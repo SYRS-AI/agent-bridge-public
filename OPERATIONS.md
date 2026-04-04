@@ -53,6 +53,8 @@ cp ~/agent-bridge/agent-roster.local.example.sh ~/agent-bridge/agent-roster.loca
 
 Put machine-specific workdirs and launch commands in `agent-roster.local.sh`, not in tracked source.
 
+If you are migrating named agents with existing prompts, keep the tracked prompt and per-agent profile skeleton under `agents/`, and keep only machine-local runtime paths in `agent-roster.local.sh`.
+
 ## Worktree Workers
 
 When the shared checkout already has a role or active worker, prefer isolation:

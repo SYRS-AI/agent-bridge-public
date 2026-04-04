@@ -16,6 +16,7 @@ Companion docs for maintainers:
 - [`ARCHITECTURE.md`](./ARCHITECTURE.md)
 - [`OPERATIONS.md`](./OPERATIONS.md)
 - [`KNOWN_ISSUES.md`](./KNOWN_ISSUES.md)
+- [`agents/README.md`](./agents/README.md)
 
 ## Highlights
 
@@ -203,6 +204,14 @@ Send a direct interrupt only when waiting for the queue is not acceptable:
 ### Static roles
 
 Static roles are optional. If you want long-lived names such as `developer`, `tester`, `codex-developer`, or `codex-tester`, define them in `agent-roster.local.sh`. Otherwise, just use dynamic agents with `agent-bridge`.
+
+### Tracked agent profiles
+
+If you are migrating existing long-lived agents, keep their tracked home-profile material under [`agents/`](./agents/README.md).
+
+- `agents/_template/` defines the standard layout before any profile generator exists
+- `agents/<name>/CLAUDE.md` is the tracked copy of the live profile
+- `agents/<name>/memory/` and `agents/<name>/skills/` are the standardized landing zones for durable notes and agent-specific skills
 
 ### Dynamic agents
 

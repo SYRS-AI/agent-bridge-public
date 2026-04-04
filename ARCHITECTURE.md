@@ -21,6 +21,8 @@ There are two kinds of agents:
 
 Static roles are optional. Fresh installs ship with an empty static roster.
 
+Tracked long-lived agent profiles live under `agents/`. That tree is the portable source of truth for prompt text and future per-agent memory or skill directories; machine-local launch wiring still lives in the roster.
+
 ## Main Entry Points
 
 - [`agent-bridge`](./agent-bridge): operator-facing CLI for status, task queue, urgent sends, worktree listing, and dynamic agent launch
