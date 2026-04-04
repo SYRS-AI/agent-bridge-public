@@ -1,0 +1,28 @@
+# Repository Guidelines
+
+## Project Structure & Module Organization
+The repository is a Bash-based bridge for managing Claude and Codex agents through `tmux`. Core entry points live at the root: `bridge-start.sh`, `bridge-run.sh`, `bridge-send.sh`, `bridge-action.sh`, `bridge-task.sh`, `bridge-sync.sh`, and `bridge-daemon.sh`. Shared logic and roster parsing belong in `bridge-lib.sh`; queue state lives in `bridge-queue.py` with SQLite data under `state/tasks.db`. Compatibility wrappers such as `run-developer.sh`, `run-tester.sh`, `cc-send.sh`, `cc-resume.sh`, and `ab` stay thin and should delegate to the core scripts. Treat `shared/` as handoff notes for humans or agents, and treat `state/` plus `logs/` as generated runtime artifacts, not hand-edited source.
+
+## Build, Test, and Development Commands
+There is no build step; scripts run directly with Bash.
+
+- `bash bridge-start.sh --list`: show registered agents and session metadata.
+- `bash bridge-start.sh tester --dry-run`: verify roster lookup and launch command without starting `tmux`.
+- `bash bridge-daemon.sh status|sync|start|stop`: inspect or manage roster sync, queue heartbeats, and idle nudges.
+- `./ab status` or `./ab status --watch`: show the bridge dashboard with queue totals, agent load, and open tasks.
+- `bash bridge-task.sh create --to tester --title "retest" --body-file shared/report.md`: enqueue work instead of interrupting another agent.
+- `./ab inbox tester`, `./ab claim 12 --agent tester`, `./ab done 12 --agent tester`: inspect and advance queued work.
+- `bash bridge-send.sh --urgent tester "prod issue" --wait 5`: send a direct interrupt only when the queue cannot wait.
+- `./ab --codex --name smoke --workdir /path --no-attach`: create an ad hoc dynamic agent.
+- `./ab --codex --name worker-a --prefer new`: create an isolated git worktree worker when a shared repo already has dormant static roles.
+- `./ab worktree list`: inspect managed worktree workers and their repo paths.
+- `shellcheck *.sh ab`: lint the shell entry points before submitting changes.
+
+## Coding Style & Naming Conventions
+Use Bash with `#!/bin/bash` and `set -euo pipefail` unless a loop intentionally handles non-zero exit codes, as in `bridge-run.sh`. Indent with two spaces inside functions and `case` arms. Keep reusable helpers in `bridge-lib.sh` and prefix them `bridge_`. Use uppercase names for exported configuration such as `BRIDGE_*`, and lowercase names for local variables. Follow the existing naming pattern: `bridge-<verb>.sh` for primary commands and short wrapper names only for compatibility.
+
+## Testing Guidelines
+This snapshot does not include a committed automated test suite, so rely on linting plus manual smoke checks. At minimum, run `shellcheck`, one `--dry-run` path for the script you changed, one queue flow such as `bash bridge-task.sh create ... && bash bridge-task.sh claim ... && bash bridge-task.sh done ...`, and one daemon pass via `bash bridge-daemon.sh sync`. Test heartbeat-sensitive changes in an isolated `BRIDGE_HOME` with temporary tmux sessions so live agents are not interrupted.
+
+## Commit & Pull Request Guidelines
+This working copy does not include `.git`, so there is no local history to infer conventions from. Use short imperative commit subjects such as `bridge: add task queue heartbeat`. Keep pull requests narrow, list the scripts touched, include the exact manual verification commands you ran, and call out any changes to queue semantics, roster behavior, `tmux` session handling, or generated `state/` file formats.

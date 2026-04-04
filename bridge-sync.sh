@@ -1,0 +1,104 @@
+#!/bin/bash
+# bridge-sync.sh — dynamic agent registry and active roster synchronization
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd -P "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
+# shellcheck source=/dev/null
+source "$SCRIPT_DIR/bridge-lib.sh"
+bridge_load_roster
+
+declare -A CLAIMED_SESSION_IDS=()
+declare -A PRUNED_DYNAMIC=()
+
+record_claimed_ids() {
+  local agent sid
+
+  for agent in "${BRIDGE_AGENT_IDS[@]}"; do
+    [[ -z "$agent" ]] && continue
+    sid="$(bridge_agent_session_id "$agent")"
+    if [[ -n "$sid" ]]; then
+      CLAIMED_SESSION_IDS["$sid"]="$agent"
+    fi
+  done
+}
+
+prune_missing_dynamic_agents() {
+  local agent sid created_at now_epoch age
+
+  while IFS= read -r agent; do
+    [[ -z "$agent" ]] && continue
+    if bridge_agent_is_active "$agent"; then
+      continue
+    fi
+
+    created_at="${BRIDGE_AGENT_CREATED_AT[$agent]-0}"
+    now_epoch="$(date +%s)"
+    if [[ "$created_at" =~ ^[0-9]+$ ]]; then
+      age=$((now_epoch - created_at))
+      if (( age >= 0 && age < 15 )); then
+        continue
+      fi
+    fi
+
+    sid="$(bridge_agent_session_id "$agent")"
+    if [[ -n "$sid" ]]; then
+      unset "CLAIMED_SESSION_IDS[$sid]"
+    fi
+
+    bridge_archive_dynamic_agent "$agent"
+    bridge_remove_dynamic_agent_file "$agent"
+    PRUNED_DYNAMIC["$agent"]=1
+  done < <(bridge_dynamic_agent_ids)
+}
+
+refresh_missing_session_ids() {
+  local agent sid exclude_csv created_at detected key
+  local -a excluded
+
+  for agent in "${BRIDGE_AGENT_IDS[@]}"; do
+    [[ -z "$agent" ]] && continue
+    [[ -n "${PRUNED_DYNAMIC[$agent]+x}" ]] && continue
+    if ! bridge_agent_is_active "$agent"; then
+      continue
+    fi
+
+    sid="$(bridge_agent_session_id "$agent")"
+    if [[ -n "$sid" ]]; then
+      continue
+    fi
+
+    excluded=()
+    for key in "${!CLAIMED_SESSION_IDS[@]}"; do
+      excluded+=("$key")
+    done
+    exclude_csv="$(IFS=,; echo "${excluded[*]}")"
+    created_at="${BRIDGE_AGENT_CREATED_AT[$agent]-0}"
+    if [[ -z "$created_at" ]]; then
+      created_at="0"
+    fi
+
+    detected="$(bridge_detect_session_id \
+      "$(bridge_agent_engine "$agent")" \
+      "$(bridge_agent_workdir "$agent")" \
+      "$created_at" \
+      "$exclude_csv")"
+
+    if [[ -z "$detected" ]]; then
+      continue
+    fi
+
+    # shellcheck disable=SC2034
+    BRIDGE_AGENT_SESSION_ID["$agent"]="$detected"
+    CLAIMED_SESSION_IDS["$detected"]="$agent"
+    bridge_persist_agent_state "$agent"
+  done
+}
+
+record_claimed_ids
+prune_missing_dynamic_agents
+bridge_load_roster
+record_claimed_ids
+refresh_missing_session_ids
+bridge_load_roster
+bridge_render_active_roster
