@@ -6,6 +6,12 @@ This repository is designed for trusted local projects. It assumes you are inten
 
 If you hand this repository URL to another Claude or Codex agent, the expected bootstrap is simple: read `README.md`, complete the steps in **Install**, then use **Quick Start** from the target working directory.
 
+Companion docs for maintainers:
+
+- [`ARCHITECTURE.md`](./ARCHITECTURE.md)
+- [`OPERATIONS.md`](./OPERATIONS.md)
+- [`KNOWN_ISSUES.md`](./KNOWN_ISSUES.md)
+
 ## Highlights
 
 - Start ad hoc Claude or Codex agents from the current directory with `ab`
@@ -257,6 +263,7 @@ For bridge changes, the minimum local check is:
 ```bash
 bash -n *.sh ab
 shellcheck *.sh ab
+./scripts/smoke-test.sh
 ```
 
 ## Access and License

@@ -16,13 +16,14 @@ There is no build step; scripts run directly with Bash.
 - `./ab --codex --name smoke --workdir /path --no-attach`: create an ad hoc dynamic agent.
 - `./ab --codex --name worker-a --prefer new`: create an isolated git worktree worker when a shared repo already has dormant static roles.
 - `./ab worktree list`: inspect managed worktree workers and their repo paths.
+- `./scripts/smoke-test.sh`: run an isolated end-to-end bridge smoke test without touching live bridge state.
 - `shellcheck *.sh ab`: lint the shell entry points before submitting changes.
 
 ## Coding Style & Naming Conventions
 Use Bash with `#!/usr/bin/env bash` and `set -euo pipefail` unless a loop intentionally handles non-zero exit codes, as in `bridge-run.sh`. Indent with two spaces inside functions and `case` arms. Keep reusable helpers in `bridge-lib.sh` and prefix them `bridge_`. Use uppercase names for exported configuration such as `BRIDGE_*`, and lowercase names for local variables. Follow the existing naming pattern: `bridge-<verb>.sh` for primary commands and short wrapper names only for compatibility.
 
 ## Testing Guidelines
-This snapshot does not include a committed automated test suite, so rely on linting plus manual smoke checks. At minimum, run `shellcheck`, one `--dry-run` path for the script you changed, one queue flow such as `bash bridge-task.sh create ... && bash bridge-task.sh claim ... && bash bridge-task.sh done ...`, and one daemon pass via `bash bridge-daemon.sh sync`. Test heartbeat-sensitive changes in an isolated `BRIDGE_HOME` with temporary tmux sessions so live agents are not interrupted.
+This snapshot does not include a full unit test suite, so rely on linting plus manual smoke checks. At minimum, run `shellcheck`, `./scripts/smoke-test.sh`, one `--dry-run` path for the script you changed, and one daemon pass via `bash bridge-daemon.sh sync`. Test heartbeat-sensitive changes in an isolated `BRIDGE_HOME` with temporary tmux sessions so live agents are not interrupted.
 
 ## Commit & Pull Request Guidelines
 This working copy does not include `.git`, so there is no local history to infer conventions from. Use short imperative commit subjects such as `bridge: add task queue heartbeat`. Keep pull requests narrow, list the scripts touched, include the exact manual verification commands you ran, and call out any changes to queue semantics, roster behavior, `tmux` session handling, or generated `state/` file formats.
