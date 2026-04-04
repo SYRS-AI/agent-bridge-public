@@ -47,7 +47,7 @@ BRIDGE_AGENT_ACTION["tester:clear"]="/clear"
 BRIDGE_AGENT_ACTION["developer:resume"]="/resume"
 BRIDGE_AGENT_ACTION["developer:clear"]="/clear"
 
-# Optional: allowlist bridge cron enqueue families. Defaults to memory-daily.
+# Optional: allowlist bridge cron enqueue families. Defaults to memory-daily + monthly-highlights.
 # BRIDGE_CRON_ENQUEUE_FAMILIES=("memory-daily" "monthly-highlights")
 
 # Example: add another long-lived role.

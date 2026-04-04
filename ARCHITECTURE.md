@@ -50,7 +50,7 @@ Shared Bash implementation is split under [`lib/`](./lib):
 - `bridge-tmux.sh`: tmux session I/O and submit helpers
 - `bridge-skills.sh`: project-local skill generation and migration of older managed skill directories
 - `bridge-state.sh`: roster loading, dynamic/static agent persistence, session-id detection, and daemon snapshots
-- `bridge-cron.sh`: OpenClaw cron path helpers, target resolution, and enqueue manifests
+- `bridge-cron.sh`: OpenClaw cron path helpers, family-aware default slots, target resolution, and enqueue manifests
 
 ## State Layout
 

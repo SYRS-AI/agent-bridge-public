@@ -194,7 +194,7 @@ bridge_load_roster() {
   : "${BRIDGE_TASK_HEARTBEAT_WINDOW_SECONDS:=300}"
   : "${BRIDGE_ON_DEMAND_IDLE_SECONDS:=0}"
   if [[ ${#BRIDGE_CRON_ENQUEUE_FAMILIES[@]} -eq 0 ]]; then
-    BRIDGE_CRON_ENQUEUE_FAMILIES=("memory-daily")
+    BRIDGE_CRON_ENQUEUE_FAMILIES=("memory-daily" "monthly-highlights")
   fi
 
   bridge_init_dirs

@@ -88,6 +88,7 @@ Use these first:
 ~/agent-bridge/agent-bridge cron inventory --limit 20
 ~/agent-bridge/agent-bridge cron inventory --mode one-shot --limit 20
 ~/agent-bridge/agent-bridge cron enqueue memory-daily-syrs-shopify --slot 2026-04-05 --dry-run
+~/agent-bridge/agent-bridge cron enqueue monthly-highlights-syrs-shopify --dry-run
 ```
 
 When planning cron migration work, inspect one job in detail before changing anything:
@@ -100,6 +101,7 @@ When you start bridging one recurring family into the queue, begin with a dry ru
 
 ```bash
 ~/agent-bridge/agent-bridge cron enqueue memory-daily-syrs-shopify --slot 2026-04-05 --dry-run
+~/agent-bridge/agent-bridge cron enqueue monthly-highlights-syrs-shopify --dry-run
 ```
 
 Inspect runtime state directly when needed:

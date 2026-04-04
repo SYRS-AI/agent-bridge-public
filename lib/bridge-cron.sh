@@ -15,7 +15,16 @@ bridge_cron_python() {
 }
 
 bridge_cron_default_slot() {
-  TZ=Asia/Seoul date +%F
+  local family="${1:-memory-daily}"
+
+  case "$family" in
+    monthly-highlights)
+      TZ=Asia/Seoul date +%Y-%m
+      ;;
+    *)
+      TZ=Asia/Seoul date +%F
+      ;;
+  esac
 }
 
 bridge_cron_family_allowed() {

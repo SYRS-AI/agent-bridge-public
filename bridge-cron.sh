@@ -169,7 +169,7 @@ run_enqueue() {
   bridge_cron_family_allowed "$CRON_JOB_FAMILY" || bridge_die "허용되지 않은 cron family입니다: $CRON_JOB_FAMILY"
 
   if [[ -z "$slot" ]]; then
-    slot="$(bridge_cron_default_slot)"
+    slot="$(bridge_cron_default_slot "$CRON_JOB_FAMILY")"
   fi
 
   if [[ -n "$target" ]]; then
