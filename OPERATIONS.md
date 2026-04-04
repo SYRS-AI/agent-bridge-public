@@ -21,8 +21,8 @@ bash ~/agent-bridge/bridge-start.sh --list
 4. Check overall status:
 
 ```bash
-~/agent-bridge/ab status
-~/agent-bridge/ab list
+~/agent-bridge/agent-bridge status
+~/agent-bridge/agent-bridge list
 ```
 
 ## Recommended Collaboration Pattern
@@ -35,12 +35,12 @@ bash ~/agent-bridge/bridge-start.sh --list
 Typical operator flow:
 
 ```bash
-~/agent-bridge/ab --codex --name dev
-~/agent-bridge/ab --claude --name tester
-~/agent-bridge/ab task create --to tester --title "retest" --body-file ~/agent-bridge/shared/report.md
-~/agent-bridge/ab inbox tester
-~/agent-bridge/ab claim 1 --agent tester
-~/agent-bridge/ab done 1 --agent tester --note "verified"
+~/agent-bridge/agent-bridge --codex --name dev
+~/agent-bridge/agent-bridge --claude --name tester
+~/agent-bridge/agent-bridge task create --to tester --title "retest" --body-file ~/agent-bridge/shared/report.md
+~/agent-bridge/agent-bridge inbox tester
+~/agent-bridge/agent-bridge claim 1 --agent tester
+~/agent-bridge/agent-bridge done 1 --agent tester --note "verified"
 ```
 
 ## Static Roles
@@ -58,8 +58,8 @@ Put machine-specific workdirs and launch commands in `agent-roster.local.sh`, no
 When the shared checkout already has a role or active worker, prefer isolation:
 
 ```bash
-~/agent-bridge/ab --codex --name reviewer-a --prefer new
-~/agent-bridge/ab worktree list
+~/agent-bridge/agent-bridge --codex --name reviewer-a --prefer new
+~/agent-bridge/agent-bridge worktree list
 ```
 
 Use worktrees when two agents may edit the same repository concurrently.
@@ -69,10 +69,10 @@ Use worktrees when two agents may edit the same repository concurrently.
 Use these first:
 
 ```bash
-~/agent-bridge/ab status
-~/agent-bridge/ab status --watch
-~/agent-bridge/ab summary
-~/agent-bridge/ab list
+~/agent-bridge/agent-bridge status
+~/agent-bridge/agent-bridge status --watch
+~/agent-bridge/agent-bridge summary
+~/agent-bridge/agent-bridge list
 ```
 
 Inspect runtime state directly when needed:
@@ -89,7 +89,7 @@ tail -n 80 ~/agent-bridge/logs/bridge-$(date +%Y%m%d).log
 Kill active bridge sessions:
 
 ```bash
-~/agent-bridge/ab kill all
+~/agent-bridge/agent-bridge kill all
 ```
 
 Stop the daemon:
@@ -112,8 +112,8 @@ Do not delete `agent-roster.local.sh` unless you intentionally want to remove lo
 Before pushing bridge changes:
 
 ```bash
-bash -n *.sh ab
-shellcheck *.sh ab
+bash -n *.sh agent-bridge agb
+shellcheck *.sh agent-bridge agb
 ./scripts/smoke-test.sh
 ```
 
@@ -128,4 +128,4 @@ If you just opened this repository and need to continue work:
 3. Read `KNOWN_ISSUES.md`
 4. Run `./scripts/smoke-test.sh`
 5. Check `git status`
-6. Check `~/agent-bridge/ab status` if working in a live environment
+6. Check `~/agent-bridge/agent-bridge status` if working in a live environment

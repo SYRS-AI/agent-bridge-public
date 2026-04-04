@@ -30,9 +30,9 @@ require_cmd python3
 require_cmd git
 
 log "linting shell entry points"
-bash -n "$REPO_ROOT"/*.sh "$REPO_ROOT"/ab "$REPO_ROOT"/scripts/smoke-test.sh
+bash -n "$REPO_ROOT"/*.sh "$REPO_ROOT"/agent-bridge "$REPO_ROOT"/agb "$REPO_ROOT"/scripts/smoke-test.sh
 if command -v shellcheck >/dev/null 2>&1; then
-  shellcheck "$REPO_ROOT"/*.sh "$REPO_ROOT"/ab "$REPO_ROOT"/scripts/smoke-test.sh "$REPO_ROOT"/agent-roster.local.example.sh
+  shellcheck "$REPO_ROOT"/*.sh "$REPO_ROOT"/agent-bridge "$REPO_ROOT"/agb "$REPO_ROOT"/scripts/smoke-test.sh "$REPO_ROOT"/agent-roster.local.example.sh
 else
   log "shellcheck not installed; skipping"
 fi
@@ -88,10 +88,10 @@ tmux has-session -t "$SESSION_NAME" >/dev/null 2>&1 || die "smoke tmux session w
 log "syncing live roster"
 bash "$REPO_ROOT/bridge-daemon.sh" sync >/dev/null
 
-LIST_OUTPUT="$("$REPO_ROOT/ab" list)"
+LIST_OUTPUT="$("$REPO_ROOT/agent-bridge" list)"
 assert_contains "$LIST_OUTPUT" "smoke-agent"
 
-STATUS_OUTPUT="$("$REPO_ROOT/ab" status --all-agents)"
+STATUS_OUTPUT="$("$REPO_ROOT/agent-bridge" status --all-agents)"
 assert_contains "$STATUS_OUTPUT" "smoke-agent"
 
 log "creating queue task"
@@ -109,7 +109,7 @@ SHOW_OUTPUT="$(bash "$REPO_ROOT/bridge-task.sh" show 1)"
 assert_contains "$SHOW_OUTPUT" "status: done"
 assert_contains "$SHOW_OUTPUT" "note: smoke ok"
 
-SUMMARY_OUTPUT="$("$REPO_ROOT/ab" summary smoke-agent)"
+SUMMARY_OUTPUT="$("$REPO_ROOT/agb" summary smoke-agent)"
 assert_contains "$SUMMARY_OUTPUT" "smoke-agent"
 
 log "smoke test passed"

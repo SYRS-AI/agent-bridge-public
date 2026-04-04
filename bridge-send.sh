@@ -14,7 +14,7 @@ usage() {
   echo "활성 로스터: $BRIDGE_ACTIVE_ROSTER_MD"
   echo ""
   echo "일반 작업 전달은 task queue를 사용하세요:"
-  echo "  $BRIDGE_HOME/ab task create --to tester --title \"재테스트\" --body-file $BRIDGE_SHARED_DIR/report.md"
+  echo "  $BRIDGE_HOME/agent-bridge task create --to tester --title \"재테스트\" --body-file $BRIDGE_SHARED_DIR/report.md"
   echo ""
   echo "등록된 에이전트:"
   bridge_list_agents
@@ -70,7 +70,7 @@ if [[ -z "$TARGET" || -z "$MESSAGE" ]]; then
 fi
 
 if [[ $URGENT_ONLY -ne 1 ]]; then
-  bridge_die "직접 메시지는 --urgent일 때만 허용합니다. 일반 작업은 'ab task create'를 사용하세요."
+  bridge_die "직접 메시지는 --urgent일 때만 허용합니다. 일반 작업은 'agent-bridge task create'를 사용하세요."
 fi
 
 bridge_require_agent "$TARGET"

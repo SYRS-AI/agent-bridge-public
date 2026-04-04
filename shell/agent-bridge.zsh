@@ -11,7 +11,6 @@ if [[ -z "${_AGENT_BRIDGE_COMPINIT_DONE:-}" ]]; then
   typeset -g _AGENT_BRIDGE_COMPINIT_DONE=1
 fi
 
-alias ab="$AGENT_BRIDGE_HOME/ab"
 alias bridge-start="bash $AGENT_BRIDGE_HOME/bridge-start.sh"
 alias bridge-send="bash $AGENT_BRIDGE_HOME/bridge-send.sh"
 alias bridge-action="bash $AGENT_BRIDGE_HOME/bridge-action.sh"

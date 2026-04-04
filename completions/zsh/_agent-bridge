@@ -1,4 +1,4 @@
-#compdef ab
+#compdef agent-bridge agb
 
 _arguments -C \
   '1:command:->command' \
@@ -6,7 +6,7 @@ _arguments -C \
 
 case "$state" in
   command)
-    _values 'ab command' \
+    _values 'agent-bridge command' \
       'status[show the bridge dashboard]' \
       'list[list active bridge sessions]' \
       'kill[kill one or all active bridge sessions]' \
@@ -49,7 +49,7 @@ case "$state" in
         _values 'worktree subcommand' 'list[list managed worktrees]'
         ;;
       *)
-        _message 'ab arguments'
+        _message 'agent-bridge arguments'
         ;;
     esac
     ;;

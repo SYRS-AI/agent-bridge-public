@@ -35,8 +35,8 @@ If you need local static roles, create `agent-roster.local.sh` from the example 
 Run these before opening a pull request:
 
 ```bash
-bash -n *.sh ab lib/*.sh scripts/*.sh
-shellcheck *.sh ab lib/*.sh scripts/*.sh agent-roster.local.example.sh
+bash -n *.sh agent-bridge agb lib/*.sh scripts/*.sh
+shellcheck *.sh agent-bridge agb lib/*.sh scripts/*.sh agent-roster.local.example.sh
 ./scripts/smoke-test.sh
 ```
 

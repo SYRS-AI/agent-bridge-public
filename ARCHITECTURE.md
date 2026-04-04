@@ -17,13 +17,14 @@ If you are resuming development, read in this order:
 There are two kinds of agents:
 
 - Static roles: defined in `agent-roster.sh` or `agent-roster.local.sh`
-- Dynamic agents: created with `ab --codex|--claude --name ...`
+- Dynamic agents: created with `agent-bridge --codex|--claude --name ...`
 
 Static roles are optional. Fresh installs ship with an empty static roster.
 
 ## Main Entry Points
 
-- [`ab`](./ab): operator-facing CLI for status, task queue, urgent sends, worktree listing, and dynamic agent launch
+- [`agent-bridge`](./agent-bridge): operator-facing CLI for status, task queue, urgent sends, worktree listing, and dynamic agent launch
+- [`agb`](./agb): shorthand wrapper that delegates to `agent-bridge`
 - [`bridge-start.sh`](./bridge-start.sh): start a static role inside `tmux`
 - [`bridge-run.sh`](./bridge-run.sh): loop or one-shot launcher inside the tmux session
 - [`bridge-task.sh`](./bridge-task.sh): shell wrapper around the SQLite queue
@@ -62,7 +63,7 @@ Human or agent handoff text belongs in `shared/`. Operator logs belong in `logs/
 
 ### Dynamic
 
-`ab --codex --name dev` or `ab --claude --name tester`:
+`agent-bridge --codex --name dev` or `agent-bridge --claude --name tester`:
 
 1. Resolve workdir from the current directory unless `--workdir` is given
 2. Optionally install a project-local bridge skill
@@ -122,7 +123,7 @@ Claude uses a literal typing path for submit reliability. Codex continues to use
 
 ## Worktree Isolation
 
-If multiple writers need to act on the same git repo, `ab --prefer new` creates a managed git worktree under:
+If multiple writers need to act on the same git repo, `agent-bridge --prefer new` creates a managed git worktree under:
 
 `~/.agent-bridge/worktrees/<repo-slug>/<agent>`
 

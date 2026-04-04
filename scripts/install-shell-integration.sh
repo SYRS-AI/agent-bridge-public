@@ -83,3 +83,4 @@ EOF
 
 echo "[info] wrote agent-bridge shell integration to $RCFILE"
 echo "[info] restart your shell or run: exec ${TARGET_SHELL}"
+echo "[info] commands on PATH: agent-bridge, agb, bridge-start, bridge-send, bridge-action, bridge-task"

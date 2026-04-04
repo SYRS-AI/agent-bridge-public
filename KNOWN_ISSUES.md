@@ -44,7 +44,7 @@ Impact:
 
 Operator guidance:
 
-- Use `ab --codex|--claude --name ...` immediately
+- Use `agent-bridge --codex|--claude --name ...` immediately
 - Add local static roles only when they add value
 
 ## 4. Runtime state is local and untracked

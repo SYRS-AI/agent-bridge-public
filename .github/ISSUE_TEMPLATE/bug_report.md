@@ -33,7 +33,7 @@ What happened instead?
 
 ## Logs or output
 
-Paste relevant command output, `ab status`, or log excerpts.
+Paste relevant command output, `agent-bridge status`, or log excerpts.
 
 ## Additional context
 

@@ -55,7 +55,7 @@ render_once() {
 
   roster_snapshot="$(mktemp)"
   bridge_write_roster_status_snapshot "$roster_snapshot"
-  footer="commands: ab list | ab summary | ab inbox <agent> | ab show <task-id>"
+  footer="commands: agent-bridge list | agent-bridge summary | agent-bridge inbox <agent> | agent-bridge show <task-id>"
   if [[ $WATCH_MODE -eq 1 ]]; then
     footer+=" | Ctrl-C to exit"
   fi

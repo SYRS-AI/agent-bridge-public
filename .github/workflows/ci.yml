@@ -22,10 +22,10 @@ jobs:
           sudo apt-get install -y tmux shellcheck
 
       - name: Verify shell syntax
-        run: bash -n *.sh ab lib/*.sh scripts/*.sh
+        run: bash -n *.sh agent-bridge agb lib/*.sh scripts/*.sh
 
       - name: Run shellcheck
-        run: shellcheck *.sh ab lib/*.sh scripts/*.sh agent-roster.local.example.sh
+        run: shellcheck *.sh agent-bridge agb lib/*.sh scripts/*.sh agent-roster.local.example.sh
 
       - name: Run isolated smoke test
         run: ./scripts/smoke-test.sh
