@@ -1,0 +1,31 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y tmux shellcheck
+
+      - name: Verify shell syntax
+        run: bash -n *.sh ab lib/*.sh scripts/*.sh
+
+      - name: Run shellcheck
+        run: shellcheck *.sh ab lib/*.sh scripts/*.sh agent-roster.local.example.sh
+
+      - name: Run isolated smoke test
+        run: ./scripts/smoke-test.sh

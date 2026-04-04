@@ -1,5 +1,8 @@
 # Agent Bridge
 
+[![CI](https://github.com/SYRS-AI/agent-bridge/actions/workflows/ci.yml/badge.svg)](https://github.com/SYRS-AI/agent-bridge/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](./LICENSE)
+
 Agent Bridge is a `tmux`-based coordination layer for running Claude Code and Codex side by side. It provides a shared roster, queue-first task handoff, live status views, urgent interrupts, and optional git worktree isolation for parallel workers.
 
 This repository is designed for trusted local projects. It assumes you are intentionally granting Claude Code or Codex access to the directory where you launch them.
@@ -34,7 +37,7 @@ Companion docs for maintainers:
 Optional but recommended:
 
 - `shellcheck`
-- GitHub CLI `gh` for cloning private repos
+- GitHub CLI `gh`
 
 ## Install
 
@@ -69,7 +72,7 @@ sudo apt install -y bash tmux python3 python3-venv shellcheck git
 
 ### Clone
 
-If you have GitHub CLI access:
+If you have GitHub CLI:
 
 ```bash
 gh repo clone SYRS-AI/agent-bridge ~/agent-bridge
@@ -289,6 +292,9 @@ shellcheck *.sh ab
 ./scripts/smoke-test.sh
 ```
 
-## Access and License
+## Project Metadata
 
-This repository is currently operated as a private codebase. If you plan to distribute it publicly, add an explicit `LICENSE` file first.
+- License: [`MIT`](./LICENSE)
+- Contributing guide: [`CONTRIBUTING.md`](./CONTRIBUTING.md)
+- Code of conduct: [`CODE_OF_CONDUCT.md`](./CODE_OF_CONDUCT.md)
+- Security policy: [`SECURITY.md`](./SECURITY.md)
