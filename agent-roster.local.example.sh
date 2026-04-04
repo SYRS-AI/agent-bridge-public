@@ -33,6 +33,10 @@ BRIDGE_AGENT_WORKDIR["codex-developer"]="$HOME/project-app"
 # BRIDGE_AGENT_PROFILE_HOME["tester"]="$HOME/project-test"
 # BRIDGE_AGENT_PROFILE_HOME["developer"]="$HOME/project-app"
 
+# Optional: map OpenClaw cron agent ids to bridge agents for cron enqueue.
+# BRIDGE_OPENCLAW_AGENT_TARGET["syrs-shopify"]="shopify"
+# BRIDGE_OPENCLAW_AGENT_TARGET["main"]="main"
+
 BRIDGE_AGENT_LAUNCH_CMD["tester"]='claude -c --dangerously-skip-permissions'
 BRIDGE_AGENT_LAUNCH_CMD["developer"]='claude -c --dangerously-skip-permissions'
 BRIDGE_AGENT_LAUNCH_CMD["codex-tester"]='codex --dangerously-bypass-approvals-and-sandbox --no-alt-screen'
@@ -42,6 +46,9 @@ BRIDGE_AGENT_ACTION["tester:resume"]="/resume"
 BRIDGE_AGENT_ACTION["tester:clear"]="/clear"
 BRIDGE_AGENT_ACTION["developer:resume"]="/resume"
 BRIDGE_AGENT_ACTION["developer:clear"]="/clear"
+
+# Optional: allowlist bridge cron enqueue families. Defaults to memory-daily.
+# BRIDGE_CRON_ENQUEUE_FAMILIES=("memory-daily" "monthly-highlights")
 
 # Example: add another long-lived role.
 # bridge_add_agent_id_if_missing "reviewer"

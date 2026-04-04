@@ -31,7 +31,7 @@ Tracked long-lived agent profiles live under `agents/`. That tree is the portabl
 - [`bridge-run.sh`](./bridge-run.sh): loop or one-shot launcher inside the tmux session
 - [`bridge-task.sh`](./bridge-task.sh): shell wrapper around the SQLite queue
 - [`bridge-profile.sh`](./bridge-profile.sh): tracked agent profile status, diff, and deploy
-- [`bridge-cron.sh`](./bridge-cron.sh): read-only OpenClaw cron inventory wrapper
+- [`bridge-cron.sh`](./bridge-cron.sh): OpenClaw cron inventory plus queue adapter wrapper
 - [`bridge-send.sh`](./bridge-send.sh): urgent-only direct message path
 - [`bridge-action.sh`](./bridge-action.sh): send predefined actions like `/resume`
 - [`bridge-daemon.sh`](./bridge-daemon.sh): background sync and heartbeat loop
@@ -39,7 +39,7 @@ Tracked long-lived agent profiles live under `agents/`. That tree is the portabl
 - [`bridge-status.sh`](./bridge-status.sh): compact TUI-style dashboard
 - [`bridge-lib.sh`](./bridge-lib.sh): thin loader that sources the shell modules under [`lib/`](./lib)
 - [`bridge-queue.py`](./bridge-queue.py): persistent queue and daemon-side bookkeeping
-- [`bridge-cron.py`](./bridge-cron.py): OpenClaw cron inventory parsing and reporting
+- [`bridge-cron.py`](./bridge-cron.py): OpenClaw cron inventory parsing and job metadata export
 
 ## Shell Module Layout
 
@@ -50,7 +50,7 @@ Shared Bash implementation is split under [`lib/`](./lib):
 - `bridge-tmux.sh`: tmux session I/O and submit helpers
 - `bridge-skills.sh`: project-local skill generation and migration of older managed skill directories
 - `bridge-state.sh`: roster loading, dynamic/static agent persistence, session-id detection, and daemon snapshots
-- `bridge-cron.sh`: OpenClaw cron path helpers and Python entrypoint wrapper
+- `bridge-cron.sh`: OpenClaw cron path helpers, target resolution, and enqueue manifests
 
 ## State Layout
 
@@ -149,6 +149,7 @@ Important environment variables:
 - `BRIDGE_WORKTREE_ROOT`
 - `BRIDGE_OPENCLAW_HOME`
 - `BRIDGE_OPENCLAW_CRON_JOBS_FILE`
+- `BRIDGE_CRON_STATE_DIR`
 
 Use them for isolated testing and for machine-specific installs.
 

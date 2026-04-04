@@ -38,3 +38,9 @@ declare -Ag BRIDGE_AGENT_ACTION=()
 
 # shellcheck disable=SC2034
 declare -Ag BRIDGE_AGENT_IDLE_TIMEOUT=()
+
+# shellcheck disable=SC2034
+declare -Ag BRIDGE_OPENCLAW_AGENT_TARGET=()
+
+# shellcheck disable=SC2034
+declare -ag BRIDGE_CRON_ENQUEUE_FAMILIES=()

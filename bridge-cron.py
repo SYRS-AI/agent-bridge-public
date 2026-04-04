@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 import argparse
 import json
+import shlex
 import sys
 from collections import Counter, defaultdict
 from datetime import datetime, timezone
@@ -257,6 +258,24 @@ def serialize_record(record, include_payload=False):
     return payload
 
 
+def render_shell(record):
+    payload = serialize_record(record, include_payload=True)
+    payload.pop("raw", None)
+    lines = []
+    for key, value in payload.items():
+        shell_key = f"CRON_JOB_{key.upper()}"
+        if isinstance(value, bool):
+            text = "1" if value else "0"
+        elif value is None:
+            text = ""
+        elif isinstance(value, (dict, list)):
+            text = json.dumps(value, ensure_ascii=False, sort_keys=True)
+        else:
+            text = str(value)
+        lines.append(f"{shell_key}={shlex.quote(text)}")
+    return "\n".join(lines)
+
+
 def print_inventory(args, all_records, filtered_records):
     source_file = str(Path(args.jobs_file).expanduser())
     family_rows = inventory_rows(filtered_records)
@@ -372,8 +391,12 @@ def print_show(args, records):
         print(f"error: {exc}", file=sys.stderr)
         return 2
 
-    if args.json:
+    if args.format == "json" or args.json:
         print(json.dumps(serialize_record(record, include_payload=True), ensure_ascii=False, indent=2))
+        return 0
+
+    if args.format == "shell":
+        print(render_shell(record))
         return 0
 
     print(f"source_file: {Path(args.jobs_file).expanduser()}")
@@ -417,6 +440,7 @@ def build_parser():
     show_parser = subparsers.add_parser("show", help="Show one cron job in detail.")
     show_parser.add_argument("--jobs-file", required=True)
     show_parser.add_argument("job_ref")
+    show_parser.add_argument("--format", choices=("text", "json", "shell"), default="text")
     show_parser.add_argument("--json", action="store_true")
     return parser
 
