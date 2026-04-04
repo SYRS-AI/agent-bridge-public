@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 # bridge-run.sh — roster 기반 에이전트 실행기
 
 set -uo pipefail

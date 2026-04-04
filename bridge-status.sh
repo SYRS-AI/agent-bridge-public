@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 # bridge-status.sh — compact dashboard for queue and roster state
 
 set -euo pipefail

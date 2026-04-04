@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 # bridge-task.sh — SQLite-backed task queue operations
 
 set -euo pipefail

@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 # run-tester.sh — 호환용 래퍼
 
 set -euo pipefail

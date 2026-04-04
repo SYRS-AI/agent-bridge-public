@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 # shellcheck shell=bash
 
 BRIDGE_SCRIPT_DIR="$(cd -P "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
@@ -64,6 +64,15 @@ bridge_now_iso() {
   python3 - <<'PY'
 from datetime import datetime, timezone
 print(datetime.now(timezone.utc).astimezone().isoformat(timespec="seconds"))
+PY
+}
+
+bridge_nonce() {
+  bridge_require_python
+  python3 - <<'PY'
+import secrets
+
+print(secrets.token_hex(8))
 PY
 }
 
@@ -723,7 +732,7 @@ bridge_tmux_paste_and_submit() {
   local text="$2"
   local buffer_name
 
-  buffer_name="bridge-send-$$-$(date +%s%N)"
+  buffer_name="bridge-send-$$-$(bridge_nonce)"
   tmux set-buffer -b "$buffer_name" "$text"
   tmux paste-buffer -d -p -b "$buffer_name" -t "$session"
 

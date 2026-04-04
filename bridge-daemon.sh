@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 # bridge-daemon.sh — keeps dynamic bridge roster in sync with tmux sessions
 
 set -euo pipefail

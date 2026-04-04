@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 # ab — ad hoc bridge launcher
 
 set -euo pipefail

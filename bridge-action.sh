@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 # bridge-action.sh — roster 기반 에이전트 액션 전송
 
 set -euo pipefail

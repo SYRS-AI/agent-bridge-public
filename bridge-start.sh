@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 # bridge-start.sh — roster 기반 tmux 세션 시작기
 
 set -euo pipefail

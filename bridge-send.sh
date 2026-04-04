@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 # bridge-send.sh — roster 기반 tmux 에이전트 메시지 전송
 
 set -euo pipefail

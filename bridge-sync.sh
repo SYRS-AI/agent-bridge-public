@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 # bridge-sync.sh — dynamic agent registry and active roster synchronization
 
 set -euo pipefail
