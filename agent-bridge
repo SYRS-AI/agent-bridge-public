@@ -19,6 +19,7 @@ Usage:
   $CLI_NAME task <create|inbox|show|claim|done|handoff|summary> ...
   $CLI_NAME profile <status|diff|deploy> ...
   $CLI_NAME cron <inventory|show|enqueue|errors|cleanup> ...
+  $CLI_NAME discord <status|sync>
   $CLI_NAME inbox [agent] [--all]
   $CLI_NAME show <task-id>
   $CLI_NAME claim <task-id> [--agent <agent>] [--lease <seconds>]
@@ -29,6 +30,8 @@ Usage:
   $CLI_NAME profile status [agent|--all]
   $CLI_NAME profile diff <agent>
   $CLI_NAME profile deploy <agent> [--dry-run] [--force]
+  $CLI_NAME discord status
+  $CLI_NAME discord sync
   $CLI_NAME cron inventory [--mode recurring|one-shot|all] [--family <family>] [--limit <count>]
   $CLI_NAME cron show <job-name-or-id>
   $CLI_NAME cron enqueue <job-name-or-id> [--slot <slot-key>] [--dry-run]
@@ -217,6 +220,10 @@ if [[ $# -gt 0 ]]; then
     cron)
       shift
       exec "$BRIDGE_BASH_BIN" "$SCRIPT_DIR/bridge-cron.sh" "$@"
+      ;;
+    discord)
+      shift
+      exec "$BRIDGE_BASH_BIN" "$SCRIPT_DIR/bridge-discord-relay.sh" "$@"
       ;;
     worktree)
       shift

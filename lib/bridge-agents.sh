@@ -311,6 +311,11 @@ bridge_agent_profile_home() {
   printf '%s' "${BRIDGE_AGENT_PROFILE_HOME[$agent]-}"
 }
 
+bridge_agent_discord_channel_id() {
+  local agent="$1"
+  printf '%s' "${BRIDGE_AGENT_DISCORD_CHANNEL_ID[$agent]-}"
+}
+
 bridge_agent_loop() {
   local agent="$1"
   printf '%s' "${BRIDGE_AGENT_LOOP[$agent]-1}"

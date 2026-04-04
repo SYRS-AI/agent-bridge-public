@@ -32,6 +32,7 @@ BRIDGE_CRON_STATE_DIR="${BRIDGE_CRON_STATE_DIR:-$BRIDGE_STATE_DIR/cron}"
 BRIDGE_WORKTREE_ROOT="${BRIDGE_WORKTREE_ROOT:-$HOME/.agent-bridge/worktrees}"
 BRIDGE_OPENCLAW_HOME="${BRIDGE_OPENCLAW_HOME:-$HOME/.openclaw}"
 BRIDGE_OPENCLAW_CRON_JOBS_FILE="${BRIDGE_OPENCLAW_CRON_JOBS_FILE:-$BRIDGE_OPENCLAW_HOME/cron/jobs.json}"
+BRIDGE_DISCORD_RELAY_STATE_FILE="${BRIDGE_DISCORD_RELAY_STATE_FILE:-$BRIDGE_STATE_DIR/discord-relay.json}"
 BRIDGE_BASH_BIN="${BRIDGE_BASH_BIN:-${BASH:-$(command -v bash)}}"
 export BRIDGE_BASH_BIN
 
@@ -63,3 +64,4 @@ bridge_source_module "bridge-skills.sh"
 bridge_source_module "bridge-state.sh"
 bridge_source_module "bridge-profiles.sh"
 bridge_source_module "bridge-cron.sh"
+bridge_source_module "bridge-discord.sh"

@@ -114,6 +114,8 @@ cmd_sync_cycle() {
     nudge_agent_session "$agent" "$session" "$queued" "$claimed" "$idle" "$nudge_key" || true
   done <<<"$nudge_output"
 
+  bridge_discord_relay_step || true
+
   summary_output="$(bridge_queue_cli summary --format tsv 2>/dev/null || true)"
   if [[ -n "$summary_output" ]] && process_on_demand_agents "$summary_output"; then
     changed=0
