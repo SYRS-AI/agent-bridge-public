@@ -84,15 +84,17 @@ Install and authenticate the CLIs you want to use:
 
 The bridge does not install those tools for you.
 
-### Optional local roster overrides
+### Optional static roster
 
-The committed [`agent-roster.sh`](./agent-roster.sh) is intentionally generic. If you want static roles like `developer` or `tester` to point at your own projects, create a local override file:
+Fresh installs ship with no static roles. You can use dynamic agents with `ab` immediately and ignore the roster entirely.
+
+If you want long-lived named roles like `developer` or `tester`, create a local roster file:
 
 ```bash
 cp ~/agent-bridge/agent-roster.local.example.sh ~/agent-bridge/agent-roster.local.sh
 ```
 
-`agent-roster.local.sh` is git-ignored and is sourced after the default roster, so you can override workdirs, descriptions, launch commands, or add extra long-lived roles without changing the tracked repo.
+`agent-roster.local.sh` is git-ignored and is sourced after the default roster, so you can add your own workdirs, descriptions, launch commands, and actions without changing the tracked repo.
 
 ### Start the daemon
 
@@ -166,7 +168,7 @@ Send a direct interrupt only when waiting for the queue is not acceptable:
 
 ### Static roles
 
-Static roles live in [`agent-roster.sh`](./agent-roster.sh). Use them for long-lived names such as `developer`, `tester`, `codex-developer`, or `codex-tester`. If you want those names to target your own repos, override them in `agent-roster.local.sh`.
+Static roles are optional. If you want long-lived names such as `developer`, `tester`, `codex-developer`, or `codex-tester`, define them in `agent-roster.local.sh`. Otherwise, just use dynamic agents with `ab`.
 
 ### Dynamic agents
 

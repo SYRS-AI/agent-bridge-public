@@ -546,6 +546,11 @@ bridge_list_agents() {
   local actions
   local active
 
+  if [[ ${#BRIDGE_AGENT_IDS[@]} -eq 0 ]]; then
+    echo "  (등록된 정적 에이전트 없음)"
+    return 0
+  fi
+
   for agent in "${BRIDGE_AGENT_IDS[@]}"; do
     actions=$(bridge_list_actions "$agent" | paste -sd ',' -)
     if [[ -z "$actions" ]]; then
@@ -1224,22 +1229,16 @@ bridge_load_static_histories() {
 bridge_load_roster() {
   local agent
 
-  if [[ ! -f "$BRIDGE_ROSTER_FILE" ]]; then
-    bridge_die "로스터 파일이 없습니다: $BRIDGE_ROSTER_FILE"
-  fi
-
   bridge_reset_roster_maps
 
-  # shellcheck source=/dev/null
-  source "$BRIDGE_ROSTER_FILE"
+  if [[ -f "$BRIDGE_ROSTER_FILE" ]]; then
+    # shellcheck source=/dev/null
+    source "$BRIDGE_ROSTER_FILE"
+  fi
 
   if [[ -f "$BRIDGE_ROSTER_LOCAL_FILE" ]]; then
     # shellcheck source=/dev/null
     source "$BRIDGE_ROSTER_LOCAL_FILE"
-  fi
-
-  if [[ -z "${BRIDGE_AGENT_IDS+x}" || ${#BRIDGE_AGENT_IDS[@]} -eq 0 ]]; then
-    bridge_die "BRIDGE_AGENT_IDS가 비어 있습니다: $BRIDGE_ROSTER_FILE"
   fi
 
   : "${BRIDGE_LOG_DIR:=$BRIDGE_HOME/logs}"
