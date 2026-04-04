@@ -104,6 +104,26 @@ cp ~/agent-bridge/agent-roster.local.example.sh ~/agent-bridge/agent-roster.loca
 
 `agent-roster.local.sh` is git-ignored and is sourced after the default roster, so you can add your own workdirs, descriptions, launch commands, and actions without changing the tracked repo.
 
+### Optional zsh shell integration
+
+If you use `zsh` and do not want to type `./ab`, install the shell integration:
+
+```bash
+cd ~/agent-bridge
+./scripts/install-shell-integration.sh --shell zsh --apply
+exec zsh
+```
+
+After that you can run:
+
+```bash
+ab status
+bridge-start --list
+bridge-daemon status
+```
+
+The integration adds the repo to `PATH`, registers a basic `ab` completion, and installs convenience aliases for the `bridge-*.sh` commands.
+
 ### Start the daemon
 
 ```bash

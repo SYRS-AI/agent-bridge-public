@@ -16,6 +16,7 @@ There is no build step; scripts run directly with Bash.
 - `./ab --codex --name smoke --workdir /path --no-attach`: create an ad hoc dynamic agent.
 - `./ab --codex --name worker-a --prefer new`: create an isolated git worktree worker when a shared repo already has dormant static roles.
 - `./ab worktree list`: inspect managed worktree workers and their repo paths.
+- `./scripts/install-shell-integration.sh --shell zsh --apply`: install zsh integration so `ab` and bridge aliases work without `./`.
 - `./scripts/smoke-test.sh`: run an isolated end-to-end bridge smoke test without touching live bridge state.
 - `shellcheck *.sh ab`: lint the shell entry points before submitting changes.
 
