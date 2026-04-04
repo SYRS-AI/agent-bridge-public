@@ -12,7 +12,7 @@ case "$state" in
       'kill[kill one or all active bridge sessions]' \
       'urgent[send an urgent direct message]' \
       'task[run a task queue subcommand]' \
-      'cron[inspect OpenClaw cron inventory]' \
+      'cron[inspect OpenClaw cron inventory and reports]' \
       'inbox[show an agent inbox]' \
       'show[show a task]' \
       'claim[claim a task]' \
@@ -51,6 +51,7 @@ case "$state" in
           'inventory[summarize and filter OpenClaw cron jobs]' \
           'show[show one cron job]' \
           'enqueue[enqueue one supported cron job into the bridge queue]' \
+          'errors[report recurring cron errors]' \
           'cleanup[report or prune expired one-shot cron jobs]'
         ;;
       worktree)

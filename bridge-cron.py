@@ -87,6 +87,17 @@ def format_duration_ms(value):
     return " ".join(parts[:2])
 
 
+def preview_text(value, limit=120):
+    if not value:
+        return ""
+    flattened = " ".join(str(value).splitlines()).strip()
+    if len(flattened) <= limit:
+        return flattened
+    if limit <= 3:
+        return flattened[:limit]
+    return flattened[: limit - 3].rstrip() + "..."
+
+
 def classify_family(name):
     for rule in FAMILY_RULES:
         if name.startswith(rule) or rule in name:
@@ -124,6 +135,10 @@ def agent_matches(agent_id, expected):
     return agent_id.endswith(f"-{expected}")
 
 
+def is_error_record(record):
+    return record["consecutive_errors"] > 0 or record["last_status"] not in ("-", "ok", "success")
+
+
 def build_job_record(job):
     state = job.get("state") or {}
     schedule = job.get("schedule") or {}
@@ -134,6 +149,12 @@ def build_job_record(job):
 
     last_run = parse_epoch_ms(state.get("lastRunAtMs"))
     name = job.get("name", "<unnamed>")
+    last_status = state.get("lastStatus") or state.get("lastRunStatus") or "-"
+    consecutive_errors = int(state.get("consecutiveErrors") or 0)
+    payload_text = payload.get("text") or payload.get("message") or ""
+    last_error = parse_epoch_ms(state.get("lastErrorAtMs"))
+    if last_error is None and (consecutive_errors > 0 or last_status not in ("-", "ok", "success")):
+        last_error = last_run
 
     return {
         "id": job.get("id", ""),
@@ -146,13 +167,16 @@ def build_job_record(job):
         "schedule_text": schedule_text(schedule),
         "next_run_at": next_run,
         "last_run_at": last_run,
-        "last_status": state.get("lastStatus") or state.get("lastRunStatus") or "-",
-        "consecutive_errors": int(state.get("consecutiveErrors") or 0),
+        "last_error_at": last_error,
+        "last_status": last_status,
+        "consecutive_errors": consecutive_errors,
+        "last_duration_ms": state.get("lastDurationMs"),
         "last_delivery_status": state.get("lastDeliveryStatus") or "-",
         "session_target": job.get("sessionTarget", "-"),
         "wake_mode": job.get("wakeMode", "-"),
         "payload_kind": payload.get("kind", "-"),
-        "payload_text": payload.get("text") or payload.get("message") or "",
+        "payload_text": payload_text,
+        "payload_preview": preview_text(payload_text),
         "raw": job,
     }
 
@@ -252,12 +276,15 @@ def serialize_record(record, include_payload=False):
         "schedule_text": record["schedule_text"],
         "next_run_at": record["next_run_at"].isoformat() if record["next_run_at"] else None,
         "last_run_at": record["last_run_at"].isoformat() if record["last_run_at"] else None,
+        "last_error_at": record["last_error_at"].isoformat() if record["last_error_at"] else None,
         "last_status": record["last_status"],
         "consecutive_errors": record["consecutive_errors"],
+        "last_duration_ms": record["last_duration_ms"],
         "last_delivery_status": record["last_delivery_status"],
         "session_target": record["session_target"],
         "wake_mode": record["wake_mode"],
         "payload_kind": record["payload_kind"],
+        "payload_preview": record["payload_preview"],
     }
     if include_payload:
         payload["payload_text"] = record["payload_text"]
@@ -283,10 +310,132 @@ def render_shell(record):
     return "\n".join(lines)
 
 
-def cleanup_prefix(name):
+def job_prefix(name):
     if not name:
         return "<unnamed>"
-    return name.split("-", 1)[0]
+    prefix = name.split("-", 1)[0].strip()
+    return prefix or name.strip() or "<unnamed>"
+
+
+def error_severity_bucket(record):
+    if record["consecutive_errors"] >= 10:
+        return "10+"
+    if record["consecutive_errors"] >= 3:
+        return "3-9"
+    return "1-2"
+
+
+def error_sort_key(record):
+    last_error_sort = -record["last_error_at"].timestamp() if record["last_error_at"] else float("inf")
+    return (-record["consecutive_errors"], last_error_sort, record["agent"], record["name"])
+
+
+def error_records(records, args):
+    filtered = []
+    for record in records:
+        if record["schedule_kind"] != "cron":
+            continue
+        if not is_error_record(record):
+            continue
+        if args.family and record["family"] != args.family:
+            continue
+        if args.agent and not agent_matches(record["agent"], args.agent):
+            continue
+        filtered.append(record)
+    return filtered
+
+
+def format_error_record(record):
+    return (
+        f"{record['agent']} | {record['name']} | "
+        f"errors={record['consecutive_errors']} | "
+        f"last_error={format_dt(record['last_error_at'])} | "
+        f"duration={format_duration_ms(record['last_duration_ms'])} | "
+        f"schedule={record['schedule_text']} | "
+        f"payload={record['payload_preview'] or '-'}"
+    )
+
+
+def severity_summary(records):
+    counts = Counter(error_severity_bucket(record) for record in records)
+    return {
+        "10+": counts.get("10+", 0),
+        "3-9": counts.get("3-9", 0),
+        "1-2": counts.get("1-2", 0),
+    }
+
+
+def print_errors_report(args, records):
+    errors = sorted(error_records(records, args), key=error_sort_key)
+    recurring_total = sum(1 for record in records if record["schedule_kind"] == "cron")
+    severity_counts = severity_summary(errors)
+    agent_counts = Counter(record["agent"] for record in errors)
+    family_counts = Counter(record["family"] for record in errors)
+    prefix_counts = Counter(job_prefix(record["name"]) for record in errors)
+    limit = args.limit if args.limit is not None else (0 if args.json else 20)
+    display_records = errors if limit == 0 else errors[:limit]
+
+    if args.json:
+        payload = {
+            "source_file": str(Path(args.jobs_file).expanduser()),
+            "generated_at": datetime.now().astimezone().isoformat(),
+            "filters": {
+                "agent": args.agent,
+                "family": args.family,
+                "limit": 0 if limit == 0 else limit,
+            },
+            "total_recurring_jobs": recurring_total,
+            "error_jobs": len(errors),
+            "by_severity": severity_counts,
+            "by_agent": dict(agent_counts),
+            "by_family": dict(family_counts),
+            "by_job_prefix": dict(prefix_counts),
+            "jobs": [serialize_record(record) for record in display_records],
+            "jobs_total": len(errors),
+        }
+        print(json.dumps(payload, ensure_ascii=False, indent=2))
+        return 0
+
+    print(f"source_file: {Path(args.jobs_file).expanduser()}")
+    print(f"generated_at: {datetime.now().astimezone().isoformat()}")
+    print(f"filters: agent={args.agent or '-'} family={args.family or '-'} limit={limit}")
+    print(f"total_recurring_jobs: {recurring_total}")
+    print(f"error_jobs: {len(errors)}")
+    print()
+    print("by_severity:")
+    for bucket, count in severity_counts.items():
+        print(f"- {bucket}: {count}")
+    print()
+    print("by_agent:")
+    if not agent_counts:
+        print("- none")
+    else:
+        for agent, count in agent_counts.most_common():
+            print(f"- {agent}: {count}")
+    print()
+    print("by_family:")
+    if not family_counts:
+        print("- none")
+    else:
+        for family, count in family_counts.most_common():
+            print(f"- {family}: {count}")
+    print()
+    print("by_job_prefix:")
+    if not prefix_counts:
+        print("- none")
+    else:
+        for prefix, count in prefix_counts.most_common():
+            print(f"- {prefix}: {count}")
+    print()
+    print("jobs:")
+    if not display_records:
+        print("- none")
+    else:
+        for record in display_records:
+            print(f"- {format_error_record(record)}")
+        if limit != 0 and len(errors) > len(display_records):
+            print(f"- ... ({len(errors) - len(display_records)} more jobs)")
+    return 0
 
 
 def cleanup_candidates(records, mode):
@@ -316,7 +465,7 @@ def format_cleanup_candidate(record):
 def print_cleanup_report(args, records):
     candidates = sorted(cleanup_candidates(records, args.mode), key=record_sort_key)
     agent_counts = Counter(record["agent"] for record in candidates)
-    prefix_counts = Counter(cleanup_prefix(record["name"]) for record in candidates)
+    prefix_counts = Counter(job_prefix(record["name"]) for record in candidates)
     sample_limit = args.limit if args.limit is not None else 20
     samples = candidates if sample_limit == 0 else candidates[:sample_limit]
     criteria = {
@@ -596,6 +745,13 @@ def build_parser():
     show_parser.add_argument("--format", choices=("text", "json", "shell"), default="text")
     show_parser.add_argument("--json", action="store_true")
 
+    errors_report_parser = subparsers.add_parser("errors-report", help="Report recurring cron jobs that are currently in error.")
+    errors_report_parser.add_argument("--jobs-file", required=True)
+    errors_report_parser.add_argument("--agent")
+    errors_report_parser.add_argument("--family")
+    errors_report_parser.add_argument("--limit", type=int, default=None)
+    errors_report_parser.add_argument("--json", action="store_true")
+
     cleanup_report_parser = subparsers.add_parser("cleanup-report", help="Report prune candidates for stale one-shot cron jobs.")
     cleanup_report_parser.add_argument("--jobs-file", required=True)
     cleanup_report_parser.add_argument("--mode", choices=("expired-one-shot",), default="expired-one-shot")
@@ -632,6 +788,12 @@ def main():
 
     if args.command == "show":
         return print_show(args, records)
+
+    if args.command == "errors-report":
+        if args.limit is not None and args.limit < 0:
+            print("error: --limit must be >= 0", file=sys.stderr)
+            return 2
+        return print_errors_report(args, records)
 
     if args.command == "cleanup-report":
         if args.limit is not None and args.limit < 0:

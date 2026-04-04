@@ -162,6 +162,7 @@ If you are migrating existing OpenClaw cron jobs into Agent Bridge, start with t
 ./agent-bridge cron show memory-daily-syrs-shopify
 ./agent-bridge cron enqueue memory-daily-syrs-shopify --slot 2026-04-05 --dry-run
 ./agent-bridge cron enqueue monthly-highlights-syrs-shopify --dry-run
+./agent-bridge cron errors report --limit 20
 ./agent-bridge cron cleanup report
 ./agent-bridge cron cleanup prune --dry-run
 ```
@@ -169,6 +170,8 @@ If you are migrating existing OpenClaw cron jobs into Agent Bridge, start with t
 By default the inventory reads `~/.openclaw/cron/jobs.json`. Override it with `BRIDGE_OPENCLAW_CRON_JOBS_FILE=/path/to/jobs.json` when testing snapshots.
 
 `cron enqueue` is the first bridge adapter path for recurring OpenClaw jobs. It currently allows `memory-daily` and `monthly-highlights`, writes a materialized note under `shared/cron/`, and records a per-slot manifest under `state/cron/dispatch/` so duplicate runs do not create duplicate tasks.
+
+`cron errors report` is the report-only view for recurring cron failures. It shows `lastErrorAt`, consecutive error counts, family and prefix summaries, and the highest-error outliers first so model-switch fallout is easy to separate from older failures.
 
 `cron cleanup report` and `cron cleanup prune --dry-run` are the safe way to inspect stale one-shot jobs before deleting them. The current prune target is intentionally narrow: expired `schedule.kind=at` jobs with `deleteAfterRun=true` and `enabled=false`.
 
@@ -294,6 +297,7 @@ That creates an isolated git worktree under `~/.agent-bridge/worktrees/` instead
 ./agent-bridge cron inventory --mode one-shot --limit 20
 ./agent-bridge cron enqueue memory-daily-syrs-shopify --slot 2026-04-05 --dry-run
 ./agent-bridge cron enqueue monthly-highlights-syrs-shopify --dry-run
+./agent-bridge cron errors report --limit 20
 ./agent-bridge cron cleanup report
 ./agent-bridge kill 1
 ./agent-bridge kill all
@@ -308,7 +312,7 @@ bash bridge-daemon.sh status
 - `agb`: shorthand wrapper for `agent-bridge`
 - `bridge-start.sh`, `bridge-run.sh`: session startup paths
 - `bridge-task.sh`, `bridge-queue.py`: queue API and SQLite backend
-- `bridge-cron.sh`, `bridge-cron.py`: read-only OpenClaw cron inventory and job inspection
+- `bridge-cron.sh`, `bridge-cron.py`: OpenClaw cron inventory, error reporting, queue adapters, and cleanup helpers
 - `bridge-send.sh`, `bridge-action.sh`: urgent interrupts and predefined actions
 - `bridge-status.sh`, `bridge-daemon.sh`, `bridge-sync.sh`: status, background sync, and heartbeats
 - `bridge-lib.sh`: thin loader for shared shell modules

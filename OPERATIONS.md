@@ -89,6 +89,7 @@ Use these first:
 ~/agent-bridge/agent-bridge cron inventory --mode one-shot --limit 20
 ~/agent-bridge/agent-bridge cron enqueue memory-daily-syrs-shopify --slot 2026-04-05 --dry-run
 ~/agent-bridge/agent-bridge cron enqueue monthly-highlights-syrs-shopify --dry-run
+~/agent-bridge/agent-bridge cron errors report --limit 20
 ~/agent-bridge/agent-bridge cron cleanup report
 ```
 
@@ -113,6 +114,13 @@ Before deleting stale one-shot jobs, inspect the candidate set first:
 ```
 
 Run the actual prune only between gateway cron ticks, because it rewrites `~/.openclaw/cron/jobs.json` directly.
+
+For recurring cron failures, use the report-only view first:
+
+```bash
+~/agent-bridge/agent-bridge cron errors report --limit 20
+~/agent-bridge/agent-bridge cron errors report --family memory-daily --json
+```
 
 Inspect runtime state directly when needed:
 

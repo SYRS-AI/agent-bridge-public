@@ -13,6 +13,7 @@ Usage:
   $(basename "$0") inventory [--agent <openclaw-agent>] [--family <family>] [--mode recurring|one-shot|all] [--enabled yes|no|all] [--limit <count>] [--json]
   $(basename "$0") show <job-name-or-id> [--json]
   $(basename "$0") enqueue <job-name-or-id> [--slot <slot-key>] [--target <bridge-agent>] [--from <actor>] [--priority normal|high] [--dry-run]
+  $(basename "$0") errors report [--agent <bridge|openclaw-agent>] [--family <family>] [--limit <count>] [--json]
   $(basename "$0") cleanup report [--mode expired-one-shot] [--json]
   $(basename "$0") cleanup prune [--mode expired-one-shot] [--dry-run]
 EOF
@@ -226,6 +227,46 @@ run_enqueue() {
   printf 'manifest: %s\n' "$manifest_rel"
 }
 
+run_errors() {
+  local errors_cmd="${1:-}"
+  shift || true
+
+  bridge_require_openclaw_cron_jobs
+
+  case "$errors_cmd" in
+    report)
+      local py_args=(
+        errors-report
+        --jobs-file "$BRIDGE_OPENCLAW_CRON_JOBS_FILE"
+      )
+      while [[ $# -gt 0 ]]; do
+        case "$1" in
+          --agent|--family|--limit)
+            [[ $# -lt 2 ]] && bridge_die "$1 뒤에 값을 지정하세요."
+            py_args+=("$1" "$2")
+            shift 2
+            ;;
+          --json)
+            py_args+=("$1")
+            shift
+            ;;
+          -h|--help)
+            usage
+            exit 0
+            ;;
+          *)
+            bridge_die "지원하지 않는 errors report 옵션입니다: $1"
+            ;;
+        esac
+      done
+      bridge_cron_python "${py_args[@]}"
+      ;;
+    *)
+      bridge_die "지원하지 않는 errors 명령입니다: ${errors_cmd:-<none>}"
+      ;;
+  esac
+}
+
 run_cleanup() {
   local cleanup_cmd="${1:-}"
   shift || true
@@ -305,6 +346,9 @@ case "$subcommand" in
     ;;
   enqueue)
     run_enqueue "$@"
+    ;;
+  errors)
+    run_errors "$@"
     ;;
   cleanup)
     run_cleanup "$@"
