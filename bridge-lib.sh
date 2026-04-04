@@ -1,6 +1,18 @@
 #!/usr/bin/env bash
 # shellcheck shell=bash disable=SC2034
 
+if (( ${BASH_VERSINFO[0]:-0} < 4 )); then
+  for bridge_candidate_bash in /opt/homebrew/bin/bash /usr/local/bin/bash "$(command -v bash 2>/dev/null || true)"; do
+    [[ -n "$bridge_candidate_bash" && -x "$bridge_candidate_bash" ]] || continue
+    if "$bridge_candidate_bash" -lc '[[ ${BASH_VERSINFO[0]:-0} -ge 4 ]]' >/dev/null 2>&1; then
+      exec "$bridge_candidate_bash" "$0" "$@"
+    fi
+  done
+
+  echo "[bridge-lib] Agent Bridge requires Bash 4+ (current: ${BASH_VERSION:-unknown})." >&2
+  exit 1
+fi
+
 BRIDGE_SCRIPT_DIR="$(cd -P "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 BRIDGE_HOME="${BRIDGE_HOME:-$BRIDGE_SCRIPT_DIR}"
 BRIDGE_ROSTER_FILE="${BRIDGE_ROSTER_FILE:-$BRIDGE_HOME/agent-roster.sh}"
@@ -16,6 +28,8 @@ BRIDGE_DAEMON_LOG="${BRIDGE_DAEMON_LOG:-$BRIDGE_STATE_DIR/daemon.log}"
 BRIDGE_DAEMON_INTERVAL="${BRIDGE_DAEMON_INTERVAL:-5}"
 BRIDGE_TASK_DB="${BRIDGE_TASK_DB:-$BRIDGE_STATE_DIR/tasks.db}"
 BRIDGE_WORKTREE_ROOT="${BRIDGE_WORKTREE_ROOT:-$HOME/.agent-bridge/worktrees}"
+BRIDGE_BASH_BIN="${BRIDGE_BASH_BIN:-${BASH:-$(command -v bash)}}"
+export BRIDGE_BASH_BIN
 
 RED='\033[0;31m'
 # shellcheck disable=SC2034

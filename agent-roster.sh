@@ -32,3 +32,6 @@ declare -Ag BRIDGE_AGENT_LAUNCH_CMD=()
 
 # shellcheck disable=SC2034
 declare -Ag BRIDGE_AGENT_ACTION=()
+
+# shellcheck disable=SC2034
+declare -Ag BRIDGE_AGENT_IDLE_TIMEOUT=()

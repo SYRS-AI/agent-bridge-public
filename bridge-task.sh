@@ -37,6 +37,45 @@ infer_actor_if_possible() {
   printf '%s' "${USER:-unknown}"
 }
 
+notify_task_requester() {
+  local task_id="$1"
+  local actor="$2"
+  local note="$3"
+  local note_file="$4"
+  local TASK_ID=""
+  local TASK_TITLE=""
+  local TASK_STATUS=""
+  local TASK_ASSIGNED_TO=""
+  local TASK_CREATED_BY=""
+  local TASK_PRIORITY=""
+  local TASK_CLAIMED_BY=""
+  local TASK_BODY_PATH=""
+  local creator
+  local session
+  local engine
+  local message
+
+  # shellcheck disable=SC1090
+  source <(bridge_queue_cli show "$task_id" --format shell)
+
+  creator="$TASK_CREATED_BY"
+  [[ -n "$creator" ]] || return 0
+  [[ "$creator" != "$actor" ]] || return 0
+  bridge_agent_exists "$creator" || return 0
+  bridge_agent_is_active "$creator" || return 0
+
+  session="$(bridge_agent_session "$creator")"
+  engine="$(bridge_agent_engine "$creator")"
+  message="[Agent Bridge] task #${TASK_ID} \"${TASK_TITLE}\" completed by ${actor}"
+  if [[ -n "$note" ]]; then
+    message+=": ${note}"
+  elif [[ -n "$note_file" ]]; then
+    message+=" (note_file: ${note_file})"
+  fi
+
+  bridge_tmux_send_and_submit "$session" "$engine" "$message" || true
+}
+
 cmd_create() {
   local target=""
   local title=""
@@ -241,6 +280,7 @@ cmd_done() {
     args+=(--note-file "$note_file")
   fi
   bridge_queue_cli "${args[@]}"
+  notify_task_requester "$task_id" "$agent" "$note" "$note_file"
 }
 
 cmd_handoff() {

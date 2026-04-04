@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import csv
 import os
+import shlex
 import sqlite3
 import sys
 import time
@@ -96,14 +97,23 @@ def init_db(conn: sqlite3.Connection) -> None:
               last_seen_ts INTEGER,
               last_heartbeat_ts INTEGER,
               session_activity_ts INTEGER,
-              last_nudge_ts INTEGER
+              last_nudge_ts INTEGER,
+              last_nudge_key TEXT
             )
             """
         )
+        ensure_column(conn, "agent_state", "last_nudge_key", "TEXT")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_tasks_assigned_status ON tasks(assigned_to, status)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_tasks_claimed_status ON tasks(claimed_by, status)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_tasks_lease ON tasks(status, lease_until_ts)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_task_events_task ON task_events(task_id, created_ts)")
+
+
+def ensure_column(conn: sqlite3.Connection, table: str, column: str, spec: str) -> None:
+    existing = {row["name"] for row in conn.execute(f"PRAGMA table_info({table})")}
+    if column in existing:
+        return
+    conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {spec}")
 
 
 def normalize_path(path_value: str | None) -> str | None:
@@ -335,6 +345,21 @@ def cmd_show(args: argparse.Namespace) -> int:
             (args.task_id,),
         ).fetchall()
 
+    if args.format == "shell":
+        fields = {
+            "TASK_ID": task["id"],
+            "TASK_TITLE": task["title"],
+            "TASK_STATUS": task["status"],
+            "TASK_ASSIGNED_TO": task["assigned_to"],
+            "TASK_CREATED_BY": task["created_by"],
+            "TASK_PRIORITY": task["priority"],
+            "TASK_CLAIMED_BY": task["claimed_by"] or "",
+            "TASK_BODY_PATH": task["body_path"] or "",
+        }
+        for key, value in fields.items():
+            print(f"{key}={shlex.quote(str(value))}")
+        return 0
+
     print(f"task #{task['id']}: {task['title']}")
     print(f"status: {task['status']}")
     print(f"assigned_to: {task['assigned_to']}")
@@ -507,6 +532,7 @@ def cmd_daemon_step(args: argparse.Namespace) -> int:
     heartbeat_window = int(args.heartbeat_window)
     idle_threshold = int(args.idle_threshold)
     nudge_cooldown = int(args.nudge_cooldown)
+    queued_ids_by_agent: dict[str, list[int]] = {}
 
     with closing(connect()) as conn, conn:
         for row in snapshot_rows:
@@ -591,6 +617,17 @@ def cmd_daemon_step(args: argparse.Namespace) -> int:
             )
 
         rows = conn.execute(
+            """
+            SELECT assigned_to, id
+            FROM tasks
+            WHERE status = 'queued'
+            ORDER BY assigned_to, id
+            """
+        ).fetchall()
+        for row in rows:
+            queued_ids_by_agent.setdefault(str(row["assigned_to"]), []).append(int(row["id"]))
+
+        rows = conn.execute(
             f"""
             WITH assigned AS (
               SELECT assigned_to AS agent, COUNT(*) AS queued_count
@@ -611,7 +648,8 @@ def cmd_daemon_step(args: argparse.Namespace) -> int:
               COALESCE(claimed.claimed_count, 0) AS claimed_count,
               agent_state.session_activity_ts,
               agent_state.last_seen_ts,
-              agent_state.last_nudge_ts
+              agent_state.last_nudge_ts,
+              agent_state.last_nudge_key
             FROM agent_state
             LEFT JOIN assigned ON assigned.agent = agent_state.agent
             LEFT JOIN claimed ON claimed.agent = agent_state.agent
@@ -630,8 +668,12 @@ def cmd_daemon_step(args: argparse.Namespace) -> int:
         idle_seconds = max(0, current_ts - int(activity_ts))
         if idle_seconds < idle_threshold:
             continue
+        queue_ids = queued_ids_by_agent.get(str(row["agent"]), [])
+        if not queue_ids:
+            continue
+        nudge_key = ",".join(str(task_id) for task_id in queue_ids)
         last_nudge_ts = int(row["last_nudge_ts"] or 0)
-        if last_nudge_ts and current_ts - last_nudge_ts < nudge_cooldown:
+        if row["last_nudge_key"] == nudge_key and last_nudge_ts and current_ts - last_nudge_ts < nudge_cooldown:
             continue
         printed = True
         print(
@@ -642,6 +684,7 @@ def cmd_daemon_step(args: argparse.Namespace) -> int:
                     str(row["queued_count"]),
                     str(row["claimed_count"]),
                     str(idle_seconds),
+                    nudge_key,
                 ]
             )
         )
@@ -656,12 +699,13 @@ def cmd_note_nudge(args: argparse.Namespace) -> int:
     with closing(connect()) as conn, conn:
         conn.execute(
             """
-            INSERT INTO agent_state (agent, last_nudge_ts)
-            VALUES (?, ?)
+            INSERT INTO agent_state (agent, last_nudge_ts, last_nudge_key)
+            VALUES (?, ?, ?)
             ON CONFLICT(agent) DO UPDATE SET
-              last_nudge_ts = excluded.last_nudge_ts
+              last_nudge_ts = excluded.last_nudge_ts,
+              last_nudge_key = excluded.last_nudge_key
             """,
-            (args.agent, current_ts),
+            (args.agent, current_ts, args.key),
         )
     print(f"recorded nudge for {args.agent}")
     return 0
@@ -691,6 +735,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     show_parser = subparsers.add_parser("show")
     show_parser.add_argument("task_id", type=int)
+    show_parser.add_argument("--format", choices=("text", "shell"), default="text")
     show_parser.set_defaults(handler=cmd_show)
 
     claim_parser = subparsers.add_parser("claim")
@@ -741,6 +786,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     nudge_parser = subparsers.add_parser("note-nudge")
     nudge_parser.add_argument("--agent", required=True)
+    nudge_parser.add_argument("--key")
     nudge_parser.set_defaults(handler=cmd_note_nudge)
 
     return parser

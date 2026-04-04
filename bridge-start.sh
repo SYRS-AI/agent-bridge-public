@@ -69,10 +69,13 @@ bridge_require_agent "$AGENT"
 SESSION="$(bridge_agent_session "$AGENT")"
 WORK_DIR="$(bridge_agent_workdir "$AGENT")"
 RUNNER="$SCRIPT_DIR/bridge-run.sh"
-if [[ "$(bridge_agent_loop "$AGENT")" == "1" ]]; then
-  printf -v SESSION_CMD 'bash %q %q' "$RUNNER" "$AGENT"
-else
-  printf -v SESSION_CMD 'bash %q %q --once' "$RUNNER" "$AGENT"
+ENV_PREFIX="$(bridge_export_env_prefix)"
+SESSION_CMD="$(bridge_join_quoted "$BRIDGE_BASH_BIN" "$RUNNER" "$AGENT")"
+if [[ "$(bridge_agent_loop "$AGENT")" != "1" ]]; then
+  SESSION_CMD+=" --once"
+fi
+if [[ -n "$ENV_PREFIX" ]]; then
+  SESSION_CMD="${ENV_PREFIX} ${SESSION_CMD}"
 fi
 
 if [[ $DRY_RUN -eq 1 ]]; then

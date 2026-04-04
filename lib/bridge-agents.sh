@@ -337,6 +337,11 @@ bridge_agent_action() {
   printf '%s' "${BRIDGE_AGENT_ACTION["$agent:$action"]-}"
 }
 
+bridge_agent_idle_timeout() {
+  local agent="$1"
+  printf '%s' "${BRIDGE_AGENT_IDLE_TIMEOUT[$agent]-0}"
+}
+
 bridge_list_actions() {
   local agent="$1"
   local key
@@ -466,7 +471,7 @@ bridge_list_active_agents_numbered() {
 
 bridge_refresh_runtime_state() {
   if [[ -f "$BRIDGE_HOME/bridge-sync.sh" ]]; then
-    bash "$BRIDGE_HOME/bridge-sync.sh" >/dev/null 2>&1 || true
+    "$BRIDGE_BASH_BIN" "$BRIDGE_HOME/bridge-sync.sh" >/dev/null 2>&1 || true
   else
     bridge_render_active_roster
   fi

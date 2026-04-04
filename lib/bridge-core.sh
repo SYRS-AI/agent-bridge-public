@@ -74,7 +74,7 @@ bridge_reset_roster_maps() {
   unset BRIDGE_AGENT_WORKDIR BRIDGE_AGENT_LAUNCH_CMD BRIDGE_AGENT_ACTION
   unset BRIDGE_AGENT_SOURCE BRIDGE_AGENT_META_FILE BRIDGE_AGENT_LOOP
   unset BRIDGE_AGENT_CONTINUE BRIDGE_AGENT_SESSION_ID BRIDGE_AGENT_HISTORY_KEY
-  unset BRIDGE_AGENT_CREATED_AT BRIDGE_AGENT_UPDATED_AT
+  unset BRIDGE_AGENT_CREATED_AT BRIDGE_AGENT_UPDATED_AT BRIDGE_AGENT_IDLE_TIMEOUT
 
   declare -g -a BRIDGE_AGENT_IDS=()
   declare -g -A BRIDGE_AGENT_DESC=()
@@ -91,6 +91,7 @@ bridge_reset_roster_maps() {
   declare -g -A BRIDGE_AGENT_HISTORY_KEY=()
   declare -g -A BRIDGE_AGENT_CREATED_AT=()
   declare -g -A BRIDGE_AGENT_UPDATED_AT=()
+  declare -g -A BRIDGE_AGENT_IDLE_TIMEOUT=()
 }
 
 bridge_add_agent_id_if_missing() {
@@ -119,6 +120,47 @@ bridge_join_quoted() {
   for arg in "$@"; do
     printf -v quoted '%q' "$arg"
     out+="${out:+ }${quoted}"
+  done
+
+  printf '%s' "$out"
+}
+
+bridge_export_env_prefix() {
+  local out=""
+  local name
+  local value
+  local quoted
+  local names=(
+    BRIDGE_BASH_BIN
+    BRIDGE_HOME
+    BRIDGE_ROSTER_FILE
+    BRIDGE_ROSTER_LOCAL_FILE
+    BRIDGE_STATE_DIR
+    BRIDGE_ACTIVE_AGENT_DIR
+    BRIDGE_HISTORY_DIR
+    BRIDGE_WORKTREE_META_DIR
+    BRIDGE_ACTIVE_ROSTER_TSV
+    BRIDGE_ACTIVE_ROSTER_MD
+    BRIDGE_DAEMON_PID_FILE
+    BRIDGE_DAEMON_LOG
+    BRIDGE_DAEMON_INTERVAL
+    BRIDGE_TASK_DB
+    BRIDGE_WORKTREE_ROOT
+    BRIDGE_LOG_DIR
+    BRIDGE_SHARED_DIR
+    BRIDGE_TASK_NOTE_DIR
+    BRIDGE_TASK_LEASE_SECONDS
+    BRIDGE_TASK_IDLE_NUDGE_SECONDS
+    BRIDGE_TASK_NUDGE_COOLDOWN_SECONDS
+    BRIDGE_TASK_HEARTBEAT_WINDOW_SECONDS
+    BRIDGE_ON_DEMAND_IDLE_SECONDS
+  )
+
+  for name in "${names[@]}"; do
+    [[ -n "${!name+x}" ]] || continue
+    value="${!name}"
+    printf -v quoted '%q' "$value"
+    out+="${out:+ }${name}=${quoted}"
   done
 
   printf '%s' "$out"

@@ -190,8 +190,9 @@ bridge_load_roster() {
   : "${BRIDGE_TASK_NOTE_DIR:=$BRIDGE_SHARED_DIR/tasks}"
   : "${BRIDGE_TASK_LEASE_SECONDS:=900}"
   : "${BRIDGE_TASK_IDLE_NUDGE_SECONDS:=120}"
-  : "${BRIDGE_TASK_NUDGE_COOLDOWN_SECONDS:=900}"
+  : "${BRIDGE_TASK_NUDGE_COOLDOWN_SECONDS:=300}"
   : "${BRIDGE_TASK_HEARTBEAT_WINDOW_SECONDS:=300}"
+  : "${BRIDGE_ON_DEMAND_IDLE_SECONDS:=0}"
 
   bridge_init_dirs
 
@@ -200,6 +201,7 @@ bridge_load_roster() {
     BRIDGE_AGENT_LOOP["$agent"]="${BRIDGE_AGENT_LOOP[$agent]-1}"
     BRIDGE_AGENT_CONTINUE["$agent"]="${BRIDGE_AGENT_CONTINUE[$agent]-1}"
     BRIDGE_AGENT_HISTORY_KEY["$agent"]="${BRIDGE_AGENT_HISTORY_KEY[$agent]-$(bridge_history_key_for "$(bridge_agent_engine "$agent")" "$agent" "$(bridge_agent_workdir "$agent")")}"
+    BRIDGE_AGENT_IDLE_TIMEOUT["$agent"]="${BRIDGE_AGENT_IDLE_TIMEOUT[$agent]-$BRIDGE_ON_DEMAND_IDLE_SECONDS}"
   done
 
   bridge_load_static_histories
@@ -514,7 +516,14 @@ bridge_task_daemon_step() {
 
 bridge_task_note_nudge() {
   local agent="$1"
-  bridge_queue_cli note-nudge --agent "$agent" >/dev/null
+  local key="${2:-}"
+  local args=(note-nudge --agent "$agent")
+
+  if [[ -n "$key" ]]; then
+    args+=(--key "$key")
+  fi
+
+  bridge_queue_cli "${args[@]}" >/dev/null
 }
 
 bridge_render_active_roster() {

@@ -98,7 +98,7 @@ log_line "${AGENT} 에이전트 시작 (engine=${ENGINE}, dir=${WORK_DIR})"
 FAIL_COUNT=0
 while true; do
   log_line "실행: ${LAUNCH_CMD}"
-  bash -lc "$LAUNCH_CMD"
+  "$BRIDGE_BASH_BIN" -lc "$LAUNCH_CMD"
   EXIT_CODE=$?
 
   if [[ $ONCE -eq 1 ]]; then
