@@ -32,8 +32,18 @@ Static roles are optional. Fresh installs ship with an empty static roster.
 - [`bridge-daemon.sh`](./bridge-daemon.sh): background sync and heartbeat loop
 - [`bridge-sync.sh`](./bridge-sync.sh): reconcile active tmux sessions into live bridge state
 - [`bridge-status.sh`](./bridge-status.sh): compact TUI-style dashboard
-- [`bridge-lib.sh`](./bridge-lib.sh): shared shell logic
+- [`bridge-lib.sh`](./bridge-lib.sh): thin loader that sources the shell modules under [`lib/`](./lib)
 - [`bridge-queue.py`](./bridge-queue.py): persistent queue and daemon-side bookkeeping
+
+## Shell Module Layout
+
+Shared Bash implementation is split under [`lib/`](./lib):
+
+- `bridge-core.sh`: generic helpers, hashing, queue wrapper, and path utilities
+- `bridge-agents.sh`: roster accessors, active-agent queries, worktree preparation, and session kill helpers
+- `bridge-tmux.sh`: tmux session I/O and submit helpers
+- `bridge-skills.sh`: project-local skill generation and migration of older managed skill directories
+- `bridge-state.sh`: roster loading, dynamic/static agent persistence, session-id detection, and daemon snapshots
 
 ## State Layout
 

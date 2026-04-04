@@ -244,7 +244,8 @@ bash bridge-daemon.sh status
 - `bridge-task.sh`, `bridge-queue.py`: queue API and SQLite backend
 - `bridge-send.sh`, `bridge-action.sh`: urgent interrupts and predefined actions
 - `bridge-status.sh`, `bridge-daemon.sh`, `bridge-sync.sh`: status, background sync, and heartbeats
-- `bridge-lib.sh`: shared shell helpers
+- `bridge-lib.sh`: thin loader for shared shell modules
+- `lib/`: modular shell implementation split by concern (`core`, `agents`, `tmux`, `skills`, `state`)
 - `agent-roster.sh`: static role definitions
 - `shared/`, `logs/`, `state/`: runtime artifacts and handoff files
 
