@@ -18,7 +18,7 @@ Usage:
   $CLI_NAME urgent <agent> "<message>" [--wait <seconds>]
   $CLI_NAME task <create|inbox|show|claim|done|handoff|summary> ...
   $CLI_NAME profile <status|diff|deploy> ...
-  $CLI_NAME cron <inventory|show|enqueue> ...
+  $CLI_NAME cron <inventory|show|enqueue|cleanup> ...
   $CLI_NAME inbox [agent] [--all]
   $CLI_NAME show <task-id>
   $CLI_NAME claim <task-id> [--agent <agent>] [--lease <seconds>]
@@ -32,6 +32,8 @@ Usage:
   $CLI_NAME cron inventory [--mode recurring|one-shot|all] [--family <family>] [--limit <count>]
   $CLI_NAME cron show <job-name-or-id>
   $CLI_NAME cron enqueue <job-name-or-id> [--slot <slot-key>] [--dry-run]
+  $CLI_NAME cron cleanup report [--mode expired-one-shot] [--json]
+  $CLI_NAME cron cleanup prune [--mode expired-one-shot] [--dry-run]
   $CLI_NAME --codex|--claude --name <agent> [--loop] [--no-continue] [--workdir <dir>] [--replace] [--no-attach] [--no-project-skill] [--prefer wake|new|shared]
 
 Examples:
@@ -43,6 +45,7 @@ Examples:
   $CLI_NAME worktree list
   $CLI_NAME cron inventory --family memory-daily --limit 10
   $CLI_NAME cron enqueue memory-daily-syrs-shopify --slot 2026-04-05 --dry-run
+  $CLI_NAME cron cleanup report
   $CLI_NAME inbox developer
   $CLI_NAME task create --to tester --title "재테스트" --body-file ~/agent-bridge/shared/report.md
   $CLI_NAME claim 12 --agent tester

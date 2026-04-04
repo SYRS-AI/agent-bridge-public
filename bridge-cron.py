@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
 import argparse
 import json
+import os
 import shlex
 import sys
+import tempfile
 from collections import Counter, defaultdict
 from datetime import datetime, timezone
 from pathlib import Path
@@ -19,11 +21,16 @@ FAMILY_RULES = (
 )
 
 
-def load_jobs(path):
+def load_jobs_payload(path):
     raw = json.loads(Path(path).expanduser().read_text(encoding="utf-8"))
     jobs = raw.get("jobs") if isinstance(raw, dict) else raw
     if not isinstance(jobs, list):
         raise ValueError("jobs.json must contain a top-level list or {jobs:[...]}")
+    return raw, jobs
+
+
+def load_jobs(path):
+    _, jobs = load_jobs_payload(path)
     return jobs
 
 
@@ -276,6 +283,152 @@ def render_shell(record):
     return "\n".join(lines)
 
 
+def cleanup_prefix(name):
+    if not name:
+        return "<unnamed>"
+    return name.split("-", 1)[0]
+
+
+def cleanup_candidates(records, mode):
+    now = datetime.now().astimezone()
+    if mode != "expired-one-shot":
+        raise ValueError(f"unsupported cleanup mode: {mode}")
+    return [
+        record
+        for record in records
+        if record["schedule_kind"] == "at"
+        and record["next_run_at"] is not None
+        and record["next_run_at"] < now
+        and record["raw"].get("deleteAfterRun") is True
+        and record["enabled"] is False
+    ]
+
+
+def format_cleanup_candidate(record):
+    return (
+        f"{record['agent']} | {record['name']} | "
+        f"scheduled={format_dt(record['next_run_at'])} | "
+        f"last={format_dt(record['last_run_at'])} | "
+        f"status={record['last_status']}"
+    )
+
+
+def print_cleanup_report(args, records):
+    candidates = sorted(cleanup_candidates(records, args.mode), key=record_sort_key)
+    agent_counts = Counter(record["agent"] for record in candidates)
+    prefix_counts = Counter(cleanup_prefix(record["name"]) for record in candidates)
+    sample_limit = args.limit if args.limit is not None else 20
+    samples = candidates if sample_limit == 0 else candidates[:sample_limit]
+    criteria = {
+        "schedule_kind": "at",
+        "scheduled_before_now": True,
+        "delete_after_run": True,
+        "enabled": False,
+    }
+
+    if args.json:
+        payload = {
+            "source_file": str(Path(args.jobs_file).expanduser()),
+            "generated_at": datetime.now().astimezone().isoformat(),
+            "mode": args.mode,
+            "criteria": criteria,
+            "candidate_count": len(candidates),
+            "total_jobs": len(records),
+            "by_agent": dict(agent_counts),
+            "by_prefix": dict(prefix_counts),
+            "samples": [serialize_record(record) for record in samples],
+        }
+        print(json.dumps(payload, ensure_ascii=False, indent=2))
+        return 0
+
+    print(f"source_file: {Path(args.jobs_file).expanduser()}")
+    print(f"generated_at: {datetime.now().astimezone().isoformat()}")
+    print(f"mode: {args.mode}")
+    print("criteria: schedule.kind=at, at<now, deleteAfterRun=true, enabled=false")
+    print(f"candidate_jobs: {len(candidates)}")
+    print(f"total_jobs: {len(records)}")
+    print()
+    print("by_agent:")
+    if not agent_counts:
+        print("- none")
+    else:
+        for agent, count in agent_counts.most_common():
+            print(f"- {agent}: {count}")
+    print()
+    print("by_prefix:")
+    if not prefix_counts:
+        print("- none")
+    else:
+        for prefix, count in prefix_counts.most_common():
+            print(f"- {prefix}: {count}")
+    print()
+    print("sample_jobs:")
+    if not samples:
+        print("- none")
+    else:
+        for record in samples:
+            print(f"- {format_cleanup_candidate(record)}")
+        if sample_limit != 0 and len(candidates) > len(samples):
+            print(f"- ... ({len(candidates) - len(samples)} more candidates)")
+    return 0
+
+
+def backup_path_for(jobs_path):
+    timestamp = datetime.now().astimezone().strftime("%Y%m%d-%H%M%S")
+    return jobs_path.with_name(f"{jobs_path.name}.bak-{timestamp}")
+
+
+def atomic_write_jobs(jobs_path, raw_payload):
+    suffix = f".{jobs_path.name}.tmp"
+    with tempfile.NamedTemporaryFile("w", encoding="utf-8", dir=jobs_path.parent, delete=False, suffix=suffix) as fh:
+        json.dump(raw_payload, fh, ensure_ascii=False, indent=2)
+        fh.write("\n")
+        temp_path = Path(fh.name)
+    os.replace(temp_path, jobs_path)
+
+
+def run_cleanup_prune(args, raw_payload, records):
+    candidates = sorted(cleanup_candidates(records, args.mode), key=record_sort_key)
+    candidate_ids = {record["id"] for record in candidates}
+    jobs_path = Path(args.jobs_file).expanduser()
+    remaining_jobs = [job for job in (raw_payload.get("jobs") if isinstance(raw_payload, dict) else raw_payload) if job.get("id") not in candidate_ids]
+    remaining_count = len(remaining_jobs)
+
+    print("warning: cleanup prune rewrites gateway jobs.json directly.")
+    print("warning: run it between gateway cron ticks to reduce write collision risk.")
+    print(f"mode: {args.mode}")
+    print(f"candidate_jobs: {len(candidates)}")
+    print(f"remaining_jobs_after_prune: {remaining_count}")
+
+    if not candidates:
+        print("status: nothing_to_prune")
+        return 0
+
+    print("candidate_sample:")
+    for record in candidates[:10]:
+        print(f"- {format_cleanup_candidate(record)}")
+    if len(candidates) > 10:
+        print(f"- ... ({len(candidates) - 10} more candidates)")
+
+    if args.dry_run:
+        print("status: dry_run")
+        return 0
+
+    backup_path = backup_path_for(jobs_path)
+    backup_path.write_text(jobs_path.read_text(encoding="utf-8"), encoding="utf-8")
+    if isinstance(raw_payload, dict):
+        next_payload = dict(raw_payload)
+        next_payload["jobs"] = remaining_jobs
+    else:
+        next_payload = remaining_jobs
+    atomic_write_jobs(jobs_path, next_payload)
+    print("status: pruned")
+    print(f"deleted_jobs: {len(candidates)}")
+    print(f"remaining_jobs: {remaining_count}")
+    print(f"backup_file: {backup_path}")
+    return 0
+
+
 def print_inventory(args, all_records, filtered_records):
     source_file = str(Path(args.jobs_file).expanduser())
     family_rows = inventory_rows(filtered_records)
@@ -425,7 +578,7 @@ def print_show(args, records):
 
 
 def build_parser():
-    parser = argparse.ArgumentParser(description="Read-only OpenClaw cron inventory for Agent Bridge.")
+    parser = argparse.ArgumentParser(description="OpenClaw cron inventory, enqueue metadata, and cleanup helpers for Agent Bridge.")
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     inventory_parser = subparsers.add_parser("inventory", help="Summarize and filter cron jobs.")
@@ -442,6 +595,17 @@ def build_parser():
     show_parser.add_argument("job_ref")
     show_parser.add_argument("--format", choices=("text", "json", "shell"), default="text")
     show_parser.add_argument("--json", action="store_true")
+
+    cleanup_report_parser = subparsers.add_parser("cleanup-report", help="Report prune candidates for stale one-shot cron jobs.")
+    cleanup_report_parser.add_argument("--jobs-file", required=True)
+    cleanup_report_parser.add_argument("--mode", choices=("expired-one-shot",), default="expired-one-shot")
+    cleanup_report_parser.add_argument("--limit", type=int, default=None)
+    cleanup_report_parser.add_argument("--json", action="store_true")
+
+    cleanup_prune_parser = subparsers.add_parser("cleanup-prune", help="Prune stale one-shot cron jobs from jobs.json.")
+    cleanup_prune_parser.add_argument("--jobs-file", required=True)
+    cleanup_prune_parser.add_argument("--mode", choices=("expired-one-shot",), default="expired-one-shot")
+    cleanup_prune_parser.add_argument("--dry-run", action="store_true")
     return parser
 
 
@@ -450,7 +614,8 @@ def main():
     args = parser.parse_args()
 
     try:
-        records = [build_job_record(job) for job in load_jobs(args.jobs_file)]
+        raw_payload, jobs = load_jobs_payload(args.jobs_file)
+        records = [build_job_record(job) for job in jobs]
     except FileNotFoundError:
         print(f"error: jobs file not found: {args.jobs_file}", file=sys.stderr)
         return 2
@@ -467,6 +632,15 @@ def main():
 
     if args.command == "show":
         return print_show(args, records)
+
+    if args.command == "cleanup-report":
+        if args.limit is not None and args.limit < 0:
+            print("error: --limit must be >= 0", file=sys.stderr)
+            return 2
+        return print_cleanup_report(args, records)
+
+    if args.command == "cleanup-prune":
+        return run_cleanup_prune(args, raw_payload, records)
 
     parser.error(f"unsupported command: {args.command}")
     return 2

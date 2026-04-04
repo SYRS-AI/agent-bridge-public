@@ -13,6 +13,8 @@ Usage:
   $(basename "$0") inventory [--agent <openclaw-agent>] [--family <family>] [--mode recurring|one-shot|all] [--enabled yes|no|all] [--limit <count>] [--json]
   $(basename "$0") show <job-name-or-id> [--json]
   $(basename "$0") enqueue <job-name-or-id> [--slot <slot-key>] [--target <bridge-agent>] [--from <actor>] [--priority normal|high] [--dry-run]
+  $(basename "$0") cleanup report [--mode expired-one-shot] [--json]
+  $(basename "$0") cleanup prune [--mode expired-one-shot] [--dry-run]
 EOF
 }
 
@@ -224,6 +226,73 @@ run_enqueue() {
   printf 'manifest: %s\n' "$manifest_rel"
 }
 
+run_cleanup() {
+  local cleanup_cmd="${1:-}"
+  shift || true
+
+  bridge_require_openclaw_cron_jobs
+
+  case "$cleanup_cmd" in
+    report)
+      local py_args=(
+        cleanup-report
+        --jobs-file "$BRIDGE_OPENCLAW_CRON_JOBS_FILE"
+      )
+      while [[ $# -gt 0 ]]; do
+        case "$1" in
+          --mode)
+            [[ $# -lt 2 ]] && bridge_die "--mode 뒤에 값을 지정하세요."
+            py_args+=("$1" "$2")
+            shift 2
+            ;;
+          --json)
+            py_args+=("$1")
+            shift
+            ;;
+          -h|--help)
+            usage
+            exit 0
+            ;;
+          *)
+            bridge_die "지원하지 않는 cleanup report 옵션입니다: $1"
+            ;;
+        esac
+      done
+      bridge_cron_python "${py_args[@]}"
+      ;;
+    prune)
+      local py_args=(
+        cleanup-prune
+        --jobs-file "$BRIDGE_OPENCLAW_CRON_JOBS_FILE"
+      )
+      while [[ $# -gt 0 ]]; do
+        case "$1" in
+          --mode)
+            [[ $# -lt 2 ]] && bridge_die "--mode 뒤에 값을 지정하세요."
+            py_args+=("$1" "$2")
+            shift 2
+            ;;
+          --dry-run)
+            py_args+=("$1")
+            shift
+            ;;
+          -h|--help)
+            usage
+            exit 0
+            ;;
+          *)
+            bridge_die "지원하지 않는 cleanup prune 옵션입니다: $1"
+            ;;
+        esac
+      done
+      bridge_cron_python "${py_args[@]}"
+      ;;
+    *)
+      bridge_die "지원하지 않는 cleanup 명령입니다: ${cleanup_cmd:-<none>}"
+      ;;
+  esac
+}
+
 subcommand="${1:-}"
 shift || true
 
@@ -236,6 +305,9 @@ case "$subcommand" in
     ;;
   enqueue)
     run_enqueue "$@"
+    ;;
+  cleanup)
+    run_cleanup "$@"
     ;;
   ""|-h|--help|help)
     usage

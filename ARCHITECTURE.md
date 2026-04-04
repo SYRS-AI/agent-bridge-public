@@ -31,7 +31,7 @@ Tracked long-lived agent profiles live under `agents/`. That tree is the portabl
 - [`bridge-run.sh`](./bridge-run.sh): loop or one-shot launcher inside the tmux session
 - [`bridge-task.sh`](./bridge-task.sh): shell wrapper around the SQLite queue
 - [`bridge-profile.sh`](./bridge-profile.sh): tracked agent profile status, diff, and deploy
-- [`bridge-cron.sh`](./bridge-cron.sh): OpenClaw cron inventory plus queue adapter wrapper
+- [`bridge-cron.sh`](./bridge-cron.sh): OpenClaw cron inventory, queue adapters, and stale one-shot cleanup wrapper
 - [`bridge-send.sh`](./bridge-send.sh): urgent-only direct message path
 - [`bridge-action.sh`](./bridge-action.sh): send predefined actions like `/resume`
 - [`bridge-daemon.sh`](./bridge-daemon.sh): background sync and heartbeat loop
@@ -39,7 +39,7 @@ Tracked long-lived agent profiles live under `agents/`. That tree is the portabl
 - [`bridge-status.sh`](./bridge-status.sh): compact TUI-style dashboard
 - [`bridge-lib.sh`](./bridge-lib.sh): thin loader that sources the shell modules under [`lib/`](./lib)
 - [`bridge-queue.py`](./bridge-queue.py): persistent queue and daemon-side bookkeeping
-- [`bridge-cron.py`](./bridge-cron.py): OpenClaw cron inventory parsing and job metadata export
+- [`bridge-cron.py`](./bridge-cron.py): OpenClaw cron inventory parsing, metadata export, and cleanup pruning
 
 ## Shell Module Layout
 

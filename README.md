@@ -162,11 +162,15 @@ If you are migrating existing OpenClaw cron jobs into Agent Bridge, start with t
 ./agent-bridge cron show memory-daily-syrs-shopify
 ./agent-bridge cron enqueue memory-daily-syrs-shopify --slot 2026-04-05 --dry-run
 ./agent-bridge cron enqueue monthly-highlights-syrs-shopify --dry-run
+./agent-bridge cron cleanup report
+./agent-bridge cron cleanup prune --dry-run
 ```
 
 By default the inventory reads `~/.openclaw/cron/jobs.json`. Override it with `BRIDGE_OPENCLAW_CRON_JOBS_FILE=/path/to/jobs.json` when testing snapshots.
 
 `cron enqueue` is the first bridge adapter path for recurring OpenClaw jobs. It currently allows `memory-daily` and `monthly-highlights`, writes a materialized note under `shared/cron/`, and records a per-slot manifest under `state/cron/dispatch/` so duplicate runs do not create duplicate tasks.
+
+`cron cleanup report` and `cron cleanup prune --dry-run` are the safe way to inspect stale one-shot jobs before deleting them. The current prune target is intentionally narrow: expired `schedule.kind=at` jobs with `deleteAfterRun=true` and `enabled=false`.
 
 ### Start the daemon
 
@@ -290,6 +294,7 @@ That creates an isolated git worktree under `~/.agent-bridge/worktrees/` instead
 ./agent-bridge cron inventory --mode one-shot --limit 20
 ./agent-bridge cron enqueue memory-daily-syrs-shopify --slot 2026-04-05 --dry-run
 ./agent-bridge cron enqueue monthly-highlights-syrs-shopify --dry-run
+./agent-bridge cron cleanup report
 ./agent-bridge kill 1
 ./agent-bridge kill all
 ./agent-bridge worktree list
