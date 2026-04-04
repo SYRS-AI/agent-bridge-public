@@ -4,6 +4,7 @@
 BRIDGE_SCRIPT_DIR="$(cd -P "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 BRIDGE_HOME="${BRIDGE_HOME:-$BRIDGE_SCRIPT_DIR}"
 BRIDGE_ROSTER_FILE="${BRIDGE_ROSTER_FILE:-$BRIDGE_HOME/agent-roster.sh}"
+BRIDGE_ROSTER_LOCAL_FILE="${BRIDGE_ROSTER_LOCAL_FILE:-$BRIDGE_HOME/agent-roster.local.sh}"
 BRIDGE_STATE_DIR="${BRIDGE_STATE_DIR:-$BRIDGE_HOME/state}"
 BRIDGE_ACTIVE_AGENT_DIR="${BRIDGE_ACTIVE_AGENT_DIR:-$BRIDGE_STATE_DIR/agents}"
 BRIDGE_HISTORY_DIR="${BRIDGE_HISTORY_DIR:-$BRIDGE_STATE_DIR/history}"
@@ -1231,6 +1232,11 @@ bridge_load_roster() {
 
   # shellcheck source=/dev/null
   source "$BRIDGE_ROSTER_FILE"
+
+  if [[ -f "$BRIDGE_ROSTER_LOCAL_FILE" ]]; then
+    # shellcheck source=/dev/null
+    source "$BRIDGE_ROSTER_LOCAL_FILE"
+  fi
 
   if [[ -z "${BRIDGE_AGENT_IDS+x}" || ${#BRIDGE_AGENT_IDS[@]} -eq 0 ]]; then
     bridge_die "BRIDGE_AGENT_IDS가 비어 있습니다: $BRIDGE_ROSTER_FILE"

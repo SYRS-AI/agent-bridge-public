@@ -19,7 +19,7 @@ There is no build step; scripts run directly with Bash.
 - `shellcheck *.sh ab`: lint the shell entry points before submitting changes.
 
 ## Coding Style & Naming Conventions
-Use Bash with `#!/bin/bash` and `set -euo pipefail` unless a loop intentionally handles non-zero exit codes, as in `bridge-run.sh`. Indent with two spaces inside functions and `case` arms. Keep reusable helpers in `bridge-lib.sh` and prefix them `bridge_`. Use uppercase names for exported configuration such as `BRIDGE_*`, and lowercase names for local variables. Follow the existing naming pattern: `bridge-<verb>.sh` for primary commands and short wrapper names only for compatibility.
+Use Bash with `#!/usr/bin/env bash` and `set -euo pipefail` unless a loop intentionally handles non-zero exit codes, as in `bridge-run.sh`. Indent with two spaces inside functions and `case` arms. Keep reusable helpers in `bridge-lib.sh` and prefix them `bridge_`. Use uppercase names for exported configuration such as `BRIDGE_*`, and lowercase names for local variables. Follow the existing naming pattern: `bridge-<verb>.sh` for primary commands and short wrapper names only for compatibility.
 
 ## Testing Guidelines
 This snapshot does not include a committed automated test suite, so rely on linting plus manual smoke checks. At minimum, run `shellcheck`, one `--dry-run` path for the script you changed, one queue flow such as `bash bridge-task.sh create ... && bash bridge-task.sh claim ... && bash bridge-task.sh done ...`, and one daemon pass via `bash bridge-daemon.sh sync`. Test heartbeat-sensitive changes in an isolated `BRIDGE_HOME` with temporary tmux sessions so live agents are not interrupted.

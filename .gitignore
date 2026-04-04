@@ -4,3 +4,4 @@ shared/
 __pycache__/
 *.pyc
 .DS_Store
+agent-roster.local.sh

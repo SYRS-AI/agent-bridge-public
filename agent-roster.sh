@@ -5,11 +5,13 @@
 # - Add the agent id to BRIDGE_AGENT_IDS
 # - Fill the metadata maps below
 # - Optional actions are defined in BRIDGE_AGENT_ACTION using "<agent>:<action>"
+# - For machine-specific paths or private roles, create agent-roster.local.sh
 
 BRIDGE_HOME="${BRIDGE_HOME:-$HOME/agent-bridge}"
 BRIDGE_LOG_DIR="${BRIDGE_LOG_DIR:-$BRIDGE_HOME/logs}"
 BRIDGE_SHARED_DIR="${BRIDGE_SHARED_DIR:-$BRIDGE_HOME/shared}"
 BRIDGE_MAX_MESSAGE_LEN="${BRIDGE_MAX_MESSAGE_LEN:-500}"
+BRIDGE_DEFAULT_ROLE_WORKDIR="${BRIDGE_DEFAULT_ROLE_WORKDIR:-$BRIDGE_HOME}"
 
 # shellcheck disable=SC2034
 declare -ag BRIDGE_AGENT_IDS=(
@@ -21,10 +23,10 @@ declare -ag BRIDGE_AGENT_IDS=(
 
 # shellcheck disable=SC2034
 declare -Ag BRIDGE_AGENT_DESC=(
-  [tester]="CRM 테스트 에이전트 (Claude Code)"
-  [developer]="CRM 개발 에이전트 (Claude Code)"
-  [codex-tester]="CRM 테스트 에이전트 (Codex)"
-  [codex-developer]="CRM 개발 에이전트 (Codex)"
+  [tester]="Default test role (Claude Code)"
+  [developer]="Default development role (Claude Code)"
+  [codex-tester]="Default test role (Codex)"
+  [codex-developer]="Default development role (Codex)"
 )
 
 # shellcheck disable=SC2034
@@ -45,10 +47,10 @@ declare -Ag BRIDGE_AGENT_SESSION=(
 
 # shellcheck disable=SC2034
 declare -Ag BRIDGE_AGENT_WORKDIR=(
-  [tester]="/home/sean/crm_test"
-  [developer]="/home/sean/cosmax-crm-cli"
-  [codex-tester]="/home/sean/crm_test"
-  [codex-developer]="/home/sean/cosmax-crm-cli"
+  [tester]="$BRIDGE_DEFAULT_ROLE_WORKDIR"
+  [developer]="$BRIDGE_DEFAULT_ROLE_WORKDIR"
+  [codex-tester]="$BRIDGE_DEFAULT_ROLE_WORKDIR"
+  [codex-developer]="$BRIDGE_DEFAULT_ROLE_WORKDIR"
 )
 
 # shellcheck disable=SC2034
