@@ -902,7 +902,7 @@ Use this guide when a task involves tmux-based agent coordination through \`${br
 - Start an ad hoc Codex agent from the current folder: \`${bridge_home}/ab --codex --name dev\`
 - Start an ad hoc Claude agent from the current folder: \`${bridge_home}/ab --claude --name reviewer\`
 - Create an isolated git worktree worker from the current folder: \`${bridge_home}/ab --codex --name reviewer-a --prefer new\`
-- Reconnect to a Claude-style resume action: \`bash ${bridge_home}/cc-resume.sh tester --wait 5\`
+- Trigger a predefined resume action: \`bash ${bridge_home}/bridge-action.sh tester resume --wait 5\`
 
 ## Task Queue
 

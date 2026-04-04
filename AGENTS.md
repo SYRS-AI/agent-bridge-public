@@ -1,7 +1,7 @@
 # Repository Guidelines
 
 ## Project Structure & Module Organization
-The repository is a Bash-based bridge for managing Claude and Codex agents through `tmux`. Core entry points live at the root: `bridge-start.sh`, `bridge-run.sh`, `bridge-send.sh`, `bridge-action.sh`, `bridge-task.sh`, `bridge-sync.sh`, and `bridge-daemon.sh`. Shared logic and roster parsing belong in `bridge-lib.sh`; queue state lives in `bridge-queue.py` with SQLite data under `state/tasks.db`. Compatibility wrappers such as `run-developer.sh`, `run-tester.sh`, `cc-send.sh`, `cc-resume.sh`, and `ab` stay thin and should delegate to the core scripts. Treat `shared/` as handoff notes for humans or agents, and treat `state/` plus `logs/` as generated runtime artifacts, not hand-edited source.
+The repository is a Bash-based bridge for managing Claude and Codex agents through `tmux`. Core entry points live at the root: `ab`, `bridge-start.sh`, `bridge-run.sh`, `bridge-send.sh`, `bridge-action.sh`, `bridge-task.sh`, `bridge-sync.sh`, and `bridge-daemon.sh`. Shared logic and roster parsing belong in `bridge-lib.sh`; queue state lives in `bridge-queue.py` with SQLite data under `state/tasks.db`. Treat `shared/` as handoff notes for humans or agents, and treat `state/` plus `logs/` as generated runtime artifacts, not hand-edited source.
 
 ## Build, Test, and Development Commands
 There is no build step; scripts run directly with Bash.
@@ -21,7 +21,7 @@ There is no build step; scripts run directly with Bash.
 - `shellcheck *.sh ab`: lint the shell entry points before submitting changes.
 
 ## Coding Style & Naming Conventions
-Use Bash with `#!/usr/bin/env bash` and `set -euo pipefail` unless a loop intentionally handles non-zero exit codes, as in `bridge-run.sh`. Indent with two spaces inside functions and `case` arms. Keep reusable helpers in `bridge-lib.sh` and prefix them `bridge_`. Use uppercase names for exported configuration such as `BRIDGE_*`, and lowercase names for local variables. Follow the existing naming pattern: `bridge-<verb>.sh` for primary commands and short wrapper names only for compatibility.
+Use Bash with `#!/usr/bin/env bash` and `set -euo pipefail` unless a loop intentionally handles non-zero exit codes, as in `bridge-run.sh`. Indent with two spaces inside functions and `case` arms. Keep reusable helpers in `bridge-lib.sh` and prefix them `bridge_`. Use uppercase names for exported configuration such as `BRIDGE_*`, and lowercase names for local variables. Follow the existing naming pattern: `bridge-<verb>.sh` for primary commands.
 
 ## Testing Guidelines
 This snapshot does not include a full unit test suite, so rely on linting plus manual smoke checks. At minimum, run `shellcheck`, `./scripts/smoke-test.sh`, one `--dry-run` path for the script you changed, and one daemon pass via `bash bridge-daemon.sh sync`. Test heartbeat-sensitive changes in an isolated `BRIDGE_HOME` with temporary tmux sessions so live agents are not interrupted.
