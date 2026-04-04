@@ -1,0 +1,56 @@
+#compdef ab
+
+_arguments -C \
+  '1:command:->command' \
+  '*::args:->args'
+
+case "$state" in
+  command)
+    _values 'ab command' \
+      'status[show the bridge dashboard]' \
+      'list[list active bridge sessions]' \
+      'kill[kill one or all active bridge sessions]' \
+      'urgent[send an urgent direct message]' \
+      'task[run a task queue subcommand]' \
+      'inbox[show an agent inbox]' \
+      'show[show a task]' \
+      'claim[claim a task]' \
+      'done[complete a task]' \
+      'handoff[handoff a task]' \
+      'summary[show queue summary]' \
+      'worktree[list managed worktrees]'
+    ;;
+  args)
+    case "${words[2]:-}" in
+      status)
+        _values 'status option' \
+          '--watch[watch the dashboard]' \
+          '--refresh[set refresh interval]' \
+          '--open-limit[set open task limit]' \
+          '--all-agents[include static roles]'
+        ;;
+      kill)
+        _message 'session number or all'
+        ;;
+      urgent)
+        _message 'agent then message'
+        ;;
+      task)
+        _values 'task subcommand' \
+          'create[create a task]' \
+          'inbox[show inbox]' \
+          'show[show task details]' \
+          'claim[claim a task]' \
+          'done[complete a task]' \
+          'handoff[handoff a task]' \
+          'summary[queue summary]'
+        ;;
+      worktree)
+        _values 'worktree subcommand' 'list[list managed worktrees]'
+        ;;
+      *)
+        _message 'ab arguments'
+        ;;
+    esac
+    ;;
+esac
