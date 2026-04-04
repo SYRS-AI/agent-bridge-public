@@ -16,6 +16,7 @@ Usage:
   ab kill <number|all>
   ab urgent <agent> "<message>" [--wait <seconds>]
   ab task <create|inbox|show|claim|done|handoff|summary> ...
+  ab cron <inventory|show> ...
   ab inbox [agent] [--all]
   ab show <task-id>
   ab claim <task-id> [--agent <agent>] [--lease <seconds>]
@@ -23,6 +24,8 @@ Usage:
   ab handoff <task-id> --to <agent> [--from <agent>] [--note <text> | --note-file <path>]
   ab summary [agent...]
   ab worktree list
+  ab cron inventory [--mode recurring|one-shot|all] [--family <family>] [--limit <count>]
+  ab cron show <job-name-or-id>
   ab --codex|--claude --name <agent> [--loop] [--no-continue] [--workdir <dir>] [--replace] [--no-attach] [--no-project-skill] [--prefer wake|new|shared]
 
 Examples:
@@ -32,6 +35,7 @@ Examples:
   ab kill 1
   ab kill all
   ab worktree list
+  ab cron inventory --family memory-daily --limit 10
   ab inbox developer
   ab task create --to tester --title "재테스트" --body-file ~/agent-bridge/shared/report.md
   ab claim 12 --agent tester
@@ -190,6 +194,10 @@ if [[ $# -gt 0 ]]; then
     task)
       shift
       exec bash "$SCRIPT_DIR/bridge-task.sh" "$@"
+      ;;
+    cron)
+      shift
+      exec bash "$SCRIPT_DIR/bridge-cron.sh" "$@"
       ;;
     worktree)
       shift

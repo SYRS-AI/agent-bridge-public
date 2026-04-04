@@ -18,6 +18,7 @@ Usage:
   $CLI_NAME urgent <agent> "<message>" [--wait <seconds>]
   $CLI_NAME task <create|inbox|show|claim|done|handoff|summary> ...
   $CLI_NAME profile <status|diff|deploy> ...
+  $CLI_NAME cron <inventory|show> ...
   $CLI_NAME inbox [agent] [--all]
   $CLI_NAME show <task-id>
   $CLI_NAME claim <task-id> [--agent <agent>] [--lease <seconds>]
@@ -28,6 +29,8 @@ Usage:
   $CLI_NAME profile status [agent|--all]
   $CLI_NAME profile diff <agent>
   $CLI_NAME profile deploy <agent> [--dry-run] [--force]
+  $CLI_NAME cron inventory [--mode recurring|one-shot|all] [--family <family>] [--limit <count>]
+  $CLI_NAME cron show <job-name-or-id>
   $CLI_NAME --codex|--claude --name <agent> [--loop] [--no-continue] [--workdir <dir>] [--replace] [--no-attach] [--no-project-skill] [--prefer wake|new|shared]
 
 Examples:
@@ -37,6 +40,7 @@ Examples:
   $CLI_NAME kill 1
   $CLI_NAME kill all
   $CLI_NAME worktree list
+  $CLI_NAME cron inventory --family memory-daily --limit 10
   $CLI_NAME inbox developer
   $CLI_NAME task create --to tester --title "재테스트" --body-file ~/agent-bridge/shared/report.md
   $CLI_NAME claim 12 --agent tester
@@ -202,6 +206,10 @@ if [[ $# -gt 0 ]]; then
     profile)
       shift
       exec "$BRIDGE_BASH_BIN" "$SCRIPT_DIR/bridge-profile.sh" "$@"
+      ;;
+    cron)
+      shift
+      exec "$BRIDGE_BASH_BIN" "$SCRIPT_DIR/bridge-cron.sh" "$@"
       ;;
     worktree)
       shift

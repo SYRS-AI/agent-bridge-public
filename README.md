@@ -151,6 +151,19 @@ cd ~/agent-bridge
 
 The deploy helper copies every tracked file from the working tree, verifies the copied bytes, and preserves target-only runtime files such as `agent-roster.local.sh`, `state/`, `logs/`, and `shared/`.
 
+### Inspect OpenClaw cron inventory
+
+If you are migrating existing OpenClaw cron jobs into Agent Bridge, start with the read-only inventory:
+
+```bash
+./agent-bridge cron inventory
+./agent-bridge cron inventory --family memory-daily --limit 10
+./agent-bridge cron inventory --mode one-shot --limit 20
+./agent-bridge cron show memory-daily-syrs-shopify
+```
+
+By default the inventory reads `~/.openclaw/cron/jobs.json`. Override it with `BRIDGE_OPENCLAW_CRON_JOBS_FILE=/path/to/jobs.json` when testing snapshots.
+
 ### Start the daemon
 
 ```bash
@@ -270,6 +283,7 @@ That creates an isolated git worktree under `~/.agent-bridge/worktrees/` instead
 ./agent-bridge profile status --all
 ./agent-bridge profile diff patch
 ./agent-bridge profile deploy patch --dry-run
+./agent-bridge cron inventory --mode one-shot --limit 20
 ./agent-bridge kill 1
 ./agent-bridge kill all
 ./agent-bridge worktree list
@@ -283,6 +297,7 @@ bash bridge-daemon.sh status
 - `agb`: shorthand wrapper for `agent-bridge`
 - `bridge-start.sh`, `bridge-run.sh`: session startup paths
 - `bridge-task.sh`, `bridge-queue.py`: queue API and SQLite backend
+- `bridge-cron.sh`, `bridge-cron.py`: read-only OpenClaw cron inventory and job inspection
 - `bridge-send.sh`, `bridge-action.sh`: urgent interrupts and predefined actions
 - `bridge-status.sh`, `bridge-daemon.sh`, `bridge-sync.sh`: status, background sync, and heartbeats
 - `bridge-lib.sh`: thin loader for shared shell modules
