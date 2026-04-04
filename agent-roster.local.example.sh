@@ -50,6 +50,10 @@ BRIDGE_AGENT_ACTION["developer:clear"]="/clear"
 # Optional: allowlist bridge cron enqueue families. Defaults to memory-daily + monthly-highlights.
 # BRIDGE_CRON_ENQUEUE_FAMILIES=("memory-daily" "monthly-highlights")
 
+# Optional: dashboard health-check thresholds for active sessions.
+# BRIDGE_HEALTH_WARN_SECONDS=3600
+# BRIDGE_HEALTH_CRITICAL_SECONDS=14400
+
 # Example: add another long-lived role.
 # bridge_add_agent_id_if_missing "reviewer"
 # BRIDGE_AGENT_DESC["reviewer"]="Code review role (Claude Code)"

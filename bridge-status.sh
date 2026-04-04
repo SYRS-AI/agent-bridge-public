@@ -65,6 +65,8 @@ render_once() {
     --db "$BRIDGE_TASK_DB"
     --daemon-pid-file "$BRIDGE_DAEMON_PID_FILE"
     --open-limit "$OPEN_LIMIT"
+    --stale-warn-seconds "$BRIDGE_HEALTH_WARN_SECONDS"
+    --stale-critical-seconds "$BRIDGE_HEALTH_CRITICAL_SECONDS"
     --footer "$footer"
   )
   if [[ $ALL_AGENTS -eq 1 ]]; then

@@ -93,6 +93,8 @@ Use these first:
 ~/agent-bridge/agent-bridge cron cleanup report
 ```
 
+`agent-bridge status` now includes a `stale` column for active-session health checks. It is based on recorded session activity age, not on OpenClaw-style scheduled heartbeat work. Defaults are `warn=1h` and `crit=4h`, and inactive on-demand roles are excluded from stale counts.
+
 When planning cron migration work, inspect one job in detail before changing anything:
 
 ```bash

@@ -52,6 +52,19 @@ def fmt_remaining(ts: int | None) -> str:
     return f"{delta // 86400}d"
 
 
+def classify_stale(active: bool, activity_ts: int | None, warn_seconds: int, critical_seconds: int) -> str:
+    if not active:
+        return "-"
+    if not activity_ts:
+        return "crit"
+    age = max(0, int(datetime.now(timezone.utc).timestamp()) - int(activity_ts))
+    if critical_seconds > 0 and age >= critical_seconds:
+        return "crit"
+    if warn_seconds > 0 and age >= warn_seconds:
+        return "warn"
+    return "ok"
+
+
 def short_path(path: str, max_parts: int = 2) -> str:
     if not path:
         return "-"
@@ -214,6 +227,23 @@ def render_dashboard(args: argparse.Namespace) -> str:
 
     full_total_agents = len(roster)
     full_active_count = sum(1 for row in roster if str(row.get("active", "0")) == "1")
+    health_warn_count = 0
+    health_critical_count = 0
+
+    for row in roster:
+        metric = metrics.get(row["agent"], {})
+        active = str(row.get("active", "0")) == "1"
+        activity_ts = metric.get("session_activity_ts") or metric.get("last_seen_ts")
+        stale = classify_stale(
+            active,
+            int(activity_ts) if activity_ts else None,
+            args.stale_warn_seconds,
+            args.stale_critical_seconds,
+        )
+        if stale == "warn":
+            health_warn_count += 1
+        elif stale == "crit":
+            health_critical_count += 1
 
     if not args.all_agents:
         roster = [
@@ -231,7 +261,8 @@ def render_dashboard(args: argparse.Namespace) -> str:
     lines.append("Agent Bridge Status")
     lines.append(
         f"updated {iso_now()} | daemon {'running' if daemon_running else 'stopped'} pid={daemon_pid} | "
-        f"active {full_active_count}/{full_total_agents} | shown {visible_agents} | db {queue_db}"
+        f"active {full_active_count}/{full_total_agents} | shown {visible_agents} | "
+        f"health warn={health_warn_count} crit={health_critical_count} | db {queue_db}"
     )
     lines.append("")
     lines.append(
@@ -239,26 +270,36 @@ def render_dashboard(args: argparse.Namespace) -> str:
         f"queued {totals['queued_count']} [{render_bar(totals['queued_count'])}]  "
         f"claimed {totals['claimed_count']} [{render_bar(totals['claimed_count'])}]  "
         f"blocked {totals['blocked_count']} [{render_bar(totals['blocked_count'])}]  "
-        f"urgent {totals['urgent_count']}  overdue {totals['overdue_count']}"
+        f"urgent {totals['urgent_count']}  overdue {totals['overdue_count']}  "
+        f"health warn>={fmt_age(int(datetime.now(timezone.utc).timestamp()) - args.stale_warn_seconds) if args.stale_warn_seconds > 0 else 'off'} "
+        f"crit>={fmt_age(int(datetime.now(timezone.utc).timestamp()) - args.stale_critical_seconds) if args.stale_critical_seconds > 0 else 'off'}"
     )
     lines.append("")
     lines.append("Agents")
-    lines.append("agent           eng     on  q   c   b   idle  nudge  load        session        workdir")
+    lines.append("agent           eng     on  q   c   b   idle  stale nudge  load        session        workdir")
 
     for row in roster:
         agent = row["agent"]
         metric = metrics.get(agent, {})
+        active = str(row.get("active", "0")) == "1"
         queued = int(metric.get("queued_count", 0) or 0)
         claimed = int(metric.get("claimed_count", 0) or 0)
         blocked = int(metric.get("blocked_count", 0) or 0)
         activity_ts = metric.get("session_activity_ts") or metric.get("last_seen_ts")
         last_nudge_ts = metric.get("last_nudge_ts")
+        stale = classify_stale(
+            active,
+            int(activity_ts) if activity_ts else None,
+            args.stale_warn_seconds,
+            args.stale_critical_seconds,
+        )
         load_bar = f"q:{render_bar(queued, width=4, char='=')} c:{render_bar(claimed, width=4, char='*')}"
         lines.append(
             f"{agent:<15} {row['engine']:<7} "
-            f"{'yes' if str(row.get('active', '0')) == '1' else 'no ':<3} "
+            f"{'yes' if active else 'no ':<3} "
             f"{queued:>2}  {claimed:>2}  {blocked:>2}  "
             f"{fmt_idle(int(activity_ts) if activity_ts else None):>4}  "
+            f"{stale:>5} "
             f"{fmt_age(int(last_nudge_ts) if last_nudge_ts else None):>5}  "
             f"{load_bar:<12}  "
             f"{(row.get('session') or '-')[:12]:<12}  {short_path(row.get('workdir', ''))}"
@@ -291,6 +332,8 @@ def main() -> int:
     parser.add_argument("--db", required=True)
     parser.add_argument("--daemon-pid-file", required=True)
     parser.add_argument("--open-limit", type=int, default=8)
+    parser.add_argument("--stale-warn-seconds", type=int, default=3600)
+    parser.add_argument("--stale-critical-seconds", type=int, default=14400)
     parser.add_argument("--footer", default="")
     parser.add_argument("--all-agents", action="store_true")
     args = parser.parse_args()

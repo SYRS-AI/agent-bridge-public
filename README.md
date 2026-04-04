@@ -25,7 +25,7 @@ Companion docs for maintainers:
 - Keep long-lived named roles in a static roster
 - Route normal collaboration through a durable SQLite task queue
 - Reserve direct messages for urgent interrupts only
-- Watch queue load, active sessions, and open work in a single dashboard
+- Watch queue load, active sessions, stale health, and open work in a single dashboard
 - Spawn isolated git worktree workers when one checkout is not enough
 
 ## Requirements
@@ -174,6 +174,8 @@ By default the inventory reads `~/.openclaw/cron/jobs.json`. Override it with `B
 `cron errors report` is the report-only view for recurring cron failures. It shows `lastErrorAt`, consecutive error counts, family and prefix summaries, and the highest-error outliers first so model-switch fallout is easy to separate from older failures.
 
 `cron cleanup report` and `cron cleanup prune --dry-run` are the safe way to inspect stale one-shot jobs before deleting them. The current prune target is intentionally narrow: expired `schedule.kind=at` jobs with `deleteAfterRun=true` and `enabled=false`.
+
+The status dashboard also includes a lightweight health check for active sessions. It classifies them as `ok`, `warn`, or `crit` from recorded session activity age. Inactive on-demand roles are not treated as stale. Defaults are `BRIDGE_HEALTH_WARN_SECONDS=3600` and `BRIDGE_HEALTH_CRITICAL_SECONDS=14400`, and you can override them in `agent-roster.local.sh`.
 
 ### Start the daemon
 
