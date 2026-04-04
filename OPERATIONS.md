@@ -25,6 +25,14 @@ bash ~/agent-bridge/bridge-start.sh --list
 ~/agent-bridge/agent-bridge list
 ```
 
+If your live runtime is `~/.agent-bridge` while development happens in `~/agent-bridge`, prefer the deploy helper over manual copying:
+
+```bash
+cd ~/agent-bridge
+./scripts/deploy-live-install.sh --dry-run
+./scripts/deploy-live-install.sh --restart-daemon
+```
+
 ## Recommended Collaboration Pattern
 
 1. Start agents
@@ -122,6 +130,8 @@ shellcheck *.sh agent-bridge agb
 ```
 
 If a change touches queue semantics, include at least one real create/claim/done flow in your manual notes.
+
+If a change needs to be reflected in the live local install, use `./scripts/deploy-live-install.sh` so the full tracked tree is copied and verified together.
 
 ## Resume Checklist For Another Agent
 

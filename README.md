@@ -139,6 +139,18 @@ bridge-daemon status
 
 The integration adds the repo to `PATH`, registers completion for `agent-bridge` and `agb`, and installs convenience aliases for the `bridge-*.sh` commands.
 
+### Deploy into a live local install
+
+If you develop in `~/agent-bridge` but run the bridge from `~/.agent-bridge`, use the deploy helper instead of copying files by hand:
+
+```bash
+cd ~/agent-bridge
+./scripts/deploy-live-install.sh --dry-run
+./scripts/deploy-live-install.sh --restart-daemon
+```
+
+The deploy helper copies every tracked file from the working tree, verifies the copied bytes, and preserves target-only runtime files such as `agent-roster.local.sh`, `state/`, `logs/`, and `shared/`.
+
 ### Start the daemon
 
 ```bash
