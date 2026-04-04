@@ -23,7 +23,7 @@ Companion docs for maintainers:
 
 ## Requirements
 
-- Bash 4+
+- Bash 4+ available in `PATH` for running the bridge scripts
 - `tmux`
 - `python3`
 - `git`
@@ -39,6 +39,8 @@ Optional but recommended:
 ## Install
 
 ### macOS
+
+Your interactive shell can stay `zsh`. The bridge scripts themselves run with `bash`, so the only requirement is that a modern Bash is available in `PATH`.
 
 Install the base tools:
 
