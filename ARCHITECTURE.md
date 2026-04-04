@@ -30,6 +30,7 @@ Tracked long-lived agent profiles live under `agents/`. That tree is the portabl
 - [`bridge-start.sh`](./bridge-start.sh): start a static role inside `tmux`
 - [`bridge-run.sh`](./bridge-run.sh): loop or one-shot launcher inside the tmux session
 - [`bridge-task.sh`](./bridge-task.sh): shell wrapper around the SQLite queue
+- [`bridge-profile.sh`](./bridge-profile.sh): tracked agent profile status, diff, and deploy
 - [`bridge-send.sh`](./bridge-send.sh): urgent-only direct message path
 - [`bridge-action.sh`](./bridge-action.sh): send predefined actions like `/resume`
 - [`bridge-daemon.sh`](./bridge-daemon.sh): background sync and heartbeat loop
@@ -57,6 +58,7 @@ Runtime state lives under `state/` and is intentionally untracked:
 - `state/agents/`: dynamic agent metadata
 - `state/history/`: persisted resume metadata for static and dynamic agents
 - `state/worktrees/`: metadata for managed isolated workers
+- `state/profiles/`: deploy manifests for tracked agent profiles
 - `state/daemon.pid` and `state/daemon.log`: daemon process tracking
 
 Human or agent handoff text belongs in `shared/`. Operator logs belong in `logs/`.

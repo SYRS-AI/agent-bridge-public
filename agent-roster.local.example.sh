@@ -29,6 +29,10 @@ BRIDGE_AGENT_WORKDIR["developer"]="$HOME/project-app"
 BRIDGE_AGENT_WORKDIR["codex-tester"]="$HOME/project-test"
 BRIDGE_AGENT_WORKDIR["codex-developer"]="$HOME/project-app"
 
+# Optional: tracked profile deploy target, separate from workdir when needed.
+# BRIDGE_AGENT_PROFILE_HOME["tester"]="$HOME/project-test"
+# BRIDGE_AGENT_PROFILE_HOME["developer"]="$HOME/project-app"
+
 BRIDGE_AGENT_LAUNCH_CMD["tester"]='claude -c --dangerously-skip-permissions'
 BRIDGE_AGENT_LAUNCH_CMD["developer"]='claude -c --dangerously-skip-permissions'
 BRIDGE_AGENT_LAUNCH_CMD["codex-tester"]='codex --dangerously-bypass-approvals-and-sandbox --no-alt-screen'

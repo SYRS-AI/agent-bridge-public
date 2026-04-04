@@ -17,6 +17,7 @@ Usage:
   $CLI_NAME kill <number|all>
   $CLI_NAME urgent <agent> "<message>" [--wait <seconds>]
   $CLI_NAME task <create|inbox|show|claim|done|handoff|summary> ...
+  $CLI_NAME profile <status|diff|deploy> ...
   $CLI_NAME inbox [agent] [--all]
   $CLI_NAME show <task-id>
   $CLI_NAME claim <task-id> [--agent <agent>] [--lease <seconds>]
@@ -24,6 +25,9 @@ Usage:
   $CLI_NAME handoff <task-id> --to <agent> [--from <agent>] [--note <text> | --note-file <path>]
   $CLI_NAME summary [agent...]
   $CLI_NAME worktree list
+  $CLI_NAME profile status [agent|--all]
+  $CLI_NAME profile diff <agent>
+  $CLI_NAME profile deploy <agent> [--dry-run] [--force]
   $CLI_NAME --codex|--claude --name <agent> [--loop] [--no-continue] [--workdir <dir>] [--replace] [--no-attach] [--no-project-skill] [--prefer wake|new|shared]
 
 Examples:
@@ -194,6 +198,10 @@ if [[ $# -gt 0 ]]; then
     task)
       shift
       exec "$BRIDGE_BASH_BIN" "$SCRIPT_DIR/bridge-task.sh" "$@"
+      ;;
+    profile)
+      shift
+      exec "$BRIDGE_BASH_BIN" "$SCRIPT_DIR/bridge-profile.sh" "$@"
       ;;
     worktree)
       shift

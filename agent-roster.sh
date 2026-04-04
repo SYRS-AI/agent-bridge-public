@@ -28,6 +28,9 @@ declare -Ag BRIDGE_AGENT_SESSION=()
 declare -Ag BRIDGE_AGENT_WORKDIR=()
 
 # shellcheck disable=SC2034
+declare -Ag BRIDGE_AGENT_PROFILE_HOME=()
+
+# shellcheck disable=SC2034
 declare -Ag BRIDGE_AGENT_LAUNCH_CMD=()
 
 # shellcheck disable=SC2034

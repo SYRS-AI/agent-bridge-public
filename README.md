@@ -17,6 +17,7 @@ Companion docs for maintainers:
 - [`OPERATIONS.md`](./OPERATIONS.md)
 - [`KNOWN_ISSUES.md`](./KNOWN_ISSUES.md)
 - [`agents/README.md`](./agents/README.md)
+- [`agents/SYNC-MODEL.md`](./agents/SYNC-MODEL.md)
 
 ## Highlights
 
@@ -109,6 +110,13 @@ cp ~/agent-bridge/agent-roster.local.example.sh ~/agent-bridge/agent-roster.loca
 ```
 
 `agent-roster.local.sh` is git-ignored and is sourced after the default roster, so you can add your own workdirs, descriptions, launch commands, and actions without changing the tracked repo.
+
+If a tracked profile should deploy into a different live home than the bridge workdir, declare that separately:
+
+```bash
+BRIDGE_AGENT_PROFILE_HOME["patch"]="$HOME/.openclaw/patch"
+BRIDGE_AGENT_PROFILE_HOME["shopify"]="$HOME/syrs-shopify"
+```
 
 ### Optional zsh shell integration
 
@@ -212,6 +220,7 @@ If you are migrating existing long-lived agents, keep their tracked home-profile
 - `agents/_template/` defines the standard layout before any profile generator exists
 - `agents/<name>/CLAUDE.md` is the tracked copy of the live profile
 - `agents/<name>/memory/` and `agents/<name>/skills/` are the standardized landing zones for durable notes and agent-specific skills
+- `agent-bridge profile status|diff|deploy` manages explicit copy-based promotion into the live home
 
 ### Dynamic agents
 
@@ -246,6 +255,9 @@ That creates an isolated git worktree under `~/.agent-bridge/worktrees/` instead
 ./agb status
 ./agent-bridge status --watch
 ./agent-bridge list
+./agent-bridge profile status --all
+./agent-bridge profile diff patch
+./agent-bridge profile deploy patch --dry-run
 ./agent-bridge kill 1
 ./agent-bridge kill all
 ./agent-bridge worktree list

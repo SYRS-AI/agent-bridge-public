@@ -306,6 +306,11 @@ bridge_agent_workdir() {
   printf '%s' "${BRIDGE_AGENT_WORKDIR[$agent]-}"
 }
 
+bridge_agent_profile_home() {
+  local agent="$1"
+  printf '%s' "${BRIDGE_AGENT_PROFILE_HOME[$agent]-}"
+}
+
 bridge_agent_loop() {
   local agent="$1"
   printf '%s' "${BRIDGE_AGENT_LOOP[$agent]-1}"

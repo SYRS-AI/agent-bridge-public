@@ -135,6 +135,7 @@ Default deploy must be conservative:
 - copy only managed files
 - never delete target-only files in v1
 - fail if local target drift is detected unless `--force` is given
+- back up an overwritten `CLAUDE.md` to `.CLAUDE.md.bak`
 - print a restart warning if the agent session is active
 
 Deploy should not automatically restart or interrupt the live session in v1.
