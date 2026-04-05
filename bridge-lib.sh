@@ -65,6 +65,23 @@ export BRIDGE_OPENCLAW_HOME BRIDGE_OPENCLAW_CRON_JOBS_FILE
 export BRIDGE_DISCORD_RELAY_STATE_FILE BRIDGE_DAEMON_LAUNCHAGENT_LABEL BRIDGE_DAEMON_LAUNCHAGENT_PLIST
 export BRIDGE_TMUX_PROMPT_WAIT_SECONDS
 
+bridge_prepend_path_entry() {
+  local entry="$1"
+  [[ -n "$entry" ]] || return 0
+  [[ -d "$entry" ]] || return 0
+  case ":$PATH:" in
+    *":$entry:"*) ;;
+    *) PATH="$entry${PATH:+:$PATH}" ;;
+  esac
+}
+
+bridge_prepend_path_entry "$HOME/.local/bin"
+bridge_prepend_path_entry "$HOME/.nix-profile/bin"
+bridge_prepend_path_entry "$HOME/bin"
+bridge_prepend_path_entry "/opt/homebrew/bin"
+bridge_prepend_path_entry "/usr/local/bin"
+export PATH
+
 RED='\033[0;31m'
 # shellcheck disable=SC2034
 GREEN='\033[0;32m'

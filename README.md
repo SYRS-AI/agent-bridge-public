@@ -221,6 +221,8 @@ For `memory-daily` the default slot is `YYYY-MM-DD`. For `monthly-highlights` it
 
 `cron sync` is the bridge-owned recurring scheduler. It scans legacy recurring jobs, derives due occurrence slots, and enqueues each occurrence through the same disposable-child path. When `BRIDGE_OPENCLAW_CRON_SYNC_ENABLED=1`, the daemon also drains queued `[cron-dispatch]` tasks itself, so recurring jobs do not wake long-lived agent sessions unless a run explicitly needs a separate `[cron-followup]` task.
 
+If your daemon environment does not inherit the same `PATH` as your interactive shell, set `BRIDGE_CLAUDE_BIN` or `BRIDGE_CODEX_BIN` explicitly in `agent-roster.local.sh`. The cron runner also searches common install locations such as `~/.local/bin`, `/opt/homebrew/bin`, and `/usr/local/bin`.
+
 `cron errors report` is the report-only view for recurring cron failures. It shows `lastErrorAt`, consecutive error counts, family and prefix summaries, and the highest-error outliers first so model-switch fallout is easy to separate from older failures.
 
 `cron cleanup report` and `cron cleanup prune --dry-run` are the safe way to inspect stale one-shot jobs before deleting them. The current prune target is intentionally narrow: expired `schedule.kind=at` jobs with `deleteAfterRun=true` and `enabled=false`.

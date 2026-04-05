@@ -7,6 +7,7 @@ import argparse
 import json
 import os
 import shlex
+import shutil
 import subprocess
 import sys
 import time
@@ -39,6 +40,14 @@ RESULT_SCHEMA = {
     ],
     "additionalProperties": False,
 }
+
+COMMON_BIN_DIRS = [
+    Path.home() / ".local" / "bin",
+    Path.home() / ".nix-profile" / "bin",
+    Path.home() / "bin",
+    Path("/opt/homebrew/bin"),
+    Path("/usr/local/bin"),
+]
 
 
 def now_iso() -> str:
@@ -128,10 +137,50 @@ def build_prompt(request: dict[str, Any], payload_text: str) -> str:
     return "\n".join(lines).strip() + "\n"
 
 
+def augmented_path() -> str:
+    entries: list[str] = []
+    seen: set[str] = set()
+    for raw_entry in os.environ.get("PATH", "").split(os.pathsep):
+        entry = raw_entry.strip()
+        if not entry or entry in seen:
+            continue
+        seen.add(entry)
+        entries.append(entry)
+    for candidate in COMMON_BIN_DIRS:
+        entry = str(candidate)
+        if candidate.is_dir() and entry not in seen:
+            seen.add(entry)
+            entries.insert(0, entry)
+    return os.pathsep.join(entries)
+
+
+def runner_env() -> dict[str, str]:
+    env = dict(os.environ)
+    env["PATH"] = augmented_path()
+    return env
+
+
+def resolve_binary(name: str, override_env: str) -> str:
+    override = os.environ.get(override_env, "").strip()
+    if override:
+        path = Path(override).expanduser()
+        if not path.is_file():
+            raise FileNotFoundError(f"{override_env} points to a missing file: {path}")
+        return str(path.resolve())
+
+    resolved = shutil.which(name, path=augmented_path())
+    if resolved:
+        return resolved
+
+    searched = [str(path) for path in COMMON_BIN_DIRS]
+    raise FileNotFoundError(f"{name} binary not found; searched PATH and common dirs: {', '.join(searched)}")
+
+
 def run_codex(request: dict[str, Any], prompt: str, schema_path: Path, timeout: int) -> tuple[list[str], subprocess.CompletedProcess[str]]:
     workdir = request["target_workdir"]
+    codex_bin = resolve_binary("codex", "BRIDGE_CODEX_BIN")
     command = [
-        "codex",
+        codex_bin,
         "exec",
         "--ephemeral",
         "--json",
@@ -146,6 +195,7 @@ def run_codex(request: dict[str, Any], prompt: str, schema_path: Path, timeout: 
     completed = subprocess.run(
         command,
         cwd=workdir,
+        env=runner_env(),
         capture_output=True,
         text=True,
         timeout=timeout,
@@ -156,8 +206,9 @@ def run_codex(request: dict[str, Any], prompt: str, schema_path: Path, timeout: 
 
 def run_claude(request: dict[str, Any], prompt: str, timeout: int) -> tuple[list[str], subprocess.CompletedProcess[str]]:
     workdir = request["target_workdir"]
+    claude_bin = resolve_binary("claude", "BRIDGE_CLAUDE_BIN")
     command = [
-        "claude",
+        claude_bin,
         "-p",
         "--output-format",
         "json",
@@ -170,6 +221,7 @@ def run_claude(request: dict[str, Any], prompt: str, timeout: int) -> tuple[list
     completed = subprocess.run(
         command,
         cwd=workdir,
+        env=runner_env(),
         capture_output=True,
         text=True,
         timeout=timeout,
