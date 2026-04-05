@@ -128,8 +128,6 @@ base = ["claude"]
 if continue_mode == "1":
     if session_id:
         base.extend(["--resume", session_id])
-    else:
-        base.append("--continue")
 base.extend(["--dangerously-skip-permissions", "--name", agent])
 base.extend(extras)
 
@@ -293,6 +291,8 @@ bridge_load_static_agent_history() {
   local agent="$1"
   local file
   local AGENT_ID=""
+  local AGENT_ENGINE=""
+  local AGENT_WORKDIR=""
   local AGENT_SESSION_ID=""
   local AGENT_HISTORY_KEY=""
   local AGENT_CREATED_AT=""
@@ -309,7 +309,11 @@ bridge_load_static_agent_history() {
   fi
 
   if [[ -n "$AGENT_SESSION_ID" ]]; then
-    BRIDGE_AGENT_SESSION_ID["$agent"]="$AGENT_SESSION_ID"
+    AGENT_ENGINE="${AGENT_ENGINE:-$(bridge_agent_engine "$agent")}"
+    AGENT_WORKDIR="${AGENT_WORKDIR:-$(bridge_agent_workdir "$agent")}"
+    if [[ "$AGENT_ENGINE" != "claude" ]] || bridge_claude_session_id_exists "$AGENT_SESSION_ID" "$AGENT_WORKDIR"; then
+      BRIDGE_AGENT_SESSION_ID["$agent"]="$AGENT_SESSION_ID"
+    fi
   fi
   if [[ -n "$AGENT_HISTORY_KEY" ]]; then
     BRIDGE_AGENT_HISTORY_KEY["$agent"]="$AGENT_HISTORY_KEY"
@@ -561,6 +565,37 @@ for path in glob.glob(os.path.expanduser("~/.claude/sessions/*.json")):
         best = (started, sid)
 
 print(best[1] if best else "")
+PY
+}
+
+bridge_claude_session_id_exists() {
+  local session_id="$1"
+  local workdir="$2"
+
+  [[ -n "$session_id" && -n "$workdir" ]] || return 1
+
+  python3 - "$session_id" "$workdir" <<'PY'
+import glob
+import json
+import os
+import sys
+
+session_id = sys.argv[1]
+workdir = os.path.realpath(sys.argv[2])
+
+for path in glob.glob(os.path.expanduser("~/.claude/sessions/*.json")):
+    try:
+        with open(path, "r", encoding="utf-8") as fh:
+            data = json.load(fh)
+    except Exception:
+        continue
+    if data.get("sessionId") != session_id:
+        continue
+    if os.path.realpath(str(data.get("cwd") or "")) != workdir:
+        continue
+    raise SystemExit(0)
+
+raise SystemExit(1)
 PY
 }
 

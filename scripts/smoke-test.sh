@@ -399,8 +399,9 @@ CLAUDE_LAUNCH_CONTINUE="$("$BASH4_BIN" -c '
   unset BRIDGE_AGENT_SESSION_ID["claude-static"]
   bridge_agent_launch_cmd "claude-static"
 ')"
-assert_contains "$CLAUDE_LAUNCH_CONTINUE" "DISCORD_STATE_DIR=$CLAUDE_STATIC_WORKDIR/.discord claude --continue --dangerously-skip-permissions --name claude-static --channels plugin:discord@claude-plugins-official"
-assert_contains "$CLAUDE_LAUNCH_CONTINUE" "claude --continue --dangerously-skip-permissions --name claude-static --channels plugin:discord@claude-plugins-official"
+assert_contains "$CLAUDE_LAUNCH_CONTINUE" "DISCORD_STATE_DIR=$CLAUDE_STATIC_WORKDIR/.discord claude --dangerously-skip-permissions --name claude-static --channels plugin:discord@claude-plugins-official"
+assert_contains "$CLAUDE_LAUNCH_CONTINUE" "claude --dangerously-skip-permissions --name claude-static --channels plugin:discord@claude-plugins-official"
+[[ "$CLAUDE_LAUNCH_CONTINUE" != *" --continue "* ]] || die "static Claude launch without session_id should start fresh, not use --continue"
 [[ "$CLAUDE_LAUNCH_CONTINUE" != *"'DISCORD_STATE_DIR="* ]] || die "static Claude env prefix should not be shell-quoted on continue"
 
 STATIC_HISTORY_CONTINUE="$("$BASH4_BIN" -c '
@@ -416,6 +417,24 @@ EOF
   printf "%s" "$(bridge_agent_continue "claude-static")"
 ')"
 [[ "$STATIC_HISTORY_CONTINUE" == "1" ]] || die "static history should not override continue defaults"
+
+CLAUDE_STALE_RESUME_FALLBACK="$("$BASH4_BIN" -c '
+  source "'"$REPO_ROOT"'/bridge-lib.sh"
+  bridge_load_roster
+  history_file="$(bridge_history_file_for_agent "claude-static")"
+  cat >"$history_file" <<EOF
+AGENT_ID=claude-static
+AGENT_ENGINE=claude
+AGENT_WORKDIR='"$CLAUDE_STATIC_WORKDIR"'
+AGENT_CONTINUE=1
+AGENT_SESSION_ID=stale-session-id
+EOF
+  bridge_load_roster
+  bridge_agent_launch_cmd "claude-static"
+')"
+assert_contains "$CLAUDE_STALE_RESUME_FALLBACK" "claude --dangerously-skip-permissions --name claude-static --channels plugin:discord@claude-plugins-official"
+[[ "$CLAUDE_STALE_RESUME_FALLBACK" != *" --resume "* ]] || die "stale Claude session_id should not be used for resume"
+[[ "$CLAUDE_STALE_RESUME_FALLBACK" != *" --continue "* ]] || die "stale Claude session_id should fall back to fresh start"
 
 log "configuring admin role and launching it"
 SETUP_ADMIN_OUTPUT="$("$REPO_ROOT/agent-bridge" setup admin "$SMOKE_AGENT")"
