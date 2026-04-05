@@ -63,8 +63,14 @@ bridge_tmux_session_has_prompt() {
     line="${line//$'\u00A0'/ }"
     trimmed="${line#"${line%%[![:space:]]*}"}"
     trimmed="${trimmed%"${trimmed##*[![:space:]]}"}"
-    case "$trimmed" in
-      "❯"|">"|"›")
+    case "$engine:$trimmed" in
+      claude:❯*)
+        return 0
+        ;;
+      codex:›*)
+        return 0
+        ;;
+      *:">")
         return 0
         ;;
     esac
