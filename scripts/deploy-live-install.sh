@@ -10,6 +10,7 @@ DRY_RUN=0
 RESTART_DAEMON=0
 COPIED_COUNT=0
 VERIFIED_COUNT=0
+SKIPPED_COUNT=0
 
 usage() {
   cat <<EOF
@@ -17,7 +18,7 @@ Usage:
   $(basename "$0") [--target <dir>] [--dry-run] [--restart-daemon]
 
 Copies every tracked file from the current working tree into the live install.
-Target-only files such as agent-roster.local.sh, state/, logs/, and shared/ are preserved.
+Runtime and target-only paths such as agent-roster.local.sh, state/, logs/, and shared/ are never copied.
 EOF
 }
 
@@ -29,10 +30,39 @@ run_cmd() {
   "$@"
 }
 
+should_skip_relpath() {
+  local relpath="$1"
+
+  case "$relpath" in
+    agent-roster.local.sh|logs|logs/*|shared|shared/*|state|state/*)
+      return 0
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
+note_skip_relpath() {
+  local relpath="$1"
+
+  if [[ "$DRY_RUN" == "1" ]]; then
+    printf '[dry-run] skip runtime path %s\n' "$relpath"
+  else
+    printf '[info] skipping runtime path %s\n' "$relpath"
+  fi
+}
+
 copy_tracked_file() {
   local relpath="$1"
   local src="$SOURCE_ROOT/$relpath"
   local dst="$TARGET_ROOT/$relpath"
+
+  if should_skip_relpath "$relpath"; then
+    note_skip_relpath "$relpath"
+    SKIPPED_COUNT=$((SKIPPED_COUNT + 1))
+    return 0
+  fi
 
   [[ -f "$src" ]] || return 0
 
@@ -45,6 +75,10 @@ verify_tracked_file() {
   local relpath="$1"
   local src="$SOURCE_ROOT/$relpath"
   local dst="$TARGET_ROOT/$relpath"
+
+  if should_skip_relpath "$relpath"; then
+    return 0
+  fi
 
   [[ -f "$src" ]] || return 0
   [[ -f "$dst" ]] || {
@@ -120,8 +154,8 @@ fi
 printf 'source_root: %s\n' "$SOURCE_ROOT"
 printf 'target_root: %s\n' "$TARGET_ROOT"
 printf 'copied_files: %s\n' "$COPIED_COUNT"
+printf 'skipped_runtime_paths: %s\n' "$SKIPPED_COUNT"
 if [[ "$DRY_RUN" == "0" ]]; then
   printf 'verified_files: %s\n' "$VERIFIED_COUNT"
 fi
 printf 'daemon_restarted: %s\n' "$([[ "$RESTART_DAEMON" == "1" ]] && printf yes || printf no)"
-
