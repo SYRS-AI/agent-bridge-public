@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Send short Agent Bridge notifications over Discord or Telegram."""
+"""Send short Agent Bridge notifications over Discord, Discord webhooks, or Telegram."""
 
 from __future__ import annotations
 
@@ -89,6 +89,23 @@ def send_discord(token: str, channel_id: str, text: str) -> None:
         return
 
 
+def send_discord_webhook(webhook_url: str, text: str, username: str) -> None:
+    payload: dict[str, Any] = {"content": text}
+    if username:
+        payload["username"] = username
+    req = Request(
+        webhook_url,
+        data=json.dumps(payload).encode("utf-8"),
+        headers={
+            "Content-Type": "application/json",
+            "User-Agent": "agent-bridge-notify/0.1",
+        },
+        method="POST",
+    )
+    with urlopen(req, timeout=15):
+        return
+
+
 def send_telegram(token: str, chat_id: str, text: str) -> None:
     payload = urlencode(
         {
@@ -128,13 +145,16 @@ def cmd_send(args: argparse.Namespace) -> int:
         print(json.dumps(payload, ensure_ascii=False, indent=2))
         return 0
 
-    account_cfg = load_account_config(Path(args.openclaw_config), kind, account)
-    token = load_account_token(account_cfg)
-
     try:
         if kind == "discord":
+            account_cfg = load_account_config(Path(args.openclaw_config), kind, account)
+            token = load_account_token(account_cfg)
             send_discord(token, target, text)
+        elif kind == "discord-webhook":
+            send_discord_webhook(target, text, args.agent or "Agent Bridge")
         elif kind == "telegram":
+            account_cfg = load_account_config(Path(args.openclaw_config), kind, account)
+            token = load_account_token(account_cfg)
             send_telegram(token, target, text)
         else:
             raise SystemExit(f"unsupported notify kind: {kind}")
@@ -154,7 +174,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     send_parser = subparsers.add_parser("send")
     send_parser.add_argument("--agent")
-    send_parser.add_argument("--kind", required=True, choices=("discord", "telegram"))
+    send_parser.add_argument("--kind", required=True, choices=("discord", "discord-webhook", "telegram"))
     send_parser.add_argument("--target", required=True)
     send_parser.add_argument("--account", default="default")
     send_parser.add_argument("--openclaw-config", required=True)

@@ -6,7 +6,8 @@ This document supersedes the earlier queue-only sketch.
 
 The final direction after Sean review is:
 
-- `Claude Code` agents should stop receiving free-form bridge messages through `tmux` input injection.
+- `Claude Code` agents should prefer webhook delivery when a webhook surface exists.
+- `Claude Code` agents may use short prompt-gated local `tmux` attention messages as a fallback when running locally.
 - `Codex` agents keep the current prompt-gated short-message path until a native push/webhook path exists.
 
 ## Problem
@@ -28,21 +29,21 @@ The bridge must stop using `tmux` pane input as the message transport for `Claud
 Delivery path:
 
 1. create a queue task
-2. send a short channel notification through the agent's existing external push surface
-3. let the Claude Code channel plugin deliver that push into the live session
+2. if a webhook surface exists, send a short webhook notification
+3. otherwise, if the session is active locally, send a short prompt-gated `tmux` attention message
 
 The external push surface is the transport.
 
 Examples:
 
-- Discord-backed agents: notify their Discord channel
+- Discord-backed agents: prefer Discord webhooks, not bot-authored channel posts
 - Telegram-backed agents: notify their Telegram channel or direct thread
 
 This means:
 
-- no free-form `tmux send-keys` into Claude panes
-- idle or busy prompt state no longer matters for message delivery
-- the same channel push can also act as the wake signal
+- no free-form task-body injection into Claude panes
+- when local `tmux` fallback is used, only send a short attention line such as `agb inbox <agent>`
+- Discord bot-authored channel posts are not a reliable Claude delivery surface
 
 ### Codex agents
 
@@ -86,8 +87,8 @@ Dispatch rules:
 
 - `claude` target:
   - queue task
-  - send channel notification through Discord or Telegram
-  - no `tmux` content injection
+  - prefer webhook delivery
+  - otherwise fall back to short prompt-gated local attention if the session is active
 - `codex` target:
   - keep current prompt-gated short direct message
   - queue remains the durable source of truth
@@ -97,8 +98,8 @@ Dispatch rules:
 Dispatch rules:
 
 - `claude` target:
-  - no `tmux` nudge text
-  - send a short channel notification instead
+  - prefer webhook nudge
+  - otherwise fall back to short prompt-gated local nudge text
 - `codex` target:
   - keep current prompt-gated short nudge
 

@@ -161,9 +161,10 @@ The deploy helper copies every tracked file from the working tree, verifies the 
 
 ### Configure queue notifications for Claude roles
 
-Queue-backed tasks still work without any extra transport, but Claude Code roles
-need a notification target if you expect live wake / urgent / completion pings
-inside Discord or Telegram.
+Queue-backed tasks still work without any extra transport. For Claude Code
+roles, the bridge uses short prompt-gated local `tmux` delivery when the target
+session is active. If you also want external channel delivery, configure a
+webhook transport.
 
 Add one of these to `agent-roster.local.sh`:
 
@@ -174,14 +175,14 @@ BRIDGE_AGENT_DISCORD_CHANNEL_ID["tester"]="123456789012345678"
 Or:
 
 ```bash
-BRIDGE_AGENT_NOTIFY_KIND["tester"]="discord"
-BRIDGE_AGENT_NOTIFY_TARGET["tester"]="123456789012345678"
+BRIDGE_AGENT_NOTIFY_KIND["tester"]="discord-webhook"
+BRIDGE_AGENT_NOTIFY_TARGET["tester"]="https://discord.com/api/webhooks/..."
 BRIDGE_AGENT_NOTIFY_ACCOUNT["tester"]="default"
 ```
 
-If a Claude role is missing this metadata, `agent-bridge task create` and
-`agent-bridge urgent` now warn immediately, and `agent-bridge status` shows
-`notify miss` so the problem is visible on a fresh install.
+Use `telegram` only when the Claude session genuinely consumes Telegram as its
+primary inbound surface. Plain Discord bot posts are not a reliable delivery
+surface for Claude Code sessions.
 
 ### Inspect OpenClaw cron inventory
 

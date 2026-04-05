@@ -42,18 +42,18 @@ BRIDGE_AGENT_SESSION["codex-developer"]="codex-developer"
 # BRIDGE_AGENT_PROFILE_HOME["tester"]="$HOME/project-test"
 # BRIDGE_AGENT_PROFILE_HOME["developer"]="$HOME/project-app"
 
-# Optional but strongly recommended for Claude Code agents: external
-# notification transport for queue-backed wake / urgent / completion signals.
-# If omitted, Discord-backed agents can fall back to BRIDGE_AGENT_DISCORD_CHANNEL_ID
-# when present. Without either setting, queue items still exist, but the agent
-# must poll `agb inbox <agent>` because no live attention signal can be sent.
-# BRIDGE_AGENT_NOTIFY_KIND["tester"]="discord"
-# BRIDGE_AGENT_NOTIFY_TARGET["tester"]="123456789012345678"
+# Optional external notification transport for Claude Code agents. Prefer
+# `discord-webhook` for Discord-backed Claude sessions; plain `discord` bot
+# posts are not a reliable delivery surface for Claude Code.
+# BRIDGE_AGENT_NOTIFY_KIND["tester"]="discord-webhook"
+# BRIDGE_AGENT_NOTIFY_TARGET["tester"]="https://discord.com/api/webhooks/..."
 # BRIDGE_AGENT_NOTIFY_ACCOUNT["tester"]="default"
 # BRIDGE_AGENT_NOTIFY_KIND["developer"]="telegram"
 # BRIDGE_AGENT_NOTIFY_TARGET["developer"]="7670324081"
 # BRIDGE_AGENT_NOTIFY_ACCOUNT["developer"]="default"
 # BRIDGE_AGENT_DISCORD_CHANNEL_ID["tester"]="123456789012345678"
+# The channel id is still useful for Discord wake relay / metadata, but not for
+# bot-authored Claude delivery.
 
 # Optional: map OpenClaw cron agent ids to bridge agents for cron enqueue.
 # BRIDGE_OPENCLAW_AGENT_TARGET["syrs-shopify"]="shopify"

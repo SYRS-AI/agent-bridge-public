@@ -57,7 +57,7 @@ bridge_notify_send() {
 bridge_warn_missing_notify_transport() {
   local agent="$1"
 
-  bridge_warn "Claude agent '${agent}' has no notification transport; configure BRIDGE_AGENT_DISCORD_CHANNEL_ID[\"${agent}\"] or BRIDGE_AGENT_NOTIFY_KIND/TARGET in agent-roster.local.sh. Task remains queued; the agent must poll 'agb inbox ${agent}'."
+  bridge_warn "Claude agent '${agent}' has no external webhook transport configured; bridge will rely on local tmux delivery when the session is active. To support channel delivery, configure BRIDGE_AGENT_NOTIFY_KIND/TARGET in agent-roster.local.sh."
 }
 
 bridge_notification_text() {
@@ -92,17 +92,38 @@ bridge_dispatch_notification() {
   local task_id="${4:-}"
   local priority="${5:-normal}"
   local engine=""
+  local kind=""
   local session=""
   local text=""
 
   engine="$(bridge_agent_engine "$agent")"
   case "$engine" in
     claude)
+      kind="$(bridge_agent_notify_kind "$agent")"
+      if bridge_agent_has_notify_transport "$agent"; then
+        case "$kind" in
+          discord)
+            ;;
+          *)
+            if bridge_notify_send "$agent" "$title" "$message" "$task_id" "$priority"; then
+              return 0
+            fi
+            bridge_warn "external notify failed for Claude agent '${agent}'; falling back to local tmux delivery if possible"
+            ;;
+        esac
+      fi
+      session="$(bridge_agent_session "$agent")"
+      if [[ -n "$session" ]] && bridge_tmux_session_exists "$session"; then
+        text="$(bridge_notification_text "$title" "$message" "$task_id" "$priority")"
+        bridge_tmux_send_and_submit "$session" "$engine" "$text"
+        return $?
+      fi
       if ! bridge_agent_has_notify_transport "$agent"; then
         bridge_warn_missing_notify_transport "$agent"
-        return 1
+      elif [[ "$kind" == "discord" ]]; then
+        bridge_warn "discord bot channel posts do not reliably reach Claude sessions; use discord-webhook or keep the session active for local delivery: ${agent}"
       fi
-      bridge_notify_send "$agent" "$title" "$message" "$task_id" "$priority"
+      return 1
       ;;
     *)
       session="$(bridge_agent_session "$agent")"
