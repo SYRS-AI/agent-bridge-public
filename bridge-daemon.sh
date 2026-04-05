@@ -255,14 +255,13 @@ process_on_demand_agents() {
   while IFS=$'\t' read -r agent queued claimed blocked active idle _last_seen _last_nudge session _engine _workdir; do
     [[ -z "$agent" ]] && continue
     [[ "$(bridge_agent_source "$agent")" == "static" ]] || continue
-    timeout="$(bridge_agent_idle_timeout "$agent")"
-    [[ "$timeout" =~ ^[0-9]+$ ]] || timeout=0
-    (( timeout > 0 )) || continue
 
     if [[ "$active" == "0" ]]; then
       if [[ "$queued" =~ ^[0-9]+$ ]] && (( queued > 0 )) && ! bridge_agent_is_active "$agent"; then
         if "$BRIDGE_BASH_BIN" "$SCRIPT_DIR/bridge-start.sh" "$agent" >/dev/null 2>&1; then
           session="$(bridge_agent_session "$agent")"
+          timeout="$(bridge_agent_idle_timeout "$agent")"
+          [[ "$timeout" =~ ^[0-9]+$ ]] || timeout=0
           if [[ -n "$session" ]] && bridge_tmux_session_exists "$session"; then
             nudge_agent_session "$agent" "$session" "$queued" "$claimed" "0" || true
           fi
@@ -274,6 +273,10 @@ process_on_demand_agents() {
       fi
       continue
     fi
+
+    timeout="$(bridge_agent_idle_timeout "$agent")"
+    [[ "$timeout" =~ ^[0-9]+$ ]] || timeout=0
+    (( timeout > 0 )) || continue
 
     if ! [[ "$queued" =~ ^[0-9]+$ && "$claimed" =~ ^[0-9]+$ && "$blocked" =~ ^[0-9]+$ && "$idle" =~ ^[0-9]+$ ]]; then
       continue

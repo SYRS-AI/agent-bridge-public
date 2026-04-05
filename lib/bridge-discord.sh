@@ -22,7 +22,6 @@ bridge_discord_relay_rows_tsv() {
     [[ -n "$channel_id" ]] || continue
     timeout="$(bridge_agent_idle_timeout "$agent")"
     [[ "$timeout" =~ ^[0-9]+$ ]] || timeout=0
-    (( timeout > 0 )) || continue
     if bridge_agent_is_active "$agent"; then
       active=1
     else

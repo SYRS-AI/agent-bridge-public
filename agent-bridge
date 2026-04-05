@@ -14,7 +14,7 @@ usage() {
 Usage:
   $CLI_NAME status [--watch] [--refresh <seconds>] [--open-limit <count>] [--all-agents]
   $CLI_NAME list
-  $CLI_NAME admin [--replace] [--no-attach] [--no-project-skill]
+  $CLI_NAME admin [--replace] [--continue|--no-continue] [--no-attach] [--no-project-skill]
   $CLI_NAME kill <number|all>
   $CLI_NAME urgent <agent> "<message>" [--wait <seconds>]
   $CLI_NAME task <create|inbox|show|claim|done|handoff|summary> ...

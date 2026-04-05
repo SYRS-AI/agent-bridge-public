@@ -72,11 +72,14 @@ SESSION_NAME="bridge-smoke-$$"
 REQUESTER_SESSION="bridge-requester-$$"
 SMOKE_AGENT="smoke-agent-$$"
 REQUESTER_AGENT="requester-agent-$$"
+AUTO_START_AGENT="auto-start-agent-$$"
+AUTO_START_SESSION="auto-start-session-$$"
 STATIC_AGENT="static-role-$$"
 STATIC_SESSION="static-session-$$"
 WORKTREE_AGENT="worker-reuse-$$"
 WORKDIR="$TMP_ROOT/workdir"
 REQUESTER_WORKDIR="$TMP_ROOT/requester-workdir"
+AUTO_START_WORKDIR="$TMP_ROOT/auto-start-workdir"
 PROJECT_ROOT="$TMP_ROOT/git-project"
 HOOK_WORKDIR="$TMP_ROOT/claude-hook-workdir"
 MCP_WORKDIR="$TMP_ROOT/claude-mcp-workdir"
@@ -90,6 +93,7 @@ cleanup() {
   bash "$REPO_ROOT/bridge-daemon.sh" stop >/dev/null 2>&1 || true
   tmux kill-session -t "$SESSION_NAME" >/dev/null 2>&1 || true
   tmux kill-session -t "$REQUESTER_SESSION" >/dev/null 2>&1 || true
+  tmux kill-session -t "$AUTO_START_SESSION" >/dev/null 2>&1 || true
   tmux kill-session -t "$STATIC_SESSION" >/dev/null 2>&1 || true
   tmux kill-session -t "$WORKTREE_AGENT" >/dev/null 2>&1 || true
   if [[ -n "$FAKE_DISCORD_PID" ]]; then
@@ -100,7 +104,7 @@ cleanup() {
 }
 trap cleanup EXIT
 
-mkdir -p "$BRIDGE_HOME" "$BRIDGE_STATE_DIR" "$BRIDGE_LOG_DIR" "$BRIDGE_SHARED_DIR" "$WORKDIR" "$REQUESTER_WORKDIR"
+mkdir -p "$BRIDGE_HOME" "$BRIDGE_STATE_DIR" "$BRIDGE_LOG_DIR" "$BRIDGE_SHARED_DIR" "$WORKDIR" "$REQUESTER_WORKDIR" "$AUTO_START_WORKDIR"
 mkdir -p "$HOOK_WORKDIR/.claude"
 mkdir -p "$MCP_WORKDIR"
 mkdir -p "$CLAUDE_STATIC_WORKDIR"
@@ -128,23 +132,29 @@ cat >"$BRIDGE_ROSTER_LOCAL_FILE" <<EOF
 #!/usr/bin/env bash
 bridge_add_agent_id_if_missing "$SMOKE_AGENT"
 bridge_add_agent_id_if_missing "$REQUESTER_AGENT"
+bridge_add_agent_id_if_missing "$AUTO_START_AGENT"
 bridge_add_agent_id_if_missing "claude-static"
 BRIDGE_ADMIN_AGENT_ID="$SMOKE_AGENT"
 BRIDGE_AGENT_DESC["$SMOKE_AGENT"]="Smoke test role"
 BRIDGE_AGENT_DESC["$REQUESTER_AGENT"]="Requester role"
+BRIDGE_AGENT_DESC["$AUTO_START_AGENT"]="Auto-start role"
 BRIDGE_AGENT_DESC["claude-static"]="Claude static role"
 BRIDGE_AGENT_ENGINE["$SMOKE_AGENT"]="codex"
 BRIDGE_AGENT_ENGINE["$REQUESTER_AGENT"]="codex"
+BRIDGE_AGENT_ENGINE["$AUTO_START_AGENT"]="codex"
 BRIDGE_AGENT_ENGINE["claude-static"]="claude"
 BRIDGE_AGENT_SESSION["$SMOKE_AGENT"]="$SESSION_NAME"
 BRIDGE_AGENT_SESSION["$REQUESTER_AGENT"]="$REQUESTER_SESSION"
+BRIDGE_AGENT_SESSION["$AUTO_START_AGENT"]="$AUTO_START_SESSION"
 BRIDGE_AGENT_SESSION["claude-static"]="claude-static-$SESSION_NAME"
 BRIDGE_AGENT_WORKDIR["$SMOKE_AGENT"]="$WORKDIR"
 BRIDGE_AGENT_WORKDIR["$REQUESTER_AGENT"]="$REQUESTER_WORKDIR"
+BRIDGE_AGENT_WORKDIR["$AUTO_START_AGENT"]="$AUTO_START_WORKDIR"
 BRIDGE_AGENT_WORKDIR["claude-static"]="$CLAUDE_STATIC_WORKDIR"
 BRIDGE_AGENT_DISCORD_CHANNEL_ID["$SMOKE_AGENT"]="123456789012345678"
 BRIDGE_AGENT_LAUNCH_CMD["$SMOKE_AGENT"]='python3 -c "import time; print(\"smoke-agent ready\", flush=True); time.sleep(30)"'
 BRIDGE_AGENT_LAUNCH_CMD["$REQUESTER_AGENT"]='python3 -c "import time; print(\"requester-agent ready\", flush=True); time.sleep(30)"'
+BRIDGE_AGENT_LAUNCH_CMD["$AUTO_START_AGENT"]='python3 -c "import time; print(\"auto-start ready\", flush=True); time.sleep(30)"'
 BRIDGE_AGENT_LAUNCH_CMD["claude-static"]='DISCORD_STATE_DIR=REPLACE_CLAUDE_DISCORD claude -c --dangerously-skip-permissions --channels plugin:discord@claude-plugins-official'
 EOF
 
@@ -263,6 +273,13 @@ assert_contains "$LIST_OUTPUT" "$SMOKE_AGENT"
 STATUS_OUTPUT="$("$REPO_ROOT/agent-bridge" status --all-agents)"
 assert_contains "$STATUS_OUTPUT" "$SMOKE_AGENT"
 
+RELAY_ROWS="$("$BASH4_BIN" -c '
+  source "'"$REPO_ROOT"'/bridge-lib.sh"
+  bridge_load_roster
+  bridge_discord_relay_rows_tsv
+')"
+assert_contains "$RELAY_ROWS" "$SMOKE_AGENT"$'\t'"123456789012345678"
+
 log "verifying session alias resolution and worktree replace"
 tmux new-session -d -s "$WORKTREE_AGENT" -c "$PROJECT_ROOT" 'python3 -c "import time; print(\"worker active\", flush=True); time.sleep(30)"'
 cat >>"$BRIDGE_ROSTER_LOCAL_FILE" <<EOF
@@ -338,6 +355,13 @@ assert_contains "$REQUESTER_SHOW_OUTPUT" "completed_by: $SMOKE_AGENT"
 
 SUMMARY_OUTPUT="$("$REPO_ROOT/agb" summary "$SMOKE_AGENT")"
 assert_contains "$SUMMARY_OUTPUT" "$SMOKE_AGENT"
+
+log "auto-starting static role even when timeout=0"
+AUTO_START_OUTPUT="$(bash "$REPO_ROOT/bridge-task.sh" create --to "$AUTO_START_AGENT" --title "auto-start smoke" --body "wake" --from "$REQUESTER_AGENT")"
+assert_contains "$AUTO_START_OUTPUT" "created task #"
+bash "$REPO_ROOT/bridge-daemon.sh" sync >/dev/null
+sleep 1
+tmux has-session -t "$AUTO_START_SESSION" >/dev/null 2>&1 || die "auto-start role did not start with timeout=0"
 
 log "running guided Discord setup"
 SETUP_DISCORD_OUTPUT="$("$REPO_ROOT/agent-bridge" setup discord "$SMOKE_AGENT" --openclaw-account smoke --openclaw-config "$TMP_ROOT/openclaw.json" --api-base-url "$FAKE_DISCORD_API_BASE" --yes)"
@@ -629,12 +653,13 @@ cat >"$DISPATCH_BODY" <<EOF
 EOF
 
 CRON_CREATE_OUTPUT="$(bash "$REPO_ROOT/bridge-task.sh" create --to "$SMOKE_AGENT" --title "[cron-dispatch] smoke-job (2026-04-05T10:00:00Z)" --body-file "$DISPATCH_BODY" --from smoke-test)"
-assert_contains "$CRON_CREATE_OUTPUT" "created task #3"
+[[ "$CRON_CREATE_OUTPUT" =~ created\ task\ \#([0-9]+) ]] || die "could not parse cron dispatch task id"
+CRON_TASK_ID="${BASH_REMATCH[1]}"
 
 bash "$REPO_ROOT/bridge-daemon.sh" sync >/dev/null
 
 for _ in $(seq 1 20); do
-  SHOW_CRON_OUTPUT="$(bash "$REPO_ROOT/bridge-task.sh" show 3)"
+  SHOW_CRON_OUTPUT="$(bash "$REPO_ROOT/bridge-task.sh" show "$CRON_TASK_ID")"
   if [[ "$SHOW_CRON_OUTPUT" == *"status: done"* ]]; then
     break
   fi
