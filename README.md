@@ -376,7 +376,9 @@ The current directory becomes the agent's workdir. `agent-bridge` will also inst
 
 - Codex: `.agents/skills/agent-bridge-project/SKILL.md`
 - Claude: `.claude/skills/agent-bridge-project/SKILL.md`
-- Claude shared cron skill: `.claude/skills/cron-manager/SKILL.md`
+- Bridge-owned Claude homes also get:
+  - `.claude/skills/agent-bridge-runtime/SKILL.md`
+  - `.claude/skills/cron-manager/SKILL.md`
 
 ### Queue-first workflow
 

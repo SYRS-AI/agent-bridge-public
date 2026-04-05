@@ -94,6 +94,10 @@ By default, $CLI_NAME installs a project-local agent-bridge skill in the target 
   Codex  -> .agents/skills/agent-bridge-project/SKILL.md
   Claude -> .claude/skills/agent-bridge-project/SKILL.md
 
+Bridge-owned Claude homes also receive shared runtime skills:
+  .claude/skills/agent-bridge-runtime/SKILL.md
+  .claude/skills/cron-manager/SKILL.md
+
 If a same-name session is already active with different engine/workdir/loop settings,
 $CLI_NAME will refuse to attach. Use \`$CLI_NAME kill <number>\` or rerun with \`--replace\`.
 

@@ -132,6 +132,8 @@ if tmux has-session -t "$SESSION" 2>/dev/null; then
 fi
 
 if [[ "$ENGINE" == "claude" ]]; then
+  bridge_bootstrap_project_skill "$ENGINE" "$WORK_DIR" || true
+  bridge_bootstrap_claude_shared_skills "$WORK_DIR" || true
   if ! bridge_ensure_claude_project_trust "$WORK_DIR" >/dev/null 2>&1; then
     bridge_warn "Claude project trust seed failed: $WORK_DIR"
   fi

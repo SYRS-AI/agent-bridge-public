@@ -18,6 +18,70 @@ bridge_project_skill_dir_for() {
   esac
 }
 
+bridge_shared_claude_skill_source_dir() {
+  local skill_name="$1"
+  local home_path="$BRIDGE_HOME/.claude/skills/$skill_name"
+  local repo_path="$BRIDGE_SCRIPT_DIR/.claude/skills/$skill_name"
+
+  if [[ -d "$home_path" ]]; then
+    printf '%s' "$home_path"
+    return 0
+  fi
+
+  printf '%s' "$repo_path"
+}
+
+bridge_agent_claude_skill_link_dir() {
+  local workdir="$1"
+  local skill_name="$2"
+  printf '%s/.claude/skills/%s' "$workdir" "$skill_name"
+}
+
+bridge_link_shared_claude_skill() {
+  local workdir="$1"
+  local skill_name="$2"
+  local source_dir=""
+  local link_dir=""
+
+  [[ "$(bridge_path_is_within_root "$workdir" "$BRIDGE_AGENT_HOME_ROOT")" == "1" ]] || return 0
+
+  source_dir="$(bridge_shared_claude_skill_source_dir "$skill_name")"
+  [[ -d "$source_dir" ]] || return 0
+  link_dir="$(bridge_agent_claude_skill_link_dir "$workdir" "$skill_name")"
+
+  bridge_require_python
+  python3 - "$source_dir" "$link_dir" <<'PY'
+import os
+import shutil
+import sys
+from datetime import datetime
+from pathlib import Path
+
+source_dir = Path(sys.argv[1]).expanduser()
+link_dir = Path(sys.argv[2]).expanduser()
+link_dir.parent.mkdir(parents=True, exist_ok=True)
+
+if link_dir.is_symlink():
+    if os.path.realpath(link_dir) == os.path.realpath(source_dir):
+        raise SystemExit(0)
+    link_dir.unlink()
+elif link_dir.exists():
+    stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+    backup = link_dir.with_name(f"{link_dir.name}.agent-bridge.bak-{stamp}")
+    shutil.move(str(link_dir), str(backup))
+
+rel_target = os.path.relpath(source_dir, start=link_dir.parent)
+link_dir.symlink_to(rel_target, target_is_directory=True)
+PY
+}
+
+bridge_bootstrap_claude_shared_skills() {
+  local workdir="$1"
+
+  bridge_link_shared_claude_skill "$workdir" "agent-bridge-runtime"
+  bridge_link_shared_claude_skill "$workdir" "cron-manager"
+}
+
 bridge_is_managed_markdown() {
   local file="$1"
   grep -Fq "$BRIDGE_MANAGED_MARKER" "$file"
