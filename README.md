@@ -189,7 +189,7 @@ The deploy helper copies every tracked file from the working tree, verifies the 
 Claude roles now wake through the local tmux session only when the bridge has
 explicitly marked them idle via the installed hooks:
 
-- `Stop` hook writes `idle-since`
+- `Stop` hook writes `idle-since` and prints a short inbox summary as additional context
 - `UserPromptSubmit` clears `idle-since`
 - the daemon sends only a short line such as `agb inbox <agent>` when `idle-since` exists
 

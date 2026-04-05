@@ -105,6 +105,8 @@ def print_payload(data: dict[str, str], fmt: str) -> None:
         print(f"prompt_hook: {data['HOOK_PROMPT_HOOK']}")
     if data.get("HOOK_COMMAND"):
         print(f"command: {data['HOOK_COMMAND']}")
+    if data.get("HOOK_ADDITIONAL_CONTEXT"):
+        print(f"additional_context: {data['HOOK_ADDITIONAL_CONTEXT']}")
 
 
 def cmd_status_stop_hook(args: argparse.Namespace) -> int:
@@ -119,6 +121,7 @@ def cmd_status_stop_hook(args: argparse.Namespace) -> int:
         "HOOK_STOP_HOOK": "present" if hook else "missing",
         "HOOK_PROMPT_HOOK": "",
         "HOOK_COMMAND": command,
+        "HOOK_ADDITIONAL_CONTEXT": "true" if hook and bool(hook.get("additionalContext")) else "false",
     }
     print_payload(payload, args.format)
     return 0 if hook else 1
@@ -129,6 +132,9 @@ def ensure_command_hook(
     event_name: str,
     desired_command: str,
     matcher: Any,
+    *,
+    timeout: int = 3,
+    additional_context: bool | None = None,
 ) -> bool:
     settings = ensure_settings_root(settings_path)
     event_hooks = hooks_list(settings, event_name)
@@ -142,7 +148,8 @@ def ensure_command_hook(
                     {
                         "type": "command",
                         "command": desired_command,
-                        "timeout": 3,
+                        "timeout": timeout,
+                        **({"additionalContext": additional_context} if additional_context is not None else {}),
                     }
                 ]
             }
@@ -155,8 +162,11 @@ def ensure_command_hook(
         if str(hook.get("command") or "") != desired_command:
             hook["command"] = desired_command
             changed = True
-        if int(hook.get("timeout") or 0) != 3:
-            hook["timeout"] = 3
+        if int(hook.get("timeout") or 0) != timeout:
+            hook["timeout"] = timeout
+            changed = True
+        if additional_context is not None and bool(hook.get("additionalContext")) != bool(additional_context):
+            hook["additionalContext"] = additional_context
             changed = True
         if group is None:
             changed = True
@@ -171,7 +181,14 @@ def cmd_ensure_stop_hook(args: argparse.Namespace) -> int:
     bridge_home = Path(args.bridge_home).expanduser()
     settings_path = Path(args.workdir).expanduser() / ".claude" / "settings.json"
     desired_command = stop_hook_command(bridge_home, args.bash_bin)
-    changed = ensure_command_hook(settings_path, "Stop", desired_command, is_mark_idle_hook)
+    changed = ensure_command_hook(
+        settings_path,
+        "Stop",
+        desired_command,
+        is_mark_idle_hook,
+        timeout=3,
+        additional_context=True,
+    )
 
     payload = {
         "HOOK_SETTINGS_FILE": str(settings_path),
@@ -179,6 +196,7 @@ def cmd_ensure_stop_hook(args: argparse.Namespace) -> int:
         "HOOK_STOP_HOOK": "present",
         "HOOK_PROMPT_HOOK": "",
         "HOOK_COMMAND": desired_command,
+        "HOOK_ADDITIONAL_CONTEXT": "true",
     }
     print_payload(payload, args.format)
     return 0
@@ -205,7 +223,13 @@ def cmd_ensure_prompt_hook(args: argparse.Namespace) -> int:
     bridge_home = Path(args.bridge_home).expanduser()
     settings_path = Path(args.workdir).expanduser() / ".claude" / "settings.json"
     desired_command = prompt_hook_command(bridge_home, args.bash_bin)
-    changed = ensure_command_hook(settings_path, "UserPromptSubmit", desired_command, is_clear_idle_hook)
+    changed = ensure_command_hook(
+        settings_path,
+        "UserPromptSubmit",
+        desired_command,
+        is_clear_idle_hook,
+        timeout=3,
+    )
 
     payload = {
         "HOOK_SETTINGS_FILE": str(settings_path),

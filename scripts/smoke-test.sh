@@ -449,10 +449,13 @@ EOF
 HOOK_ENSURE_OUTPUT="$(python3 "$REPO_ROOT/bridge-hooks.py" ensure-stop-hook --workdir "$HOOK_WORKDIR" --bridge-home "$BRIDGE_HOME" --bash-bin bash)"
 assert_contains "$HOOK_ENSURE_OUTPUT" "status: updated"
 assert_contains "$HOOK_ENSURE_OUTPUT" "stop_hook: present"
+assert_contains "$HOOK_ENSURE_OUTPUT" "additional_context: true"
 HOOK_STATUS_OUTPUT="$(python3 "$REPO_ROOT/bridge-hooks.py" status-stop-hook --workdir "$HOOK_WORKDIR" --bridge-home "$BRIDGE_HOME" --bash-bin bash)"
 assert_contains "$HOOK_STATUS_OUTPUT" "status: present"
+assert_contains "$HOOK_STATUS_OUTPUT" "additional_context: true"
 assert_contains "$(cat "$HOOK_WORKDIR/.claude/settings.json")" "\"SessionStart\""
 assert_contains "$(cat "$HOOK_WORKDIR/.claude/settings.json")" "\"Stop\""
+assert_contains "$(cat "$HOOK_WORKDIR/.claude/settings.json")" "\"additionalContext\": true"
 assert_contains "$(cat "$HOOK_WORKDIR/.claude/settings.json")" "mark-idle.sh"
 
 PROMPT_HOOK_OUTPUT="$(python3 "$REPO_ROOT/bridge-hooks.py" ensure-prompt-hook --workdir "$HOOK_WORKDIR" --bridge-home "$BRIDGE_HOME" --bash-bin bash)"
@@ -461,6 +464,14 @@ PROMPT_STATUS_OUTPUT="$(python3 "$REPO_ROOT/bridge-hooks.py" status-prompt-hook 
 assert_contains "$PROMPT_STATUS_OUTPUT" "status: present"
 assert_contains "$(cat "$HOOK_WORKDIR/.claude/settings.json")" "\"UserPromptSubmit\""
 assert_contains "$(cat "$HOOK_WORKDIR/.claude/settings.json")" "clear-idle.sh"
+
+log "ensuring mark-idle hook emits inbox summary context"
+HOOK_QUEUE_CREATE_OUTPUT="$(python3 "$REPO_ROOT/bridge-queue.py" create --to claude-static --title "Follow-up task" --from smoke --priority high --body "check inbox")"
+assert_contains "$HOOK_QUEUE_CREATE_OUTPUT" "created task #"
+HOOK_CONTEXT_OUTPUT="$(BRIDGE_HOME="$REPO_ROOT" BRIDGE_STATE_DIR="$BRIDGE_STATE_DIR" BRIDGE_ACTIVE_AGENT_DIR="$BRIDGE_ACTIVE_AGENT_DIR" BRIDGE_HISTORY_DIR="$BRIDGE_HISTORY_DIR" BRIDGE_TASK_DB="$BRIDGE_TASK_DB" BRIDGE_ROSTER_FILE="$REPO_ROOT/agent-roster.sh" BRIDGE_ROSTER_LOCAL_FILE="$BRIDGE_ROSTER_LOCAL_FILE" BRIDGE_AGENT_ID="claude-static" "$BASH4_BIN" "$REPO_ROOT/hooks/mark-idle.sh")"
+assert_contains "$HOOK_CONTEXT_OUTPUT" "[Agent Bridge] queued tasks waiting (1)"
+assert_contains "$HOOK_CONTEXT_OUTPUT" "agb inbox claude-static"
+assert_contains "$HOOK_CONTEXT_OUTPUT" "next: #"
 
 log "ensuring Claude webhook MCP config merge"
 cat >"$MCP_WORKDIR/.mcp.json" <<'EOF'
