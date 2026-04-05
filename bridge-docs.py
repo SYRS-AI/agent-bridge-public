@@ -19,6 +19,7 @@ TODAY = datetime.now().strftime("%Y-%m-%d")
 REMOVABLE_DOCS = ("AGENTS.md", "IDENTITY.md", "BOOTSTRAP.md")
 SHARED_SOURCE_FILES = ("ROSTER.md", "SYRS-CONTEXT.md", "SYRS-RULES.md", "SYRS-USER.md")
 AGENT_SHARED_LINKS = ("TOOLS.md", "ROSTER.md", "SYRS-CONTEXT.md", "SYRS-RULES.md", "SYRS-USER.md")
+AGENT_RUNTIME_REWRITE_FILES = ("SOUL.md", "HEARTBEAT.md", "CHECKLIST.md")
 LEGACY_PATTERNS = (
     "openclaw message send",
     "sessions_send",
@@ -300,6 +301,51 @@ def rewrite_shared_legacy_text(name: str, bridge_home: Path, text: str) -> str:
         text = text.replace("패치는 OpenClaw 에이전트가 아님", "패치는 Agent Bridge 관리자 역할")
 
     return text
+
+
+def rewrite_agent_runtime_text(agent_dir: Path, text: str) -> str:
+    text = normalize_legacy_paths(text)
+    runtime_root = "~/.agent-bridge/runtime"
+    replacements = {
+        "~/.openclaw/credentials/": f"{runtime_root}/credentials/",
+        "/Users/soonseokoh/.openclaw/credentials/": f"{runtime_root}/credentials/",
+        "~/.openclaw/secrets/": f"{runtime_root}/secrets/",
+        "/Users/soonseokoh/.openclaw/secrets/": f"{runtime_root}/secrets/",
+        "~/.openclaw/openclaw.json": f"{runtime_root}/openclaw.json",
+        "/Users/soonseokoh/.openclaw/openclaw.json": f"{runtime_root}/openclaw.json",
+        "~/.openclaw/scripts/": f"{runtime_root}/scripts/",
+        "/Users/soonseokoh/.openclaw/scripts/": f"{runtime_root}/scripts/",
+        "~/.openclaw/skills/": f"{runtime_root}/skills/",
+        "/Users/soonseokoh/.openclaw/skills/": f"{runtime_root}/skills/",
+        "~/.openclaw/memory/": f"{runtime_root}/memory/",
+        "/Users/soonseokoh/.openclaw/memory/": f"{runtime_root}/memory/",
+        "sessions_send": "agent-bridge task create",
+        "sessions_spawn": "bridge disposable child",
+        "sessions_history": "bridge task/MEMORY context",
+        "openclaw message send": "연결된 Claude 세션 응답",
+        "localhost:8787/hooks/patch-trigger": "`agent-bridge urgent patch`",
+        "Discord #patch 채널 웹훅": "`agent-bridge task create --to patch` 또는 `agent-bridge urgent patch`",
+    }
+    for old, new in replacements.items():
+        text = text.replace(old, new)
+
+    if agent_dir.name == "patch":
+        text = text.replace("~/.openclaw/patch/", "~/.agent-bridge/agents/patch/")
+        text = text.replace("/Users/soonseokoh/.openclaw/patch/", "~/.agent-bridge/agents/patch/")
+
+    return text
+
+
+def normalize_agent_runtime_file(path: Path, agent_dir: Path, dry_run: bool, backup_root: Path) -> bool:
+    if not path.exists() or not path.is_file():
+        return False
+    original = read_text(path)
+    rewritten = rewrite_agent_runtime_text(agent_dir, original)
+    if rewritten == original:
+        return False
+    backup_file(path, backup_root, dry_run)
+    write_text(path, rewritten, dry_run)
+    return True
 
 
 def sync_shared_docs(bridge_home: Path, source_shared: Path, dry_run: bool) -> list[str]:
@@ -639,6 +685,17 @@ def sync_agent_docs(agent_dir: Path, bridge_home: Path, dry_run: bool, stamp: st
             backup_file(skills_path, backup_root, dry_run)
         write_text(skills_path, skills_text, dry_run)
         changed.append(str(skills_path))
+
+    for name in AGENT_RUNTIME_REWRITE_FILES:
+        path = agent_dir / name
+        if normalize_agent_runtime_file(path, agent_dir, dry_run, backup_root):
+            changed.append(str(path))
+
+    skills_root = agent_dir / "skills"
+    if skills_root.exists():
+        for path in sorted(skills_root.rglob("*.md")):
+            if normalize_agent_runtime_file(path, agent_dir, dry_run, backup_root):
+                changed.append(str(path))
 
     for name in REMOVABLE_DOCS:
         path = agent_dir / name
