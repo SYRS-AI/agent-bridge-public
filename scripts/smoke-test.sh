@@ -383,6 +383,12 @@ assert_contains "$(cat "$BRIDGE_ROSTER_LOCAL_FILE")" "BRIDGE_ADMIN_AGENT_ID=\"$S
 ADMIN_OUTPUT="$("$REPO_ROOT/agent-bridge" admin --no-attach 2>&1)"
 assert_contains "$ADMIN_OUTPUT" "세션 '$SESSION_NAME'이 이미 실행 중입니다."
 
+ADMIN_REPLACE_OUTPUT="$("$REPO_ROOT/agent-bridge" admin --replace --no-continue --no-attach 2>&1)"
+assert_contains "$ADMIN_REPLACE_OUTPUT" "세션 '$SESSION_NAME' 시작 완료"
+
+STATIC_START_DRY_RUN="$("$REPO_ROOT/bridge-start.sh" "$SMOKE_AGENT" --dry-run --no-continue)"
+assert_contains "$STATIC_START_DRY_RUN" "continue=0"
+
 log "ensuring Claude Stop hook settings merge"
 cat >"$HOOK_WORKDIR/.claude/settings.json" <<'EOF'
 {

@@ -9,7 +9,7 @@ source "$SCRIPT_DIR/bridge-lib.sh"
 bridge_load_roster
 
 usage() {
-  echo "Usage: bash $SCRIPT_DIR/bridge-start.sh <agent> [--replace] [--attach] [--dry-run]"
+  echo "Usage: bash $SCRIPT_DIR/bridge-start.sh <agent> [--replace] [--attach] [--continue|--no-continue] [--dry-run]"
   echo "       bash $SCRIPT_DIR/bridge-start.sh --list"
   echo ""
   echo "등록된 에이전트:"
@@ -20,6 +20,8 @@ LIST_ONLY=0
 REPLACE=0
 ATTACH=0
 DRY_RUN=0
+CONTINUE_EXPLICIT=0
+CONTINUE_MODE=1
 AGENT=""
 
 while [[ $# -gt 0 ]]; do
@@ -38,6 +40,16 @@ while [[ $# -gt 0 ]]; do
       ;;
     --dry-run)
       DRY_RUN=1
+      shift
+      ;;
+    --continue)
+      CONTINUE_EXPLICIT=1
+      CONTINUE_MODE=1
+      shift
+      ;;
+    --no-continue)
+      CONTINUE_EXPLICIT=1
+      CONTINUE_MODE=0
       shift
       ;;
     -*)
@@ -66,6 +78,10 @@ fi
 
 bridge_require_agent "$AGENT"
 
+if [[ $CONTINUE_EXPLICIT -eq 1 ]]; then
+  BRIDGE_AGENT_CONTINUE["$AGENT"]="$CONTINUE_MODE"
+fi
+
 SESSION="$(bridge_agent_session "$AGENT")"
 WORK_DIR="$(bridge_agent_workdir "$AGENT")"
 DEFAULT_WORK_DIR="$(bridge_agent_default_home "$AGENT")"
@@ -84,6 +100,7 @@ if [[ $DRY_RUN -eq 1 ]]; then
   echo "agent=$AGENT"
   echo "session=$SESSION"
   echo "workdir=$WORK_DIR"
+  echo "continue=$(bridge_agent_continue "$AGENT")"
   echo "tmux_command=$SESSION_CMD"
   exit 0
 fi

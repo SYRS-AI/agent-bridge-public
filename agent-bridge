@@ -217,6 +217,13 @@ start_static_agent() {
   if [[ $REPLACE_MODE -eq 1 ]]; then
     start_args+=(--replace)
   fi
+  if [[ $CONTINUE_EXPLICIT -eq 1 ]]; then
+    if [[ $CONTINUE_MODE -eq 1 ]]; then
+      start_args+=(--continue)
+    else
+      start_args+=(--no-continue)
+    fi
+  fi
   if [[ $ATTACH_MODE -eq 1 ]]; then
     start_args+=(--attach)
   fi
@@ -323,6 +330,7 @@ WORKDIR="$(pwd)"
 WORKDIR_EXPLICIT=0
 LOOP_MODE=0
 CONTINUE_MODE=1
+CONTINUE_EXPLICIT=0
 ATTACH_MODE=1
 REPLACE_MODE=0
 INSTALL_PROJECT_SKILL=1
@@ -349,10 +357,12 @@ while [[ $# -gt 0 ]]; do
       ;;
     --no-continue)
       CONTINUE_MODE=0
+      CONTINUE_EXPLICIT=1
       shift
       ;;
     --continue)
       CONTINUE_MODE=1
+      CONTINUE_EXPLICIT=1
       shift
       ;;
     --workdir)
