@@ -38,6 +38,185 @@ nudge_agent_session() {
   echo "[info] nudged ${agent} (queued=${queued}, claimed=${claimed}, idle=${idle}s)"
 }
 
+cron_worker_running_count() {
+  local worker_dir
+  local pid_file
+  local pid
+  local count=0
+
+  worker_dir="$(bridge_cron_worker_dir)"
+  mkdir -p "$worker_dir"
+
+  shopt -s nullglob
+  for pid_file in "$worker_dir"/*.pid; do
+    pid="$(<"$pid_file")"
+    if [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null; then
+      count=$((count + 1))
+      continue
+    fi
+    rm -f "$pid_file"
+  done
+  shopt -u nullglob
+
+  printf '%s' "$count"
+}
+
+start_cron_worker() {
+  local task_id="$1"
+  local log_file
+
+  log_file="$(bridge_cron_worker_log_file "$task_id")"
+  mkdir -p "$(dirname "$log_file")"
+
+  if [[ "$(uname -s)" != "Darwin" ]] && command -v setsid >/dev/null 2>&1; then
+    setsid "$BRIDGE_BASH_BIN" "$SCRIPT_DIR/bridge-daemon.sh" run-cron-worker "$task_id" </dev/null >>"$log_file" 2>&1 &
+  else
+    nohup "$BRIDGE_BASH_BIN" "$SCRIPT_DIR/bridge-daemon.sh" run-cron-worker "$task_id" </dev/null >>"$log_file" 2>&1 &
+    disown || true
+  fi
+}
+
+start_cron_dispatch_workers() {
+  local max_parallel="${BRIDGE_CRON_DISPATCH_MAX_PARALLEL:-0}"
+  local running_count
+  local ready_rows=""
+  local task_id
+  local agent
+  local _priority
+  local _title
+  local _body_path
+  local started=0
+
+  [[ "$max_parallel" =~ ^[0-9]+$ ]] || max_parallel=0
+  (( max_parallel > 0 )) || return 0
+
+  running_count="$(cron_worker_running_count)"
+  (( running_count < max_parallel )) || return 0
+
+  ready_rows="$(bridge_queue_cli cron-ready --limit "$max_parallel" --format tsv 2>/dev/null || true)"
+  [[ -n "$ready_rows" ]] || return 0
+
+  while IFS=$'\t' read -r task_id agent _priority _title _body_path; do
+    [[ -n "$task_id" && -n "$agent" ]] || continue
+    (( running_count < max_parallel )) || break
+
+    if ! bridge_queue_cli claim "$task_id" --agent "$agent" --lease-seconds "$BRIDGE_CRON_DISPATCH_LEASE_SECONDS" >/dev/null 2>&1; then
+      continue
+    fi
+
+    if start_cron_worker "$task_id"; then
+      echo "[info] started cron worker for task #${task_id} (${agent})"
+      running_count=$((running_count + 1))
+      started=1
+      continue
+    fi
+
+    bridge_warn "failed to start cron worker for task #${task_id}"
+    bridge_queue_cli handoff "$task_id" --to "$agent" --from daemon --note "failed to start cron worker" >/dev/null 2>&1 || true
+  done <<<"$ready_rows"
+
+  return "$started"
+}
+
+cmd_run_cron_worker() {
+  local task_id="${1:-}"
+  local pid_file=""
+  local run_id=""
+  local done_note_file=""
+  local followup_body_file=""
+  local followup_task_id=""
+  local create_output=""
+  local followup_priority="normal"
+  local followup_actor=""
+  local subagent_status=0
+  local TASK_ID=""
+  local TASK_TITLE=""
+  local TASK_STATUS=""
+  local TASK_ASSIGNED_TO=""
+  local TASK_CREATED_BY=""
+  local TASK_PRIORITY=""
+  local TASK_CLAIMED_BY=""
+  local TASK_BODY_PATH=""
+  local CRON_RUN_ID=""
+  local CRON_JOB_NAME=""
+  local CRON_FAMILY=""
+  local CRON_SLOT=""
+  local CRON_TARGET_AGENT=""
+  local CRON_TARGET_ENGINE=""
+  local CRON_RESULT_STATUS=""
+  local CRON_RESULT_SUMMARY=""
+  local CRON_RUN_STATE=""
+  local CRON_RESULT_FILE=""
+  local CRON_STATUS_FILE=""
+  local CRON_STDOUT_LOG=""
+  local CRON_STDERR_LOG=""
+  local CRON_PROMPT_FILE=""
+  local CRON_NEEDS_HUMAN_FOLLOWUP=""
+
+  [[ "$task_id" =~ ^[0-9]+$ ]] || bridge_die "Usage: bash $SCRIPT_DIR/bridge-daemon.sh run-cron-worker <task-id>"
+
+  pid_file="$(bridge_cron_worker_pid_file "$task_id")"
+  mkdir -p "$(dirname "$pid_file")"
+  echo "$$" >"$pid_file"
+  trap 'rm -f "$pid_file"' EXIT
+
+  # shellcheck disable=SC1090
+  source <(bridge_queue_cli show "$task_id" --format shell)
+
+  if [[ -z "$TASK_ASSIGNED_TO" ]]; then
+    bridge_warn "cron worker task #${task_id} missing assigned agent"
+    return 1
+  fi
+
+  if [[ -z "$TASK_BODY_PATH" ]]; then
+    run_id="task-${task_id}"
+    done_note_file="$(bridge_cron_dispatch_completion_note_file_by_id "$run_id")"
+    mkdir -p "$(dirname "$done_note_file")"
+    {
+      printf '# Cron Dispatch Result\n\n'
+      printf -- '- task_id: %s\n' "$task_id"
+      printf -- '- state: invalid_task\n'
+      printf -- '- reason: missing body_path\n'
+    } >"$done_note_file"
+    bridge_queue_cli done "$task_id" --agent "$TASK_ASSIGNED_TO" --note-file "$done_note_file" >/dev/null 2>&1 || true
+    return 0
+  fi
+
+  run_id="$(bridge_cron_run_id_from_body_path "$TASK_BODY_PATH")"
+  # shellcheck disable=SC1090
+  source <(bridge_cron_load_run_shell "$run_id")
+
+  if [[ "$CRON_RUN_STATE" != "success" || ! -f "$CRON_RESULT_FILE" ]]; then
+    if "$BRIDGE_BASH_BIN" "$SCRIPT_DIR/bridge-cron.sh" run-subagent "$run_id" >/dev/null 2>&1; then
+      subagent_status=0
+    else
+      subagent_status=$?
+    fi
+    # shellcheck disable=SC1090
+    source <(bridge_cron_load_run_shell "$run_id")
+  fi
+
+  if [[ "$CRON_RUN_STATE" != "success" || "$CRON_RESULT_STATUS" == "error" || $subagent_status -ne 0 ]]; then
+    CRON_NEEDS_HUMAN_FOLLOWUP="1"
+    followup_priority="high"
+  fi
+
+  if [[ "$CRON_NEEDS_HUMAN_FOLLOWUP" == "1" ]]; then
+    followup_body_file="$(bridge_cron_dispatch_followup_file_by_id "$run_id")"
+    bridge_cron_write_followup_body "$run_id" "$followup_body_file"
+    followup_actor="cron:${CRON_JOB_NAME:-$run_id}"
+    create_output="$(bridge_queue_cli create --to "$TASK_ASSIGNED_TO" --title "[cron-followup] ${CRON_JOB_NAME:-$run_id} (${CRON_SLOT:-$run_id})" --from "$followup_actor" --priority "$followup_priority" --body-file "$followup_body_file" 2>/dev/null || true)"
+    if [[ "$create_output" =~ created\ task\ \#([0-9]+) ]]; then
+      followup_task_id="${BASH_REMATCH[1]}"
+    fi
+  fi
+
+  done_note_file="$(bridge_cron_dispatch_completion_note_file_by_id "$run_id")"
+  bridge_cron_write_completion_note "$run_id" "$done_note_file" "$followup_task_id"
+  bridge_queue_cli done "$task_id" --agent "$TASK_ASSIGNED_TO" --note-file "$done_note_file" >/dev/null
+  echo "[info] completed cron worker task #${task_id} run_id=${run_id} state=${CRON_RUN_STATE:-unknown} followup=${followup_task_id:-0}"
+}
+
 process_on_demand_agents() {
   local summary_output="$1"
   local agent
@@ -116,6 +295,8 @@ cmd_sync_cycle() {
   bridge_write_agent_snapshot "$snapshot_file"
   nudge_output="$(bridge_task_daemon_step "$snapshot_file" 2>/dev/null || true)"
   rm -f "$snapshot_file"
+
+  start_cron_dispatch_workers || true
 
   while IFS=$'\t' read -r agent session queued claimed idle nudge_key; do
     [[ -z "$agent" || -z "$session" ]] && continue
@@ -223,6 +404,10 @@ case "$CMD" in
     ;;
   run)
     cmd_run
+    ;;
+  run-cron-worker)
+    shift || true
+    cmd_run_cron_worker "$@"
     ;;
   stop)
     cmd_stop

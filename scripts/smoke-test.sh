@@ -44,11 +44,13 @@ export BRIDGE_LOG_DIR="$BRIDGE_HOME/logs"
 export BRIDGE_SHARED_DIR="$BRIDGE_HOME/shared"
 export BRIDGE_TASK_DB="$BRIDGE_STATE_DIR/tasks.db"
 export BRIDGE_DAEMON_INTERVAL=1
+export BRIDGE_CRON_DISPATCH_MAX_PARALLEL=1
 export BRIDGE_ROSTER_FILE="$REPO_ROOT/agent-roster.sh"
 export BRIDGE_ROSTER_LOCAL_FILE="$BRIDGE_HOME/agent-roster.local.sh"
 
 SESSION_NAME="bridge-smoke-$$"
 WORKDIR="$TMP_ROOT/workdir"
+FAKE_BIN="$TMP_ROOT/bin"
 
 cleanup() {
   bash "$REPO_ROOT/bridge-daemon.sh" stop >/dev/null 2>&1 || true
@@ -58,6 +60,16 @@ cleanup() {
 trap cleanup EXIT
 
 mkdir -p "$BRIDGE_HOME" "$BRIDGE_STATE_DIR" "$BRIDGE_LOG_DIR" "$BRIDGE_SHARED_DIR" "$WORKDIR"
+mkdir -p "$FAKE_BIN"
+export PATH="$FAKE_BIN:$PATH"
+
+cat >"$FAKE_BIN/codex" <<'EOF'
+#!/usr/bin/env bash
+cat <<'JSON'
+{"type":"item.completed","item":{"type":"agent_message","text":"{\"status\":\"completed\",\"summary\":\"cron smoke ok\",\"findings\":[],\"actions_taken\":[\"processed cron dispatch\"],\"needs_human_followup\":false,\"recommended_next_steps\":[],\"artifacts\":[],\"confidence\":\"high\"}"}}
+JSON
+EOF
+chmod +x "$FAKE_BIN/codex"
 
 cat >"$BRIDGE_ROSTER_LOCAL_FILE" <<EOF
 #!/usr/bin/env bash
@@ -111,5 +123,63 @@ assert_contains "$SHOW_OUTPUT" "note: smoke ok"
 
 SUMMARY_OUTPUT="$("$REPO_ROOT/agb" summary smoke-agent)"
 assert_contains "$SUMMARY_OUTPUT" "smoke-agent"
+
+log "processing one queued cron-dispatch task through the daemon"
+RUN_ID="smoke-job-1234--2026-04-05T10-00-00Z"
+RUN_DIR="$BRIDGE_STATE_DIR/cron/runs/$RUN_ID"
+DISPATCH_BODY="$BRIDGE_SHARED_DIR/cron-dispatch/$RUN_ID.md"
+mkdir -p "$RUN_DIR" "$(dirname "$DISPATCH_BODY")"
+
+cat >"$RUN_DIR/payload.md" <<'EOF'
+# [cron] smoke-job
+
+Do a disposable cron smoke run.
+EOF
+
+cat >"$RUN_DIR/request.json" <<EOF
+{
+  "run_id": "$RUN_ID",
+  "job_id": "12345678-abcd",
+  "job_name": "smoke-job",
+  "family": "smoke-family",
+  "openclaw_agent": "smoke-agent",
+  "target_agent": "smoke-agent",
+  "target_engine": "codex",
+  "target_workdir": "$WORKDIR",
+  "slot": "2026-04-05T10:00:00Z",
+  "dispatch_task_id": 0,
+  "created_at": "2026-04-05T10:00:00Z",
+  "dispatch_body_file": "$DISPATCH_BODY",
+  "payload_file": "$RUN_DIR/payload.md",
+  "payload_kind": "agentTurn",
+  "result_file": "$RUN_DIR/result.json",
+  "status_file": "$RUN_DIR/status.json",
+  "stdout_log": "$RUN_DIR/stdout.log",
+  "stderr_log": "$RUN_DIR/stderr.log",
+  "source_file": "$TMP_ROOT/jobs.json"
+}
+EOF
+
+cat >"$DISPATCH_BODY" <<EOF
+# [cron-dispatch] smoke-job
+
+- run_id: $RUN_ID
+EOF
+
+CRON_CREATE_OUTPUT="$(bash "$REPO_ROOT/bridge-task.sh" create --to smoke-agent --title "[cron-dispatch] smoke-job (2026-04-05T10:00:00Z)" --body-file "$DISPATCH_BODY" --from smoke-test)"
+assert_contains "$CRON_CREATE_OUTPUT" "created task #2"
+
+bash "$REPO_ROOT/bridge-daemon.sh" sync >/dev/null
+
+for _ in $(seq 1 20); do
+  SHOW_CRON_OUTPUT="$(bash "$REPO_ROOT/bridge-task.sh" show 2)"
+  if [[ "$SHOW_CRON_OUTPUT" == *"status: done"* ]]; then
+    break
+  fi
+  sleep 0.25
+done
+
+assert_contains "$SHOW_CRON_OUTPUT" "status: done"
+[[ -f "$RUN_DIR/result.json" ]] || die "cron worker did not write result artifact"
 
 log "smoke test passed"

@@ -26,13 +26,14 @@ All migrated recurring jobs should use the same bridge shape:
 
 1. `cron sync` detects a due occurrence
 2. the bridge enqueues a `[cron-dispatch]` task with an explicit slot
-3. the parent agent claims that dispatch task
-4. the parent runs `agent-bridge cron run-subagent <run-id>`
+3. the bridge daemon claims that dispatch task
+4. the daemon runs `agent-bridge cron run-subagent <run-id>` in a disposable child
 5. the disposable child returns a structured result artifact
-6. the parent decides follow-up, user-facing delivery, and task closure
+6. the daemon closes the dispatch task and optionally emits a separate `[cron-followup]` task if human follow-up is still needed
 
-This keeps recurring work out of the long-lived parent context while preserving
-parent ownership of final actions.
+This keeps recurring work out of long-lived agent contexts while still allowing
+selective follow-up when a child run surfaces something a durable agent session
+should inspect.
 
 ## Foundation Changes
 

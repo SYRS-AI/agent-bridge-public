@@ -126,11 +126,11 @@ write_dispatch_body() {
     printf -- '- result_file: %s\n' "$result_file"
     printf -- '- status_file: %s\n' "$status_file"
     printf '\n## Instruction\n\n'
-    printf 'Do not execute the legacy cron payload inline in this long-lived session.\n\n'
-    printf '1. Run `agent-bridge cron run-subagent %s`\n' "$run_id"
-    printf '2. Wait for the disposable child result artifact\n'
-    printf '3. Read `result_file` and decide follow-up from this parent session\n'
-    printf '4. Do not let the child deliver directly to users or channels\n'
+    printf 'This dispatch task is owned by the bridge daemon.\n\n'
+    printf '1. The daemon claims this task and runs `agent-bridge cron run-subagent %s`\n' "$run_id"
+    printf '2. The disposable child writes structured result artifacts under `state/cron/runs/%s/`\n' "$run_id"
+    printf '3. The daemon closes this dispatch task when the child finishes\n'
+    printf '4. If human follow-up is still needed, the daemon creates a separate `[cron-followup]` queue task\n'
   } >"$body_file"
 }
 

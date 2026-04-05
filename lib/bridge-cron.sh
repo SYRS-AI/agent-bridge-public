@@ -185,6 +185,244 @@ bridge_cron_body_file() {
   printf '%s/cron-dispatch/%s.md' "$BRIDGE_SHARED_DIR" "$(bridge_cron_run_id "$job_name" "$job_id" "$slot")"
 }
 
+bridge_cron_worker_dir() {
+  printf '%s' "$BRIDGE_CRON_DISPATCH_WORKER_DIR"
+}
+
+bridge_cron_worker_pid_file() {
+  local task_id="$1"
+  printf '%s/task-%s.pid' "$(bridge_cron_worker_dir)" "$task_id"
+}
+
+bridge_cron_worker_log_file() {
+  local task_id="$1"
+  printf '%s/task-%s.log' "$(bridge_cron_worker_dir)" "$task_id"
+}
+
+bridge_cron_dispatch_completion_note_file_by_id() {
+  local run_id="$1"
+  printf '%s/cron-result/%s.md' "$BRIDGE_SHARED_DIR" "$run_id"
+}
+
+bridge_cron_dispatch_followup_file_by_id() {
+  local run_id="$1"
+  printf '%s/cron-followup/%s.md' "$BRIDGE_SHARED_DIR" "$run_id"
+}
+
+bridge_cron_run_id_from_body_path() {
+  local body_path="$1"
+  local base
+
+  base="$(basename "$body_path")"
+  printf '%s' "${base%.md}"
+}
+
+bridge_cron_load_run_shell() {
+  local run_id="$1"
+  local request_file result_file status_file
+
+  request_file="$(bridge_cron_request_file_by_id "$run_id")"
+  result_file="$(bridge_cron_result_file_by_id "$run_id")"
+  status_file="$(bridge_cron_status_file_by_id "$run_id")"
+
+  bridge_require_python
+  python3 - "$request_file" "$result_file" "$status_file" <<'PY'
+import json
+import shlex
+import sys
+from pathlib import Path
+
+request_file = Path(sys.argv[1])
+result_file = Path(sys.argv[2])
+status_file = Path(sys.argv[3])
+
+
+def load(path: Path) -> dict:
+    if not path.is_file():
+        return {}
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+request = load(request_file)
+result = load(result_file)
+status = load(status_file)
+
+fields = {
+    "CRON_RUN_ID": request.get("run_id", request_file.parent.name),
+    "CRON_JOB_NAME": request.get("job_name", ""),
+    "CRON_FAMILY": request.get("family", ""),
+    "CRON_SLOT": request.get("slot", ""),
+    "CRON_TARGET_AGENT": request.get("target_agent", ""),
+    "CRON_TARGET_ENGINE": request.get("target_engine", ""),
+    "CRON_RESULT_STATUS": result.get("status", ""),
+    "CRON_RESULT_SUMMARY": result.get("summary", ""),
+    "CRON_RUN_STATE": status.get("state", ""),
+    "CRON_RESULT_FILE": str(result_file),
+    "CRON_STATUS_FILE": str(status_file),
+    "CRON_STDOUT_LOG": request.get("stdout_log", ""),
+    "CRON_STDERR_LOG": request.get("stderr_log", ""),
+    "CRON_PROMPT_FILE": str(request_file.parent / "prompt.txt"),
+    "CRON_NEEDS_HUMAN_FOLLOWUP": "1" if result.get("needs_human_followup") else "0",
+}
+
+for key, value in fields.items():
+    print(f"{key}={shlex.quote(str(value))}")
+PY
+}
+
+bridge_cron_write_completion_note() {
+  local run_id="$1"
+  local note_file="$2"
+  local followup_task_id="${3:-}"
+
+  bridge_require_python
+  python3 - "$run_id" "$note_file" "$followup_task_id" "$(bridge_cron_request_file_by_id "$run_id")" "$(bridge_cron_result_file_by_id "$run_id")" "$(bridge_cron_status_file_by_id "$run_id")" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+run_id, note_file, followup_task_id, request_file, result_file, status_file = sys.argv[1:]
+request_path = Path(request_file)
+result_path = Path(result_file)
+status_path = Path(status_file)
+note_path = Path(note_file)
+
+
+def load(path: Path) -> dict:
+    if not path.is_file():
+        return {}
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+request = load(request_path)
+result = load(result_path)
+status = load(status_path)
+
+job_name = request.get("job_name", "")
+slot = request.get("slot", "")
+state = status.get("state", result.get("status", "unknown"))
+
+lines = [
+    "# Cron Dispatch Result",
+    "",
+    f"- run_id: {run_id}",
+    f"- job: {job_name}",
+    f"- family: {request.get('family', '')}",
+    f"- slot: {slot}",
+    f"- target_agent: {request.get('target_agent', '')}",
+    f"- engine: {request.get('target_engine', '')}",
+    f"- state: {state}",
+    f"- child_status: {result.get('status', '')}",
+    f"- request_file: {request_file}",
+    f"- result_file: {result_file}",
+    f"- status_file: {status_file}",
+]
+
+stdout_log = request.get("stdout_log")
+stderr_log = request.get("stderr_log")
+if stdout_log:
+    lines.append(f"- stdout_log: {stdout_log}")
+if stderr_log:
+    lines.append(f"- stderr_log: {stderr_log}")
+if followup_task_id:
+    lines.append(f"- followup_task_id: {followup_task_id}")
+
+summary = str(result.get("summary", "")).strip()
+if summary:
+    lines.extend(["", "## Summary", "", summary])
+
+recommended = result.get("recommended_next_steps") or []
+if recommended:
+    lines.extend(["", "## Recommended Next Steps", ""])
+    for item in recommended:
+        lines.append(f"- {item}")
+
+runner_error = str(result.get("runner_error", "")).strip()
+if runner_error:
+    lines.extend(["", "## Runner Error", "", runner_error])
+
+note_path.parent.mkdir(parents=True, exist_ok=True)
+note_path.write_text("\n".join(lines).rstrip() + "\n", encoding="utf-8")
+PY
+}
+
+bridge_cron_write_followup_body() {
+  local run_id="$1"
+  local body_file="$2"
+
+  bridge_require_python
+  python3 - "$run_id" "$body_file" "$(bridge_cron_request_file_by_id "$run_id")" "$(bridge_cron_result_file_by_id "$run_id")" "$(bridge_cron_status_file_by_id "$run_id")" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+run_id, body_file, request_file, result_file, status_file = sys.argv[1:]
+request_path = Path(request_file)
+result_path = Path(result_file)
+status_path = Path(status_file)
+body_path = Path(body_file)
+
+
+def load(path: Path) -> dict:
+    if not path.is_file():
+        return {}
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+request = load(request_path)
+result = load(result_path)
+status = load(status_path)
+
+job_name = request.get("job_name", run_id)
+title = f"# [cron-followup] {job_name}"
+lines = [
+    title,
+    "",
+    f"- run_id: {run_id}",
+    f"- slot: {request.get('slot', '')}",
+    f"- family: {request.get('family', '')}",
+    f"- target_agent: {request.get('target_agent', '')}",
+    f"- engine: {request.get('target_engine', '')}",
+    f"- run_state: {status.get('state', '')}",
+    f"- child_status: {result.get('status', '')}",
+    f"- request_file: {request_file}",
+    f"- result_file: {result_file}",
+    f"- status_file: {status_file}",
+]
+
+stdout_log = request.get("stdout_log")
+stderr_log = request.get("stderr_log")
+if stdout_log:
+    lines.append(f"- stdout_log: {stdout_log}")
+if stderr_log:
+    lines.append(f"- stderr_log: {stderr_log}")
+
+summary = str(result.get("summary", "")).strip()
+if summary:
+    lines.extend(["", "## Summary", "", summary])
+
+for section, key in (
+    ("Findings", "findings"),
+    ("Actions Taken", "actions_taken"),
+    ("Recommended Next Steps", "recommended_next_steps"),
+    ("Artifacts", "artifacts"),
+):
+    values = result.get(key) or []
+    if not values:
+      continue
+    lines.extend(["", f"## {section}", ""])
+    for item in values:
+        lines.append(f"- {item}")
+
+runner_error = str(result.get("runner_error", "")).strip()
+if runner_error:
+    lines.extend(["", "## Runner Error", "", runner_error])
+
+body_path.parent.mkdir(parents=True, exist_ok=True)
+body_path.write_text("\n".join(lines).rstrip() + "\n", encoding="utf-8")
+PY
+}
+
 bridge_resolve_openclaw_target() {
   local openclaw_agent="$1"
   local explicit="${BRIDGE_OPENCLAW_AGENT_TARGET[$openclaw_agent]-}"

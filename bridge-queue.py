@@ -189,8 +189,8 @@ def agent_summary_rows(conn: sqlite3.Connection, agents: Iterable[str] | None) -
         assigned AS (
           SELECT
             assigned_to AS agent,
-            SUM(CASE WHEN status = 'queued' THEN 1 ELSE 0 END) AS queued_count,
-            SUM(CASE WHEN status = 'blocked' THEN 1 ELSE 0 END) AS blocked_count
+            SUM(CASE WHEN status = 'queued' AND title NOT LIKE '[cron-dispatch]%' THEN 1 ELSE 0 END) AS queued_count,
+            SUM(CASE WHEN status = 'blocked' AND title NOT LIKE '[cron-dispatch]%' THEN 1 ELSE 0 END) AS blocked_count
           FROM tasks
           GROUP BY assigned_to
         ),
@@ -529,6 +529,46 @@ def cmd_summary(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_cron_ready(args: argparse.Namespace) -> int:
+    sql = """
+        SELECT id, assigned_to, priority, title, body_path
+        FROM tasks
+        WHERE status = 'queued'
+          AND title LIKE '[cron-dispatch]%'
+        ORDER BY id
+        LIMIT ?
+    """
+
+    with closing(connect()) as conn:
+        rows = conn.execute(sql, (int(args.limit),)).fetchall()
+
+    if args.format == "tsv":
+        for row in rows:
+            print(
+                "\t".join(
+                    [
+                        str(row["id"]),
+                        str(row["assigned_to"]),
+                        str(row["priority"]),
+                        str(row["title"]),
+                        str(row["body_path"] or ""),
+                    ]
+                )
+            )
+        return 0
+
+    if not rows:
+        print("(no queued cron-dispatch tasks)")
+        return 0
+
+    print("id  assigned_to  priority  title")
+    for row in rows:
+        print(f"{row['id']:<3} {row['assigned_to']:<11} {row['priority']:<8} {row['title']}")
+        if row["body_path"]:
+            print(f"    file: {row['body_path']}")
+    return 0
+
+
 def load_snapshot(path: str) -> list[dict[str, str]]:
     rows: list[dict[str, str]] = []
     with open(path, "r", encoding="utf-8") as handle:
@@ -635,6 +675,7 @@ def cmd_daemon_step(args: argparse.Namespace) -> int:
             SELECT assigned_to, id
             FROM tasks
             WHERE status = 'queued'
+              AND title NOT LIKE '[cron-dispatch]%'
             ORDER BY assigned_to, id
             """
         ).fetchall()
@@ -647,6 +688,7 @@ def cmd_daemon_step(args: argparse.Namespace) -> int:
               SELECT assigned_to AS agent, COUNT(*) AS queued_count
               FROM tasks
               WHERE status = 'queued'
+                AND title NOT LIKE '[cron-dispatch]%'
               GROUP BY assigned_to
             ),
             claimed AS (
@@ -787,6 +829,11 @@ def build_parser() -> argparse.ArgumentParser:
     summary_parser.add_argument("--agent", action="append")
     summary_parser.add_argument("--format", choices=("text", "tsv"), default="text")
     summary_parser.set_defaults(handler=cmd_summary)
+
+    cron_ready_parser = subparsers.add_parser("cron-ready")
+    cron_ready_parser.add_argument("--limit", type=int, default=50)
+    cron_ready_parser.add_argument("--format", choices=("text", "tsv"), default="tsv")
+    cron_ready_parser.set_defaults(handler=cmd_cron_ready)
 
     daemon_parser = subparsers.add_parser("daemon-step")
     daemon_parser.add_argument("--snapshot", required=True)
