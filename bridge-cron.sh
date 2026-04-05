@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# bridge-cron.sh — OpenClaw cron inventory and queue adapters
+# bridge-cron.sh — bridge-owned cron inventory, migration, and queue adapters
 
 set -euo pipefail
 
@@ -10,8 +10,9 @@ source "$SCRIPT_DIR/bridge-lib.sh"
 usage() {
   cat <<EOF
 Usage:
-  $(basename "$0") inventory [--agent <openclaw-agent>] [--family <family>] [--mode recurring|one-shot|all] [--enabled yes|no|all] [--limit <count>] [--json]
+  $(basename "$0") inventory [--agent <agent>] [--family <family>] [--mode recurring|one-shot|all] [--enabled yes|no|all] [--limit <count>] [--json]
   $(basename "$0") show <job-name-or-id> [--json]
+  $(basename "$0") import [--source-jobs-file <path>] [--dry-run]
   $(basename "$0") list [--agent <bridge-agent>] [--enabled yes|no|all] [--limit <count>] [--json]
   $(basename "$0") create --agent <bridge-agent> --schedule "<cron-expr>" --title "<title>" [--payload "<text>" | --payload-file <path>] [--tz <iana-tz>]
   $(basename "$0") update <job-id> [--agent <bridge-agent>] [--schedule "<cron-expr>"] [--title "<title>"] [--payload "<text>" | --payload-file <path>] [--tz <iana-tz>] [--enable|--disable]
@@ -19,16 +20,18 @@ Usage:
   $(basename "$0") enqueue <job-name-or-id> [--slot <slot-key>] [--target <bridge-agent>] [--from <actor>] [--priority normal|high] [--dry-run]
   $(basename "$0") sync [--dry-run] [--json] [--since <iso-datetime>] [--now <iso-datetime>]
   $(basename "$0") run-subagent <run-id> [--dry-run]
-  $(basename "$0") errors report [--agent <bridge|openclaw-agent>] [--family <family>] [--limit <count>] [--json]
+  $(basename "$0") errors report [--agent <agent>] [--family <family>] [--limit <count>] [--json]
   $(basename "$0") cleanup report [--mode expired-one-shot] [--json]
   $(basename "$0") cleanup prune [--mode expired-one-shot] [--dry-run]
 EOF
 }
 
 run_inventory() {
+  local jobs_file
+  jobs_file="$(bridge_cron_source_jobs_file || true)"
   local py_args=(
     inventory
-    --jobs-file "$BRIDGE_OPENCLAW_CRON_JOBS_FILE"
+    --jobs-file "$jobs_file"
   )
 
   while [[ $# -gt 0 ]]; do
@@ -52,15 +55,17 @@ run_inventory() {
     esac
   done
 
-  bridge_require_openclaw_cron_jobs
+  bridge_require_cron_source_jobs "$jobs_file"
   bridge_cron_python "${py_args[@]}"
 }
 
 run_show() {
   local job_ref="${1:-}"
+  local jobs_file
+  jobs_file="$(bridge_cron_source_jobs_file || true)"
   local py_args=(
     show
-    --jobs-file "$BRIDGE_OPENCLAW_CRON_JOBS_FILE"
+    --jobs-file "$jobs_file"
   )
 
   shift || true
@@ -83,7 +88,44 @@ run_show() {
     esac
   done
 
-  bridge_require_openclaw_cron_jobs
+  bridge_require_cron_source_jobs "$jobs_file"
+  bridge_cron_python "${py_args[@]}"
+}
+
+run_import() {
+  local source_jobs_file="$BRIDGE_OPENCLAW_CRON_JOBS_FILE"
+  local dry_run=0
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --source-jobs-file)
+        [[ $# -lt 2 ]] && bridge_die "--source-jobs-file 뒤에 값을 지정하세요."
+        source_jobs_file="$2"
+        shift 2
+        ;;
+      --dry-run)
+        dry_run=1
+        shift
+        ;;
+      -h|--help)
+        usage
+        exit 0
+        ;;
+      *)
+        bridge_die "지원하지 않는 import 옵션입니다: $1"
+        ;;
+    esac
+  done
+
+  [[ -f "$source_jobs_file" ]] || bridge_die "source cron jobs 파일이 없습니다: $source_jobs_file"
+  local py_args=(
+    native-import
+    --jobs-file "$BRIDGE_NATIVE_CRON_JOBS_FILE"
+    --source-jobs-file "$source_jobs_file"
+  )
+  if [[ $dry_run -eq 1 ]]; then
+    py_args+=(--dry-run)
+  fi
   bridge_cron_python "${py_args[@]}"
 }
 
@@ -244,7 +286,8 @@ write_dispatch_body() {
 
 run_enqueue() {
   local job_ref=""
-  local jobs_file="$BRIDGE_OPENCLAW_CRON_JOBS_FILE"
+  local jobs_file
+  jobs_file="$(bridge_cron_source_jobs_file || true)"
   local slot=""
   local target=""
   local actor=""
@@ -306,6 +349,7 @@ run_enqueue() {
   done
 
   [[ -n "$job_ref" ]] || bridge_die "Usage: $(basename "$0") enqueue <job-name-or-id> [--jobs-file <path>] [--slot <slot-key>] [--target <bridge-agent>] [--from <actor>] [--priority normal|high] [--dry-run]"
+  bridge_require_cron_source_jobs "$jobs_file"
 
   case "$priority" in
     normal|high) ;;
@@ -494,40 +538,15 @@ run_sync() {
     esac
   done
 
-  if [[ ! -f "$BRIDGE_OPENCLAW_CRON_JOBS_FILE" && ! -f "$BRIDGE_NATIVE_CRON_JOBS_FILE" ]]; then
+  if [[ ! -f "$BRIDGE_NATIVE_CRON_JOBS_FILE" ]]; then
     printf 'status: skipped\n'
-    printf 'reason: no_cron_jobs_files\n'
-    printf 'openclaw_jobs_file: %s\n' "$BRIDGE_OPENCLAW_CRON_JOBS_FILE"
+    printf 'reason: no_native_cron_jobs_file\n'
     printf 'native_jobs_file: %s\n' "$BRIDGE_NATIVE_CRON_JOBS_FILE"
     return 0
   fi
 
   tmp_dir="$(mktemp -d)"
   trap 'rm -rf "$tmp_dir"' RETURN
-
-  if [[ -f "$BRIDGE_OPENCLAW_CRON_JOBS_FILE" ]]; then
-    local openclaw_args=(
-      sync
-      --jobs-file "$BRIDGE_OPENCLAW_CRON_JOBS_FILE"
-      --state-file "$openclaw_state_file"
-      --bridge-cron "$SCRIPT_DIR/bridge-cron.sh"
-      --repo-root "$SCRIPT_DIR"
-      --json
-    )
-    if [[ -n "$since" ]]; then
-      openclaw_args+=(--since "$since")
-    fi
-    if [[ -n "$now" ]]; then
-      openclaw_args+=(--now "$now")
-    fi
-    if [[ $dry_run -eq 1 ]]; then
-      openclaw_args+=(--dry-run)
-    fi
-    if ! bridge_cron_scheduler_python "${openclaw_args[@]}" >"$tmp_dir/openclaw.json"; then
-      status=1
-    fi
-    openclaw_json="$tmp_dir/openclaw.json"
-  fi
 
   if [[ -f "$BRIDGE_NATIVE_CRON_JOBS_FILE" ]]; then
     local native_args=(
@@ -646,13 +665,15 @@ run_errors() {
   local errors_cmd="${1:-}"
   shift || true
 
-  bridge_require_openclaw_cron_jobs
+  local jobs_file
+  jobs_file="$(bridge_cron_source_jobs_file || true)"
+  bridge_require_cron_source_jobs "$jobs_file"
 
   case "$errors_cmd" in
     report)
       local py_args=(
         errors-report
-        --jobs-file "$BRIDGE_OPENCLAW_CRON_JOBS_FILE"
+        --jobs-file "$jobs_file"
       )
       while [[ $# -gt 0 ]]; do
         case "$1" in
@@ -686,13 +707,15 @@ run_cleanup() {
   local cleanup_cmd="${1:-}"
   shift || true
 
-  bridge_require_openclaw_cron_jobs
+  local jobs_file
+  jobs_file="$(bridge_cron_source_jobs_file || true)"
+  bridge_require_cron_source_jobs "$jobs_file"
 
   case "$cleanup_cmd" in
     report)
       local py_args=(
         cleanup-report
-        --jobs-file "$BRIDGE_OPENCLAW_CRON_JOBS_FILE"
+        --jobs-file "$jobs_file"
       )
       while [[ $# -gt 0 ]]; do
         case "$1" in
@@ -719,7 +742,7 @@ run_cleanup() {
     prune)
       local py_args=(
         cleanup-prune
-        --jobs-file "$BRIDGE_OPENCLAW_CRON_JOBS_FILE"
+        --jobs-file "$jobs_file"
       )
       while [[ $# -gt 0 ]]; do
         case "$1" in
@@ -758,6 +781,9 @@ case "$subcommand" in
     ;;
   show)
     run_show "$@"
+    ;;
+  import)
+    run_import "$@"
     ;;
   list)
     run_list "$@"

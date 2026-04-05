@@ -40,7 +40,7 @@ should inspect.
 These repo changes are required before broad rollout:
 
 1. Remove the current family allowlist default so `cron enqueue` can bridge any enabled recurring job.
-2. Add `agent-bridge cron sync` so Agent Bridge itself can detect due jobs from `~/.openclaw/cron/jobs.json`.
+2. Add `agent-bridge cron import` + `cron sync` so Agent Bridge itself can cut over an old snapshot into the bridge-native cron store and detect due jobs there.
 3. Add daemon integration so each daemon cycle can run `cron sync` before queue nudge / auto-start processing.
 4. Add bridge-owned scheduler state under `state/cron/` so missed daemon cycles can catch up without duplicate enqueue.
 5. Keep one-shot migration separate from this recurring rollout.
@@ -49,8 +49,9 @@ These repo changes are required before broad rollout:
 
 ### Source Of Truth
 
-- Job definitions remain in legacy `jobs.json` during migration.
-- Agent Bridge becomes the runtime that decides when to enqueue due recurring jobs.
+- Job definitions cut over into `~/.agent-bridge/cron/jobs.json`.
+- `cron import` is the one-shot bridge-owned import step from an older snapshot.
+- After import, Agent Bridge itself is both the canonical store and the runtime that decides when to enqueue due recurring jobs.
 
 ### Supported Schedule Kinds
 

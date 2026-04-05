@@ -9,6 +9,28 @@ bridge_require_openclaw_cron_jobs() {
   bridge_die "OpenClaw cron jobs 파일이 없습니다: $BRIDGE_OPENCLAW_CRON_JOBS_FILE"
 }
 
+bridge_cron_source_jobs_file() {
+  if [[ -f "$BRIDGE_NATIVE_CRON_JOBS_FILE" ]]; then
+    printf '%s\n' "$BRIDGE_NATIVE_CRON_JOBS_FILE"
+    return 0
+  fi
+  if [[ -f "$BRIDGE_OPENCLAW_CRON_JOBS_FILE" ]]; then
+    printf '%s\n' "$BRIDGE_OPENCLAW_CRON_JOBS_FILE"
+    return 0
+  fi
+  return 1
+}
+
+bridge_require_cron_source_jobs() {
+  local jobs_file="${1:-}"
+  if [[ -n "$jobs_file" && -f "$jobs_file" ]]; then
+    return 0
+  fi
+  jobs_file="$(bridge_cron_source_jobs_file || true)"
+  [[ -n "$jobs_file" ]] && return 0
+  bridge_die "cron jobs 파일이 없습니다: $BRIDGE_NATIVE_CRON_JOBS_FILE"
+}
+
 bridge_cron_python() {
   bridge_require_python
   python3 "$BRIDGE_SCRIPT_DIR/bridge-cron.py" "$@"

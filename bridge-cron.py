@@ -832,6 +832,46 @@ def run_native_delete(args):
     return 0
 
 
+def run_native_import(args):
+    source_path = Path(args.source_jobs_file).expanduser()
+    target_path = Path(args.jobs_file).expanduser()
+    raw_payload, jobs = load_jobs_payload(source_path)
+    imported_jobs = [dict(job) for job in jobs if isinstance(job, dict)]
+    result = {
+        "source_file": str(source_path),
+        "target_file": str(target_path),
+        "total_jobs": len(jobs),
+        "imported_jobs": len(imported_jobs),
+    }
+    if args.dry_run:
+        result["status"] = "dry_run"
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+        return 0
+
+    target_path.parent.mkdir(parents=True, exist_ok=True)
+    backup_file = None
+    if target_path.exists():
+        backup_file = backup_path_for(target_path)
+        backup_file.write_text(target_path.read_text(encoding="utf-8"), encoding="utf-8")
+
+    next_payload = raw_payload if isinstance(raw_payload, dict) else {"jobs": imported_jobs}
+    next_payload["format"] = "agent-bridge-cron-v1"
+    next_payload["updatedAt"] = datetime.now().astimezone().isoformat()
+    next_payload["metadata"] = {
+        **dict(next_payload.get("metadata") or {}),
+        "source": "native-import",
+        "importedFrom": str(source_path),
+    }
+    next_payload["jobs"] = imported_jobs
+    atomic_write_jobs(target_path, next_payload)
+
+    result["status"] = "imported"
+    if backup_file is not None:
+        result["backup_file"] = str(backup_file)
+    print(json.dumps(result, ensure_ascii=False, indent=2))
+    return 0
+
+
 def run_cleanup_prune(args, raw_payload, records):
     candidates = sorted(cleanup_candidates(records, args.mode), key=record_sort_key)
     candidate_ids = {record["id"] for record in candidates}
@@ -1096,6 +1136,11 @@ def build_parser():
     native_delete_parser = subparsers.add_parser("native-delete", help="Delete a bridge-native cron job.")
     native_delete_parser.add_argument("--jobs-file", required=True)
     native_delete_parser.add_argument("job_ref")
+
+    native_import_parser = subparsers.add_parser("native-import", help="Import cron jobs into the bridge-native store.")
+    native_import_parser.add_argument("--jobs-file", required=True)
+    native_import_parser.add_argument("--source-jobs-file", required=True)
+    native_import_parser.add_argument("--dry-run", action="store_true")
     return parser
 
 
@@ -1138,6 +1183,16 @@ def main():
     if args.command == "native-delete":
         try:
             return run_native_delete(args)
+        except ValueError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 2
+
+    if args.command == "native-import":
+        try:
+            return run_native_import(args)
+        except FileNotFoundError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 2
         except ValueError as exc:
             print(f"error: {exc}", file=sys.stderr)
             return 2

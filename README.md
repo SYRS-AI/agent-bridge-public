@@ -272,15 +272,17 @@ Use `--test-start` only when you want a real tmux launch smoke test:
 ./agent-bridge setup agent tester --test-start
 ```
 
-### Optional: inspect OpenClaw cron inventory
+### Optional: inspect and import existing cron jobs
 
-If you are migrating existing OpenClaw cron jobs into Agent Bridge, start with the read-only inventory:
+If you are migrating existing cron jobs into Agent Bridge, start with the read-only inventory and then import them into the bridge-native store:
 
 ```bash
 ./agent-bridge cron inventory
 ./agent-bridge cron inventory --family memory-daily --limit 10
 ./agent-bridge cron inventory --mode one-shot --limit 20
 ./agent-bridge cron show <job-id>
+./agent-bridge cron import --dry-run
+./agent-bridge cron import
 ./agent-bridge cron enqueue <memory-daily-job-id> --slot 2026-04-05 --dry-run
 ./agent-bridge cron enqueue <monthly-highlights-job-id> --dry-run
 ./agent-bridge cron sync --dry-run
@@ -289,13 +291,13 @@ If you are migrating existing OpenClaw cron jobs into Agent Bridge, start with t
 ./agent-bridge cron cleanup prune --dry-run
 ```
 
-By default the inventory reads `~/.openclaw/cron/jobs.json`. Override it with `BRIDGE_OPENCLAW_CRON_JOBS_FILE=/path/to/jobs.json` when testing snapshots.
+`cron inventory`, `show`, `enqueue`, `errors`, and `cleanup` prefer `~/.agent-bridge/cron/jobs.json` when it exists. Before the cutover import runs, they fall back to `BRIDGE_OPENCLAW_CRON_JOBS_FILE` so you can still inspect an older source snapshot. Use `cron import` once to copy that source into the bridge-native store.
 
-`cron enqueue` now works for recurring OpenClaw jobs in general. It writes a materialized note under `shared/cron/`, records per-slot manifests under `state/cron/dispatch/`, and creates compact `[cron-dispatch]` queue tasks for the bridge daemon. The daemon claims those tasks, runs `agent-bridge cron run-subagent <run-id>` in a disposable child, then closes the dispatch task when the result artifact is ready.
+`cron enqueue` now works for recurring jobs in general. It writes a materialized note under `shared/cron/`, records per-slot manifests under `state/cron/dispatch/`, and creates compact `[cron-dispatch]` queue tasks for the bridge daemon. The daemon claims those tasks, runs `agent-bridge cron run-subagent <run-id>` in a disposable child, then closes the dispatch task when the result artifact is ready.
 
 For `memory-daily` the default slot is `YYYY-MM-DD`. For `monthly-highlights` it is `YYYY-MM`. Other recurring jobs default to the current minute as an ISO timestamp, so repeated enqueue calls on the same day do not collapse into one slot.
 
-`cron sync` is the bridge-owned recurring scheduler. It scans legacy recurring jobs, derives due occurrence slots, and enqueues each occurrence through the same disposable-child path. When `BRIDGE_OPENCLAW_CRON_SYNC_ENABLED=1`, the daemon also drains queued `[cron-dispatch]` tasks itself, so recurring jobs do not wake long-lived agent sessions unless a run explicitly needs a separate `[cron-followup]` task.
+`cron sync` is the bridge-owned recurring scheduler. It scans the bridge-native recurring job store, derives due occurrence slots, and enqueues each occurrence through the same disposable-child path. When `BRIDGE_OPENCLAW_CRON_SYNC_ENABLED=1`, the daemon also drains queued `[cron-dispatch]` tasks itself, so recurring jobs do not wake long-lived agent sessions unless a run explicitly needs a separate `[cron-followup]` task.
 
 If your daemon environment does not inherit the same `PATH` as your interactive shell, set `BRIDGE_CLAUDE_BIN` or `BRIDGE_CODEX_BIN` explicitly in `agent-roster.local.sh`. The cron runner also searches common install locations such as `~/.local/bin`, `/opt/homebrew/bin`, and `/usr/local/bin`.
 
@@ -305,7 +307,7 @@ If your daemon environment does not inherit the same `PATH` as your interactive 
 
 ### Bridge-native cron jobs
 
-For recurring work discovered inside Agent Bridge itself, use the bridge-native cron store instead of relying on OpenClaw:
+For recurring work defined inside Agent Bridge itself, use the bridge-native cron store:
 
 ```bash
 ./agent-bridge cron list --agent main
@@ -314,7 +316,7 @@ For recurring work discovered inside Agent Bridge itself, use the bridge-native 
 ./agent-bridge cron delete <job-id>
 ```
 
-Bridge-native jobs live at `~/.agent-bridge/cron/jobs.json`. `cron sync` now aggregates both legacy OpenClaw recurring jobs and bridge-native recurring jobs into the same disposable-child dispatch path.
+Bridge-native jobs live at `~/.agent-bridge/cron/jobs.json`. `cron import` is the one-shot cutover step for an older source snapshot; after that, `cron sync` reads the bridge-native store directly.
 
 The status dashboard also includes a lightweight health check for active sessions. It classifies them as `ok`, `warn`, or `crit` from recorded session activity age. Inactive on-demand roles are not treated as stale. Defaults are `BRIDGE_HEALTH_WARN_SECONDS=3600` and `BRIDGE_HEALTH_CRITICAL_SECONDS=14400`, and you can override them in `agent-roster.local.sh`.
 
