@@ -509,7 +509,11 @@ def replace_with_indent(line: str, replacement: str) -> str:
 
 
 def rewrite_cron_delivery_text(text: str, agent_id: str) -> tuple[str, Counter]:
-    if "sessions_send" not in text and "openclaw message send" not in text:
+    if (
+        "sessions_send" not in text
+        and "openclaw message send" not in text
+        and "sessions_history" not in text
+    ):
         return text, Counter()
 
     counts: Counter = Counter()
@@ -562,6 +566,16 @@ def rewrite_cron_delivery_text(text: str, agent_id: str) -> tuple[str, Counter]:
                 )
             )
             counts["notify_followup"] += 1
+            continue
+        if "sessions_history" in line:
+            add_banner()
+            output.append(
+                replace_with_indent(
+                    line,
+                    "- legacy session history 직접 조회 대신 `MEMORY.md`, 현재 bridge queue/task 상태, 관련 파일/DB 결과로 최근 맥락을 판단한다.",
+                )
+            )
+            counts["notify_context"] += 1
             continue
         output.append(line)
 
