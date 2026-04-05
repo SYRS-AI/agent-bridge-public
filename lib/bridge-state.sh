@@ -559,18 +559,20 @@ bridge_write_roster_status_snapshot() {
   local file="$1"
   local agent
   local active
+  local notify
   local session
 
   {
-    echo -e "agent\tengine\tsession\tworkdir\tsource\tactive"
+    echo -e "agent\tengine\tsession\tworkdir\tsource\tactive\tnotify"
     for agent in "${BRIDGE_AGENT_IDS[@]}"; do
       active=0
+      notify="$(bridge_agent_notify_status "$agent")"
       session="$(bridge_agent_session "$agent")"
       if bridge_agent_is_active "$agent"; then
         active=1
       fi
 
-      echo -e "${agent}\t$(bridge_agent_engine "$agent")\t${session}\t$(bridge_agent_workdir "$agent")\t$(bridge_agent_source "$agent")\t${active}"
+      echo -e "${agent}\t$(bridge_agent_engine "$agent")\t${session}\t$(bridge_agent_workdir "$agent")\t$(bridge_agent_source "$agent")\t${active}\t${notify}"
     done
   } >"$file"
 }

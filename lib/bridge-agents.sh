@@ -391,6 +391,37 @@ bridge_agent_notify_account() {
   esac
 }
 
+bridge_agent_requires_notify_transport() {
+  local agent="$1"
+  [[ "$(bridge_agent_engine "$agent")" == "claude" ]]
+}
+
+bridge_agent_has_notify_transport() {
+  local agent="$1"
+  local kind
+  local target
+
+  kind="$(bridge_agent_notify_kind "$agent")"
+  target="$(bridge_agent_notify_target "$agent")"
+  [[ -n "$kind" && -n "$target" ]]
+}
+
+bridge_agent_notify_status() {
+  local agent="$1"
+
+  if ! bridge_agent_requires_notify_transport "$agent"; then
+    printf '%s' "-"
+    return 0
+  fi
+
+  if bridge_agent_has_notify_transport "$agent"; then
+    printf '%s' "ok"
+    return 0
+  fi
+
+  printf '%s' "miss"
+}
+
 bridge_agent_loop() {
   local agent="$1"
   printf '%s' "${BRIDGE_AGENT_LOOP[$agent]-1}"

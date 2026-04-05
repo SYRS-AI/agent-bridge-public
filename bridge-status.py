@@ -229,6 +229,7 @@ def render_dashboard(args: argparse.Namespace) -> str:
     full_active_count = sum(1 for row in roster if str(row.get("active", "0")) == "1")
     health_warn_count = 0
     health_critical_count = 0
+    notify_missing_count = sum(1 for row in roster if row.get("notify") == "miss")
 
     for row in roster:
         metric = metrics.get(row["agent"], {})
@@ -262,7 +263,7 @@ def render_dashboard(args: argparse.Namespace) -> str:
     lines.append(
         f"updated {iso_now()} | daemon {'running' if daemon_running else 'stopped'} pid={daemon_pid} | "
         f"active {full_active_count}/{full_total_agents} | shown {visible_agents} | "
-        f"health warn={health_warn_count} crit={health_critical_count} | db {queue_db}"
+        f"health warn={health_warn_count} crit={health_critical_count} | notify miss={notify_missing_count} | db {queue_db}"
     )
     lines.append("")
     lines.append(
@@ -276,7 +277,7 @@ def render_dashboard(args: argparse.Namespace) -> str:
     )
     lines.append("")
     lines.append("Agents")
-    lines.append("agent           eng     on  q   c   b   idle  stale nudge  load        session        workdir")
+    lines.append("agent           eng     on  q   c   b   idle  stale notify nudge  load        session        workdir")
 
     for row in roster:
         agent = row["agent"]
@@ -300,6 +301,7 @@ def render_dashboard(args: argparse.Namespace) -> str:
             f"{queued:>2}  {claimed:>2}  {blocked:>2}  "
             f"{fmt_idle(int(activity_ts) if activity_ts else None):>4}  "
             f"{stale:>5} "
+            f"{(row.get('notify') or '-'):>6} "
             f"{fmt_age(int(last_nudge_ts) if last_nudge_ts else None):>5}  "
             f"{load_bar:<12}  "
             f"{(row.get('session') or '-')[:12]:<12}  {short_path(row.get('workdir', ''))}"

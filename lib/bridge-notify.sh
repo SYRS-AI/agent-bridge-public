@@ -54,6 +54,12 @@ bridge_notify_send() {
   bridge_notify_python "${args[@]}"
 }
 
+bridge_warn_missing_notify_transport() {
+  local agent="$1"
+
+  bridge_warn "Claude agent '${agent}' has no notification transport; configure BRIDGE_AGENT_DISCORD_CHANNEL_ID[\"${agent}\"] or BRIDGE_AGENT_NOTIFY_KIND/TARGET in agent-roster.local.sh. Task remains queued; the agent must poll 'agb inbox ${agent}'."
+}
+
 bridge_notification_text() {
   local title="$1"
   local message="$2"
@@ -92,8 +98,8 @@ bridge_dispatch_notification() {
   engine="$(bridge_agent_engine "$agent")"
   case "$engine" in
     claude)
-      if [[ -z "$(bridge_agent_notify_kind "$agent")" || -z "$(bridge_agent_notify_target "$agent")" ]]; then
-        bridge_warn "notify transport missing for Claude agent '${agent}'"
+      if ! bridge_agent_has_notify_transport "$agent"; then
+        bridge_warn_missing_notify_transport "$agent"
         return 1
       fi
       bridge_notify_send "$agent" "$title" "$message" "$task_id" "$priority"

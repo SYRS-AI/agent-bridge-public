@@ -159,6 +159,30 @@ cd ~/agent-bridge
 
 The deploy helper copies every tracked file from the working tree, verifies the copied bytes, and preserves target-only runtime files such as `agent-roster.local.sh`, `state/`, `logs/`, and `shared/`.
 
+### Configure queue notifications for Claude roles
+
+Queue-backed tasks still work without any extra transport, but Claude Code roles
+need a notification target if you expect live wake / urgent / completion pings
+inside Discord or Telegram.
+
+Add one of these to `agent-roster.local.sh`:
+
+```bash
+BRIDGE_AGENT_DISCORD_CHANNEL_ID["tester"]="123456789012345678"
+```
+
+Or:
+
+```bash
+BRIDGE_AGENT_NOTIFY_KIND["tester"]="discord"
+BRIDGE_AGENT_NOTIFY_TARGET["tester"]="123456789012345678"
+BRIDGE_AGENT_NOTIFY_ACCOUNT["tester"]="default"
+```
+
+If a Claude role is missing this metadata, `agent-bridge task create` and
+`agent-bridge urgent` now warn immediately, and `agent-bridge status` shows
+`notify miss` so the problem is visible on a fresh install.
+
 ### Inspect OpenClaw cron inventory
 
 If you are migrating existing OpenClaw cron jobs into Agent Bridge, start with the read-only inventory:

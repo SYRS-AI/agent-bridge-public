@@ -74,6 +74,14 @@ notify_task_requester() {
   bridge_dispatch_notification "$creator" "$title" "$message" "$TASK_ID" "$TASK_PRIORITY" || true
 }
 
+warn_if_target_notify_missing() {
+  local agent="$1"
+
+  if bridge_agent_requires_notify_transport "$agent" && ! bridge_agent_has_notify_transport "$agent"; then
+    bridge_warn_missing_notify_transport "$agent"
+  fi
+}
+
 cmd_create() {
   local target=""
   local title=""
@@ -137,6 +145,7 @@ cmd_create() {
     args+=(--body-file "$body_file")
   fi
 
+  warn_if_target_notify_missing "$target"
   bridge_queue_cli "${args[@]}"
 }
 

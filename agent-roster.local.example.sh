@@ -42,15 +42,18 @@ BRIDGE_AGENT_SESSION["codex-developer"]="codex-developer"
 # BRIDGE_AGENT_PROFILE_HOME["tester"]="$HOME/project-test"
 # BRIDGE_AGENT_PROFILE_HOME["developer"]="$HOME/project-app"
 
-# Optional: external notification transport for queue-backed wake / urgent /
-# completion signals. If omitted, Discord-backed agents can fall back to
-# BRIDGE_AGENT_DISCORD_CHANNEL_ID when present.
+# Optional but strongly recommended for Claude Code agents: external
+# notification transport for queue-backed wake / urgent / completion signals.
+# If omitted, Discord-backed agents can fall back to BRIDGE_AGENT_DISCORD_CHANNEL_ID
+# when present. Without either setting, queue items still exist, but the agent
+# must poll `agb inbox <agent>` because no live attention signal can be sent.
 # BRIDGE_AGENT_NOTIFY_KIND["tester"]="discord"
 # BRIDGE_AGENT_NOTIFY_TARGET["tester"]="123456789012345678"
 # BRIDGE_AGENT_NOTIFY_ACCOUNT["tester"]="default"
 # BRIDGE_AGENT_NOTIFY_KIND["developer"]="telegram"
 # BRIDGE_AGENT_NOTIFY_TARGET["developer"]="7670324081"
 # BRIDGE_AGENT_NOTIFY_ACCOUNT["developer"]="default"
+# BRIDGE_AGENT_DISCORD_CHANNEL_ID["tester"]="123456789012345678"
 
 # Optional: map OpenClaw cron agent ids to bridge agents for cron enqueue.
 # BRIDGE_OPENCLAW_AGENT_TARGET["syrs-shopify"]="shopify"
