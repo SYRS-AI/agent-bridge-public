@@ -115,6 +115,27 @@ def cmd_ensure_webhook_server(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_remove_webhook_server(args: argparse.Namespace) -> int:
+    mcp_path = Path(args.workdir).expanduser() / ".mcp.json"
+    payload = ensure_mcp_root(mcp_path)
+    servers = mcp_servers(payload)
+    removed = servers.pop(args.server_name, None) is not None
+    if removed:
+        save_json(mcp_path, payload)
+
+    print_payload(
+        {
+            "MCP_FILE": str(mcp_path),
+            "MCP_STATUS": "removed" if removed else "absent",
+            "MCP_SERVER_NAME": args.server_name,
+            "MCP_WEBHOOK_PORT": str(args.port),
+            "MCP_COMMAND": "",
+        },
+        args.format,
+    )
+    return 0
+
+
 def add_common_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--workdir", required=True)
     parser.add_argument("--bridge-home", required=True)
@@ -138,6 +159,10 @@ def build_parser() -> argparse.ArgumentParser:
     status_parser = subparsers.add_parser("status-webhook-server")
     add_common_args(status_parser)
     status_parser.set_defaults(handler=cmd_status_webhook_server)
+
+    remove_parser = subparsers.add_parser("remove-webhook-server")
+    add_common_args(remove_parser)
+    remove_parser.set_defaults(handler=cmd_remove_webhook_server)
 
     return parser
 

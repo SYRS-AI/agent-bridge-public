@@ -661,10 +661,11 @@ bridge_write_roster_status_snapshot() {
     echo -e "agent\tengine\tsession\tworkdir\tsource\tactive\twake"
     for agent in "${BRIDGE_AGENT_IDS[@]}"; do
       active=0
-      wake="$(bridge_agent_wake_status "$agent")"
+      wake="-"
       session="$(bridge_agent_session "$agent")"
       if bridge_agent_is_active "$agent"; then
         active=1
+        wake="$(bridge_agent_wake_status "$agent")"
       fi
 
       echo -e "${agent}\t$(bridge_agent_engine "$agent")\t${session}\t$(bridge_agent_workdir "$agent")\t$(bridge_agent_source "$agent")\t${active}\t${wake}"

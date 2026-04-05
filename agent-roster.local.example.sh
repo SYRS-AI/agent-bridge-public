@@ -43,8 +43,9 @@ BRIDGE_AGENT_SESSION["codex-developer"]="codex-developer"
 # BRIDGE_AGENT_PROFILE_HOME["developer"]="$HOME/project-app"
 
 # Optional external notification transport. This is not the primary A2A
-# delivery path for Claude roles; Claude wake uses BRIDGE_AGENT_WEBHOOK_PORT.
-# Use these only when you explicitly want out-of-band Discord/Telegram posts.
+# delivery path for Claude roles; Claude wake currently uses idle-gated local
+# tmux sends. Use these only when you explicitly want out-of-band
+# Discord/Telegram posts.
 # BRIDGE_AGENT_NOTIFY_KIND["tester"]="discord-webhook"
 # BRIDGE_AGENT_NOTIFY_TARGET["tester"]="<discord-webhook-url>"
 # BRIDGE_AGENT_NOTIFY_ACCOUNT["tester"]="default"
@@ -54,10 +55,10 @@ BRIDGE_AGENT_SESSION["codex-developer"]="codex-developer"
 # BRIDGE_AGENT_DISCORD_CHANNEL_ID["tester"]="123456789012345678"
 # The channel id is still useful for Discord wake relay / metadata.
 #
-# Optional: local Claude idle-wake webhook port. Static roles should set one
-# explicitly; dynamic Claude roles get a state-managed port automatically.
+# Optional/backlog: dormant custom channel port. The runtime path does not use
+# this today because development channels require an interactive trust prompt.
+# Keep it unset on normal installs.
 # BRIDGE_AGENT_WEBHOOK_PORT["tester"]="9001"
-# BRIDGE_AGENT_WEBHOOK_PORT["developer"]="9002"
 #
 # After setting the primary channel id, scaffold the runtime Discord files with:
 #   agent-bridge setup discord tester

@@ -45,40 +45,6 @@ nudge_agent_session() {
   echo "[info] nudged ${agent} (queued=${queued}, claimed=${claimed}, idle=${idle}s)"
 }
 
-webhook_wake_agent_session() {
-  local agent="$1"
-  local queued="$2"
-  local claimed="$3"
-  local idle="$4"
-  local nudge_key="${5:-}"
-  local fallback_idle="${BRIDGE_CLAUDE_IDLE_FALLBACK_SECONDS:-300}"
-  local title
-  local message
-  local status=0
-
-  [[ "$fallback_idle" =~ ^[0-9]+$ ]] || fallback_idle=300
-  [[ "$idle" =~ ^[0-9]+$ ]] || idle=0
-
-  if ! bridge_agent_idle_marker_exists "$agent" && (( idle < fallback_idle )); then
-    return 2
-  fi
-
-  title="queued tasks waiting (${queued})"
-  message="agb inbox ${agent}"
-  if bridge_dispatch_notification "$agent" "$title" "$message" "" "normal"; then
-    bridge_task_note_nudge "$agent" "$nudge_key" || true
-    echo "[info] webhook woke ${agent} (queued=${queued}, claimed=${claimed}, idle=${idle}s)"
-    return 0
-  fi
-
-  status=$?
-  if [[ "$status" == "2" ]]; then
-    return 2
-  fi
-
-  return 1
-}
-
 cron_worker_running_count() {
   local worker_dir
   local pid_file
@@ -339,7 +305,6 @@ cmd_sync_cycle() {
   local idle
   local nudge_key
   local changed=1
-  local engine
 
   "$BRIDGE_BASH_BIN" "$SCRIPT_DIR/bridge-sync.sh" >/dev/null 2>&1 || true
   if [[ "${BRIDGE_OPENCLAW_CRON_SYNC_ENABLED:-0}" == "1" ]]; then
@@ -360,22 +325,6 @@ cmd_sync_cycle() {
   while IFS=$'\t' read -r agent session queued claimed idle nudge_key; do
     [[ -z "$agent" || -z "$session" ]] && continue
     if ! bridge_tmux_session_exists "$session"; then
-      continue
-    fi
-
-    engine="$(bridge_agent_engine "$agent")"
-    if [[ "$engine" == "claude" ]]; then
-      if ! bridge_agent_has_wake_channel "$agent"; then
-        continue
-      fi
-      if webhook_wake_agent_session "$agent" "$queued" "$claimed" "$idle" "$nudge_key"; then
-        continue
-      fi
-      case "$?" in
-        2)
-          continue
-          ;;
-      esac
       continue
     fi
 

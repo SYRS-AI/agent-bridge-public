@@ -439,7 +439,7 @@ bridge_agent_has_wake_channel() {
     return 1
   fi
 
-  bridge_agent_has_webhook_port "$agent"
+  [[ -n "$(bridge_agent_session "$agent")" ]]
 }
 
 bridge_agent_wake_status() {

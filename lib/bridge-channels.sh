@@ -200,32 +200,34 @@ bridge_claude_webhook_channel_status() {
     --agent "$agent"
 }
 
+bridge_disable_claude_webhook_channel() {
+  local agent="$1"
+  local workdir="${2:-$(bridge_agent_workdir "$agent")}"
+  local port=""
+
+  port="$(bridge_agent_webhook_port "$agent" 2>/dev/null || true)"
+  [[ -n "$port" ]] || port=0
+
+  bridge_channels_python remove-webhook-server \
+    --workdir "$workdir" \
+    --bridge-home "$BRIDGE_HOME" \
+    --bridge-state-dir "$BRIDGE_STATE_DIR" \
+    --python-bin "$(command -v python3)" \
+    --server-script "$(bridge_channel_server_script_path)" \
+    --server-name "$(bridge_channel_server_name)" \
+    --port "$port" \
+    --agent "$agent"
+}
+
 bridge_claude_launch_with_webhook() {
   local agent="$1"
   local base_cmd="$2"
-  local port=""
-  local server_ref=""
-  local flag=""
 
   [[ "$(bridge_agent_engine "$agent")" == "claude" ]] || {
     printf '%s' "$base_cmd"
     return 0
   }
-
-  port="$(bridge_agent_webhook_port "$agent" 2>/dev/null || true)"
-  if [[ -z "$port" ]]; then
-    printf '%s' "$base_cmd"
-    return 0
-  fi
-
-  if [[ "$base_cmd" == *"--dangerously-load-development-channels"* ]]; then
-    printf '%s' "$base_cmd"
-    return 0
-  fi
-
-  server_ref="server:$(bridge_channel_server_name)"
-  flag="$(bridge_join_quoted --dangerously-load-development-channels "$server_ref")"
-  printf '%s %s' "$base_cmd" "$flag"
+  printf '%s' "$base_cmd"
 }
 
 bridge_post_channel_webhook() {

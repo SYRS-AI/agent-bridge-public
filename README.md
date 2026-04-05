@@ -171,21 +171,16 @@ cd ~/agent-bridge
 
 The deploy helper copies every tracked file from the working tree, verifies the copied bytes, and preserves target-only runtime files such as `agent-roster.local.sh`, `state/`, `logs/`, and `shared/`.
 
-### Enable Claude idle wake webhooks
+### Claude idle wake
 
-For Claude roles that should wake themselves when queue work arrives at a task
-boundary, assign a local webhook port in `agent-roster.local.sh`:
+Claude roles now wake through the local tmux session only when the bridge has
+explicitly marked them idle via the installed hooks:
 
-```bash
-BRIDGE_AGENT_WEBHOOK_PORT["tester"]="9001"
-```
+- `Stop` hook writes `idle-since`
+- `UserPromptSubmit` clears `idle-since`
+- the daemon sends only a short line such as `agb inbox <agent>` when `idle-since` exists
 
-Dynamic Claude agents get a state-managed port automatically from the bridge's
-local range. Static roles should set a fixed port explicitly.
-
-Queue-backed work remains durable even without a webhook port, but `wake=miss`
-will show up in `agent-bridge status` and idle Claude sessions will not be
-nudged automatically.
+This keeps the durable payload in the queue and avoids mid-turn delivery.
 
 ### Optional external channel notifications
 
@@ -199,6 +194,19 @@ BRIDGE_AGENT_NOTIFY_KIND["tester"]="discord-webhook"
 BRIDGE_AGENT_NOTIFY_TARGET["tester"]="<discord-webhook-url>"
 BRIDGE_AGENT_NOTIFY_ACCOUNT["tester"]="default"
 ```
+
+### Backlog: custom Claude channels
+
+The repo still includes the dormant channel-webhook helpers:
+
+- `bridge-channel-server.py`
+- `bridge-channels.py`
+- `lib/bridge-channels.sh`
+
+They are currently disabled in the runtime path because
+`--dangerously-load-development-channels` is not suitable for unattended setup
+or OSS onboarding. If Claude later supports safe custom channels without that
+prompt, the bridge can switch back to channel-based wake.
 
 ### Onboard a Discord-backed agent
 

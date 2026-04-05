@@ -4,7 +4,7 @@
 
 This document reflects the current A2A v2 behavior.
 
-- `Claude Code` uses `queue + local webhook wake`.
+- `Claude Code` uses `queue + idle-gated local tmux wake`.
 - `Codex` still uses prompt-gated short `tmux` delivery as a temporary fallback.
 - The queue is the durable source of truth for both engines.
 
@@ -12,7 +12,7 @@ This document reflects the current A2A v2 behavior.
 
 1. Every task payload lives in the SQLite queue.
 2. Claude never receives free-form `tmux send-keys`.
-3. Claude wake signals are short webhook posts such as `agb inbox <agent>`.
+3. Claude wake signals are short local sends such as `agb inbox <agent>`, and only happen when `idle-since` is present.
 4. Requester completion notices are queued back into the requester's inbox.
 5. Codex keeps prompt-gated short `tmux` messages until it has a native wake surface.
 
@@ -23,10 +23,10 @@ This document reflects the current A2A v2 behavior.
 For Claude agents, the bridge does this:
 
 1. create a durable queue task
-2. if the session is locally reachable and idle, POST a short wake signal to the agent's webhook channel
-3. if the agent is busy, stopped, or missing a wake channel, leave the task queued and wait for the next safe wake point
+2. if the session is locally reachable and explicitly idle, send a short wake line into the Claude prompt
+3. if the agent is busy or stopped, leave the task queued and wait for the next safe wake point
 
-The webhook message is intentionally short:
+The wake line is intentionally short:
 
 ```text
 [Agent Bridge] task #104: Redis incident needs triage
@@ -46,25 +46,21 @@ Instead it creates a new queue task for `B`:
 
 Then the normal engine-aware wake path applies:
 
-- Claude requester: webhook wake if idle
+- Claude requester: idle-gated local wake if safe
 - Codex requester: prompt-gated short message
 
 ## Claude Wake Metadata
 
-Claude wake is keyed off a local webhook port, not external Discord/Telegram metadata.
+Claude wake depends on:
 
-Static roles should configure:
-
-```bash
-BRIDGE_AGENT_WEBHOOK_PORT["tester"]="9001"
-```
-
-Dynamic Claude roles get a state-managed port automatically.
+- a live tmux session
+- `Stop` hook marking `idle-since`
+- `UserPromptSubmit` hook clearing `idle-since`
 
 The dashboard surfaces this as:
 
-- `wake=ok`: webhook wake channel is configured
-- `wake=miss`: queue is durable, but automatic idle wake is unavailable
+- `wake=ok`: the agent has a local wake path
+- `wake=miss`: session metadata is incomplete
 
 ## Codex Delivery
 
@@ -94,12 +90,12 @@ Out of scope here:
 
 ## Optional External Notifications
 
-`bridge-notify.py` still exists for explicit channel notifications, but it is not the core A2A delivery path for Claude sessions.
+`bridge-notify.py`, `bridge-channel-server.py`, and the `.mcp.json` webhook helpers remain in the repo for future use, but they are not part of the active Claude runtime path.
 
 The bridge runtime should work without Discord webhooks or Telegram chat ids as long as:
 
 - the queue is available
-- Claude wake ports are configured where needed
+- Claude sessions run with the bridge hooks installed
 
 ## Implementation Notes
 

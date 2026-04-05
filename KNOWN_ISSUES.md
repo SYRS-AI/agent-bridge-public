@@ -91,3 +91,20 @@ Operator guidance:
 
 - Install Homebrew Bash
 - Put Homebrew `bin` ahead of `/bin` in your shell `PATH`
+
+## 7. Claude custom channel wake is currently disabled
+
+Current behavior:
+
+- the repo still contains `bridge-channel-server.py`, `bridge-channels.py`, and `lib/bridge-channels.sh`
+- the active runtime path does not use them
+- Claude wake currently relies on `Stop` hook idle markers plus short idle-only `tmux` sends
+
+Reason:
+
+- `--dangerously-load-development-channels` is not suitable for unattended setup or OSS onboarding because it introduces an interactive trust step
+
+Operator guidance:
+
+- treat the channel helpers as backlog / future capability
+- restart Claude sessions after bridge deploys that change idle wake behavior

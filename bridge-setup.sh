@@ -165,8 +165,7 @@ run_agent() {
   local claude_path=""
   local hook_output=""
   local prompt_hook_output=""
-  local webhook_output=""
-  local webhook_port=""
+  local webhook_cleanup_output=""
   local wake_status=""
   local roster_channel=""
   local access_channel=""
@@ -251,19 +250,14 @@ run_agent() {
     fi
 
     echo
-    echo "== Claude Webhook Channel =="
-    webhook_port="$(bridge_agent_webhook_port "$agent" 2>/dev/null || true)"
-    if [[ -n "$webhook_port" ]]; then
-      if webhook_output="$(bridge_ensure_claude_webhook_channel "$agent" "$workdir" 2>&1)"; then
-        echo "$webhook_output"
-      else
-        echo "$webhook_output"
-        failures=$((failures + 1))
-      fi
+    echo "== Claude Idle Wake =="
+    echo "mode: local_tmux_send"
+    echo "idle_marker: stop_hook + prompt_hook"
+    if webhook_cleanup_output="$(bridge_disable_claude_webhook_channel "$agent" "$workdir" 2>&1)"; then
+      echo "$webhook_cleanup_output"
     else
-      echo "status: disabled"
-      echo "reason: no webhook port configured"
-      warnings+=("Set BRIDGE_AGENT_WEBHOOK_PORT[\"$agent\"]=\"9001\" in agent-roster.local.sh to enable Claude idle wake webhooks for this static role.")
+      echo "$webhook_cleanup_output"
+      warnings+=("Legacy bridge-webhook MCP entry could not be removed automatically from $workdir/.mcp.json. Remove it manually before restarting the session.")
     fi
 
     claude_path="$(bridge_find_agent_claude_md "$agent" || true)"
@@ -348,7 +342,7 @@ run_agent() {
     fi
   fi
   if [[ "$engine" == "claude" && "$wake_status" == "miss" ]]; then
-    warnings+=("Claude role has no webhook wake channel. Queue tasks remain durable, but configure BRIDGE_AGENT_WEBHOOK_PORT for static roles so idle wake works without tmux send-keys.")
+    warnings+=("Claude role has no session metadata for idle wake. Verify BRIDGE_AGENT_SESSION is set and restart the session after deploy.")
   fi
 
   if [[ ${#warnings[@]} -gt 0 ]]; then

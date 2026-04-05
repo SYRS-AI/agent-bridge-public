@@ -57,18 +57,12 @@ bridge_notify_send() {
 bridge_warn_missing_wake_channel() {
   local agent="$1"
 
-  bridge_warn "Claude agent '${agent}' has no webhook wake channel configured. Queue tasks remain durable, but idle wake is disabled until BRIDGE_AGENT_WEBHOOK_PORT is set."
+  bridge_warn "Claude agent '${agent}' has no local session configured. Queue tasks remain durable, but idle wake cannot run without a live tmux session."
 }
 
 bridge_claude_session_can_wake() {
   local agent="$1"
-  local session="$2"
-
-  if bridge_agent_idle_marker_exists "$agent"; then
-    return 0
-  fi
-
-  bridge_tmux_session_has_prompt "$session" claude
+  [[ -f "$(bridge_agent_idle_since_file "$agent")" ]]
 }
 
 bridge_notification_text() {
@@ -114,6 +108,7 @@ bridge_dispatch_notification() {
         return 2
       fi
       if ! bridge_agent_has_wake_channel "$agent"; then
+        bridge_warn_missing_wake_channel "$agent"
         return 2
       fi
       if ! bridge_claude_session_can_wake "$agent" "$session"; then
@@ -121,10 +116,10 @@ bridge_dispatch_notification() {
       fi
 
       text="$(bridge_notification_text "$title" "$message" "$task_id" "$priority")"
-      if bridge_post_channel_webhook "$agent" "$text"; then
+      if bridge_tmux_send_and_submit "$session" "$engine" "$text"; then
         return 0
       fi
-      bridge_warn "Claude wake webhook delivery failed for '${agent}'"
+      bridge_warn "Claude idle wake delivery failed for '${agent}'"
       return 1
       ;;
     *)
