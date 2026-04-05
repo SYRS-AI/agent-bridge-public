@@ -22,6 +22,7 @@ Usage:
   $CLI_NAME discord <status|sync>
   $CLI_NAME migrate workspace plan <agent>
   $CLI_NAME migrate workspace copy <agent> [--dry-run]
+  $CLI_NAME migrate workspace cutover <agent> --dry-run
   $CLI_NAME inbox [agent] [--all]
   $CLI_NAME show <task-id>
   $CLI_NAME claim <task-id> [--agent <agent>] [--lease <seconds>]
@@ -42,6 +43,7 @@ Usage:
   $CLI_NAME cron cleanup prune [--mode expired-one-shot] [--dry-run]
   $CLI_NAME migrate workspace plan <agent>
   $CLI_NAME migrate workspace copy <agent> [--dry-run]
+  $CLI_NAME migrate workspace cutover <agent> --dry-run
   $CLI_NAME --codex|--claude --name <agent> [--loop] [--no-continue] [--workdir <dir>] [--replace] [--no-attach] [--no-project-skill] [--prefer wake|new|shared]
 
 Examples:
@@ -57,6 +59,7 @@ Examples:
   $CLI_NAME cron cleanup report
   $CLI_NAME migrate workspace plan huchu
   $CLI_NAME migrate workspace copy huchu --dry-run
+  $CLI_NAME migrate workspace cutover huchu --dry-run
   $CLI_NAME inbox developer
   $CLI_NAME task create --to tester --title "재테스트" --body-file ~/agent-bridge/shared/report.md
   $CLI_NAME claim 12 --agent tester

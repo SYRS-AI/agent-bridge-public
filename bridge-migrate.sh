@@ -13,6 +13,7 @@ usage() {
 Usage:
   bash $SCRIPT_DIR/bridge-migrate.sh workspace plan <agent>
   bash $SCRIPT_DIR/bridge-migrate.sh workspace copy <agent> [--dry-run]
+  bash $SCRIPT_DIR/bridge-migrate.sh workspace cutover <agent> --dry-run
 EOF
 }
 
@@ -336,6 +337,63 @@ cmd_workspace_copy() {
   fi
 }
 
+cmd_workspace_cutover() {
+  local agent="$1"
+  local dry_run="${2:-0}"
+  local session=""
+  local active="no"
+
+  resolve_workspace_context "$agent"
+
+  if [[ "$dry_run" != "1" ]]; then
+    bridge_die "actual cutover is not implemented yet. Use --dry-run."
+  fi
+
+  session="$(bridge_agent_session "$agent")"
+  if bridge_agent_is_active "$agent"; then
+    active="yes"
+  fi
+
+  printf 'agent: %s\n' "$MIGRATE_AGENT"
+  printf 'mode: dry-run\n'
+  printf 'engine: %s\n' "$(bridge_agent_engine "$agent")"
+  printf 'session: %s\n' "$session"
+  printf 'active: %s\n' "$active"
+  printf 'current_workdir: %s\n' "$MIGRATE_CURRENT_WORKDIR"
+  printf 'current_profile_home: %s\n' "$MIGRATE_EFFECTIVE_PROFILE_HOME"
+  printf 'target_home: %s\n' "$MIGRATE_TARGET_HOME"
+  printf '\n'
+
+  printf 'cutover_steps:\n'
+  printf '  1. inspect: agent-bridge migrate workspace plan %s\n' "$agent"
+  printf '  2. stage data: agent-bridge migrate workspace copy %s\n' "$agent"
+  if [[ "$MIGRATE_CURRENT_WORKDIR" == "$MIGRATE_TARGET_HOME" ]]; then
+    printf '  3. roster workdir: already at standard home\n'
+  else
+    printf '  3. roster workdir: set BRIDGE_AGENT_WORKDIR["%s"]="$BRIDGE_AGENT_HOME_ROOT/%s"\n' "$agent" "$agent"
+  fi
+  if [[ -z "$MIGRATE_EXPLICIT_PROFILE_HOME" ]]; then
+    printf '  4. roster profile: no explicit override today; keep default or set BRIDGE_AGENT_PROFILE_HOME["%s"]="$BRIDGE_AGENT_HOME_ROOT/%s"\n' "$agent" "$agent"
+  elif [[ "$MIGRATE_EXPLICIT_PROFILE_HOME" == "$MIGRATE_TARGET_HOME" ]]; then
+    printf '  4. roster profile: already points at standard home; optional cleanup is unset BRIDGE_AGENT_PROFILE_HOME["%s"]\n' "$agent"
+  else
+    printf '  4. roster profile: set BRIDGE_AGENT_PROFILE_HOME["%s"]="$BRIDGE_AGENT_HOME_ROOT/%s" or unset after cutover\n' "$agent" "$agent"
+  fi
+  printf '  5. deploy tracked profile: agent-bridge profile deploy %s\n' "$agent"
+  printf '  6. restart session: bash %s/bridge-start.sh %s --replace\n' "$BRIDGE_HOME" "$agent"
+  printf '  7. sync daemon: bash %s/bridge-daemon.sh sync\n' "$BRIDGE_HOME"
+  printf '\n'
+
+  printf 'rollback:\n'
+  printf '  - restore BRIDGE_AGENT_WORKDIR["%s"]="%s"\n' "$agent" "$MIGRATE_CURRENT_WORKDIR"
+  if [[ -n "$MIGRATE_EXPLICIT_PROFILE_HOME" ]]; then
+    printf '  - restore BRIDGE_AGENT_PROFILE_HOME["%s"]="%s"\n' "$agent" "$MIGRATE_EXPLICIT_PROFILE_HOME"
+  else
+    printf '  - remove any BRIDGE_AGENT_PROFILE_HOME["%s"] override that was added during cutover\n' "$agent"
+  fi
+  printf '  - restart from legacy path: bash %s/bridge-start.sh %s --replace\n' "$BRIDGE_HOME" "$agent"
+}
+
 subcommand="${1:-}"
 shift || true
 
@@ -371,6 +429,31 @@ case "$subcommand" in
         done
         [[ -n "$agent" ]] || bridge_die "Usage: bash $SCRIPT_DIR/bridge-migrate.sh workspace copy <agent> [--dry-run]"
         cmd_workspace_copy "$agent" "$dry_run"
+        ;;
+      cutover)
+        shift
+        dry_run=0
+        agent=""
+        while [[ $# -gt 0 ]]; do
+          case "$1" in
+            --dry-run)
+              dry_run=1
+              shift
+              ;;
+            -*)
+              bridge_die "알 수 없는 옵션: $1"
+              ;;
+            *)
+              if [[ -n "$agent" ]]; then
+                bridge_die "agent는 하나만 지정할 수 있습니다."
+              fi
+              agent="$1"
+              shift
+              ;;
+          esac
+        done
+        [[ -n "$agent" ]] || bridge_die "Usage: bash $SCRIPT_DIR/bridge-migrate.sh workspace cutover <agent> --dry-run"
+        cmd_workspace_cutover "$agent" "$dry_run"
         ;;
       ""|-h|--help|help)
         usage
