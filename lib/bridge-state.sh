@@ -90,25 +90,18 @@ bridge_build_static_claude_launch_cmd() {
 
   bridge_require_python
   python3 - "$agent" "$continue_mode" "$session_id" "$fallback" <<'PY'
+import re
 import shlex
 import sys
 
 agent, continue_mode, session_id, original = sys.argv[1:]
-parts = shlex.split(original)
+match = re.match(r"^(?P<prefix>.*?)(?P<command>claude(?:\s|$).*)$", original)
+if not match:
+    print(original)
+    raise SystemExit(0)
 
-env_prefix = []
-idx = 0
-while idx < len(parts):
-    token = parts[idx]
-    if token.startswith("-") or "=" not in token:
-        break
-    name = token.split("=", 1)[0]
-    if not name or not all(ch.isalnum() or ch == "_" for ch in name):
-        break
-    env_prefix.append(token)
-    idx += 1
-
-args = parts[idx:]
+env_prefix = match.group("prefix")
+args = shlex.split(match.group("command"))
 if not args or args[0] != "claude":
     print(original)
     raise SystemExit(0)
@@ -119,16 +112,16 @@ j = 0
 while j < len(rest):
     token = rest[j]
     if token in {"-c", "--continue", "--dangerously-skip-permissions"}:
-      j += 1
-      continue
+        j += 1
+        continue
     if token in {"--resume", "--name"}:
-      j += 2 if j + 1 < len(rest) else 1
-      continue
+        j += 2 if j + 1 < len(rest) else 1
+        continue
     extras.append(token)
     if token.startswith("--") and j + 1 < len(rest) and not rest[j + 1].startswith("-"):
-      extras.append(rest[j + 1])
-      j += 2
-      continue
+        extras.append(rest[j + 1])
+        j += 2
+        continue
     j += 1
 
 base = ["claude"]
@@ -140,7 +133,11 @@ if continue_mode == "1":
 base.extend(["--dangerously-skip-permissions", "--name", agent])
 base.extend(extras)
 
-print(" ".join(shlex.quote(token) for token in env_prefix + base))
+quoted = " ".join(shlex.quote(token) for token in base)
+if env_prefix:
+    print(f"{env_prefix}{quoted}")
+else:
+    print(quoted)
 PY
 }
 

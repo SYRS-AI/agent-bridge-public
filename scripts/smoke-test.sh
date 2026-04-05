@@ -387,8 +387,10 @@ CLAUDE_LAUNCH_NO_CONTINUE="$("$BASH4_BIN" -c '
   BRIDGE_AGENT_CONTINUE["claude-static"]="0"
   bridge_agent_launch_cmd "claude-static"
 ')"
+assert_contains "$CLAUDE_LAUNCH_NO_CONTINUE" "DISCORD_STATE_DIR=$CLAUDE_STATIC_WORKDIR/.discord claude --dangerously-skip-permissions --name claude-static --channels plugin:discord@claude-plugins-official"
 assert_contains "$CLAUDE_LAUNCH_NO_CONTINUE" "claude --dangerously-skip-permissions --name claude-static --channels plugin:discord@claude-plugins-official"
 [[ "$CLAUDE_LAUNCH_NO_CONTINUE" != *" -c "* ]] || die "static Claude launch still contains -c"
+[[ "$CLAUDE_LAUNCH_NO_CONTINUE" != *"'DISCORD_STATE_DIR="* ]] || die "static Claude env prefix should not be shell-quoted"
 
 CLAUDE_LAUNCH_CONTINUE="$("$BASH4_BIN" -c '
   source "'"$REPO_ROOT"'/bridge-lib.sh"
@@ -397,7 +399,9 @@ CLAUDE_LAUNCH_CONTINUE="$("$BASH4_BIN" -c '
   unset BRIDGE_AGENT_SESSION_ID["claude-static"]
   bridge_agent_launch_cmd "claude-static"
 ')"
+assert_contains "$CLAUDE_LAUNCH_CONTINUE" "DISCORD_STATE_DIR=$CLAUDE_STATIC_WORKDIR/.discord claude --continue --dangerously-skip-permissions --name claude-static --channels plugin:discord@claude-plugins-official"
 assert_contains "$CLAUDE_LAUNCH_CONTINUE" "claude --continue --dangerously-skip-permissions --name claude-static --channels plugin:discord@claude-plugins-official"
+[[ "$CLAUDE_LAUNCH_CONTINUE" != *"'DISCORD_STATE_DIR="* ]] || die "static Claude env prefix should not be shell-quoted on continue"
 
 STATIC_HISTORY_CONTINUE="$("$BASH4_BIN" -c '
   source "'"$REPO_ROOT"'/bridge-lib.sh"
