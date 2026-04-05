@@ -196,6 +196,48 @@ Use `telegram` only when the Claude session genuinely consumes Telegram as its
 primary inbound surface. Plain Discord bot posts are not a reliable delivery
 surface for Claude Code sessions.
 
+### Onboard a Discord-backed agent
+
+If an agent should read and reply in Discord, set its primary channel metadata
+in `agent-roster.local.sh` first:
+
+```bash
+BRIDGE_AGENT_DISCORD_CHANNEL_ID["tester"]="123456789012345678"
+```
+
+Then run the guided setup:
+
+```bash
+./agent-bridge setup discord tester
+./agent-bridge setup agent tester
+```
+
+`setup discord` writes the runtime Discord files into the agent workdir:
+
+- `<workdir>/.discord/.env`
+- `<workdir>/.discord/access.json`
+
+The wizard can:
+
+- reuse the existing `.discord` token
+- import a bot token from `~/.openclaw/openclaw.json` during migration
+- scaffold the allowlist for one or more channel IDs
+- validate the bot token
+- send a small write-access test message unless you pass `--skip-send-test`
+
+For broader preflight, `setup agent` also checks:
+
+- roster presence and workdir/session wiring
+- `CLAUDE.md` presence for Claude roles
+- tracked profile status
+- `bridge-start.sh --dry-run`
+
+Use `--test-start` only when you want a real tmux launch smoke test:
+
+```bash
+./agent-bridge setup agent tester --test-start
+```
+
 ### Optional: inspect OpenClaw cron inventory
 
 If you are migrating existing OpenClaw cron jobs into Agent Bridge, start with the read-only inventory:
@@ -382,6 +424,8 @@ That creates an isolated git worktree under `~/.agent-bridge/worktrees/` instead
 ./agent-bridge profile status --all
 ./agent-bridge profile diff <agent>
 ./agent-bridge profile deploy <agent> --dry-run
+./agent-bridge setup discord tester
+./agent-bridge setup agent tester
 ./agent-bridge cron inventory --mode one-shot --limit 20
 ./agent-bridge cron list --agent main
 ./agent-bridge cron create --agent main --schedule "0 9 * * *" --title "Daily check"
@@ -403,6 +447,7 @@ bash ./scripts/oss-preflight.sh
 - `agb`: shorthand wrapper for `agent-bridge`
 - `bridge-start.sh`, `bridge-run.sh`: session startup paths
 - `bridge-task.sh`, `bridge-queue.py`: queue API and SQLite backend
+- `bridge-setup.sh`, `bridge-setup.py`: Discord onboarding and agent preflight checks
 - `bridge-cron.sh`, `bridge-cron.py`, `bridge-cron-scheduler.py`: bridge-native cron CRUD plus legacy OpenClaw cron inventory, scheduling, queue adapters, and cleanup helpers
 - `bridge-send.sh`, `bridge-action.sh`: urgent interrupts and predefined actions
 - `bridge-status.sh`, `bridge-daemon.sh`, `bridge-sync.sh`: status, background sync, and heartbeats
@@ -425,6 +470,17 @@ exec zsh
 ### Claude shows a trust prompt on first run
 
 That is expected in a new folder. Confirm the prompt once, then future resumes will work normally.
+
+### Discord replies fail with "channel is not allowlisted"
+
+Run:
+
+```bash
+./agent-bridge setup discord <agent>
+```
+
+Make sure the intended channel ID is present in `<workdir>/.discord/access.json`
+under `groups`, then restart the agent session if it was already running.
 
 ### The daemon is not running
 

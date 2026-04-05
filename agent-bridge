@@ -18,6 +18,7 @@ Usage:
   $CLI_NAME urgent <agent> "<message>" [--wait <seconds>]
   $CLI_NAME task <create|inbox|show|claim|done|handoff|summary> ...
   $CLI_NAME profile <status|diff|deploy> ...
+  $CLI_NAME setup <discord|agent> ...
   $CLI_NAME cron <inventory|show|list|create|update|delete|enqueue|sync|run-subagent|errors|cleanup> ...
   $CLI_NAME discord <status|sync>
   $CLI_NAME migrate workspace plan <agent>
@@ -33,6 +34,8 @@ Usage:
   $CLI_NAME profile status [agent|--all]
   $CLI_NAME profile diff <agent>
   $CLI_NAME profile deploy <agent> [--dry-run] [--force]
+  $CLI_NAME setup discord <agent> [--channel <id>]... [--openclaw-account <account>]
+  $CLI_NAME setup agent <agent> [--skip-discord] [--test-start]
   $CLI_NAME discord status
   $CLI_NAME discord sync
   $CLI_NAME cron inventory [--mode recurring|one-shot|all] [--family <family>] [--limit <count>]
@@ -67,6 +70,8 @@ Examples:
   $CLI_NAME cron run-subagent <run-id> --dry-run
   $CLI_NAME cron errors report --limit 20
   $CLI_NAME cron cleanup report
+  $CLI_NAME setup discord tester
+  $CLI_NAME setup agent tester
   $CLI_NAME migrate workspace plan <agent>
   $CLI_NAME migrate workspace copy <agent> --dry-run
   $CLI_NAME migrate workspace cutover <agent> --dry-run
@@ -235,6 +240,10 @@ if [[ $# -gt 0 ]]; then
     profile)
       shift
       exec "$BRIDGE_BASH_BIN" "$SCRIPT_DIR/bridge-profile.sh" "$@"
+      ;;
+    setup)
+      shift
+      exec "$BRIDGE_BASH_BIN" "$SCRIPT_DIR/bridge-setup.sh" "$@"
       ;;
     cron)
       shift

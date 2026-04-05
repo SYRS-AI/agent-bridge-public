@@ -54,6 +54,10 @@ BRIDGE_AGENT_SESSION["codex-developer"]="codex-developer"
 # BRIDGE_AGENT_DISCORD_CHANNEL_ID["tester"]="123456789012345678"
 # The channel id is still useful for Discord wake relay / metadata, but not for
 # bot-authored Claude delivery.
+#
+# After setting the primary channel id, scaffold the runtime Discord files with:
+#   agent-bridge setup discord tester
+#   agent-bridge setup agent tester
 
 # Optional: map OpenClaw cron agent ids to bridge agents for cron enqueue.
 # BRIDGE_OPENCLAW_AGENT_TARGET["legacy-agent"]="tester"

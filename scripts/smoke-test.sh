@@ -60,10 +60,17 @@ SESSION_NAME="bridge-smoke-$$"
 SMOKE_AGENT="smoke-agent-$$"
 WORKDIR="$TMP_ROOT/workdir"
 FAKE_BIN="$TMP_ROOT/bin"
+FAKE_DISCORD_PORT_FILE="$TMP_ROOT/fake-discord.port"
+FAKE_DISCORD_REQUESTS="$TMP_ROOT/fake-discord-requests.jsonl"
+FAKE_DISCORD_PID=""
 
 cleanup() {
   bash "$REPO_ROOT/bridge-daemon.sh" stop >/dev/null 2>&1 || true
   tmux kill-session -t "$SESSION_NAME" >/dev/null 2>&1 || true
+  if [[ -n "$FAKE_DISCORD_PID" ]]; then
+    kill "$FAKE_DISCORD_PID" >/dev/null 2>&1 || true
+    wait "$FAKE_DISCORD_PID" >/dev/null 2>&1 || true
+  fi
   rm -rf "$TMP_ROOT"
 }
 trap cleanup EXIT
@@ -87,10 +94,91 @@ BRIDGE_AGENT_DESC["$SMOKE_AGENT"]="Smoke test role"
 BRIDGE_AGENT_ENGINE["$SMOKE_AGENT"]="codex"
 BRIDGE_AGENT_SESSION["$SMOKE_AGENT"]="$SESSION_NAME"
 BRIDGE_AGENT_WORKDIR["$SMOKE_AGENT"]="$WORKDIR"
+BRIDGE_AGENT_DISCORD_CHANNEL_ID["$SMOKE_AGENT"]="123456789012345678"
 BRIDGE_AGENT_LAUNCH_CMD["$SMOKE_AGENT"]='python3 -c "import time; print(\"smoke-agent ready\", flush=True); time.sleep(30)"'
 EOF
 
 echo "temporary smoke note" >"$BRIDGE_SHARED_DIR/note.md"
+echo "# Smoke CLAUDE" >"$WORKDIR/CLAUDE.md"
+
+cat >"$TMP_ROOT/openclaw.json" <<'EOF'
+{
+  "channels": {
+    "discord": {
+      "accounts": {
+        "smoke": {
+          "token": "smoke-token"
+        }
+      }
+    }
+  }
+}
+EOF
+
+log "starting fake Discord API"
+python3 -u - "$FAKE_DISCORD_PORT_FILE" "$FAKE_DISCORD_REQUESTS" <<'PY' >/dev/null 2>&1 &
+import json
+import sys
+from http.server import BaseHTTPRequestHandler, HTTPServer
+
+port_file, requests_file = sys.argv[1], sys.argv[2]
+TOKEN = "smoke-token"
+
+class Handler(BaseHTTPRequestHandler):
+    def log_message(self, fmt, *args):
+        return
+
+    def _send(self, code, payload):
+        body = json.dumps(payload).encode("utf-8")
+        self.send_response(code)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def _auth_ok(self):
+        return self.headers.get("Authorization") == f"Bot {TOKEN}"
+
+    def do_GET(self):
+        if not self._auth_ok():
+            self._send(401, {"message": "401: Unauthorized"})
+            return
+        if self.path == "/users/@me":
+            self._send(200, {"id": "999", "username": "smoke-bot", "bot": True})
+            return
+        if self.path.startswith("/channels/"):
+            channel_id = self.path.split("/")[2].split("?", 1)[0]
+            self._send(200, {"id": channel_id, "name": f"channel-{channel_id}"})
+            return
+        self._send(404, {"message": "404: Not Found"})
+
+    def do_POST(self):
+        if not self._auth_ok():
+            self._send(401, {"message": "401: Unauthorized"})
+            return
+        if self.path.startswith("/channels/") and self.path.endswith("/messages"):
+            channel_id = self.path.split("/")[2]
+            length = int(self.headers.get("Content-Length", "0"))
+            body = self.rfile.read(length).decode("utf-8") if length else "{}"
+            with open(requests_file, "a", encoding="utf-8") as handle:
+                handle.write(json.dumps({"path": self.path, "body": json.loads(body)}) + "\n")
+            self._send(200, {"id": "message-1", "channel_id": channel_id})
+            return
+        self._send(404, {"message": "404: Not Found"})
+
+server = HTTPServer(("127.0.0.1", 0), Handler)
+with open(port_file, "w", encoding="utf-8") as handle:
+    handle.write(str(server.server_address[1]))
+server.serve_forever()
+PY
+FAKE_DISCORD_PID=$!
+
+for _ in $(seq 1 50); do
+  [[ -f "$FAKE_DISCORD_PORT_FILE" ]] && break
+  sleep 0.1
+done
+[[ -f "$FAKE_DISCORD_PORT_FILE" ]] || die "fake Discord API failed to start"
+FAKE_DISCORD_API_BASE="http://127.0.0.1:$(cat "$FAKE_DISCORD_PORT_FILE")"
 
 log "verifying empty runtime starts clean"
 BRIDGE_ROSTER_LOCAL_FILE=/nonexistent bash "$REPO_ROOT/bridge-start.sh" --list >/dev/null
@@ -131,6 +219,21 @@ assert_contains "$SHOW_OUTPUT" "note: smoke ok"
 
 SUMMARY_OUTPUT="$("$REPO_ROOT/agb" summary "$SMOKE_AGENT")"
 assert_contains "$SUMMARY_OUTPUT" "$SMOKE_AGENT"
+
+log "running guided Discord setup"
+SETUP_DISCORD_OUTPUT="$("$REPO_ROOT/agent-bridge" setup discord "$SMOKE_AGENT" --openclaw-account smoke --openclaw-config "$TMP_ROOT/openclaw.json" --api-base-url "$FAKE_DISCORD_API_BASE" --yes)"
+assert_contains "$SETUP_DISCORD_OUTPUT" "validation: ok"
+assert_contains "$SETUP_DISCORD_OUTPUT" "token_source: openclaw:smoke"
+assert_contains "$SETUP_DISCORD_OUTPUT" "channel 123456789012345678: read=ok send=ok"
+[[ -f "$WORKDIR/.discord/.env" ]] || die "setup discord did not create .env"
+[[ -f "$WORKDIR/.discord/access.json" ]] || die "setup discord did not create access.json"
+assert_contains "$(cat "$WORKDIR/.discord/.env")" "DISCORD_BOT_TOKEN=smoke-token"
+assert_contains "$(cat "$FAKE_DISCORD_REQUESTS")" "[Agent Bridge setup]"
+
+log "running broader agent preflight"
+SETUP_AGENT_OUTPUT="$("$REPO_ROOT/agent-bridge" setup agent "$SMOKE_AGENT" --skip-discord)"
+assert_contains "$SETUP_AGENT_OUTPUT" "claude_md: n/a (engine=codex)"
+assert_contains "$SETUP_AGENT_OUTPUT" "start_dry_run: ok"
 
 log "creating and managing a bridge-native cron job"
 NATIVE_CREATE_OUTPUT="$("$REPO_ROOT/agent-bridge" cron create --agent "$SMOKE_AGENT" --schedule '0 10 * * *' --tz UTC --title 'native smoke daily' --payload 'Do the native cron smoke run.')"

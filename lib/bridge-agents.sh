@@ -313,7 +313,12 @@ bridge_agent_default_profile_home() {
 
 bridge_agent_default_discord_state_dir() {
   local agent="$1"
-  printf '%s/.discord' "$(bridge_agent_default_home "$agent")"
+  printf '%s/.discord' "$(bridge_agent_workdir "$agent")"
+}
+
+bridge_agent_discord_state_dir() {
+  local agent="$1"
+  bridge_agent_default_discord_state_dir "$agent"
 }
 
 bridge_agent_workdir() {
