@@ -727,6 +727,39 @@ assert_contains "$SYNC_DRY_RUN_OUTPUT" "due=1"
 NATIVE_DELETE_OUTPUT="$("$REPO_ROOT/agent-bridge" cron delete "$NATIVE_JOB_ID")"
 assert_contains "$NATIVE_DELETE_OUTPUT" "deleted native cron job"
 
+log "inventorying legacy runtime references"
+LEGACY_ROOT="$TMP_ROOT/legacy-runtime"
+mkdir -p "$LEGACY_ROOT/cron" "$LEGACY_ROOT/scripts" "$LEGACY_ROOT/skills/sample-skill" "$LEGACY_ROOT/credentials"
+cat >"$LEGACY_ROOT/cron/jobs.json" <<EOF
+{
+  "jobs": [
+    {
+      "id": "legacy-job-1",
+      "name": "morning-briefing-smoke",
+      "enabled": true,
+      "agentId": "$SMOKE_AGENT",
+      "schedule": {
+        "kind": "cron",
+        "expr": "0 9 * * *",
+        "tz": "UTC"
+      },
+      "payload": {
+        "text": "python3 ~/.openclaw/scripts/morning-briefing.py && openclaw message send main"
+      }
+    }
+  ]
+}
+EOF
+mkdir -p "$BRIDGE_HOME/shared"
+cat >"$BRIDGE_HOME/shared/runtime-note.md" <<'EOF'
+Legacy ref: ~/.openclaw/skills/shopify-api and agent-db are still mentioned here.
+EOF
+RUNTIME_INVENTORY_OUTPUT="$("$REPO_ROOT/agent-bridge" migrate runtime inventory --bridge-home "$BRIDGE_HOME" --legacy-home "$LEGACY_ROOT" --jobs-file "$LEGACY_ROOT/cron/jobs.json")"
+assert_contains "$RUNTIME_INVENTORY_OUTPUT" "cron_with_legacy_refs: 1"
+assert_contains "$RUNTIME_INVENTORY_OUTPUT" "files_with_legacy_refs: 1"
+assert_contains "$RUNTIME_INVENTORY_OUTPUT" "skills: 1"
+assert_contains "$RUNTIME_INVENTORY_OUTPUT" "notify: 1"
+
 log "processing one queued cron-dispatch task through the daemon"
 RUN_ID="smoke-job-1234--2026-04-05T10-00-00Z"
 RUN_DIR="$BRIDGE_STATE_DIR/cron/runs/$RUN_ID"
