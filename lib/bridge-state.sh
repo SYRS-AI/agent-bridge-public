@@ -123,6 +123,67 @@ bridge_load_dynamic_agents() {
   shopt -u nullglob
 }
 
+bridge_restore_dynamic_agents_from_history() {
+  local file active_file
+  local AGENT_ID=""
+  local AGENT_DESC=""
+  local AGENT_ENGINE=""
+  local AGENT_SESSION=""
+  local AGENT_WORKDIR=""
+  local AGENT_LOOP=""
+  local AGENT_CONTINUE=""
+  local AGENT_SESSION_ID=""
+  local AGENT_HISTORY_KEY=""
+  local AGENT_CREATED_AT=""
+  local AGENT_UPDATED_AT=""
+
+  shopt -s nullglob
+  for file in "$BRIDGE_HISTORY_DIR"/*.env; do
+    AGENT_ID=""
+    AGENT_DESC=""
+    AGENT_ENGINE=""
+    AGENT_SESSION=""
+    AGENT_WORKDIR=""
+    AGENT_LOOP=""
+    AGENT_CONTINUE=""
+    AGENT_SESSION_ID=""
+    AGENT_HISTORY_KEY=""
+    AGENT_CREATED_AT=""
+    AGENT_UPDATED_AT=""
+
+    # shellcheck source=/dev/null
+    source "$file"
+
+    if [[ -z "$AGENT_ID" || -z "$AGENT_ENGINE" || -z "$AGENT_SESSION" || -z "$AGENT_WORKDIR" ]]; then
+      continue
+    fi
+    if bridge_agent_exists "$AGENT_ID"; then
+      continue
+    fi
+    if ! bridge_tmux_session_exists "$AGENT_SESSION"; then
+      continue
+    fi
+
+    bridge_add_agent_id_if_missing "$AGENT_ID"
+    BRIDGE_AGENT_DESC["$AGENT_ID"]="${AGENT_DESC:-$AGENT_ID}"
+    BRIDGE_AGENT_ENGINE["$AGENT_ID"]="$AGENT_ENGINE"
+    BRIDGE_AGENT_SESSION["$AGENT_ID"]="$AGENT_SESSION"
+    BRIDGE_AGENT_WORKDIR["$AGENT_ID"]="$AGENT_WORKDIR"
+    BRIDGE_AGENT_SOURCE["$AGENT_ID"]="dynamic"
+    BRIDGE_AGENT_LOOP["$AGENT_ID"]="${AGENT_LOOP:-1}"
+    BRIDGE_AGENT_CONTINUE["$AGENT_ID"]="${AGENT_CONTINUE:-1}"
+    BRIDGE_AGENT_SESSION_ID["$AGENT_ID"]="${AGENT_SESSION_ID:-}"
+    BRIDGE_AGENT_HISTORY_KEY["$AGENT_ID"]="${AGENT_HISTORY_KEY:-}"
+    BRIDGE_AGENT_CREATED_AT["$AGENT_ID"]="${AGENT_CREATED_AT:-}"
+    BRIDGE_AGENT_UPDATED_AT["$AGENT_ID"]="${AGENT_UPDATED_AT:-}"
+
+    active_file="$(bridge_dynamic_agent_file_for "$AGENT_ID")"
+    BRIDGE_AGENT_META_FILE["$AGENT_ID"]="$active_file"
+    bridge_write_dynamic_agent_file "$AGENT_ID" "$active_file"
+  done
+  shopt -u nullglob
+}
+
 bridge_load_static_agent_history() {
   local agent="$1"
   local file
@@ -215,6 +276,7 @@ bridge_load_roster() {
 
   bridge_load_static_histories
   bridge_load_dynamic_agents
+  bridge_restore_dynamic_agents_from_history
 }
 
 bridge_dynamic_agent_ids() {
