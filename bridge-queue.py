@@ -673,9 +673,14 @@ def cmd_daemon_step(args: argparse.Namespace) -> int:
             continue
         nudge_key = ",".join(str(task_id) for task_id in queue_ids)
         last_nudge_ts = int(row["last_nudge_ts"] or 0)
-        if last_nudge_ts and current_ts - last_nudge_ts < nudge_cooldown:
+        last_nudge_key = row["last_nudge_key"] or ""
+        last_nudged_ids = {item for item in last_nudge_key.split(",") if item}
+        has_new_queue_ids = any(str(task_id) not in last_nudged_ids for task_id in queue_ids)
+        if last_nudge_ts and current_ts - last_nudge_ts < nudge_cooldown and not has_new_queue_ids:
             continue
-        if last_nudge_ts and int(activity_ts) and last_nudge_ts >= int(activity_ts):
+        # Suppress repeats for the same queue until the session shows activity again,
+        # but allow a fresh nudge when new queued task ids arrive.
+        if last_nudge_ts and int(activity_ts) and last_nudge_ts >= int(activity_ts) and not has_new_queue_ids:
             continue
         printed = True
         print(
