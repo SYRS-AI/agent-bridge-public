@@ -39,7 +39,7 @@ Examples:
   ab kill all
   ab worktree list
   ab cron inventory --family memory-daily --limit 10
-  ab cron enqueue memory-daily-syrs-shopify --slot 2026-04-05 --dry-run
+  ab cron enqueue <memory-daily-job-id> --slot 2026-04-05 --dry-run
   ab cron cleanup report
   ab inbox developer
   ab task create --to tester --title "재테스트" --body-file ~/agent-bridge/shared/report.md

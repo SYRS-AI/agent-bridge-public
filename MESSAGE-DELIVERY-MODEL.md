@@ -136,11 +136,11 @@ Recommended roster-level shape:
 Possible names:
 
 ```bash
-BRIDGE_AGENT_NOTIFY_KIND["main"]="telegram"
-BRIDGE_AGENT_NOTIFY_TARGET["main"]="agent:main:telegram:direct:@seanssoh"
+BRIDGE_AGENT_NOTIFY_KIND["researcher"]="telegram"
+BRIDGE_AGENT_NOTIFY_TARGET["researcher"]="<telegram-chat-or-thread-id>"
 
-BRIDGE_AGENT_NOTIFY_KIND["syrs-satomi"]="discord"
-BRIDGE_AGENT_NOTIFY_TARGET["syrs-satomi"]="1476851891290771487"
+BRIDGE_AGENT_NOTIFY_KIND["qa"]="discord-webhook"
+BRIDGE_AGENT_NOTIFY_TARGET["qa"]="<discord-webhook-url>"
 ```
 
 The exact variable names can still change, but the bridge needs this mapping.
@@ -191,8 +191,8 @@ Recommended content:
 Example:
 
 ```text
-[Agent Bridge] urgent task #104 from patch: Redis 장애 확인 필요
-agb inbox syrs-satomi
+[Agent Bridge] urgent task #104 from reviewer: Redis incident needs triage
+agb inbox qa
 ```
 
 The full body stays in the queue or body file.

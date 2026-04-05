@@ -2,17 +2,19 @@
 
 ## Goal
 
-Define how tracked agent profiles under `agents/` are promoted into each machine's live agent home without turning repository edits into immediate production mutations.
+Define how tracked agent profiles are promoted into each machine's live agent
+home without turning repository edits into immediate production mutations.
 
 ## Current Constraints
 
-- `agents/` is now the tracked source of truth for migrated agent profile material.
-- Live agent homes are machine-local and do not always match the bridge workdir.
-- `shopify` already proves this split:
-  - bridge workdir: `~/.openclaw/workspace-syrs-shopify`
-  - live CLI home with `CLAUDE.md`: `~/syrs-shopify`
-- Active tmux sessions should not be mutated implicitly while an operator is editing tracked files.
-- Live memory state should not be overwritten by an early profile sync implementation.
+- `agents/` is the tracked source of truth for public profile scaffolding.
+- Live agent homes are machine-local and do not always match the bridge
+  workdir.
+- Some installations use a split model where the bridge workdir and the live
+  CLI home differ.
+- Active tmux sessions should not be mutated implicitly while an operator is
+  editing tracked files.
+- Live memory state should not be overwritten by profile deploy.
 
 ## Options Considered
 
@@ -65,21 +67,17 @@ There is no automatic reverse sync from live home back into `agents/`.
 
 ### 2. Separate profile target from bridge workdir
 
-Add a new local-roster mapping for agents that have tracked profiles:
+Add a local-roster mapping for agents that have tracked profiles:
 
 ```bash
-BRIDGE_AGENT_PROFILE_HOME["patch"]="$HOME/.openclaw/patch"
-BRIDGE_AGENT_PROFILE_HOME["shopify"]="$HOME/syrs-shopify"
+BRIDGE_AGENT_PROFILE_HOME["ops"]="$HOME/.agent-bridge/agents/ops"
+BRIDGE_AGENT_PROFILE_HOME["analyst"]="$HOME/project-analyst"
 ```
 
 This must stay separate from `BRIDGE_AGENT_WORKDIR`.
 
-Reason:
-
-- `patch`: workdir and live home happen to match
-- `shopify`: they do not match
-
-Workers such as `patch-codex` and `shopify-codex` do not need profile targets by default.
+Some roles have matching workdir and live home. Others intentionally do not.
+Ephemeral workers usually do not need profile targets by default.
 
 ### 3. Managed vs unmanaged files
 
@@ -100,32 +98,13 @@ Explicitly unmanaged:
 - `.status`
 - repo-specific runtime artifacts
 
-Reason:
-
-- the tracked `memory/` directory is intended for future structured memory migration
-- current live memory files are still runtime state and should not be clobbered by profile deploy
-
 ### 4. Explicit CLI surface
-
-Add a new top-level command group:
 
 ```bash
 agent-bridge profile status [agent|--all]
 agent-bridge profile diff <agent>
 agent-bridge profile deploy <agent> [--dry-run] [--force]
 ```
-
-Behavior:
-
-- `status`: show tracked source path, live target path, and whether drift exists
-- `diff`: compare managed files between tracked source and live target
-- `deploy`: copy managed files from tracked source to live target
-
-Future expansion:
-
-- `agent-bridge profile deploy --all`
-- `agent-bridge profile deploy <agent> --include-memory`
-- `agent-bridge profile pull <agent>` only after reverse-sync rules are defined
 
 ### 5. Safety rules for deploy
 
@@ -158,38 +137,11 @@ Suggested fields:
 - `deployed_at`
 - `deployed_by`
 
-This enables:
-
-- safer `status`
-- target drift detection
-- clearer operator audit trail
-
-## Implementation Shape
-
-Recommended split:
-
-- CLI parsing in `agent-bridge`
-- profile metadata helpers in `lib/bridge-state.sh`
-- deploy/diff helpers in a new shell module or a focused Python helper
-
-If file diff or manifest generation gets awkward in Bash, prefer a small Python helper over adding new external dependencies.
-
 ## Rollout Plan
 
 1. Add `BRIDGE_AGENT_PROFILE_HOME` support in roster loading.
 2. Implement `agent-bridge profile status`.
 3. Implement `agent-bridge profile diff`.
 4. Implement `agent-bridge profile deploy --dry-run`.
-5. Test with `patch` and `shopify`.
-6. After deploy behavior is stable, decide whether `memory/` should stay reserved or gain an explicit opt-in sync path.
-7. Only then build a scaffold/generator around the finalized model.
-
-## Recommendation For Current Phase
-
-Proceed with:
-
-1. `BRIDGE_AGENT_PROFILE_HOME` local mapping
-2. `profile status|diff|deploy`
-3. `CLAUDE.md` and `skills/` only
-
-Do **not** sync `memory/` automatically yet.
+5. Test with one same-home role and one split-home role.
+6. Decide later whether `memory/` gains an explicit opt-in sync path.

@@ -54,12 +54,12 @@ Examples:
   $CLI_NAME kill all
   $CLI_NAME worktree list
   $CLI_NAME cron inventory --family memory-daily --limit 10
-  $CLI_NAME cron enqueue memory-daily-syrs-shopify --slot 2026-04-05 --dry-run
+  $CLI_NAME cron enqueue <memory-daily-job-id> --slot 2026-04-05 --dry-run
   $CLI_NAME cron errors report --limit 20
   $CLI_NAME cron cleanup report
-  $CLI_NAME migrate workspace plan huchu
-  $CLI_NAME migrate workspace copy huchu --dry-run
-  $CLI_NAME migrate workspace cutover huchu --dry-run
+  $CLI_NAME migrate workspace plan <agent>
+  $CLI_NAME migrate workspace copy <agent> --dry-run
+  $CLI_NAME migrate workspace cutover <agent> --dry-run
   $CLI_NAME inbox developer
   $CLI_NAME task create --to tester --title "재테스트" --body-file ~/agent-bridge/shared/report.md
   $CLI_NAME claim 12 --agent tester

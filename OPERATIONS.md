@@ -77,7 +77,9 @@ cp ~/agent-bridge/agent-roster.local.example.sh ~/agent-bridge/agent-roster.loca
 
 Put machine-specific workdirs and launch commands in `agent-roster.local.sh`, not in tracked source.
 
-If you are migrating named agents with existing prompts, keep the tracked prompt and per-agent profile skeleton under `agents/`, and keep only machine-local runtime paths in `agent-roster.local.sh`.
+If you are migrating named agents with existing prompts, start from
+`agents/_template/` and keep private production prompt stacks out of the public
+repo. Keep only machine-local runtime paths in `agent-roster.local.sh`.
 
 If the live CLI home differs from the bridge workdir, declare `BRIDGE_AGENT_PROFILE_HOME["agent"]="..."` in `agent-roster.local.sh` and use `agent-bridge profile status|diff|deploy` for explicit promotion into that live home.
 
@@ -103,8 +105,8 @@ Use these first:
 ~/agent-bridge/agent-bridge list
 ~/agent-bridge/agent-bridge cron inventory --limit 20
 ~/agent-bridge/agent-bridge cron inventory --mode one-shot --limit 20
-~/agent-bridge/agent-bridge cron enqueue memory-daily-syrs-shopify --slot 2026-04-05 --dry-run
-~/agent-bridge/agent-bridge cron enqueue monthly-highlights-syrs-shopify --dry-run
+~/agent-bridge/agent-bridge cron enqueue <memory-daily-job-id> --slot 2026-04-05 --dry-run
+~/agent-bridge/agent-bridge cron enqueue <monthly-highlights-job-id> --dry-run
 ~/agent-bridge/agent-bridge cron errors report --limit 20
 ~/agent-bridge/agent-bridge cron cleanup report
 ```
@@ -114,14 +116,14 @@ Use these first:
 When planning cron migration work, inspect one job in detail before changing anything:
 
 ```bash
-~/agent-bridge/agent-bridge cron show memory-daily-syrs-shopify
+~/agent-bridge/agent-bridge cron show <job-id>
 ```
 
 When you start bridging one recurring family into the queue, begin with a dry run:
 
 ```bash
-~/agent-bridge/agent-bridge cron enqueue memory-daily-syrs-shopify --slot 2026-04-05 --dry-run
-~/agent-bridge/agent-bridge cron enqueue monthly-highlights-syrs-shopify --dry-run
+~/agent-bridge/agent-bridge cron enqueue <memory-daily-job-id> --slot 2026-04-05 --dry-run
+~/agent-bridge/agent-bridge cron enqueue <monthly-highlights-job-id> --dry-run
 ```
 
 Before deleting stale one-shot jobs, inspect the candidate set first:
@@ -131,7 +133,8 @@ Before deleting stale one-shot jobs, inspect the candidate set first:
 ~/agent-bridge/agent-bridge cron cleanup prune --dry-run
 ```
 
-Run the actual prune only between gateway cron ticks, because it rewrites `~/.openclaw/cron/jobs.json` directly.
+Run the actual prune only between gateway cron ticks, because it rewrites the
+legacy OpenClaw jobs file directly.
 
 For recurring cron failures, use the report-only view first:
 
@@ -179,6 +182,7 @@ Before pushing bridge changes:
 ```bash
 bash -n *.sh agent-bridge agb
 shellcheck *.sh agent-bridge agb
+bash ./scripts/oss-preflight.sh
 ./scripts/smoke-test.sh
 ```
 

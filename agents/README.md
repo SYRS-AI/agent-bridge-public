@@ -1,15 +1,20 @@
 ## Tracked Agent Profiles
 
-`agents/` is the tracked home-profile tree for migrated long-lived agents.
+`agents/` is the public-facing profile scaffold and migration-doc tree.
 
-- `agents/_template/` is the seed layout for new agents before a generator exists.
-- `agents/<name>/CLAUDE.md` is a tracked copy of the current live profile, kept in-repo so the standard can evolve under version control.
-- `agents/<name>/memory/` is the future landing zone for auto-memory and durable notes that should live with the tracked profile.
-- `agents/<name>/skills/` is the future landing zone for agent-specific skills that should move out of ad hoc home directories.
+- `agents/_template/` is the seed layout for new long-lived roles.
+- The public repository intentionally does **not** ship live production
+  profiles for private agents.
+- Migration planning documents stay here because some installations still need
+  to move from a legacy OpenClaw layout into Agent Bridge.
 
-Current source material on this machine:
+Recommended public workflow:
 
-- `patch`: `~/.openclaw/patch/CLAUDE.md`
-- `shopify`: `~/syrs-shopify/CLAUDE.md`
+1. Copy `agents/_template/` into a private companion repo or a local untracked
+   directory.
+2. Customize `CLAUDE.md`, optional `skills/`, and any private notes there.
+3. Use `agent-bridge profile status|diff|deploy` to promote approved profile
+   files into the live agent home.
 
-The tracked profile tree is intentionally portable. Machine-specific runtime paths, session wiring, and launch commands still belong in `agent-roster.local.sh`.
+Machine-specific runtime paths, session wiring, credentials, and launch
+commands still belong in `agent-roster.local.sh`.

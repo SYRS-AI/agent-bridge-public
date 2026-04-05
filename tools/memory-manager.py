@@ -90,7 +90,7 @@ def parse_args():
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     search = subparsers.add_parser("search")
-    search.add_argument("--agent", required=True, help="OpenClaw agent id or a bridge alias such as shopify")
+    search.add_argument("--agent", required=True, help="OpenClaw agent id or a bridge alias")
     search.add_argument("query", help="Search query")
     search.add_argument("--config", default=str(Path.home() / ".openclaw" / "openclaw.json"))
     search.add_argument("--openclaw-root", default=str(Path.home() / ".openclaw"))
@@ -113,13 +113,20 @@ def resolve_agent_id(agent_id, openclaw_root, config):
     listed = {item.get("id") for item in config.get("agents", {}).get("list", [])}
     memory_root = Path(openclaw_root) / "memory"
     direct_db = memory_root / f"{agent_id}.sqlite"
-    syrs_alias = f"syrs-{agent_id}"
-    syrs_db = memory_root / f"{syrs_alias}.sqlite"
 
     if agent_id in listed or direct_db.exists():
         return agent_id
-    if not agent_id.startswith("syrs-") and (syrs_alias in listed or syrs_db.exists()):
-        return syrs_alias
+    suffix_matches = {
+        item
+        for item in listed
+        if item.endswith(f"-{agent_id}")
+    }
+    suffix_matches.update(
+        path.stem
+        for path in memory_root.glob(f"*-{agent_id}.sqlite")
+    )
+    if len(suffix_matches) == 1:
+        return next(iter(suffix_matches))
     return agent_id
 
 

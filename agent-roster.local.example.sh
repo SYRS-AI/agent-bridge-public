@@ -46,18 +46,18 @@ BRIDGE_AGENT_SESSION["codex-developer"]="codex-developer"
 # `discord-webhook` for Discord-backed Claude sessions; plain `discord` bot
 # posts are not a reliable delivery surface for Claude Code.
 # BRIDGE_AGENT_NOTIFY_KIND["tester"]="discord-webhook"
-# BRIDGE_AGENT_NOTIFY_TARGET["tester"]="https://discord.com/api/webhooks/..."
+# BRIDGE_AGENT_NOTIFY_TARGET["tester"]="<discord-webhook-url>"
 # BRIDGE_AGENT_NOTIFY_ACCOUNT["tester"]="default"
 # BRIDGE_AGENT_NOTIFY_KIND["developer"]="telegram"
-# BRIDGE_AGENT_NOTIFY_TARGET["developer"]="7670324081"
+# BRIDGE_AGENT_NOTIFY_TARGET["developer"]="<telegram-chat-or-thread-id>"
 # BRIDGE_AGENT_NOTIFY_ACCOUNT["developer"]="default"
 # BRIDGE_AGENT_DISCORD_CHANNEL_ID["tester"]="123456789012345678"
 # The channel id is still useful for Discord wake relay / metadata, but not for
 # bot-authored Claude delivery.
 
 # Optional: map OpenClaw cron agent ids to bridge agents for cron enqueue.
-# BRIDGE_OPENCLAW_AGENT_TARGET["syrs-shopify"]="shopify"
-# BRIDGE_OPENCLAW_AGENT_TARGET["main"]="main"
+# BRIDGE_OPENCLAW_AGENT_TARGET["legacy-agent"]="tester"
+# BRIDGE_OPENCLAW_AGENT_TARGET["legacy-ops"]="developer"
 
 BRIDGE_AGENT_LAUNCH_CMD["tester"]='claude -c --dangerously-skip-permissions'
 BRIDGE_AGENT_LAUNCH_CMD["developer"]='claude -c --dangerously-skip-permissions'

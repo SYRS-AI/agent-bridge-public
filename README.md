@@ -18,6 +18,7 @@ Companion docs for maintainers:
 - [`KNOWN_ISSUES.md`](./KNOWN_ISSUES.md)
 - [`agents/README.md`](./agents/README.md)
 - [`agents/SYNC-MODEL.md`](./agents/SYNC-MODEL.md)
+- [`agents/WORKSPACE-MIGRATION-PLAN.md`](./agents/WORKSPACE-MIGRATION-PLAN.md)
 
 ## Highlights
 
@@ -99,6 +100,17 @@ Install and authenticate the CLIs you want to use:
 
 The bridge does not install those tools for you.
 
+### Optional legacy OpenClaw migration
+
+Some bridge features are kept for teams migrating from an existing OpenClaw
+install:
+
+- cron inventory / enqueue / cleanup helpers
+- `tools/memory-manager.py`
+- legacy workspace migration docs under [`agents/`](./agents/README.md)
+
+Clean installs can ignore those features entirely.
+
 ### Optional static roster
 
 Fresh installs ship with no static roles. You can use dynamic agents with `agent-bridge` immediately and ignore the roster entirely.
@@ -122,8 +134,8 @@ If `BRIDGE_AGENT_WORKDIR["agent"]` is omitted, the bridge now defaults that role
 Only declare `BRIDGE_AGENT_PROFILE_HOME` when the live CLI home differs from the workdir:
 
 ```bash
-BRIDGE_AGENT_WORKDIR["shopify"]="$HOME/project-shopify"
-BRIDGE_AGENT_PROFILE_HOME["shopify"]="$HOME/.agent-bridge/agents/shopify"
+BRIDGE_AGENT_WORKDIR["analyst"]="$HOME/project-analyst"
+BRIDGE_AGENT_PROFILE_HOME["analyst"]="$HOME/.agent-bridge/agents/analyst"
 ```
 
 ### Optional zsh shell integration
@@ -176,7 +188,7 @@ Or:
 
 ```bash
 BRIDGE_AGENT_NOTIFY_KIND["tester"]="discord-webhook"
-BRIDGE_AGENT_NOTIFY_TARGET["tester"]="https://discord.com/api/webhooks/..."
+BRIDGE_AGENT_NOTIFY_TARGET["tester"]="<discord-webhook-url>"
 BRIDGE_AGENT_NOTIFY_ACCOUNT["tester"]="default"
 ```
 
@@ -184,7 +196,7 @@ Use `telegram` only when the Claude session genuinely consumes Telegram as its
 primary inbound surface. Plain Discord bot posts are not a reliable delivery
 surface for Claude Code sessions.
 
-### Inspect OpenClaw cron inventory
+### Optional: inspect OpenClaw cron inventory
 
 If you are migrating existing OpenClaw cron jobs into Agent Bridge, start with the read-only inventory:
 
@@ -192,9 +204,9 @@ If you are migrating existing OpenClaw cron jobs into Agent Bridge, start with t
 ./agent-bridge cron inventory
 ./agent-bridge cron inventory --family memory-daily --limit 10
 ./agent-bridge cron inventory --mode one-shot --limit 20
-./agent-bridge cron show memory-daily-syrs-shopify
-./agent-bridge cron enqueue memory-daily-syrs-shopify --slot 2026-04-05 --dry-run
-./agent-bridge cron enqueue monthly-highlights-syrs-shopify --dry-run
+./agent-bridge cron show <job-id>
+./agent-bridge cron enqueue <memory-daily-job-id> --slot 2026-04-05 --dry-run
+./agent-bridge cron enqueue <monthly-highlights-job-id> --dry-run
 ./agent-bridge cron errors report --limit 20
 ./agent-bridge cron cleanup report
 ./agent-bridge cron cleanup prune --dry-run
@@ -209,6 +221,18 @@ By default the inventory reads `~/.openclaw/cron/jobs.json`. Override it with `B
 `cron cleanup report` and `cron cleanup prune --dry-run` are the safe way to inspect stale one-shot jobs before deleting them. The current prune target is intentionally narrow: expired `schedule.kind=at` jobs with `deleteAfterRun=true` and `enabled=false`.
 
 The status dashboard also includes a lightweight health check for active sessions. It classifies them as `ok`, `warn`, or `crit` from recorded session activity age. Inactive on-demand roles are not treated as stale. Defaults are `BRIDGE_HEALTH_WARN_SECONDS=3600` and `BRIDGE_HEALTH_CRITICAL_SECONDS=14400`, and you can override them in `agent-roster.local.sh`.
+
+### Optional: search legacy OpenClaw memory
+
+If you are migrating a legacy OpenClaw install and want read-only retrieval over
+existing memory SQLite files, use the bundled helper:
+
+```bash
+python3 tools/memory-manager.py search --agent <agent-id> "recent incident summary"
+```
+
+This helper is optional. It is intended for migration and compatibility work,
+not for fresh installs that do not have OpenClaw memory state.
 
 ### Start the daemon
 
@@ -293,12 +317,13 @@ Static roles are optional. If you want long-lived names such as `developer`, `te
 
 ### Tracked agent profiles
 
-If you are migrating existing long-lived agents, keep their tracked home-profile material under [`agents/`](./agents/README.md).
+If you are migrating existing long-lived agents, use [`agents/_template/`](./agents/_template/CLAUDE.md)
+as the public scaffold and keep real production profiles in a private companion
+repo or a local untracked tree.
 
-- `agents/_template/` defines the standard layout before any profile generator exists
-- `agents/<name>/CLAUDE.md` is the tracked copy of the live profile
-- `agents/<name>/memory/` and `agents/<name>/skills/` are the standardized landing zones for durable notes and agent-specific skills
-- `agent-bridge profile status|diff|deploy` manages explicit copy-based promotion into the live home
+- the public repo intentionally ships only the `_template/` profile scaffold
+- `agent-bridge profile status|diff|deploy` still manages explicit copy-based promotion into the live home
+- optional migration planning docs live under [`agents/`](./agents/README.md)
 
 ### Dynamic agents
 
@@ -334,11 +359,11 @@ That creates an isolated git worktree under `~/.agent-bridge/worktrees/` instead
 ./agent-bridge status --watch
 ./agent-bridge list
 ./agent-bridge profile status --all
-./agent-bridge profile diff patch
-./agent-bridge profile deploy patch --dry-run
+./agent-bridge profile diff <agent>
+./agent-bridge profile deploy <agent> --dry-run
 ./agent-bridge cron inventory --mode one-shot --limit 20
-./agent-bridge cron enqueue memory-daily-syrs-shopify --slot 2026-04-05 --dry-run
-./agent-bridge cron enqueue monthly-highlights-syrs-shopify --dry-run
+./agent-bridge cron enqueue <memory-daily-job-id> --slot 2026-04-05 --dry-run
+./agent-bridge cron enqueue <monthly-highlights-job-id> --dry-run
 ./agent-bridge cron errors report --limit 20
 ./agent-bridge cron cleanup report
 ./agent-bridge kill 1
@@ -346,6 +371,7 @@ That creates an isolated git worktree under `~/.agent-bridge/worktrees/` instead
 ./agent-bridge worktree list
 bash bridge-start.sh --list
 bash bridge-daemon.sh status
+bash ./scripts/oss-preflight.sh
 ```
 
 ## Repository Layout
