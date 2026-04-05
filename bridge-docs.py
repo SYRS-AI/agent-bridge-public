@@ -262,6 +262,46 @@ def render_shared_skills_md(bridge_home: Path) -> str:
 """
 
 
+def rewrite_shared_legacy_text(name: str, bridge_home: Path, text: str) -> str:
+    runtime_root = pretty_path(bridge_home / "runtime")
+    replacements = {
+        "~/.openclaw/credentials/": f"{runtime_root}/credentials/",
+        "/Users/soonseokoh/.openclaw/credentials/": f"{runtime_root}/credentials/",
+        "~/.openclaw/secrets/": f"{runtime_root}/secrets/",
+        "/Users/soonseokoh/.openclaw/secrets/": f"{runtime_root}/secrets/",
+        "~/.openclaw/openclaw.json": f"{runtime_root}/openclaw.json",
+        "/Users/soonseokoh/.openclaw/openclaw.json": f"{runtime_root}/openclaw.json",
+        "~/.openclaw/scripts/": f"{runtime_root}/scripts/",
+        "/Users/soonseokoh/.openclaw/scripts/": f"{runtime_root}/scripts/",
+        "~/.openclaw/skills/": f"{runtime_root}/skills/",
+        "/Users/soonseokoh/.openclaw/skills/": f"{runtime_root}/skills/",
+        "~/.openclaw/shared/a2a-files/": "~/.agent-bridge/shared/a2a-files/",
+        "/Users/soonseokoh/.openclaw/shared/a2a-files/": "~/.agent-bridge/shared/a2a-files/",
+        "bash ~/.openclaw/scripts/codex-review.sh review main": "agent-bridge task create --to patch --title \"[REVIEW] 변경 검토\" --body \"변경 내용과 검토 포인트를 함께 전달\"",
+        "bash ~/.openclaw/scripts/codex-review.sh plan /path/to/plan.md": "agent-bridge task create --to patch --title \"[PLAN-REVIEW] 계획 검토\" --body-file /path/to/plan.md",
+        "bash ~/.openclaw/scripts/codex-review.sh review [base] [instructions]": "agent-bridge task create --to patch --title \"[REVIEW] 변경 검토\" --body \"base와 검토 포인트를 함께 전달\"",
+        "bash ~/.openclaw/scripts/codex-review.sh plan <file>": "agent-bridge task create --to patch --title \"[PLAN-REVIEW] 계획 검토\" --body-file <file>",
+        "bash ~/.openclaw/scripts/codex-review.sh challenge [focus]": "agent-bridge task create --to patch --title \"[CHALLENGE] 적대적 분석\" --body \"focus를 함께 전달\"",
+        "bash ~/.openclaw/scripts/codex-review.sh consult \"<prompt>\"": "agent-bridge task create --to patch --title \"[CONSULT]\" --body \"<prompt>\"",
+        "python3 ~/.openclaw/skills/task-log/scripts/task-log.py": f"python3 {runtime_root}/skills/task-log/scripts/task-log.py",
+        "Discord #patch 채널 웹훅": "`agent-bridge task create --to patch` 또는 `agent-bridge urgent patch`",
+        "localhost:8787/hooks/patch-trigger": "`agent-bridge urgent patch`",
+    }
+    for old, new in replacements.items():
+        text = text.replace(old, new)
+
+    if name in {"SYRS-RULES.md", "ROSTER.md", "SYRS-CONTEXT.md"}:
+        text = text.replace("A2A(sessions_send)", "A2A(agent-bridge task create)")
+        text = text.replace("sessions_send/sessions_spawn", "agent-bridge task create/urgent")
+        text = text.replace("sessions_spawn", "bridge disposable child")
+        text = text.replace("sessions_history", "bridge task/MEMORY context")
+        text = text.replace("sessions_send", "agent-bridge task create")
+        text = text.replace("openclaw message send", "연결된 Claude 세션 응답")
+        text = text.replace("패치는 OpenClaw 에이전트가 아님", "패치는 Agent Bridge 관리자 역할")
+
+    return text
+
+
 def sync_shared_docs(bridge_home: Path, source_shared: Path, dry_run: bool) -> list[str]:
     changed: list[str] = []
     target_shared = bridge_home / "shared"
@@ -275,6 +315,8 @@ def sync_shared_docs(bridge_home: Path, source_shared: Path, dry_run: bool) -> l
         if not src.exists():
             continue
         text = inject_after_heading(read_text(src), render_shared_override(name))
+        text = normalize_legacy_paths(text)
+        text = rewrite_shared_legacy_text(name, bridge_home, text)
         dst = target_shared / name
         old = read_text(dst) if dst.exists() else None
         if old != text:
