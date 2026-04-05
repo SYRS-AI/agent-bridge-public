@@ -57,6 +57,15 @@ src = Path(sys.argv[1]).expanduser()
 dst = Path(sys.argv[2]).expanduser()
 ignore_names = {".git", "__pycache__", ".DS_Store"}
 
+def should_ignore_name(name: str) -> bool:
+    if name in ignore_names:
+        return True
+    if name.endswith((".pyc", ".pyo", ".bak", ".orig", ".rej")):
+        return True
+    if ".bak-" in name:
+        return True
+    return False
+
 def remove_path(path: Path) -> None:
     if path.is_symlink() or path.is_file():
         path.unlink()
@@ -70,7 +79,7 @@ def same_file(left: Path, right: Path) -> bool:
         return False
 
 def copy_entry(source: Path, target: Path) -> None:
-    if source.name in ignore_names:
+    if should_ignore_name(source.name):
         return
     if source.is_symlink():
         link_target = os.readlink(source)
