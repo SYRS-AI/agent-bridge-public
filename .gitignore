@@ -6,3 +6,5 @@ __pycache__/
 *.pyc
 .DS_Store
 agent-roster.local.sh
+agents/.claude/
+agents/*/.claude/

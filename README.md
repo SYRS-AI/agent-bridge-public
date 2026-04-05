@@ -193,6 +193,11 @@ explicitly marked them idle via the installed hooks:
 - `UserPromptSubmit` clears `idle-since`
 - the daemon sends only a short line such as `agb inbox <agent>` when `idle-since` exists
 
+For bridge-owned Claude homes under `BRIDGE_AGENT_HOME_ROOT`, the bridge now
+keeps one shared settings file at `<agent-home-root>/.claude/settings.json`
+and symlinks each `<agent-home>/.claude/settings.json` to it. Claude workdirs
+outside the bridge-owned home root keep using a local settings file.
+
 This keeps the durable payload in the queue and avoids mid-turn delivery.
 
 ### Optional external channel notifications
@@ -255,6 +260,7 @@ For broader preflight, `setup agent` also checks:
 
 - roster presence and workdir/session wiring
 - Claude `Stop` + `UserPromptSubmit` hook installation into `<workdir>/.claude/settings.json`
+  - bridge-owned Claude homes use the shared `<agent-home-root>/.claude/settings.json` symlink target
 - Claude webhook channel entry in `<workdir>/.mcp.json` when a webhook port is enabled
 - `CLAUDE.md` presence for Claude roles
 - tracked profile status

@@ -206,6 +206,7 @@ run_agent() {
   local prompt_hook_output=""
   local webhook_cleanup_output=""
   local wake_status=""
+  local settings_mode=""
   local roster_channel=""
   local access_channel=""
   local access_channels=()
@@ -275,6 +276,11 @@ run_agent() {
   if [[ "$engine" == "claude" ]]; then
     echo
     echo "== Claude Activity Hooks =="
+    settings_mode="$(bridge_claude_settings_mode "$workdir")"
+    printf 'settings_mode: %s\n' "$settings_mode"
+    if [[ "$settings_mode" == "shared" ]]; then
+      printf 'shared_settings_file: %s\n' "$(bridge_hook_shared_settings_file)"
+    fi
     if hook_output="$(bridge_ensure_claude_stop_hook "$workdir" 2>&1)"; then
       echo "$hook_output"
     else

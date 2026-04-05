@@ -65,6 +65,7 @@ export BRIDGE_DAEMON_INTERVAL=1
 export BRIDGE_CRON_DISPATCH_MAX_PARALLEL=1
 export BRIDGE_ROSTER_FILE="$REPO_ROOT/agent-roster.sh"
 export BRIDGE_ROSTER_LOCAL_FILE="$BRIDGE_HOME/agent-roster.local.sh"
+export BRIDGE_AGENT_HOME_ROOT="$BRIDGE_HOME/agents"
 export BRIDGE_WEBHOOK_PORT_RANGE_START=9301
 export BRIDGE_WEBHOOK_PORT_RANGE_END=9399
 
@@ -83,7 +84,7 @@ AUTO_START_WORKDIR="$TMP_ROOT/auto-start-workdir"
 PROJECT_ROOT="$TMP_ROOT/git-project"
 HOOK_WORKDIR="$TMP_ROOT/claude-hook-workdir"
 MCP_WORKDIR="$TMP_ROOT/claude-mcp-workdir"
-CLAUDE_STATIC_WORKDIR="$TMP_ROOT/claude-static-workdir"
+CLAUDE_STATIC_WORKDIR="$BRIDGE_HOME/agents/claude-static"
 FAKE_BIN="$TMP_ROOT/bin"
 FAKE_DISCORD_PORT_FILE="$TMP_ROOT/fake-discord.port"
 FAKE_DISCORD_REQUESTS="$TMP_ROOT/fake-discord-requests.jsonl"
@@ -464,6 +465,15 @@ PROMPT_STATUS_OUTPUT="$(python3 "$REPO_ROOT/bridge-hooks.py" status-prompt-hook 
 assert_contains "$PROMPT_STATUS_OUTPUT" "status: present"
 assert_contains "$(cat "$HOOK_WORKDIR/.claude/settings.json")" "\"UserPromptSubmit\""
 assert_contains "$(cat "$HOOK_WORKDIR/.claude/settings.json")" "clear-idle.sh"
+
+log "ensuring shared Claude settings symlink for bridge-owned agent homes"
+SHARED_HOOK_OUTPUT="$("$BASH4_BIN" -lc "source \"$REPO_ROOT/bridge-lib.sh\"; bridge_load_roster; bridge_ensure_claude_stop_hook \"$CLAUDE_STATIC_WORKDIR\"")"
+assert_contains "$SHARED_HOOK_OUTPUT" "settings_file: $CLAUDE_STATIC_WORKDIR/.claude/settings.json"
+assert_contains "$SHARED_HOOK_OUTPUT" "command: $BRIDGE_HOME/agents/.claude/settings.json"
+[[ -L "$CLAUDE_STATIC_WORKDIR/.claude/settings.json" ]] || die "expected shared Claude settings symlink"
+SHARED_SYMLINK_TARGET="$(readlink "$CLAUDE_STATIC_WORKDIR/.claude/settings.json")"
+assert_contains "$SHARED_SYMLINK_TARGET" "../../.claude/settings.json"
+assert_contains "$(cat "$BRIDGE_HOME/agents/.claude/settings.json")" "\"additionalContext\": true"
 
 log "ensuring mark-idle hook emits inbox summary context"
 HOOK_QUEUE_CREATE_OUTPUT="$(python3 "$REPO_ROOT/bridge-queue.py" create --to claude-static --title "Follow-up task" --from smoke --priority high --body "check inbox")"

@@ -217,6 +217,28 @@ print(rel)
 PY
 }
 
+bridge_path_is_within_root() {
+  local path="$1"
+  local root="$2"
+
+  bridge_require_python
+  python3 - "$path" "$root" <<'PY'
+import os
+import sys
+
+path = os.path.realpath(sys.argv[1])
+root = os.path.realpath(sys.argv[2])
+
+try:
+    common = os.path.commonpath([path, root])
+except ValueError:
+    print("0")
+    raise SystemExit(0)
+
+print("1" if common == root else "0")
+PY
+}
+
 bridge_history_key_for() {
   local engine="$1"
   local name="$2"
