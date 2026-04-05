@@ -48,6 +48,10 @@ def resolve_agent_home_root(bridge_home, agent_home_root):
     return Path(bridge_home) / "agents"
 
 
+def runtime_memory_dir(bridge_home):
+    return Path(bridge_home) / "runtime" / "memory"
+
+
 def looks_like_workspace(path):
     candidate = Path(path)
     if not candidate.is_dir():
@@ -109,30 +113,43 @@ def parse_args():
     return parser.parse_args()
 
 
-def resolve_agent_id(agent_id, openclaw_root, config):
+def resolve_agent_id(agent_id, openclaw_root, bridge_home, config):
     listed = {item.get("id") for item in config.get("agents", {}).get("list", [])}
-    memory_root = Path(openclaw_root) / "memory"
-    direct_db = memory_root / f"{agent_id}.sqlite"
+    memory_roots = [runtime_memory_dir(bridge_home), Path(openclaw_root) / "memory"]
+    direct_db = None
+    for memory_root in memory_roots:
+        candidate = memory_root / f"{agent_id}.sqlite"
+        if candidate.exists():
+            direct_db = candidate
+            break
 
-    if agent_id in listed or direct_db.exists():
+    if agent_id in listed or (direct_db is not None and direct_db.exists()):
         return agent_id
     suffix_matches = {
         item
         for item in listed
         if item.endswith(f"-{agent_id}")
     }
-    suffix_matches.update(
-        path.stem
-        for path in memory_root.glob(f"*-{agent_id}.sqlite")
-    )
+    for memory_root in memory_roots:
+        suffix_matches.update(
+            path.stem
+            for path in memory_root.glob(f"*-{agent_id}.sqlite")
+        )
     if len(suffix_matches) == 1:
         return next(iter(suffix_matches))
     return agent_id
 
 
+def default_memory_db_path(resolved_agent, openclaw_root, bridge_home):
+    runtime_candidate = runtime_memory_dir(bridge_home) / f"{resolved_agent}.sqlite"
+    if runtime_candidate.exists():
+        return str(runtime_candidate)
+    return str(Path(openclaw_root) / "memory" / f"{resolved_agent}.sqlite")
+
+
 def load_agent_settings(agent_id, config_path, openclaw_root, bridge_home, agent_home_root):
     config = load_json(config_path)
-    resolved_agent = resolve_agent_id(agent_id, openclaw_root, config)
+    resolved_agent = resolve_agent_id(agent_id, openclaw_root, bridge_home, config)
     defaults = config.get("agents", {}).get("defaults", {}).get("memorySearch", {})
     agent_entry = None
     for item in config.get("agents", {}).get("list", []):
@@ -144,7 +161,7 @@ def load_agent_settings(agent_id, config_path, openclaw_root, bridge_home, agent
 
     db_path = (
         memory_settings.get("store", {}).get("path")
-        or str(Path(openclaw_root) / "memory" / f"{resolved_agent}.sqlite")
+        or default_memory_db_path(resolved_agent, openclaw_root, bridge_home)
     )
     workspace_dir = resolve_workspace_dir(agent_entry, resolved_agent, openclaw_root, bridge_home, agent_home_root)
 

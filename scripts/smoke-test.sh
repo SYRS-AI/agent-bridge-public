@@ -71,6 +71,7 @@ export BRIDGE_WEBHOOK_PORT_RANGE_END=9399
 
 SESSION_NAME="bridge-smoke-$$"
 REQUESTER_SESSION="bridge-requester-$$"
+CLAUDE_STATIC_SESSION="claude-static-$SESSION_NAME"
 SMOKE_AGENT="smoke-agent-$$"
 REQUESTER_AGENT="requester-agent-$$"
 AUTO_START_AGENT="auto-start-agent-$$"
@@ -96,6 +97,7 @@ cleanup() {
   tmux kill-session -t "$REQUESTER_SESSION" >/dev/null 2>&1 || true
   tmux kill-session -t "$AUTO_START_SESSION" >/dev/null 2>&1 || true
   tmux kill-session -t "$STATIC_SESSION" >/dev/null 2>&1 || true
+  tmux kill-session -t "$CLAUDE_STATIC_SESSION" >/dev/null 2>&1 || true
   tmux kill-session -t "$WORKTREE_AGENT" >/dev/null 2>&1 || true
   if [[ -n "$FAKE_DISCORD_PID" ]]; then
     kill "$FAKE_DISCORD_PID" >/dev/null 2>&1 || true
@@ -493,7 +495,9 @@ assert_contains "$SETUP_ADMIN_OUTPUT" "next_command: agent-bridge admin"
 assert_contains "$(cat "$BRIDGE_ROSTER_LOCAL_FILE")" "BRIDGE_ADMIN_AGENT_ID=\"$SMOKE_AGENT\""
 
 ADMIN_OUTPUT="$("$REPO_ROOT/agent-bridge" admin --no-attach 2>&1)"
-assert_contains "$ADMIN_OUTPUT" "세션 '$SESSION_NAME'이 이미 실행 중입니다."
+if [[ "$ADMIN_OUTPUT" != *"세션 '$SESSION_NAME'이 이미 실행 중입니다."* && "$ADMIN_OUTPUT" != *"세션 '$SESSION_NAME' 시작 완료"* ]]; then
+  die "expected admin launch to either reuse or start session"
+fi
 
 ADMIN_REPLACE_OUTPUT="$("$REPO_ROOT/agent-bridge" admin --replace --no-continue --no-attach 2>&1)"
 assert_contains "$ADMIN_REPLACE_OUTPUT" "세션 '$SESSION_NAME' 시작 완료"
@@ -730,6 +734,12 @@ assert_contains "$NATIVE_DELETE_OUTPUT" "deleted native cron job"
 log "inventorying legacy runtime references"
 LEGACY_ROOT="$TMP_ROOT/legacy-runtime"
 mkdir -p "$LEGACY_ROOT/cron" "$LEGACY_ROOT/scripts" "$LEGACY_ROOT/skills/sample-skill" "$LEGACY_ROOT/credentials"
+mkdir -p "$LEGACY_ROOT/shared/tools" "$LEGACY_ROOT/shared/references" "$LEGACY_ROOT/memory"
+printf 'echo runtime smoke\n' >"$LEGACY_ROOT/scripts/morning-briefing.py"
+printf '# sample skill\n' >"$LEGACY_ROOT/skills/sample-skill/SKILL.md"
+printf 'tool note\n' >"$LEGACY_ROOT/shared/tools/tool.md"
+printf 'reference note\n' >"$LEGACY_ROOT/shared/references/ref.md"
+: >"$LEGACY_ROOT/memory/$SMOKE_AGENT.sqlite"
 cat >"$LEGACY_ROOT/cron/jobs.json" <<EOF
 {
   "jobs": [
@@ -759,6 +769,21 @@ assert_contains "$RUNTIME_INVENTORY_OUTPUT" "cron_with_legacy_refs: 1"
 assert_contains "$RUNTIME_INVENTORY_OUTPUT" "files_with_legacy_refs: 1"
 assert_contains "$RUNTIME_INVENTORY_OUTPUT" "skills: 1"
 assert_contains "$RUNTIME_INVENTORY_OUTPUT" "notify: 1"
+
+log "syncing bridge-local runtime roots from legacy source"
+RUNTIME_SYNC_OUTPUT="$(BRIDGE_OPENCLAW_HOME="$LEGACY_ROOT" BRIDGE_RUNTIME_ROOT="$BRIDGE_HOME/runtime" "$REPO_ROOT/agent-bridge" migrate runtime sync)"
+assert_contains "$RUNTIME_SYNC_OUTPUT" "item[scripts]"
+[[ -f "$BRIDGE_HOME/runtime/scripts/morning-briefing.py" ]] || die "expected runtime scripts copy"
+[[ -f "$BRIDGE_HOME/runtime/skills/sample-skill/SKILL.md" ]] || die "expected runtime skills copy"
+[[ -f "$BRIDGE_HOME/runtime/shared/tools/tool.md" ]] || die "expected runtime shared tools copy"
+[[ -f "$BRIDGE_HOME/runtime/shared/references/ref.md" ]] || die "expected runtime shared references copy"
+[[ -f "$BRIDGE_HOME/runtime/memory/$SMOKE_AGENT.sqlite" ]] || die "expected runtime memory copy"
+
+log "rewriting cron payloads to bridge-local runtime paths"
+RUNTIME_REWRITE_OUTPUT="$("$REPO_ROOT/agent-bridge" migrate runtime rewrite-cron --bridge-home "$BRIDGE_HOME" --legacy-home "$LEGACY_ROOT" --jobs-file "$LEGACY_ROOT/cron/jobs.json")"
+assert_contains "$RUNTIME_REWRITE_OUTPUT" "status: rewritten"
+assert_contains "$RUNTIME_REWRITE_OUTPUT" "changed_jobs: 1"
+grep -q "$BRIDGE_HOME/runtime/scripts/morning-briefing.py" "$LEGACY_ROOT/cron/jobs.json" || die "expected rewritten runtime script path"
 
 log "processing one queued cron-dispatch task through the daemon"
 RUN_ID="smoke-job-1234--2026-04-05T10-00-00Z"

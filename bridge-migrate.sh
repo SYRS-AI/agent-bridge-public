@@ -12,6 +12,8 @@ usage() {
   cat <<EOF
 Usage:
   bash $SCRIPT_DIR/bridge-migrate.sh runtime inventory [--json] [--report <path>]
+  bash $SCRIPT_DIR/bridge-migrate.sh runtime sync [--dry-run]
+  bash $SCRIPT_DIR/bridge-migrate.sh runtime rewrite-cron [--dry-run] [--json]
   bash $SCRIPT_DIR/bridge-migrate.sh docs audit [--all] [agent...]
   bash $SCRIPT_DIR/bridge-migrate.sh docs apply [--all] [agent...] [--dry-run] [--report <path>]
   bash $SCRIPT_DIR/bridge-migrate.sh workspace plan <agent>
@@ -28,6 +30,95 @@ run_docs_helper() {
 run_runtime_helper() {
   bridge_require_python
   python3 "$SCRIPT_DIR/bridge-runtime-inventory.py" "$@"
+}
+
+runtime_count_files() {
+  local path="$1"
+  [[ -d "$path" ]] || {
+    printf '0'
+    return 0
+  }
+  find "$path" -type f | wc -l | tr -d ' '
+}
+
+runtime_sync_one() {
+  local label="$1"
+  local source_root="$2"
+  local target_root="$3"
+  local backup_root="$4"
+  local dry_run="$5"
+  local source_files=0
+  local target_files=0
+
+  [[ -d "$source_root" ]] || return 0
+
+  source_files="$(runtime_count_files "$source_root")"
+  target_files="$(runtime_count_files "$target_root")"
+  printf 'item[%s]: %s -> %s\n' "$label" "$source_root" "$target_root"
+  printf '  source_files: %s\n' "$source_files"
+  printf '  target_files_before: %s\n' "$target_files"
+
+  if [[ "$dry_run" == "1" ]]; then
+    printf '  action: merge-copy (dry-run)\n'
+    return 0
+  fi
+
+  mkdir -p "$(dirname "$target_root")" "$backup_root"
+  if [[ -d "$target_root" && ! -e "$backup_root/$label" ]]; then
+    cp -RP "$target_root" "$backup_root/$label"
+  fi
+  mkdir -p "$target_root"
+  cp -RP "$source_root/." "$target_root/"
+  printf '  target_files_after: %s\n' "$(runtime_count_files "$target_root")"
+}
+
+cmd_runtime_sync() {
+  local dry_run=0
+  local legacy_home="$BRIDGE_OPENCLAW_HOME"
+  local runtime_root="$BRIDGE_RUNTIME_ROOT"
+  local backup_root=""
+  local stamp=""
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --dry-run)
+        dry_run=1
+        shift
+        ;;
+      --legacy-home)
+        [[ $# -lt 2 ]] && bridge_die "$1 뒤에 값을 지정하세요."
+        legacy_home="$2"
+        shift 2
+        ;;
+      --runtime-root)
+        [[ $# -lt 2 ]] && bridge_die "$1 뒤에 값을 지정하세요."
+        runtime_root="$2"
+        shift 2
+        ;;
+      -h|--help)
+        usage
+        exit 0
+        ;;
+      *)
+        bridge_die "지원하지 않는 runtime sync 옵션입니다: $1"
+        ;;
+    esac
+  done
+
+  stamp="$(date '+%Y%m%d-%H%M%S')"
+  backup_root="$BRIDGE_STATE_DIR/runtime-sync/$stamp"
+
+  printf 'mode: %s\n' "$([[ "$dry_run" == "1" ]] && printf 'dry-run' || printf 'sync')"
+  printf 'legacy_home: %s\n' "$legacy_home"
+  printf 'runtime_root: %s\n' "$runtime_root"
+  printf 'backup_root: %s\n' "$backup_root"
+  printf '\n'
+
+  runtime_sync_one "scripts" "$legacy_home/scripts" "$runtime_root/scripts" "$backup_root" "$dry_run"
+  runtime_sync_one "skills" "$legacy_home/skills" "$runtime_root/skills" "$backup_root" "$dry_run"
+  runtime_sync_one "shared-tools" "$legacy_home/shared/tools" "$runtime_root/shared/tools" "$backup_root" "$dry_run"
+  runtime_sync_one "shared-references" "$legacy_home/shared/references" "$runtime_root/shared/references" "$backup_root" "$dry_run"
+  runtime_sync_one "memory" "$legacy_home/memory" "$runtime_root/memory" "$backup_root" "$dry_run"
 }
 
 MIGRATE_AGENT=""
@@ -416,7 +507,13 @@ case "$subcommand" in
     shift || true
     case "$action" in
       inventory)
-        run_runtime_helper "$@"
+        run_runtime_helper inventory "$@"
+        ;;
+      sync)
+        cmd_runtime_sync "$@"
+        ;;
+      rewrite-cron)
+        run_runtime_helper rewrite-cron "$@"
         ;;
       ""|-h|--help|help)
         usage

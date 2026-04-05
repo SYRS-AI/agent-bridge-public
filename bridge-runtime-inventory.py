@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""bridge-runtime-inventory.py — inventory legacy runtime dependencies."""
+"""bridge-runtime-inventory.py — inventory and rewrite legacy runtime dependencies."""
 
 from __future__ import annotations
 
@@ -160,16 +160,18 @@ def source_inventory(legacy_home: Path) -> dict[str, dict[str, object]]:
     }
 
 
+def load_jobs_payload(path: Path):
+    raw = json.loads(path.expanduser().read_text(encoding="utf-8"))
+    jobs = raw.get("jobs") if isinstance(raw, dict) else raw
+    if not isinstance(jobs, list):
+        raise ValueError("jobs.json must contain a top-level list or {jobs:[...]}")
+    return raw, jobs
+
+
 def load_jobs(path: Path) -> list[dict]:
     if not path.exists():
         return []
-    raw = json.loads(path.read_text(encoding="utf-8"))
-    if isinstance(raw, dict):
-        jobs = raw.get("jobs", [])
-    else:
-        jobs = raw
-    if not isinstance(jobs, list):
-        raise ValueError(f"invalid jobs payload: {path}")
+    _, jobs = load_jobs_payload(path)
     return [job for job in jobs if isinstance(job, dict)]
 
 
@@ -406,6 +408,146 @@ def build_inventory(bridge_home: Path, legacy_home: Path, jobs_file: Path, nativ
     }
 
 
+def runtime_prefixes(bridge_home: Path) -> dict[str, str]:
+    runtime_root = bridge_home / "runtime"
+    return {
+        "scripts": pretty_path(runtime_root / "scripts"),
+        "skills": pretty_path(runtime_root / "skills"),
+        "shared_tools": pretty_path(runtime_root / "shared" / "tools"),
+        "shared_references": pretty_path(runtime_root / "shared" / "references"),
+        "memory": pretty_path(runtime_root / "memory"),
+        "shared": pretty_path(bridge_home / "shared"),
+    }
+
+
+def legacy_rewrite_rules(bridge_home: Path, legacy_home: Path) -> list[tuple[str, str, str]]:
+    runtime = runtime_prefixes(bridge_home)
+    abs_legacy = str(legacy_home)
+    return [
+        ("scripts", f"{abs_legacy}/scripts/", f"{runtime['scripts']}/"),
+        ("scripts", "~/.openclaw/scripts/", f"{runtime['scripts']}/"),
+        ("skills", f"{abs_legacy}/skills/", f"{runtime['skills']}/"),
+        ("skills", "~/.openclaw/skills/", f"{runtime['skills']}/"),
+        ("shared_tools", f"{abs_legacy}/shared/tools/", f"{runtime['shared_tools']}/"),
+        ("shared_tools", "~/.openclaw/shared/tools/", f"{runtime['shared_tools']}/"),
+        ("shared_references", f"{abs_legacy}/shared/references/", f"{runtime['shared_references']}/"),
+        ("shared_references", "~/.openclaw/shared/references/", f"{runtime['shared_references']}/"),
+        ("shared", f"{abs_legacy}/shared/a2a-files/", f"{runtime['shared']}/a2a-files/"),
+        ("shared", "~/.openclaw/shared/a2a-files/", f"{runtime['shared']}/a2a-files/"),
+        ("shared", f"{abs_legacy}/shared/ROSTER.md", f"{runtime['shared']}/ROSTER.md"),
+        ("shared", "~/.openclaw/shared/ROSTER.md", f"{runtime['shared']}/ROSTER.md"),
+        ("shared", f"{abs_legacy}/shared/SYRS-CONTEXT.md", f"{runtime['shared']}/SYRS-CONTEXT.md"),
+        ("shared", "~/.openclaw/shared/SYRS-CONTEXT.md", f"{runtime['shared']}/SYRS-CONTEXT.md"),
+        ("shared", f"{abs_legacy}/shared/SYRS-RULES.md", f"{runtime['shared']}/SYRS-RULES.md"),
+        ("shared", "~/.openclaw/shared/SYRS-RULES.md", f"{runtime['shared']}/SYRS-RULES.md"),
+        ("shared", f"{abs_legacy}/shared/SYRS-USER.md", f"{runtime['shared']}/SYRS-USER.md"),
+        ("shared", "~/.openclaw/shared/SYRS-USER.md", f"{runtime['shared']}/SYRS-USER.md"),
+        ("shared", f"{abs_legacy}/shared/TOOLS.md", f"{runtime['shared']}/TOOLS.md"),
+        ("shared", "~/.openclaw/shared/TOOLS.md", f"{runtime['shared']}/TOOLS.md"),
+        ("shared", f"{abs_legacy}/shared/TOOLS-REGISTRY.md", f"{runtime['shared']}/TOOLS-REGISTRY.md"),
+        ("shared", "~/.openclaw/shared/TOOLS-REGISTRY.md", f"{runtime['shared']}/TOOLS-REGISTRY.md"),
+        ("memory", f"{abs_legacy}/memory/", f"{runtime['memory']}/"),
+        ("memory", "~/.openclaw/memory/", f"{runtime['memory']}/"),
+    ]
+
+
+def rewrite_string(value: str, rules: list[tuple[str, str, str]]) -> tuple[str, Counter]:
+    result = value
+    counts: Counter = Counter()
+    for category, old, new in rules:
+        if old not in result:
+            continue
+        occurrences = result.count(old)
+        result = result.replace(old, new)
+        counts[category] += occurrences
+    return result, counts
+
+
+def rewrite_value(value, rules: list[tuple[str, str, str]]):
+    counts: Counter = Counter()
+    changed = False
+    if isinstance(value, str):
+        rewritten, local_counts = rewrite_string(value, rules)
+        return rewritten, rewritten != value, local_counts
+    if isinstance(value, list):
+        items = []
+        for item in value:
+            rewritten, item_changed, item_counts = rewrite_value(item, rules)
+            items.append(rewritten)
+            changed = changed or item_changed
+            counts.update(item_counts)
+        return items, changed, counts
+    if isinstance(value, dict):
+        output = {}
+        for key, item in value.items():
+            rewritten, item_changed, item_counts = rewrite_value(item, rules)
+            output[key] = rewritten
+            changed = changed or item_changed
+            counts.update(item_counts)
+        return output, changed, counts
+    return value, False, counts
+
+
+def backup_path_for(path: Path) -> Path:
+    stamp = datetime.now().astimezone().strftime("%Y%m%d-%H%M%S")
+    return path.with_name(f"{path.name}.bak-{stamp}")
+
+
+def atomic_write_json(path: Path, payload) -> None:
+    temp_path = path.with_name(f".{path.name}.tmp")
+    temp_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    os.replace(temp_path, path)
+
+
+def rewrite_cron_jobs(bridge_home: Path, legacy_home: Path, jobs_file: Path, dry_run: bool) -> dict[str, object]:
+    raw, jobs = load_jobs_payload(jobs_file)
+    rules = legacy_rewrite_rules(bridge_home, legacy_home)
+    changed_jobs = 0
+    replacement_counts: Counter = Counter()
+    examples: list[dict[str, object]] = []
+    rewritten_jobs = []
+
+    for job in jobs:
+        rewritten, changed, counts = rewrite_value(job, rules)
+        rewritten_jobs.append(rewritten)
+        if not changed:
+            continue
+        changed_jobs += 1
+        replacement_counts.update(counts)
+        if len(examples) < 8:
+            texts = list(iter_strings(rewritten))
+            preview = next((first_line(text) for text in texts if "~/.agent-bridge/runtime/" in text or "~/.agent-bridge/shared/" in text), "")
+            examples.append(
+                {
+                    "job": str(job.get("name") or job.get("id") or "<unnamed>"),
+                    "preview": preview,
+                }
+            )
+
+    payload = raw if isinstance(raw, dict) else {"jobs": rewritten_jobs}
+    payload["jobs"] = rewritten_jobs
+    result = {
+        "generated_at": iso_now(),
+        "jobs_file": pretty_path(jobs_file),
+        "bridge_home": pretty_path(bridge_home),
+        "legacy_home": pretty_path(legacy_home),
+        "total_jobs": len(jobs),
+        "changed_jobs": changed_jobs,
+        "replacement_counts": dict(replacement_counts),
+        "examples": examples,
+    }
+    if dry_run or changed_jobs == 0:
+        result["status"] = "dry_run" if dry_run else "no_changes"
+        return result
+
+    backup_path = backup_path_for(jobs_file)
+    backup_path.write_text(jobs_file.read_text(encoding="utf-8"), encoding="utf-8")
+    atomic_write_json(jobs_file, payload)
+    result["status"] = "rewritten"
+    result["backup_file"] = pretty_path(backup_path)
+    return result
+
+
 def print_human(data: dict[str, object]) -> None:
     cron = data["cron"]
     docs = data["live_runtime"]
@@ -437,35 +579,80 @@ def print_human(data: dict[str, object]) -> None:
 
 
 def parse_args(argv: list[str]) -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Inventory bridge runtime dependencies still tied to a legacy source tree.")
-    parser.add_argument("--bridge-home", default=os.environ.get("BRIDGE_HOME", str(HOME / ".agent-bridge")))
-    parser.add_argument("--legacy-home", default=os.environ.get("BRIDGE_LEGACY_HOME", str(HOME / ".openclaw")))
-    parser.add_argument("--jobs-file", default=None)
-    parser.add_argument("--native-jobs-file", default=None)
-    parser.add_argument("--json", action="store_true")
-    parser.add_argument("--report", default=None)
+    parser = argparse.ArgumentParser(description="Inventory and rewrite legacy runtime dependencies for Agent Bridge.")
+    subparsers = parser.add_subparsers(dest="command", required=True)
+
+    inventory = subparsers.add_parser("inventory", help="Inventory legacy runtime dependencies.")
+    inventory.add_argument("--bridge-home", default=os.environ.get("BRIDGE_HOME", str(HOME / ".agent-bridge")))
+    inventory.add_argument("--legacy-home", default=os.environ.get("BRIDGE_LEGACY_HOME", str(HOME / ".openclaw")))
+    inventory.add_argument("--jobs-file", default=None)
+    inventory.add_argument("--native-jobs-file", default=None)
+    inventory.add_argument("--json", action="store_true")
+    inventory.add_argument("--report", default=None)
+
+    rewrite = subparsers.add_parser("rewrite-cron", help="Rewrite cron payload legacy paths to bridge-local runtime roots.")
+    rewrite.add_argument("--bridge-home", default=os.environ.get("BRIDGE_HOME", str(HOME / ".agent-bridge")))
+    rewrite.add_argument("--legacy-home", default=os.environ.get("BRIDGE_LEGACY_HOME", str(HOME / ".openclaw")))
+    rewrite.add_argument("--jobs-file", default=None)
+    rewrite.add_argument("--dry-run", action="store_true")
+    rewrite.add_argument("--json", action="store_true")
     return parser.parse_args(argv)
+
+
+def print_rewrite_result(result: dict[str, object]) -> None:
+    print(f"status: {result['status']}")
+    print(f"jobs_file: {result['jobs_file']}")
+    print(f"total_jobs: {result['total_jobs']}")
+    print(f"changed_jobs: {result['changed_jobs']}")
+    print("replacement_counts:")
+    counts = result.get("replacement_counts", {})
+    if not counts:
+        print("  - none")
+    else:
+        for category, count in sorted(counts.items()):
+            print(f"  - {category}: {count}")
+    if result.get("backup_file"):
+        print(f"backup_file: {result['backup_file']}")
+    print("examples:")
+    examples = result.get("examples", [])
+    if not examples:
+        print("  - none")
+    else:
+        for example in examples[:5]:
+            print(f"  - {example['job']} :: {example['preview']}")
 
 
 def main(argv: list[str]) -> int:
     args = parse_args(argv)
     bridge_home = Path(args.bridge_home).expanduser()
     legacy_home = Path(args.legacy_home).expanduser()
-    jobs_file = Path(args.jobs_file).expanduser() if args.jobs_file else legacy_home / "cron" / "jobs.json"
-    native_jobs_file = Path(args.native_jobs_file).expanduser() if args.native_jobs_file else bridge_home / "cron" / "jobs.json"
+    jobs_file = Path(args.jobs_file).expanduser() if getattr(args, "jobs_file", None) else legacy_home / "cron" / "jobs.json"
 
-    data = build_inventory(bridge_home, legacy_home, jobs_file, native_jobs_file)
+    if args.command == "inventory":
+        native_jobs_file = Path(args.native_jobs_file).expanduser() if args.native_jobs_file else bridge_home / "cron" / "jobs.json"
+        data = build_inventory(bridge_home, legacy_home, jobs_file, native_jobs_file)
 
-    if args.report:
-        report_path = Path(args.report).expanduser()
-        report_path.parent.mkdir(parents=True, exist_ok=True)
-        report_path.write_text(render_report(data), encoding="utf-8")
+        if args.report:
+            report_path = Path(args.report).expanduser()
+            report_path.parent.mkdir(parents=True, exist_ok=True)
+            report_path.write_text(render_report(data), encoding="utf-8")
 
-    if args.json:
-        json.dump(data, sys.stdout, ensure_ascii=False, indent=2)
-        sys.stdout.write("\n")
-    else:
-        print_human(data)
+        if args.json:
+            json.dump(data, sys.stdout, ensure_ascii=False, indent=2)
+            sys.stdout.write("\n")
+        else:
+            print_human(data)
+        return 0
+
+    if args.command == "rewrite-cron":
+        result = rewrite_cron_jobs(bridge_home, legacy_home, jobs_file, args.dry_run)
+        if args.json:
+            json.dump(result, sys.stdout, ensure_ascii=False, indent=2)
+            sys.stdout.write("\n")
+        else:
+            print_rewrite_result(result)
+        return 0
+
     return 0
 
 

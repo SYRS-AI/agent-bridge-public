@@ -23,6 +23,8 @@ Usage:
   $CLI_NAME cron <inventory|show|list|create|update|delete|enqueue|sync|run-subagent|errors|cleanup> ...
   $CLI_NAME discord <status|sync>
   $CLI_NAME migrate runtime inventory [--json] [--report <path>]
+  $CLI_NAME migrate runtime sync [--dry-run]
+  $CLI_NAME migrate runtime rewrite-cron [--dry-run] [--json]
   $CLI_NAME migrate docs audit [--all] [agent...]
   $CLI_NAME migrate docs apply [--all] [agent...] [--dry-run]
   $CLI_NAME migrate workspace plan <agent>
@@ -78,6 +80,8 @@ Examples:
   $CLI_NAME setup discord tester
   $CLI_NAME setup agent tester
   $CLI_NAME migrate runtime inventory
+  $CLI_NAME migrate runtime sync --dry-run
+  $CLI_NAME migrate runtime rewrite-cron --dry-run
   $CLI_NAME migrate docs audit --all
   $CLI_NAME migrate docs apply --all --dry-run
   $CLI_NAME migrate workspace plan <agent>
