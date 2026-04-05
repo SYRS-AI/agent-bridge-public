@@ -53,6 +53,8 @@ def read_snapshot(path: Path) -> list[dict[str, Any]]:
             line = line.rstrip("\n")
             if not line:
                 continue
+            if line.startswith("agent\tchannel_id\t"):
+                continue
             parts = line.split("\t")
             if len(parts) < 4:
                 print(f"[discord-relay] malformed snapshot row fields={len(parts)} raw={line!r}", file=sys.stderr)
@@ -63,12 +65,20 @@ def read_snapshot(path: Path) -> list[dict[str, Any]]:
             else:
                 agent, channel_id, active, idle_timeout = parts[:4]
                 session = "\t".join(parts[4:])
+            try:
+                idle_timeout_value = int(idle_timeout)
+            except ValueError:
+                print(f"[discord-relay] malformed idle_timeout raw={line!r}", file=sys.stderr)
+                continue
+            if not agent or not channel_id:
+                print(f"[discord-relay] malformed snapshot row missing agent/channel raw={line!r}", file=sys.stderr)
+                continue
             rows.append(
                 {
                     "agent": agent,
                     "channel_id": channel_id,
                     "active": active == "1",
-                    "idle_timeout": int(idle_timeout),
+                    "idle_timeout": idle_timeout_value,
                     "session": session,
                 }
             )
