@@ -49,4 +49,7 @@ declare -Ag BRIDGE_AGENT_NOTIFY_TARGET=()
 declare -Ag BRIDGE_AGENT_NOTIFY_ACCOUNT=()
 
 # shellcheck disable=SC2034
+declare -Ag BRIDGE_AGENT_WEBHOOK_PORT=()
+
+# shellcheck disable=SC2034
 declare -Ag BRIDGE_OPENCLAW_AGENT_TARGET=()

@@ -55,6 +55,11 @@ BRIDGE_AGENT_SESSION["codex-developer"]="codex-developer"
 # The channel id is still useful for Discord wake relay / metadata, but not for
 # bot-authored Claude delivery.
 #
+# Optional: local Claude idle-wake webhook port. Static roles should set one
+# explicitly; dynamic Claude roles get a state-managed port automatically.
+# BRIDGE_AGENT_WEBHOOK_PORT["tester"]="9001"
+# BRIDGE_AGENT_WEBHOOK_PORT["developer"]="9002"
+#
 # After setting the primary channel id, scaffold the runtime Discord files with:
 #   agent-bridge setup discord tester
 #   agent-bridge setup agent tester

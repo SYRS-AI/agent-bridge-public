@@ -164,6 +164,9 @@ run_agent() {
   local profile_target=""
   local claude_path=""
   local hook_output=""
+  local prompt_hook_output=""
+  local webhook_output=""
+  local webhook_port=""
   local notify_status=""
   local roster_channel=""
   local access_channel=""
@@ -233,12 +236,34 @@ run_agent() {
 
   if [[ "$engine" == "claude" ]]; then
     echo
-    echo "== Claude Stop hook =="
+    echo "== Claude Activity Hooks =="
     if hook_output="$(bridge_ensure_claude_stop_hook "$workdir" 2>&1)"; then
       echo "$hook_output"
     else
       echo "$hook_output"
       failures=$((failures + 1))
+    fi
+    if prompt_hook_output="$(bridge_ensure_claude_prompt_hook "$workdir" 2>&1)"; then
+      echo "$prompt_hook_output"
+    else
+      echo "$prompt_hook_output"
+      failures=$((failures + 1))
+    fi
+
+    echo
+    echo "== Claude Webhook Channel =="
+    webhook_port="$(bridge_agent_webhook_port "$agent" 2>/dev/null || true)"
+    if [[ -n "$webhook_port" ]]; then
+      if webhook_output="$(bridge_ensure_claude_webhook_channel "$agent" "$workdir" 2>&1)"; then
+        echo "$webhook_output"
+      else
+        echo "$webhook_output"
+        failures=$((failures + 1))
+      fi
+    else
+      echo "status: disabled"
+      echo "reason: no webhook port configured"
+      warnings+=("Set BRIDGE_AGENT_WEBHOOK_PORT[\"$agent\"]=\"9001\" in agent-roster.local.sh to enable Claude idle wake webhooks for this static role.")
     fi
 
     claude_path="$(bridge_find_agent_claude_md "$agent" || true)"

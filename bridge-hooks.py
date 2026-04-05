@@ -31,6 +31,11 @@ def stop_hook_command(bridge_home: Path, bash_bin: str) -> str:
     return shlex.join([bash_bin, str(hook_path)])
 
 
+def prompt_hook_command(bridge_home: Path, bash_bin: str) -> str:
+    hook_path = bridge_home / "hooks" / "clear-idle.sh"
+    return shlex.join([bash_bin, str(hook_path)])
+
+
 def ensure_settings_root(path: Path) -> dict[str, Any]:
     payload = load_json(path)
     if payload in (None, ""):
@@ -59,7 +64,13 @@ def is_mark_idle_hook(command: str) -> bool:
     return "mark-idle.sh" in str(command)
 
 
-def find_stop_hook(event_hooks: list[dict[str, Any]]) -> tuple[dict[str, Any], dict[str, Any]] | tuple[None, None]:
+def is_clear_idle_hook(command: str) -> bool:
+    return "clear-idle.sh" in str(command)
+
+
+def find_command_hook(
+    event_hooks: list[dict[str, Any]], predicate: Any
+) -> tuple[dict[str, Any], dict[str, Any]] | tuple[None, None]:
     for group in event_hooks:
         if not isinstance(group, dict):
             continue
@@ -71,7 +82,7 @@ def find_stop_hook(event_hooks: list[dict[str, Any]]) -> tuple[dict[str, Any], d
                 continue
             if hook.get("type") != "command":
                 continue
-            if is_mark_idle_hook(str(hook.get("command") or "")):
+            if predicate(str(hook.get("command") or "")):
                 return group, hook
     return None, None
 
@@ -82,13 +93,16 @@ def shell_line(key: str, value: str) -> str:
 
 def print_payload(data: dict[str, str], fmt: str) -> None:
     if fmt == "shell":
-      for key, value in data.items():
-          print(shell_line(key, value))
-      return
+        for key, value in data.items():
+            print(shell_line(key, value))
+        return
 
     print(f"settings_file: {data['HOOK_SETTINGS_FILE']}")
     print(f"status: {data['HOOK_STATUS']}")
-    print(f"stop_hook: {data['HOOK_STOP_HOOK']}")
+    if data.get("HOOK_STOP_HOOK"):
+        print(f"stop_hook: {data['HOOK_STOP_HOOK']}")
+    if data.get("HOOK_PROMPT_HOOK"):
+        print(f"prompt_hook: {data['HOOK_PROMPT_HOOK']}")
     if data.get("HOOK_COMMAND"):
         print(f"command: {data['HOOK_COMMAND']}")
 
@@ -97,29 +111,32 @@ def cmd_status_stop_hook(args: argparse.Namespace) -> int:
     settings_path = Path(args.workdir).expanduser() / ".claude" / "settings.json"
     settings = ensure_settings_root(settings_path)
     stop_hooks = hooks_list(settings, "Stop")
-    _group, hook = find_stop_hook(stop_hooks)
+    _group, hook = find_command_hook(stop_hooks, is_mark_idle_hook)
     command = str(hook.get("command") or "") if hook else ""
     payload = {
         "HOOK_SETTINGS_FILE": str(settings_path),
         "HOOK_STATUS": "present" if hook else "missing",
         "HOOK_STOP_HOOK": "present" if hook else "missing",
+        "HOOK_PROMPT_HOOK": "",
         "HOOK_COMMAND": command,
     }
     print_payload(payload, args.format)
     return 0 if hook else 1
 
 
-def cmd_ensure_stop_hook(args: argparse.Namespace) -> int:
-    bridge_home = Path(args.bridge_home).expanduser()
-    settings_path = Path(args.workdir).expanduser() / ".claude" / "settings.json"
+def ensure_command_hook(
+    settings_path: Path,
+    event_name: str,
+    desired_command: str,
+    matcher: Any,
+) -> bool:
     settings = ensure_settings_root(settings_path)
-    stop_hooks = hooks_list(settings, "Stop")
-    desired_command = stop_hook_command(bridge_home, args.bash_bin)
+    event_hooks = hooks_list(settings, event_name)
     changed = False
 
-    group, hook = find_stop_hook(stop_hooks)
+    group, hook = find_command_hook(event_hooks, matcher)
     if hook is None:
-        stop_hooks.append(
+        event_hooks.append(
             {
                 "hooks": [
                     {
@@ -147,10 +164,54 @@ def cmd_ensure_stop_hook(args: argparse.Namespace) -> int:
     if changed:
         save_json(settings_path, settings)
 
+    return changed
+
+
+def cmd_ensure_stop_hook(args: argparse.Namespace) -> int:
+    bridge_home = Path(args.bridge_home).expanduser()
+    settings_path = Path(args.workdir).expanduser() / ".claude" / "settings.json"
+    desired_command = stop_hook_command(bridge_home, args.bash_bin)
+    changed = ensure_command_hook(settings_path, "Stop", desired_command, is_mark_idle_hook)
+
     payload = {
         "HOOK_SETTINGS_FILE": str(settings_path),
         "HOOK_STATUS": "updated" if changed else "unchanged",
         "HOOK_STOP_HOOK": "present",
+        "HOOK_PROMPT_HOOK": "",
+        "HOOK_COMMAND": desired_command,
+    }
+    print_payload(payload, args.format)
+    return 0
+
+
+def cmd_status_prompt_hook(args: argparse.Namespace) -> int:
+    settings_path = Path(args.workdir).expanduser() / ".claude" / "settings.json"
+    settings = ensure_settings_root(settings_path)
+    prompt_hooks = hooks_list(settings, "UserPromptSubmit")
+    _group, hook = find_command_hook(prompt_hooks, is_clear_idle_hook)
+    command = str(hook.get("command") or "") if hook else ""
+    payload = {
+        "HOOK_SETTINGS_FILE": str(settings_path),
+        "HOOK_STATUS": "present" if hook else "missing",
+        "HOOK_STOP_HOOK": "",
+        "HOOK_PROMPT_HOOK": "present" if hook else "missing",
+        "HOOK_COMMAND": command,
+    }
+    print_payload(payload, args.format)
+    return 0 if hook else 1
+
+
+def cmd_ensure_prompt_hook(args: argparse.Namespace) -> int:
+    bridge_home = Path(args.bridge_home).expanduser()
+    settings_path = Path(args.workdir).expanduser() / ".claude" / "settings.json"
+    desired_command = prompt_hook_command(bridge_home, args.bash_bin)
+    changed = ensure_command_hook(settings_path, "UserPromptSubmit", desired_command, is_clear_idle_hook)
+
+    payload = {
+        "HOOK_SETTINGS_FILE": str(settings_path),
+        "HOOK_STATUS": "updated" if changed else "unchanged",
+        "HOOK_STOP_HOOK": "",
+        "HOOK_PROMPT_HOOK": "present",
         "HOOK_COMMAND": desired_command,
     }
     print_payload(payload, args.format)
@@ -174,6 +235,20 @@ def build_parser() -> argparse.ArgumentParser:
     status_parser.add_argument("--bash-bin", required=True)
     status_parser.add_argument("--format", choices=("text", "shell"), default="text")
     status_parser.set_defaults(handler=cmd_status_stop_hook)
+
+    ensure_prompt_parser = subparsers.add_parser("ensure-prompt-hook")
+    ensure_prompt_parser.add_argument("--workdir", required=True)
+    ensure_prompt_parser.add_argument("--bridge-home", required=True)
+    ensure_prompt_parser.add_argument("--bash-bin", required=True)
+    ensure_prompt_parser.add_argument("--format", choices=("text", "shell"), default="text")
+    ensure_prompt_parser.set_defaults(handler=cmd_ensure_prompt_hook)
+
+    status_prompt_parser = subparsers.add_parser("status-prompt-hook")
+    status_prompt_parser.add_argument("--workdir", required=True)
+    status_prompt_parser.add_argument("--bridge-home", required=True)
+    status_prompt_parser.add_argument("--bash-bin", required=True)
+    status_prompt_parser.add_argument("--format", choices=("text", "shell"), default="text")
+    status_prompt_parser.set_defaults(handler=cmd_status_prompt_hook)
 
     return parser
 

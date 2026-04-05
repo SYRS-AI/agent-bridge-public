@@ -196,6 +196,18 @@ Use `telegram` only when the Claude session genuinely consumes Telegram as its
 primary inbound surface. Plain Discord bot posts are not a reliable delivery
 surface for Claude Code sessions.
 
+### Enable Claude idle wake webhooks
+
+For Claude roles that should wake themselves when queue work arrives at a task
+boundary, assign a local webhook port in `agent-roster.local.sh`:
+
+```bash
+BRIDGE_AGENT_WEBHOOK_PORT["tester"]="9001"
+```
+
+Dynamic Claude agents get a state-managed port automatically from the bridge's
+local range. Static roles should set a fixed port explicitly.
+
 ### Onboard a Discord-backed agent
 
 If an agent should read and reply in Discord, set its primary channel metadata
@@ -228,7 +240,8 @@ The wizard can:
 For broader preflight, `setup agent` also checks:
 
 - roster presence and workdir/session wiring
-- Claude `Stop` hook installation into `<workdir>/.claude/settings.json`
+- Claude `Stop` + `UserPromptSubmit` hook installation into `<workdir>/.claude/settings.json`
+- Claude webhook channel entry in `<workdir>/.mcp.json` when a webhook port is enabled
 - `CLAUDE.md` presence for Claude roles
 - tracked profile status
 - `bridge-start.sh --dry-run`

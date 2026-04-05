@@ -60,21 +60,29 @@ bridge_build_resume_launch_cmd() {
 bridge_agent_launch_cmd() {
   local agent="$1"
   local fallback=""
+  local launch_cmd=""
 
   if [[ "$(bridge_agent_source "$agent")" == "dynamic" ]]; then
-    if bridge_build_resume_launch_cmd "$agent"; then
+    if launch_cmd="$(bridge_build_resume_launch_cmd "$agent")"; then
+      launch_cmd="$(bridge_claude_launch_with_webhook "$agent" "$launch_cmd")"
+      printf '%s' "$launch_cmd"
       return 0
     fi
-    bridge_build_dynamic_launch_cmd "$agent"
+    launch_cmd="$(bridge_build_dynamic_launch_cmd "$agent")"
+    launch_cmd="$(bridge_claude_launch_with_webhook "$agent" "$launch_cmd")"
+    printf '%s' "$launch_cmd"
     return 0
   fi
 
   fallback="${BRIDGE_AGENT_LAUNCH_CMD[$agent]-}"
-  if bridge_build_resume_launch_cmd "$agent"; then
+  if launch_cmd="$(bridge_build_resume_launch_cmd "$agent")"; then
+    launch_cmd="$(bridge_claude_launch_with_webhook "$agent" "$launch_cmd")"
+    printf '%s' "$launch_cmd"
     return 0
   fi
 
-  printf '%s' "$fallback"
+  launch_cmd="$(bridge_claude_launch_with_webhook "$agent" "$fallback")"
+  printf '%s' "$launch_cmd"
 }
 
 bridge_load_dynamic_agent_file() {
@@ -647,12 +655,21 @@ bridge_write_roster_status_snapshot() {
 
 bridge_task_daemon_step() {
   local snapshot_file="$1"
-  bridge_queue_cli daemon-step \
-    --snapshot "$snapshot_file" \
-    --lease-seconds "$BRIDGE_TASK_LEASE_SECONDS" \
-    --heartbeat-window "$BRIDGE_TASK_HEARTBEAT_WINDOW_SECONDS" \
-    --idle-threshold "$BRIDGE_TASK_IDLE_NUDGE_SECONDS" \
+  local ready_agents_file="${2:-}"
+  local args=(
+    daemon-step
+    --snapshot "$snapshot_file"
+    --lease-seconds "$BRIDGE_TASK_LEASE_SECONDS"
+    --heartbeat-window "$BRIDGE_TASK_HEARTBEAT_WINDOW_SECONDS"
+    --idle-threshold "$BRIDGE_TASK_IDLE_NUDGE_SECONDS"
     --nudge-cooldown "$BRIDGE_TASK_NUDGE_COOLDOWN_SECONDS"
+  )
+
+  if [[ -n "$ready_agents_file" && -f "$ready_agents_file" ]]; then
+    args+=(--ready-agents-file "$ready_agents_file")
+  fi
+
+  bridge_queue_cli "${args[@]}"
 }
 
 bridge_task_note_nudge() {

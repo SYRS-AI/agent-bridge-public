@@ -1,0 +1,274 @@
+#!/usr/bin/env bash
+# shellcheck shell=bash
+
+bridge_channels_python() {
+  bridge_require_python
+  python3 "$BRIDGE_SCRIPT_DIR/bridge-channels.py" "$@"
+}
+
+bridge_channel_server_script_path() {
+  local live_path="$BRIDGE_HOME/bridge-channel-server.py"
+
+  if [[ -f "$live_path" ]]; then
+    printf '%s' "$live_path"
+    return 0
+  fi
+
+  printf '%s/bridge-channel-server.py' "$BRIDGE_SCRIPT_DIR"
+}
+
+bridge_channel_server_name() {
+  printf '%s' "$BRIDGE_CHANNEL_SERVER_NAME"
+}
+
+bridge_agent_mcp_config_path() {
+  local agent="$1"
+  printf '%s/.mcp.json' "$(bridge_agent_workdir "$agent")"
+}
+
+bridge_agent_webhook_port_file() {
+  local agent="$1"
+  printf '%s/webhook-port' "$(bridge_agent_idle_marker_dir "$agent")"
+}
+
+bridge_agent_configured_webhook_port() {
+  local agent="$1"
+  printf '%s' "${BRIDGE_AGENT_WEBHOOK_PORT[$agent]-}"
+}
+
+bridge_webhook_port_is_available() {
+  local port="$1"
+
+  bridge_require_python
+  python3 - "$port" <<'PY'
+import socket
+import sys
+
+port = int(sys.argv[1])
+sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+try:
+    sock.bind(("127.0.0.1", port))
+except OSError:
+    raise SystemExit(1)
+finally:
+    sock.close()
+PY
+}
+
+bridge_collect_reserved_webhook_ports() {
+  local current_agent="${1:-}"
+  local agent=""
+  local port=""
+  local port_file=""
+
+  for agent in "${BRIDGE_AGENT_IDS[@]}"; do
+    [[ "$agent" == "$current_agent" ]] && continue
+    port="$(bridge_agent_configured_webhook_port "$agent")"
+    if [[ "$port" =~ ^[0-9]+$ ]]; then
+      printf '%s\n' "$port"
+    fi
+  done
+
+  shopt -s nullglob
+  for port_file in "$BRIDGE_ACTIVE_AGENT_DIR"/*/webhook-port; do
+    agent="$(basename "$(dirname "$port_file")")"
+    [[ "$agent" == "$current_agent" ]] && continue
+    port="$(<"$port_file")"
+    if [[ "$port" =~ ^[0-9]+$ ]]; then
+      printf '%s\n' "$port"
+    fi
+  done
+  shopt -u nullglob
+}
+
+bridge_allocate_dynamic_webhook_port() {
+  local agent="$1"
+  local lock_dir="$BRIDGE_STATE_DIR/webhook-port.lock"
+  local start="$BRIDGE_WEBHOOK_PORT_RANGE_START"
+  local end="$BRIDGE_WEBHOOK_PORT_RANGE_END"
+  local port_file
+  local port
+  local -A reserved=()
+  local reserved_port
+
+  [[ "$start" =~ ^[0-9]+$ ]] || start=9101
+  [[ "$end" =~ ^[0-9]+$ ]] || end=9199
+  (( start <= end )) || bridge_die "invalid webhook port range: ${start}-${end}"
+
+  mkdir -p "$BRIDGE_STATE_DIR"
+  while ! mkdir "$lock_dir" 2>/dev/null; do
+    sleep 0.05
+  done
+  trap 'rmdir "$lock_dir" >/dev/null 2>&1 || true' RETURN
+
+  port_file="$(bridge_agent_webhook_port_file "$agent")"
+  mkdir -p "$(dirname "$port_file")"
+  if [[ -f "$port_file" ]]; then
+    port="$(<"$port_file")"
+    if [[ "$port" =~ ^[0-9]+$ ]]; then
+      printf '%s' "$port"
+      return 0
+    fi
+  fi
+
+  while IFS= read -r reserved_port; do
+    [[ "$reserved_port" =~ ^[0-9]+$ ]] || continue
+    reserved["$reserved_port"]=1
+  done < <(bridge_collect_reserved_webhook_ports "$agent")
+
+  for ((port=start; port<=end; port++)); do
+    [[ -z "${reserved[$port]-}" ]] || continue
+    if ! bridge_webhook_port_is_available "$port"; then
+      continue
+    fi
+    printf '%s\n' "$port" >"$port_file"
+    printf '%s' "$port"
+    return 0
+  done
+
+  return 1
+}
+
+bridge_agent_webhook_port() {
+  local agent="$1"
+  local configured=""
+  local port_file=""
+  local port=""
+
+  configured="$(bridge_agent_configured_webhook_port "$agent")"
+  if [[ "$configured" =~ ^[0-9]+$ ]]; then
+    printf '%s' "$configured"
+    return 0
+  fi
+
+  [[ "$(bridge_agent_engine "$agent")" == "claude" ]] || return 1
+  [[ "$(bridge_agent_source "$agent")" == "dynamic" ]] || return 1
+
+  port_file="$(bridge_agent_webhook_port_file "$agent")"
+  if [[ -f "$port_file" ]]; then
+    port="$(<"$port_file")"
+    if [[ "$port" =~ ^[0-9]+$ ]]; then
+      printf '%s' "$port"
+      return 0
+    fi
+  fi
+
+  bridge_allocate_dynamic_webhook_port "$agent"
+}
+
+bridge_agent_has_webhook_port() {
+  local agent="$1"
+  [[ -n "$(bridge_agent_webhook_port "$agent" 2>/dev/null || true)" ]]
+}
+
+bridge_ensure_claude_webhook_channel() {
+  local agent="$1"
+  local workdir="${2:-$(bridge_agent_workdir "$agent")}"
+  local port=""
+
+  port="$(bridge_agent_webhook_port "$agent" 2>/dev/null || true)"
+  [[ -n "$port" ]] || return 1
+
+  bridge_channels_python ensure-webhook-server \
+    --workdir "$workdir" \
+    --bridge-home "$BRIDGE_HOME" \
+    --bridge-state-dir "$BRIDGE_STATE_DIR" \
+    --python-bin "$(command -v python3)" \
+    --server-script "$(bridge_channel_server_script_path)" \
+    --server-name "$(bridge_channel_server_name)" \
+    --port "$port" \
+    --agent "$agent"
+}
+
+bridge_claude_webhook_channel_status() {
+  local agent="$1"
+  local workdir="${2:-$(bridge_agent_workdir "$agent")}"
+  local port=""
+
+  port="$(bridge_agent_webhook_port "$agent" 2>/dev/null || true)"
+  [[ -n "$port" ]] || return 1
+
+  bridge_channels_python status-webhook-server \
+    --workdir "$workdir" \
+    --bridge-home "$BRIDGE_HOME" \
+    --bridge-state-dir "$BRIDGE_STATE_DIR" \
+    --python-bin "$(command -v python3)" \
+    --server-script "$(bridge_channel_server_script_path)" \
+    --server-name "$(bridge_channel_server_name)" \
+    --port "$port" \
+    --agent "$agent"
+}
+
+bridge_claude_launch_with_webhook() {
+  local agent="$1"
+  local base_cmd="$2"
+  local port=""
+  local server_ref=""
+  local flag=""
+
+  [[ "$(bridge_agent_engine "$agent")" == "claude" ]] || {
+    printf '%s' "$base_cmd"
+    return 0
+  }
+
+  port="$(bridge_agent_webhook_port "$agent" 2>/dev/null || true)"
+  if [[ -z "$port" ]]; then
+    printf '%s' "$base_cmd"
+    return 0
+  fi
+
+  if [[ "$base_cmd" == *"--dangerously-load-development-channels"* ]]; then
+    printf '%s' "$base_cmd"
+    return 0
+  fi
+
+  server_ref="server:$(bridge_channel_server_name)"
+  flag="$(bridge_join_quoted --dangerously-load-development-channels "$server_ref")"
+  printf '%s %s' "$base_cmd" "$flag"
+}
+
+bridge_post_channel_webhook() {
+  local agent="$1"
+  local message="$2"
+  local port=""
+
+  port="$(bridge_agent_webhook_port "$agent" 2>/dev/null || true)"
+  [[ "$port" =~ ^[0-9]+$ ]] || return 1
+
+  bridge_require_python
+  python3 - "$port" "$message" <<'PY'
+import json
+import sys
+import urllib.error
+import urllib.request
+
+port = int(sys.argv[1])
+message = sys.argv[2]
+request = urllib.request.Request(
+    f"http://127.0.0.1:{port}/",
+    data=message.encode("utf-8"),
+    headers={"Content-Type": "text/plain; charset=utf-8"},
+    method="POST",
+)
+try:
+    with urllib.request.urlopen(request, timeout=3) as response:
+        if response.status < 200 or response.status >= 300:
+            raise SystemExit(1)
+except (urllib.error.URLError, TimeoutError):
+    raise SystemExit(1)
+PY
+}
+
+bridge_write_idle_ready_agents() {
+  local file="$1"
+  local agent=""
+
+  : >"$file"
+  for agent in "${BRIDGE_AGENT_IDS[@]}"; do
+    [[ "$(bridge_agent_engine "$agent")" == "claude" ]] || continue
+    bridge_agent_is_active "$agent" || continue
+    bridge_agent_idle_marker_exists "$agent" || continue
+    printf '%s\n' "$agent" >>"$file"
+  done
+}

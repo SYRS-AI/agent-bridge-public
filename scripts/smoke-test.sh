@@ -55,11 +55,14 @@ export BRIDGE_DAEMON_INTERVAL=1
 export BRIDGE_CRON_DISPATCH_MAX_PARALLEL=1
 export BRIDGE_ROSTER_FILE="$REPO_ROOT/agent-roster.sh"
 export BRIDGE_ROSTER_LOCAL_FILE="$BRIDGE_HOME/agent-roster.local.sh"
+export BRIDGE_WEBHOOK_PORT_RANGE_START=9301
+export BRIDGE_WEBHOOK_PORT_RANGE_END=9399
 
 SESSION_NAME="bridge-smoke-$$"
 SMOKE_AGENT="smoke-agent-$$"
 WORKDIR="$TMP_ROOT/workdir"
 HOOK_WORKDIR="$TMP_ROOT/claude-hook-workdir"
+MCP_WORKDIR="$TMP_ROOT/claude-mcp-workdir"
 FAKE_BIN="$TMP_ROOT/bin"
 FAKE_DISCORD_PORT_FILE="$TMP_ROOT/fake-discord.port"
 FAKE_DISCORD_REQUESTS="$TMP_ROOT/fake-discord-requests.jsonl"
@@ -78,6 +81,7 @@ trap cleanup EXIT
 
 mkdir -p "$BRIDGE_HOME" "$BRIDGE_STATE_DIR" "$BRIDGE_LOG_DIR" "$BRIDGE_SHARED_DIR" "$WORKDIR"
 mkdir -p "$HOOK_WORKDIR/.claude"
+mkdir -p "$MCP_WORKDIR"
 mkdir -p "$FAKE_BIN"
 export PATH="$FAKE_BIN:$PATH"
 
@@ -264,6 +268,135 @@ assert_contains "$HOOK_STATUS_OUTPUT" "status: present"
 assert_contains "$(cat "$HOOK_WORKDIR/.claude/settings.json")" "\"SessionStart\""
 assert_contains "$(cat "$HOOK_WORKDIR/.claude/settings.json")" "\"Stop\""
 assert_contains "$(cat "$HOOK_WORKDIR/.claude/settings.json")" "mark-idle.sh"
+
+PROMPT_HOOK_OUTPUT="$(python3 "$REPO_ROOT/bridge-hooks.py" ensure-prompt-hook --workdir "$HOOK_WORKDIR" --bridge-home "$BRIDGE_HOME" --bash-bin bash)"
+assert_contains "$PROMPT_HOOK_OUTPUT" "prompt_hook: present"
+PROMPT_STATUS_OUTPUT="$(python3 "$REPO_ROOT/bridge-hooks.py" status-prompt-hook --workdir "$HOOK_WORKDIR" --bridge-home "$BRIDGE_HOME" --bash-bin bash)"
+assert_contains "$PROMPT_STATUS_OUTPUT" "status: present"
+assert_contains "$(cat "$HOOK_WORKDIR/.claude/settings.json")" "\"UserPromptSubmit\""
+assert_contains "$(cat "$HOOK_WORKDIR/.claude/settings.json")" "clear-idle.sh"
+
+log "ensuring Claude webhook MCP config merge"
+cat >"$MCP_WORKDIR/.mcp.json" <<'EOF'
+{
+  "mcpServers": {
+    "existing": {
+      "transport": "stdio",
+      "command": "python3",
+      "args": ["existing.py"]
+    }
+  }
+}
+EOF
+
+MCP_ENSURE_OUTPUT="$(python3 "$REPO_ROOT/bridge-channels.py" ensure-webhook-server --workdir "$MCP_WORKDIR" --bridge-home "$BRIDGE_HOME" --bridge-state-dir "$BRIDGE_STATE_DIR" --python-bin "$(command -v python3)" --server-script "$REPO_ROOT/bridge-channel-server.py" --server-name bridge-webhook --port 9301 --agent claude-smoke)"
+assert_contains "$MCP_ENSURE_OUTPUT" "status: updated"
+assert_contains "$(cat "$MCP_WORKDIR/.mcp.json")" "\"existing\""
+assert_contains "$(cat "$MCP_WORKDIR/.mcp.json")" "\"bridge-webhook\""
+assert_contains "$(cat "$MCP_WORKDIR/.mcp.json")" "\"BRIDGE_WEBHOOK_PORT\": \"9301\""
+
+log "exercising standalone bridge channel server"
+python3 - "$REPO_ROOT" "$BRIDGE_STATE_DIR" <<'PY'
+import json
+import os
+import subprocess
+import sys
+import time
+import urllib.request
+from pathlib import Path
+
+repo_root = Path(sys.argv[1])
+state_dir = Path(sys.argv[2])
+agent = "claude-smoke"
+port = 9302
+idle_file = state_dir / "agents" / agent / "idle-since"
+idle_file.parent.mkdir(parents=True, exist_ok=True)
+idle_file.write_text("123\n", encoding="utf-8")
+
+env = os.environ.copy()
+env.update(
+    {
+        "BRIDGE_WEBHOOK_PORT": str(port),
+        "BRIDGE_WEBHOOK_AGENT": agent,
+        "BRIDGE_STATE_DIR": str(state_dir),
+        "PYTHONUNBUFFERED": "1",
+    }
+)
+
+proc = subprocess.Popen(
+    [sys.executable, str(repo_root / "bridge-channel-server.py")],
+    stdin=subprocess.PIPE,
+    stdout=subprocess.PIPE,
+    stderr=subprocess.PIPE,
+    env=env,
+)
+
+def send(payload: dict) -> None:
+    body = json.dumps(payload).encode("utf-8")
+    proc.stdin.write(f"Content-Length: {len(body)}\r\n\r\n".encode("ascii"))
+    proc.stdin.write(body)
+    proc.stdin.flush()
+
+def read_message(timeout: float = 5.0) -> dict:
+    deadline = time.time() + timeout
+    headers = {}
+    while time.time() < deadline:
+        line = proc.stdout.readline()
+        if not line:
+            raise SystemExit("channel server stdout closed unexpectedly")
+        if line in (b"\r\n", b"\n"):
+            break
+        key, value = line.decode("utf-8").split(":", 1)
+        headers[key.strip().lower()] = value.strip()
+    length = int(headers["content-length"])
+    body = proc.stdout.read(length)
+    return json.loads(body.decode("utf-8"))
+
+try:
+    send(
+        {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {"protocolVersion": "2025-03-26", "capabilities": {}, "clientInfo": {"name": "smoke", "version": "1"}},
+        }
+    )
+    response = read_message()
+    assert response["id"] == 1
+    assert response["result"]["capabilities"]["experimental"]["claude/channel"] == {}
+
+    for _ in range(50):
+        try:
+            with urllib.request.urlopen(f"http://127.0.0.1:{port}/health", timeout=0.2) as resp:
+                assert resp.status == 200
+                break
+        except Exception:
+            time.sleep(0.1)
+    else:
+        raise SystemExit("channel server health endpoint never became ready")
+
+    request = urllib.request.Request(
+        f"http://127.0.0.1:{port}/",
+        data=b"agb inbox claude-smoke",
+        headers={"Content-Type": "text/plain; charset=utf-8"},
+        method="POST",
+    )
+    with urllib.request.urlopen(request, timeout=2) as resp:
+        assert resp.status == 200
+
+    notification = read_message()
+    assert notification["method"] == "notifications/claude/channel"
+    assert notification["params"]["content"] == "agb inbox claude-smoke"
+    assert notification["params"]["meta"]["chat_id"] == agent
+    assert not idle_file.exists(), "idle marker should be cleared on webhook delivery"
+finally:
+    proc.terminate()
+    try:
+        proc.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        proc.wait(timeout=5)
+PY
 
 log "creating and managing a bridge-native cron job"
 NATIVE_CREATE_OUTPUT="$("$REPO_ROOT/agent-bridge" cron create --agent "$SMOKE_AGENT" --schedule '0 10 * * *' --tz UTC --title 'native smoke daily' --payload 'Do the native cron smoke run.')"

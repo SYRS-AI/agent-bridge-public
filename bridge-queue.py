@@ -675,8 +675,21 @@ def load_snapshot(path: str) -> list[dict[str, str]]:
     return rows
 
 
+def load_ready_agents(path: str | None) -> set[str]:
+    if not path:
+        return set()
+    ready: set[str] = set()
+    with open(path, "r", encoding="utf-8") as handle:
+        for line in handle:
+            agent = line.strip()
+            if agent:
+                ready.add(agent)
+    return ready
+
+
 def cmd_daemon_step(args: argparse.Namespace) -> int:
     snapshot_rows = load_snapshot(args.snapshot)
+    ready_agents = load_ready_agents(getattr(args, "ready_agents_file", None))
     current_ts = now_ts()
     lease_seconds = int(args.lease_seconds)
     heartbeat_window = int(args.heartbeat_window)
@@ -814,11 +827,12 @@ def cmd_daemon_step(args: argparse.Namespace) -> int:
 
     printed = False
     for row in rows:
+        is_ready_agent = str(row["agent"]) in ready_agents
         activity_ts = row["session_activity_ts"] or row["last_seen_ts"] or 0
-        if not activity_ts:
+        if not activity_ts and not is_ready_agent:
             continue
-        idle_seconds = max(0, current_ts - int(activity_ts))
-        if idle_seconds < idle_threshold:
+        idle_seconds = max(0, current_ts - int(activity_ts)) if activity_ts else 0
+        if not is_ready_agent and idle_seconds < idle_threshold:
             continue
         queue_ids = queued_ids_by_agent.get(str(row["agent"]), [])
         if not queue_ids:
@@ -962,6 +976,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--nudge-cooldown",
         default=os.environ.get("BRIDGE_TASK_NUDGE_COOLDOWN_SECONDS", "900"),
     )
+    daemon_parser.add_argument("--ready-agents-file")
     daemon_parser.add_argument("--format", choices=("text", "tsv"), default="tsv")
     daemon_parser.set_defaults(handler=cmd_daemon_step)
 
