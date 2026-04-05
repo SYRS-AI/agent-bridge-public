@@ -340,8 +340,58 @@ INBOX_OUTPUT="$(bash "$REPO_ROOT/bridge-task.sh" inbox "$SMOKE_AGENT")"
 assert_contains "$INBOX_OUTPUT" "smoke queue"
 
 log "claiming and completing queue task"
+SMOKE_AGENT="$SMOKE_AGENT" BRIDGE_TASK_DB="$BRIDGE_TASK_DB" python3 - <<'PY'
+import os
+import sqlite3
+import time
+
+db = os.environ["BRIDGE_TASK_DB"]
+agent = os.environ["SMOKE_AGENT"]
+stale_ts = int(time.time()) - 7200
+with sqlite3.connect(db) as conn:
+    conn.execute(
+        """
+        INSERT INTO agent_state (agent, active, last_seen_ts, session_activity_ts)
+        VALUES (?, 1, ?, ?)
+        ON CONFLICT(agent) DO UPDATE SET
+          active = 1,
+          last_seen_ts = excluded.last_seen_ts,
+          session_activity_ts = excluded.session_activity_ts
+        """,
+        (agent, stale_ts, stale_ts),
+    )
+    conn.commit()
+PY
 bash "$REPO_ROOT/bridge-task.sh" claim 1 --agent "$SMOKE_AGENT" >/dev/null
+CLAIM_SUMMARY_TSV="$(python3 "$REPO_ROOT/bridge-queue.py" summary --agent "$SMOKE_AGENT" --format tsv)"
+CLAIM_IDLE_SECONDS="$(printf '%s\n' "$CLAIM_SUMMARY_TSV" | awk -F'\t' 'NR==1 {print $6}')"
+[[ "$CLAIM_IDLE_SECONDS" =~ ^[0-9]+$ ]] || die "claim idle seconds was not numeric: $CLAIM_IDLE_SECONDS"
+(( CLAIM_IDLE_SECONDS < 10 )) || die "claim should refresh agent activity; idle=$CLAIM_IDLE_SECONDS"
+
+SMOKE_AGENT="$SMOKE_AGENT" BRIDGE_TASK_DB="$BRIDGE_TASK_DB" python3 - <<'PY'
+import os
+import sqlite3
+import time
+
+db = os.environ["BRIDGE_TASK_DB"]
+agent = os.environ["SMOKE_AGENT"]
+stale_ts = int(time.time()) - 7200
+with sqlite3.connect(db) as conn:
+    conn.execute(
+        """
+        UPDATE agent_state
+        SET last_seen_ts = ?, session_activity_ts = ?
+        WHERE agent = ?
+        """,
+        (stale_ts, stale_ts, agent),
+    )
+    conn.commit()
+PY
 bash "$REPO_ROOT/bridge-task.sh" "done" 1 --agent "$SMOKE_AGENT" --note "smoke ok" >/dev/null
+DONE_SUMMARY_TSV="$(python3 "$REPO_ROOT/bridge-queue.py" summary --agent "$SMOKE_AGENT" --format tsv)"
+DONE_IDLE_SECONDS="$(printf '%s\n' "$DONE_SUMMARY_TSV" | awk -F'\t' 'NR==1 {print $6}')"
+[[ "$DONE_IDLE_SECONDS" =~ ^[0-9]+$ ]] || die "done idle seconds was not numeric: $DONE_IDLE_SECONDS"
+(( DONE_IDLE_SECONDS < 10 )) || die "done should refresh agent activity; idle=$DONE_IDLE_SECONDS"
 
 SHOW_OUTPUT="$(bash "$REPO_ROOT/bridge-task.sh" show 1)"
 assert_contains "$SHOW_OUTPUT" "status: done"

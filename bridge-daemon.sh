@@ -293,6 +293,11 @@ process_on_demand_agents() {
   local _workdir
   local timeout
   local changed=1
+  local live_summary=""
+  local live_agent=""
+  local live_queued=0
+  local live_claimed=0
+  local live_blocked=0
 
   while IFS=$'\t' read -r agent queued claimed blocked active idle _last_seen _last_nudge session _engine _workdir; do
     [[ -z "$agent" ]] && continue
@@ -326,6 +331,17 @@ process_on_demand_agents() {
     (( queued == 0 && claimed == 0 && blocked == 0 )) || continue
     (( idle >= timeout )) || continue
     bridge_agent_is_active "$agent" || continue
+
+    live_summary="$(bridge_queue_cli summary --agent "$agent" --format tsv 2>/dev/null | head -n 1 || true)"
+    if [[ -n "$live_summary" ]]; then
+      IFS=$'\t' read -r live_agent live_queued live_claimed live_blocked _live_active _live_idle _live_last_seen _live_last_nudge _live_session _live_engine _live_workdir <<<"$live_summary"
+      if [[ "$live_agent" == "$agent" ]]; then
+        if ! [[ "$live_queued" =~ ^[0-9]+$ ]]; then live_queued=0; fi
+        if ! [[ "$live_claimed" =~ ^[0-9]+$ ]]; then live_claimed=0; fi
+        if ! [[ "$live_blocked" =~ ^[0-9]+$ ]]; then live_blocked=0; fi
+        (( live_queued == 0 && live_claimed == 0 && live_blocked == 0 )) || continue
+      fi
+    fi
 
     if bridge_kill_agent_session "$agent" >/dev/null 2>&1; then
       echo "[info] auto-stopped ${agent} (idle=${idle}s, timeout=${timeout}s)"

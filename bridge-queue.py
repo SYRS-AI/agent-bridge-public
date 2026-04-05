@@ -147,6 +147,25 @@ def emit_event(
     )
 
 
+def touch_agent_activity(conn: sqlite3.Connection, agent: str, activity_ts: int) -> None:
+    conn.execute(
+        """
+        INSERT INTO agent_state (agent, last_seen_ts, session_activity_ts)
+        VALUES (?, ?, ?)
+        ON CONFLICT(agent) DO UPDATE SET
+          last_seen_ts = CASE
+            WHEN agent_state.last_seen_ts IS NULL OR agent_state.last_seen_ts < excluded.last_seen_ts THEN excluded.last_seen_ts
+            ELSE agent_state.last_seen_ts
+          END,
+          session_activity_ts = CASE
+            WHEN agent_state.session_activity_ts IS NULL OR agent_state.session_activity_ts < excluded.session_activity_ts THEN excluded.session_activity_ts
+            ELSE agent_state.session_activity_ts
+          END
+        """,
+        (agent, activity_ts, activity_ts),
+    )
+
+
 def require_task(conn: sqlite3.Connection, task_id: int) -> sqlite3.Row:
     row = conn.execute("SELECT * FROM tasks WHERE id = ?", (task_id,)).fetchone()
     if row is None:
@@ -462,6 +481,7 @@ def cmd_claim(args: argparse.Namespace) -> int:
                 "UPDATE tasks SET lease_until_ts = ? WHERE id = ?",
                 (lease_until_ts, args.task_id),
             )
+            touch_agent_activity(conn, agent, current_ts)
             print(f"task #{args.task_id} already claimed by {agent}; lease extended")
             return 0
 
@@ -483,6 +503,7 @@ def cmd_claim(args: argparse.Namespace) -> int:
             (agent, current_ts, lease_until_ts, current_ts, args.task_id),
         )
         emit_event(conn, args.task_id, event_type="claimed", actor=agent, created_ts=current_ts, to_agent=agent)
+        touch_agent_activity(conn, agent, current_ts)
 
     print(f"claimed task #{args.task_id} as {agent} (lease={lease_seconds}s)")
     return 0
@@ -525,6 +546,7 @@ def cmd_done(args: argparse.Namespace) -> int:
             from_agent=agent,
             to_agent=task["assigned_to"],
         )
+        touch_agent_activity(conn, agent, current_ts)
 
     print(f"completed task #{args.task_id} as {agent}")
     return 0
