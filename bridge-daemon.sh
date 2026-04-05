@@ -302,6 +302,7 @@ cmd_sync_cycle() {
   if [[ "${BRIDGE_OPENCLAW_CRON_SYNC_ENABLED:-0}" == "1" ]]; then
     "$BRIDGE_BASH_BIN" "$SCRIPT_DIR/bridge-cron.sh" sync >/dev/null 2>&1 || bridge_warn "cron sync failed"
   fi
+  bridge_reconcile_idle_markers || true
 
   snapshot_file="$(mktemp)"
   bridge_write_agent_snapshot "$snapshot_file"

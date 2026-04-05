@@ -48,6 +48,7 @@ prune_missing_dynamic_agents() {
 
     bridge_archive_dynamic_agent "$agent"
     bridge_remove_dynamic_agent_file "$agent"
+    bridge_agent_clear_idle_marker "$agent"
     PRUNED_DYNAMIC["$agent"]=1
   done < <(bridge_dynamic_agent_ids)
 }
@@ -101,4 +102,5 @@ bridge_load_roster
 record_claimed_ids
 refresh_missing_session_ids
 bridge_load_roster
+bridge_reconcile_idle_markers
 bridge_render_active_roster

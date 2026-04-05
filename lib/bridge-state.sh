@@ -327,6 +327,76 @@ bridge_write_dynamic_agent_file() {
   bridge_write_agent_state_file "$agent" "$file"
 }
 
+bridge_agent_idle_marker_dir() {
+  local agent="$1"
+  printf '%s/%s' "$BRIDGE_ACTIVE_AGENT_DIR" "$agent"
+}
+
+bridge_agent_idle_since_file() {
+  local agent="$1"
+  printf '%s/idle-since' "$(bridge_agent_idle_marker_dir "$agent")"
+}
+
+bridge_agent_idle_since_epoch() {
+  local agent="$1"
+  local file
+  local value
+
+  file="$(bridge_agent_idle_since_file "$agent")"
+  [[ -f "$file" ]] || return 1
+  value="$(<"$file")"
+  [[ "$value" =~ ^[0-9]+$ ]] || return 1
+  printf '%s' "$value"
+}
+
+bridge_agent_idle_marker_exists() {
+  local agent="$1"
+  [[ -f "$(bridge_agent_idle_since_file "$agent")" ]]
+}
+
+bridge_agent_mark_idle_now() {
+  local agent="$1"
+  local dir
+  local file
+
+  dir="$(bridge_agent_idle_marker_dir "$agent")"
+  file="$(bridge_agent_idle_since_file "$agent")"
+  mkdir -p "$dir"
+  printf '%s\n' "$(date +%s)" >"$file"
+}
+
+bridge_agent_clear_idle_marker() {
+  local agent="$1"
+  local file
+  local dir
+
+  file="$(bridge_agent_idle_since_file "$agent")"
+  dir="$(bridge_agent_idle_marker_dir "$agent")"
+  rm -f "$file"
+  rmdir "$dir" >/dev/null 2>&1 || true
+}
+
+bridge_reconcile_idle_markers() {
+  local agent
+  local file
+  local value
+
+  for agent in "${BRIDGE_AGENT_IDS[@]}"; do
+    file="$(bridge_agent_idle_since_file "$agent")"
+    [[ -f "$file" ]] || continue
+
+    if ! bridge_agent_is_active "$agent"; then
+      bridge_agent_clear_idle_marker "$agent"
+      continue
+    fi
+
+    value="$(<"$file")"
+    if ! [[ "$value" =~ ^[0-9]+$ ]]; then
+      bridge_agent_clear_idle_marker "$agent"
+    fi
+  done
+}
+
 bridge_archive_dynamic_agent() {
   local agent="$1"
   local history_file

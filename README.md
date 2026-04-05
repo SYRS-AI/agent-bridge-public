@@ -228,6 +228,7 @@ The wizard can:
 For broader preflight, `setup agent` also checks:
 
 - roster presence and workdir/session wiring
+- Claude `Stop` hook installation into `<workdir>/.claude/settings.json`
 - `CLAUDE.md` presence for Claude roles
 - tracked profile status
 - `bridge-start.sh --dry-run`

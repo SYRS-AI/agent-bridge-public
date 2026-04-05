@@ -163,6 +163,7 @@ run_agent() {
   local workdir=""
   local profile_target=""
   local claude_path=""
+  local hook_output=""
   local notify_status=""
   local roster_channel=""
   local access_channel=""
@@ -231,6 +232,15 @@ run_agent() {
   printf 'notify_transport: %s\n' "$notify_status"
 
   if [[ "$engine" == "claude" ]]; then
+    echo
+    echo "== Claude Stop hook =="
+    if hook_output="$(bridge_ensure_claude_stop_hook "$workdir" 2>&1)"; then
+      echo "$hook_output"
+    else
+      echo "$hook_output"
+      failures=$((failures + 1))
+    fi
+
     claude_path="$(bridge_find_agent_claude_md "$agent" || true)"
     if [[ -n "$claude_path" ]]; then
       printf 'claude_md: ok (%s)\n' "$claude_path"

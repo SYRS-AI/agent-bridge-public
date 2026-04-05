@@ -59,6 +59,7 @@ export BRIDGE_ROSTER_LOCAL_FILE="$BRIDGE_HOME/agent-roster.local.sh"
 SESSION_NAME="bridge-smoke-$$"
 SMOKE_AGENT="smoke-agent-$$"
 WORKDIR="$TMP_ROOT/workdir"
+HOOK_WORKDIR="$TMP_ROOT/claude-hook-workdir"
 FAKE_BIN="$TMP_ROOT/bin"
 FAKE_DISCORD_PORT_FILE="$TMP_ROOT/fake-discord.port"
 FAKE_DISCORD_REQUESTS="$TMP_ROOT/fake-discord-requests.jsonl"
@@ -76,6 +77,7 @@ cleanup() {
 trap cleanup EXIT
 
 mkdir -p "$BRIDGE_HOME" "$BRIDGE_STATE_DIR" "$BRIDGE_LOG_DIR" "$BRIDGE_SHARED_DIR" "$WORKDIR"
+mkdir -p "$HOOK_WORKDIR/.claude"
 mkdir -p "$FAKE_BIN"
 export PATH="$FAKE_BIN:$PATH"
 
@@ -234,6 +236,34 @@ log "running broader agent preflight"
 SETUP_AGENT_OUTPUT="$("$REPO_ROOT/agent-bridge" setup agent "$SMOKE_AGENT" --skip-discord)"
 assert_contains "$SETUP_AGENT_OUTPUT" "claude_md: n/a (engine=codex)"
 assert_contains "$SETUP_AGENT_OUTPUT" "start_dry_run: ok"
+
+log "ensuring Claude Stop hook settings merge"
+cat >"$HOOK_WORKDIR/.claude/settings.json" <<'EOF'
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "~/.claude/hooks/session-start.sh",
+            "timeout": 15
+          }
+        ]
+      }
+    ]
+  }
+}
+EOF
+
+HOOK_ENSURE_OUTPUT="$(python3 "$REPO_ROOT/bridge-hooks.py" ensure-stop-hook --workdir "$HOOK_WORKDIR" --bridge-home "$BRIDGE_HOME" --bash-bin bash)"
+assert_contains "$HOOK_ENSURE_OUTPUT" "status: updated"
+assert_contains "$HOOK_ENSURE_OUTPUT" "stop_hook: present"
+HOOK_STATUS_OUTPUT="$(python3 "$REPO_ROOT/bridge-hooks.py" status-stop-hook --workdir "$HOOK_WORKDIR" --bridge-home "$BRIDGE_HOME" --bash-bin bash)"
+assert_contains "$HOOK_STATUS_OUTPUT" "status: present"
+assert_contains "$(cat "$HOOK_WORKDIR/.claude/settings.json")" "\"SessionStart\""
+assert_contains "$(cat "$HOOK_WORKDIR/.claude/settings.json")" "\"Stop\""
+assert_contains "$(cat "$HOOK_WORKDIR/.claude/settings.json")" "mark-idle.sh"
 
 log "creating and managing a bridge-native cron job"
 NATIVE_CREATE_OUTPUT="$("$REPO_ROOT/agent-bridge" cron create --agent "$SMOKE_AGENT" --schedule '0 10 * * *' --tz UTC --title 'native smoke daily' --payload 'Do the native cron smoke run.')"

@@ -69,6 +69,7 @@ bridge_require_agent "$AGENT"
 SESSION="$(bridge_agent_session "$AGENT")"
 WORK_DIR="$(bridge_agent_workdir "$AGENT")"
 DEFAULT_WORK_DIR="$(bridge_agent_default_home "$AGENT")"
+ENGINE="$(bridge_agent_engine "$AGENT")"
 RUNNER="$SCRIPT_DIR/bridge-run.sh"
 ENV_PREFIX="$(bridge_export_env_prefix)"
 SESSION_CMD="$(bridge_join_quoted "$BRIDGE_BASH_BIN" "$RUNNER" "$AGENT")"
@@ -107,6 +108,14 @@ if tmux has-session -t "$SESSION" 2>/dev/null; then
     exit 0
   fi
 fi
+
+if [[ "$ENGINE" == "claude" ]]; then
+  if ! bridge_ensure_claude_stop_hook "$WORK_DIR" >/dev/null; then
+    bridge_die "Claude Stop hook 설정에 실패했습니다: $WORK_DIR"
+  fi
+fi
+
+bridge_agent_clear_idle_marker "$AGENT"
 
 # Refresh the launch window so a new session id can be detected for this run.
 # shellcheck disable=SC2034

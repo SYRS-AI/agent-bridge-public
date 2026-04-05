@@ -614,6 +614,7 @@ bridge_kill_agent_session() {
   fi
 
   tmux kill-session -t "$session"
+  bridge_agent_clear_idle_marker "$agent"
   bridge_info "[info] killed ${agent}/${session}"
 }
 
