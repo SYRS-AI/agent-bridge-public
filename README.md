@@ -297,7 +297,7 @@ If you are migrating existing cron jobs into Agent Bridge, start with the read-o
 
 For `memory-daily` the default slot is `YYYY-MM-DD`. For `monthly-highlights` it is `YYYY-MM`. Other recurring jobs default to the current minute as an ISO timestamp, so repeated enqueue calls on the same day do not collapse into one slot.
 
-`cron sync` is the bridge-owned recurring scheduler. It scans the bridge-native recurring job store, derives due occurrence slots, and enqueues each occurrence through the same disposable-child path. When `BRIDGE_OPENCLAW_CRON_SYNC_ENABLED=1`, the daemon also drains queued `[cron-dispatch]` tasks itself, so recurring jobs do not wake long-lived agent sessions unless a run explicitly needs a separate `[cron-followup]` task.
+`cron sync` is the bridge-owned recurring scheduler. It scans the bridge-native recurring job store, derives due occurrence slots, and enqueues each occurrence through the same disposable-child path. When `BRIDGE_CRON_SYNC_ENABLED=1`, the daemon also drains queued `[cron-dispatch]` tasks itself, so recurring jobs do not wake long-lived agent sessions unless a run explicitly needs a separate `[cron-followup]` task. The older `BRIDGE_OPENCLAW_CRON_SYNC_ENABLED` name still works as a compatibility alias.
 
 If your daemon environment does not inherit the same `PATH` as your interactive shell, set `BRIDGE_CLAUDE_BIN` or `BRIDGE_CODEX_BIN` explicitly in `agent-roster.local.sh`. The cron runner also searches common install locations such as `~/.local/bin`, `/opt/homebrew/bin`, and `/usr/local/bin`.
 

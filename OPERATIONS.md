@@ -131,7 +131,7 @@ When you start bridging one recurring family into the queue, begin with a dry ru
 ~/agent-bridge/agent-bridge cron sync --dry-run
 ```
 
-Automatic recurring scheduling is opt-in. Set `BRIDGE_OPENCLAW_CRON_SYNC_ENABLED=1`
+Automatic recurring scheduling is opt-in. Set `BRIDGE_CRON_SYNC_ENABLED=1`
 in `agent-roster.local.sh` only on machines that are actively migrating legacy
 OpenClaw cron jobs.
 

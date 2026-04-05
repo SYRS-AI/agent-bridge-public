@@ -368,7 +368,7 @@ cmd_sync_cycle() {
   local changed=1
 
   "$BRIDGE_BASH_BIN" "$SCRIPT_DIR/bridge-sync.sh" >/dev/null 2>&1 || true
-  if [[ "${BRIDGE_OPENCLAW_CRON_SYNC_ENABLED:-0}" == "1" ]]; then
+  if [[ "${BRIDGE_CRON_SYNC_ENABLED:-${BRIDGE_OPENCLAW_CRON_SYNC_ENABLED:-0}}" == "1" ]]; then
     "$BRIDGE_BASH_BIN" "$SCRIPT_DIR/bridge-cron.sh" sync >/dev/null 2>&1 || bridge_warn "cron sync failed"
   fi
   bridge_reconcile_idle_markers || true

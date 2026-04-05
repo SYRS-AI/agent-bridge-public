@@ -73,9 +73,10 @@ BRIDGE_AGENT_SESSION["codex-developer"]="codex-developer"
 # BRIDGE_OPENCLAW_AGENT_TARGET["legacy-agent"]="tester"
 # BRIDGE_OPENCLAW_AGENT_TARGET["legacy-ops"]="developer"
 
-# Optional: enable the bridge-owned recurring OpenClaw scheduler on machines
-# that are actively migrating legacy cron jobs. Keep this off for fresh installs.
-# BRIDGE_OPENCLAW_CRON_SYNC_ENABLED=1
+# Optional: enable the bridge-owned recurring scheduler on machines
+# that should actively enqueue recurring jobs. Keep this off for fresh installs
+# until `cron import` has populated `~/.agent-bridge/cron/jobs.json`.
+# BRIDGE_CRON_SYNC_ENABLED=1
 
 BRIDGE_AGENT_LAUNCH_CMD["tester"]='claude --dangerously-skip-permissions'
 BRIDGE_AGENT_LAUNCH_CMD["developer"]='claude --dangerously-skip-permissions'
