@@ -13,13 +13,18 @@ while IFS= read -r path; do
   [[ -f "$path" ]] || continue
   tracked_files+=("$path")
 done < "$tracked_file_list"
+scan_files=()
+for path in "${tracked_files[@]}"; do
+  [[ "$path" == "scripts/oss-preflight.sh" ]] && continue
+  scan_files+=("$path")
+done
 
 check_pattern() {
   local description="$1"
   local pattern="$2"
   local matches
 
-  matches="$(rg -n --color never -e "$pattern" "${tracked_files[@]}" || true)"
+  matches="$(rg -n --color never -e "$pattern" "${scan_files[@]}" || true)"
   if [[ -n "$matches" ]]; then
     echo "[oss] fail: ${description}"
     echo "$matches"

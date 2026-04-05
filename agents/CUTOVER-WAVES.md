@@ -1,5 +1,8 @@
 # Agent Cutover Waves
 
+This document is for optional legacy cutover planning. Fresh installs that do
+not migrate existing long-lived agents can ignore it.
+
 ## Goal
 
 Define a practical cutover order for migrating legacy long-lived agents into

@@ -1,5 +1,8 @@
 # Agent Profile Sync Model
 
+This document is for optional profile migration work. Fresh installs that do
+not import legacy agent homes can ignore it.
+
 ## Goal
 
 Define how tracked agent profiles are promoted into each machine's live agent

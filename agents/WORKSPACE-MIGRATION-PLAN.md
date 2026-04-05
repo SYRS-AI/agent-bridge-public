@@ -1,5 +1,9 @@
 # Workspace Migration Plan
 
+This document describes optional legacy migration work. The default public
+install story remains `~/.agent-bridge/agents/<agent>` without any OpenClaw
+dependency.
+
 ## Goal
 
 Move long-lived agent homes from scattered legacy OpenClaw paths into a single
