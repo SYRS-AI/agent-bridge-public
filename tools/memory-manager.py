@@ -42,6 +42,49 @@ def load_json(path):
         return json.load(handle)
 
 
+def resolve_agent_home_root(bridge_home, agent_home_root):
+    if agent_home_root:
+        return Path(agent_home_root)
+    return Path(bridge_home) / "agents"
+
+
+def looks_like_workspace(path):
+    candidate = Path(path)
+    if not candidate.is_dir():
+        return False
+    markers = (
+        candidate / "MEMORY.md",
+        candidate / "memory",
+        candidate / ".openclaw" / "workspace-state.json",
+    )
+    return any(marker.exists() for marker in markers)
+
+
+def legacy_workspace_dir(agent_id, openclaw_root):
+    root = Path(openclaw_root)
+    if agent_id == "main":
+        return root / "workspace"
+    if agent_id == "patch":
+        return root / "patch"
+    return root / f"workspace-{agent_id}"
+
+
+def resolve_workspace_dir(agent_entry, resolved_agent, openclaw_root, bridge_home, agent_home_root):
+    workspace_dir = agent_entry.get("workspace") if agent_entry else None
+    if workspace_dir:
+        return str(Path(workspace_dir).expanduser())
+
+    bridge_candidate = resolve_agent_home_root(bridge_home, agent_home_root) / resolved_agent
+    if looks_like_workspace(bridge_candidate):
+        return str(bridge_candidate)
+
+    legacy_candidate = legacy_workspace_dir(resolved_agent, openclaw_root)
+    if legacy_candidate.exists():
+        return str(legacy_candidate)
+
+    return str(bridge_candidate)
+
+
 def parse_args():
     parser = argparse.ArgumentParser()
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -51,6 +94,8 @@ def parse_args():
     search.add_argument("query", help="Search query")
     search.add_argument("--config", default=str(Path.home() / ".openclaw" / "openclaw.json"))
     search.add_argument("--openclaw-root", default=str(Path.home() / ".openclaw"))
+    search.add_argument("--bridge-home", default=os.environ.get("BRIDGE_HOME", str(Path.home() / ".agent-bridge")))
+    search.add_argument("--agent-home-root", default=os.environ.get("BRIDGE_AGENT_HOME_ROOT"))
     search.add_argument("--db-path")
     search.add_argument("--workspace-dir")
     search.add_argument("--model")
@@ -78,7 +123,7 @@ def resolve_agent_id(agent_id, openclaw_root, config):
     return agent_id
 
 
-def load_agent_settings(agent_id, config_path, openclaw_root):
+def load_agent_settings(agent_id, config_path, openclaw_root, bridge_home, agent_home_root):
     config = load_json(config_path)
     resolved_agent = resolve_agent_id(agent_id, openclaw_root, config)
     defaults = config.get("agents", {}).get("defaults", {}).get("memorySearch", {})
@@ -94,13 +139,7 @@ def load_agent_settings(agent_id, config_path, openclaw_root):
         memory_settings.get("store", {}).get("path")
         or str(Path(openclaw_root) / "memory" / f"{resolved_agent}.sqlite")
     )
-    workspace_dir = agent_entry.get("workspace") if agent_entry else None
-    if not workspace_dir:
-        workspace_dir = str(Path(openclaw_root) / f"workspace-{resolved_agent}")
-        if resolved_agent == "main":
-            workspace_dir = str(Path(openclaw_root) / "workspace")
-        elif resolved_agent == "patch":
-            workspace_dir = str(Path(openclaw_root) / "patch")
+    workspace_dir = resolve_workspace_dir(agent_entry, resolved_agent, openclaw_root, bridge_home, agent_home_root)
 
     remote = memory_settings.get("remote", {})
     query = memory_settings.get("query", {})
@@ -554,7 +593,13 @@ def render_text(payload):
 
 
 def cmd_search(args):
-    settings = load_agent_settings(args.agent, args.config, args.openclaw_root)
+    settings = load_agent_settings(
+        args.agent,
+        args.config,
+        args.openclaw_root,
+        args.bridge_home,
+        args.agent_home_root,
+    )
     if args.db_path:
         settings["db_path"] = args.db_path
     if args.workspace_dir:
