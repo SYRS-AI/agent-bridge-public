@@ -28,6 +28,11 @@ BRIDGE_AGENT_SESSION["codex-developer"]="codex-developer"
 # If you follow that layout, you can omit BRIDGE_AGENT_WORKDIR entirely and the
 # bridge will default to $BRIDGE_AGENT_HOME_ROOT/<agent>.
 # BRIDGE_AGENT_HOME_ROOT="$HOME/.agent-bridge/agents"
+#
+# Optional: designate one static role as the bridge admin role. Then
+# `agent-bridge admin` / `agb admin` will always open that role in its own
+# configured home regardless of the current directory.
+# BRIDGE_ADMIN_AGENT_ID="developer"
 
 # Optional: override workdirs when a role should launch inside another repo or
 # directory instead of the standard live home root.

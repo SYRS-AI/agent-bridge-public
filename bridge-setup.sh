@@ -13,12 +13,14 @@ usage() {
 Usage:
   $(basename "$0") discord <agent> [--token <token>] [--openclaw-account <account>] [--openclaw-config <path>] [--channel <id>]... [--allow-from <id>]... [--require-mention] [--skip-validate] [--skip-send-test] [--yes] [--dry-run]
   $(basename "$0") agent <agent> [--skip-discord] [--test-start] [discord setup options...]
+  $(basename "$0") admin <agent>
 
 Examples:
   $(basename "$0") discord tester
   $(basename "$0") discord tester --openclaw-account default --channel 123456789012345678
   $(basename "$0") agent tester
   $(basename "$0") agent tester --test-start
+  $(basename "$0") admin tester
 EOF
 }
 
@@ -99,6 +101,43 @@ for channel_id in groups.keys():
     channel_id = str(channel_id).strip()
     if channel_id:
         print(channel_id)
+PY
+}
+
+bridge_setup_write_local_scalar() {
+  local key="$1"
+  local value="$2"
+
+  bridge_require_python
+  python3 - "$BRIDGE_ROSTER_LOCAL_FILE" "$key" "$value" <<'PY'
+from pathlib import Path
+import re
+import sys
+
+path = Path(sys.argv[1])
+key = sys.argv[2]
+value = sys.argv[3]
+line = f'{key}="{value}"'
+
+if path.exists():
+    text = path.read_text(encoding="utf-8")
+else:
+    text = "#!/usr/bin/env bash\n# shellcheck shell=bash disable=SC2034\n"
+
+pattern = re.compile(rf'(?m)^[ \t]*{re.escape(key)}=.*$')
+if pattern.search(text):
+    text = pattern.sub(line, text, count=1)
+else:
+    if text and not text.endswith("\n"):
+        text += "\n"
+    if text and not text.endswith("\n\n"):
+        text += "\n"
+    text += line + "\n"
+
+path.parent.mkdir(parents=True, exist_ok=True)
+path.write_text(text, encoding="utf-8")
+print(f"updated: {path}")
+print(f"{key}={value}")
 PY
 }
 
@@ -356,6 +395,24 @@ run_agent() {
   fi
 }
 
+run_admin() {
+  local agent="${1:-}"
+
+  shift || true
+  [[ -n "$agent" ]] || bridge_die "Usage: $(basename "$0") admin <agent>"
+  [[ $# -eq 0 ]] || bridge_die "지원하지 않는 setup admin 옵션입니다: $1"
+
+  bridge_require_static_agent "$agent"
+
+  echo "== Admin role =="
+  printf 'admin_agent: %s\n' "$agent"
+  printf 'engine: %s\n' "$(bridge_agent_engine "$agent")"
+  printf 'workdir: %s\n' "$(bridge_agent_workdir "$agent")"
+  bridge_setup_write_local_scalar "BRIDGE_ADMIN_AGENT_ID" "$agent"
+  printf 'saved_in: %s\n' "$BRIDGE_ROSTER_LOCAL_FILE"
+  echo "next_command: agent-bridge admin"
+}
+
 subcommand="${1:-}"
 shift || true
 
@@ -365,6 +422,9 @@ case "$subcommand" in
     ;;
   agent)
     run_agent "$@"
+    ;;
+  admin)
+    run_admin "$@"
     ;;
   ""|-h|--help|help)
     usage

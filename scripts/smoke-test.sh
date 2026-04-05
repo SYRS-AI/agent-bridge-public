@@ -126,6 +126,7 @@ cat >"$BRIDGE_ROSTER_LOCAL_FILE" <<EOF
 #!/usr/bin/env bash
 bridge_add_agent_id_if_missing "$SMOKE_AGENT"
 bridge_add_agent_id_if_missing "$REQUESTER_AGENT"
+BRIDGE_ADMIN_AGENT_ID="$SMOKE_AGENT"
 BRIDGE_AGENT_DESC["$SMOKE_AGENT"]="Smoke test role"
 BRIDGE_AGENT_DESC["$REQUESTER_AGENT"]="Requester role"
 BRIDGE_AGENT_ENGINE["$SMOKE_AGENT"]="codex"
@@ -336,6 +337,15 @@ SETUP_AGENT_OUTPUT="$("$REPO_ROOT/agent-bridge" setup agent "$SMOKE_AGENT" --ski
 assert_contains "$SETUP_AGENT_OUTPUT" "claude_md: n/a (engine=codex)"
 assert_contains "$SETUP_AGENT_OUTPUT" "wake_channel: -"
 assert_contains "$SETUP_AGENT_OUTPUT" "start_dry_run: ok"
+
+log "configuring admin role and launching it"
+SETUP_ADMIN_OUTPUT="$("$REPO_ROOT/agent-bridge" setup admin "$SMOKE_AGENT")"
+assert_contains "$SETUP_ADMIN_OUTPUT" "admin_agent: $SMOKE_AGENT"
+assert_contains "$SETUP_ADMIN_OUTPUT" "next_command: agent-bridge admin"
+assert_contains "$(cat "$BRIDGE_ROSTER_LOCAL_FILE")" "BRIDGE_ADMIN_AGENT_ID=\"$SMOKE_AGENT\""
+
+ADMIN_OUTPUT="$("$REPO_ROOT/agent-bridge" admin --no-attach 2>&1)"
+assert_contains "$ADMIN_OUTPUT" "세션 '$SESSION_NAME'이 이미 실행 중입니다."
 
 log "ensuring Claude Stop hook settings merge"
 cat >"$HOOK_WORKDIR/.claude/settings.json" <<'EOF'

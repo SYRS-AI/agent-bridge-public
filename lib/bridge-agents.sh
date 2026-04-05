@@ -261,6 +261,10 @@ bridge_resolve_agent() {
   bridge_die "에이전트를 자동 추론할 수 없습니다. --agent 또는 명시적 agent 인자를 사용하세요."
 }
 
+bridge_admin_agent_id() {
+  printf '%s' "${BRIDGE_ADMIN_AGENT_ID:-}"
+}
+
 bridge_agent_exists() {
   local agent="$1"
   [[ -n "${BRIDGE_AGENT_SESSION[$agent]+x}" ]]
@@ -276,6 +280,27 @@ bridge_require_agent() {
   echo "등록된 에이전트:"
   bridge_list_agents >&2
   bridge_die "'$agent'은(는) 등록된 에이전트가 아닙니다."
+}
+
+bridge_require_static_agent() {
+  local agent="$1"
+
+  bridge_require_agent "$agent"
+  if [[ "$(bridge_agent_source "$agent")" != "static" ]]; then
+    bridge_die "'$agent'은(는) 정적 역할이 아닙니다. 관리자 에이전트는 정적 역할로 설정하세요."
+  fi
+}
+
+bridge_require_admin_agent() {
+  local agent
+
+  agent="$(bridge_admin_agent_id)"
+  if [[ -z "$agent" ]]; then
+    bridge_die "관리자 에이전트가 설정되지 않았습니다. 'agent-bridge setup admin <agent>' 또는 BRIDGE_ADMIN_AGENT_ID를 설정하세요."
+  fi
+
+  bridge_require_static_agent "$agent"
+  printf '%s' "$agent"
 }
 
 bridge_agent_id_for_session() {

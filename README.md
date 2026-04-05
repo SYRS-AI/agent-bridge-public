@@ -138,6 +138,15 @@ BRIDGE_AGENT_WORKDIR["analyst"]="$HOME/project-analyst"
 BRIDGE_AGENT_PROFILE_HOME["analyst"]="$HOME/.agent-bridge/agents/analyst"
 ```
 
+If one static role should act as the bridge admin, set it explicitly:
+
+```bash
+BRIDGE_ADMIN_AGENT_ID="developer"
+```
+
+After that, `agent-bridge admin` and `agb admin` always open that role using
+its configured engine and home, regardless of the current working directory.
+
 ### Optional zsh shell integration
 
 If you use `zsh` and do not want to type `./agent-bridge`, install the shell integration:
@@ -222,6 +231,7 @@ Then run the guided setup:
 ```bash
 ./agent-bridge setup discord tester
 ./agent-bridge setup agent tester
+./agent-bridge setup admin tester
 ```
 
 `setup discord` writes the runtime Discord files into the agent workdir:

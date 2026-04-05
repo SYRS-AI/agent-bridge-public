@@ -14,11 +14,12 @@ usage() {
 Usage:
   $CLI_NAME status [--watch] [--refresh <seconds>] [--open-limit <count>] [--all-agents]
   $CLI_NAME list
+  $CLI_NAME admin [--replace] [--no-attach] [--no-project-skill]
   $CLI_NAME kill <number|all>
   $CLI_NAME urgent <agent> "<message>" [--wait <seconds>]
   $CLI_NAME task <create|inbox|show|claim|done|handoff|summary> ...
   $CLI_NAME profile <status|diff|deploy> ...
-  $CLI_NAME setup <discord|agent> ...
+  $CLI_NAME setup <discord|agent|admin> ...
   $CLI_NAME cron <inventory|show|list|create|update|delete|enqueue|sync|run-subagent|errors|cleanup> ...
   $CLI_NAME discord <status|sync>
   $CLI_NAME migrate workspace plan <agent>
@@ -58,6 +59,7 @@ Usage:
 Examples:
   $CLI_NAME status
   $CLI_NAME status --watch
+  $CLI_NAME admin
   $CLI_NAME list
   $CLI_NAME kill 1
   $CLI_NAME kill all
@@ -224,6 +226,25 @@ start_static_agent() {
 
 if [[ $# -gt 0 ]]; then
   case "$1" in
+    admin)
+      shift
+      ADMIN_AGENT="$(bridge_require_admin_agent)"
+      ADMIN_ENGINE="$(bridge_agent_engine "$ADMIN_AGENT")"
+      ADMIN_WORKDIR="$(bridge_agent_workdir "$ADMIN_AGENT")"
+
+      while [[ $# -gt 0 ]]; do
+        case "$1" in
+          --name|--workdir|--codex|--claude)
+            bridge_die "'$CLI_NAME admin'은(는) 관리자 역할의 engine/workdir/name을 고정 사용합니다."
+            ;;
+          *)
+            break
+            ;;
+        esac
+      done
+
+      exec "$BRIDGE_BASH_BIN" "$SCRIPT_DIR/agent-bridge" "--$ADMIN_ENGINE" --name "$ADMIN_AGENT" --workdir "$ADMIN_WORKDIR" --loop "$@"
+      ;;
     list)
       if [[ $# -ne 1 ]]; then
       bridge_die "Usage: $CLI_NAME list"
@@ -394,6 +415,9 @@ fi
 if bridge_agent_exists "$NAME" && [[ "$(bridge_agent_source "$NAME")" == "static" ]]; then
   STATIC_ENGINE="$(bridge_agent_engine "$NAME")"
   STATIC_WORKDIR="$(bridge_agent_workdir "$NAME")"
+  if [[ -d "$STATIC_WORKDIR" ]]; then
+    STATIC_WORKDIR="$(cd "$STATIC_WORKDIR" && pwd -P)"
+  fi
 
   if [[ "$STATIC_ENGINE" != "$ENGINE" ]]; then
     bridge_die "'$NAME'은(는) ${STATIC_ENGINE} 정적 역할입니다. 요청 엔진(${ENGINE})과 다릅니다."
