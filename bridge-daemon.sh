@@ -125,6 +125,9 @@ cmd_run_cron_worker() {
   local done_note_file=""
   local followup_body_file=""
   local followup_task_id=""
+  local followup_title=""
+  local followup_title_prefix=""
+  local existing_followup_id=""
   local create_output=""
   local followup_priority="normal"
   local followup_actor=""
@@ -205,9 +208,18 @@ cmd_run_cron_worker() {
     followup_body_file="$(bridge_cron_dispatch_followup_file_by_id "$run_id")"
     bridge_cron_write_followup_body "$run_id" "$followup_body_file"
     followup_actor="cron:${CRON_JOB_NAME:-$run_id}"
-    create_output="$(bridge_queue_cli create --to "$TASK_ASSIGNED_TO" --title "[cron-followup] ${CRON_JOB_NAME:-$run_id} (${CRON_SLOT:-$run_id})" --from "$followup_actor" --priority "$followup_priority" --body-file "$followup_body_file" 2>/dev/null || true)"
-    if [[ "$create_output" =~ created\ task\ \#([0-9]+) ]]; then
-      followup_task_id="${BASH_REMATCH[1]}"
+    followup_title="[cron-followup] ${CRON_JOB_NAME:-$run_id} (${CRON_SLOT:-$run_id})"
+    followup_title_prefix="[cron-followup] ${CRON_JOB_NAME:-$run_id} ("
+    existing_followup_id="$(bridge_queue_cli find-open --agent "$TASK_ASSIGNED_TO" --title-prefix "$followup_title_prefix" 2>/dev/null || true)"
+    if [[ "$existing_followup_id" =~ ^[0-9]+$ ]]; then
+      bridge_queue_cli update "$existing_followup_id" --actor "$followup_actor" --title "$followup_title" --priority "$followup_priority" --body-file "$followup_body_file" >/dev/null 2>&1 || true
+      followup_task_id="$existing_followup_id"
+      echo "[info] refreshed cron followup task #${followup_task_id} for ${CRON_JOB_NAME:-$run_id}"
+    else
+      create_output="$(bridge_queue_cli create --to "$TASK_ASSIGNED_TO" --title "$followup_title" --from "$followup_actor" --priority "$followup_priority" --body-file "$followup_body_file" 2>/dev/null || true)"
+      if [[ "$create_output" =~ created\ task\ \#([0-9]+) ]]; then
+        followup_task_id="${BASH_REMATCH[1]}"
+      fi
     fi
   fi
 

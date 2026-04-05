@@ -402,6 +402,53 @@ def cmd_show(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_find_open(args: argparse.Namespace) -> int:
+    params: list[object] = [args.agent]
+    sql = """
+        SELECT *
+        FROM tasks
+        WHERE assigned_to = ?
+          AND status IN ('queued', 'claimed', 'blocked')
+    """
+    if args.title_prefix:
+        sql += " AND title LIKE ?"
+        params.append(f"{args.title_prefix}%")
+    sql += " ORDER BY id LIMIT 1"
+
+    with closing(connect()) as conn:
+        row = conn.execute(sql, params).fetchone()
+
+    if row is None:
+        return 1
+
+    if args.format == "shell":
+        fields = {
+            "TASK_ID": row["id"],
+            "TASK_TITLE": row["title"],
+            "TASK_STATUS": row["status"],
+            "TASK_ASSIGNED_TO": row["assigned_to"],
+            "TASK_CREATED_BY": row["created_by"],
+            "TASK_PRIORITY": row["priority"],
+            "TASK_CLAIMED_BY": row["claimed_by"] or "",
+            "TASK_BODY_PATH": row["body_path"] or "",
+        }
+        for key, value in fields.items():
+            print(f"{key}={shlex.quote(str(value))}")
+        return 0
+
+    if args.format == "id":
+        print(row["id"])
+        return 0
+
+    print(f"task #{row['id']}: {row['title']}")
+    print(f"status: {row['status']}")
+    print(f"assigned_to: {row['assigned_to']}")
+    print(f"priority: {row['priority']}")
+    if row["body_path"]:
+        print(f"body_file: {row['body_path']}")
+    return 0
+
+
 def cmd_claim(args: argparse.Namespace) -> int:
     agent = args.agent
     lease_seconds = int(args.lease_seconds)
@@ -480,6 +527,55 @@ def cmd_done(args: argparse.Namespace) -> int:
         )
 
     print(f"completed task #{args.task_id} as {agent}")
+    return 0
+
+
+def cmd_update(args: argparse.Namespace) -> int:
+    actor = args.actor or os.environ.get("USER", "unknown")
+    note_path = normalize_path(args.body_file)
+    current_ts = now_ts()
+
+    with closing(connect()) as conn, conn:
+        task = require_task(conn, args.task_id)
+        if task["status"] in ("done", "cancelled"):
+            raise SystemExit(f"task #{args.task_id} is already closed (status={task['status']})")
+
+        title = args.title.strip() if args.title is not None else task["title"]
+        priority = args.priority or task["priority"]
+        body_text = task["body_text"]
+        body_path = task["body_path"]
+
+        if args.body is not None:
+            body_text = args.body
+            body_path = None
+        elif args.body_file is not None:
+            body_text = None
+            body_path = note_path
+
+        conn.execute(
+            """
+            UPDATE tasks
+            SET title = ?,
+                priority = ?,
+                body_text = ?,
+                body_path = ?,
+                updated_ts = ?
+            WHERE id = ?
+            """,
+            (title, priority, body_text, body_path, current_ts, args.task_id),
+        )
+        emit_event(
+            conn,
+            args.task_id,
+            event_type="updated",
+            actor=actor,
+            created_ts=current_ts,
+            note_text=args.body,
+            note_path=note_path,
+            to_agent=task["assigned_to"],
+        )
+
+    print(f"updated task #{args.task_id}")
     return 0
 
 
@@ -802,6 +898,12 @@ def build_parser() -> argparse.ArgumentParser:
     show_parser.add_argument("--format", choices=("text", "shell"), default="text")
     show_parser.set_defaults(handler=cmd_show)
 
+    find_open_parser = subparsers.add_parser("find-open")
+    find_open_parser.add_argument("--agent", required=True)
+    find_open_parser.add_argument("--title-prefix")
+    find_open_parser.add_argument("--format", choices=("id", "text", "shell"), default="id")
+    find_open_parser.set_defaults(handler=cmd_find_open)
+
     claim_parser = subparsers.add_parser("claim")
     claim_parser.add_argument("task_id", type=int)
     claim_parser.add_argument("--agent", required=True)
@@ -815,6 +917,16 @@ def build_parser() -> argparse.ArgumentParser:
     note_group.add_argument("--note")
     note_group.add_argument("--note-file")
     done_parser.set_defaults(handler=cmd_done)
+
+    update_parser = subparsers.add_parser("update")
+    update_parser.add_argument("task_id", type=int)
+    update_parser.add_argument("--actor")
+    update_parser.add_argument("--title")
+    update_parser.add_argument("--priority", choices=PRIORITY_CHOICES)
+    update_body_group = update_parser.add_mutually_exclusive_group()
+    update_body_group.add_argument("--body")
+    update_body_group.add_argument("--body-file")
+    update_parser.set_defaults(handler=cmd_update)
 
     handoff_parser = subparsers.add_parser("handoff")
     handoff_parser.add_argument("task_id", type=int)
