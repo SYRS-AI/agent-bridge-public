@@ -389,21 +389,38 @@ with sqlite3.connect(db) as conn:
     )
     conn.commit()
 PY
-bash "$REPO_ROOT/bridge-task.sh" "done" 1 --agent "$SMOKE_AGENT" --note "smoke ok" >/dev/null
-DONE_SUMMARY_TSV="$(python3 "$REPO_ROOT/bridge-queue.py" summary --agent "$SMOKE_AGENT" --format tsv)"
-DONE_IDLE_SECONDS="$(printf '%s\n' "$DONE_SUMMARY_TSV" | awk -F'\t' 'NR==1 {print $6}')"
-[[ "$DONE_IDLE_SECONDS" =~ ^[0-9]+$ ]] || die "done idle seconds was not numeric: $DONE_IDLE_SECONDS"
-(( DONE_IDLE_SECONDS < 10 )) || die "done should refresh agent activity; idle=$DONE_IDLE_SECONDS"
+DONE_BEFORE_TS="$(date +%s)"
+python3 "$REPO_ROOT/bridge-queue.py" done 1 --agent "$SMOKE_AGENT" --note "smoke ok" >/dev/null
+DONE_ACTIVITY_TS="$(SMOKE_AGENT="$SMOKE_AGENT" BRIDGE_TASK_DB="$BRIDGE_TASK_DB" python3 - <<'PY'
+import os
+import sqlite3
+
+db = os.environ["BRIDGE_TASK_DB"]
+agent = os.environ["SMOKE_AGENT"]
+with sqlite3.connect(db) as conn:
+    value = conn.execute(
+        "SELECT session_activity_ts FROM agent_state WHERE agent = ?",
+        (agent,),
+    ).fetchone()
+print(int(value[0] or 0))
+PY
+)"
+[[ "$DONE_ACTIVITY_TS" =~ ^[0-9]+$ ]] || die "done activity ts was not numeric: $DONE_ACTIVITY_TS"
+(( DONE_ACTIVITY_TS >= DONE_BEFORE_TS )) || die "done should refresh agent activity; activity_ts=$DONE_ACTIVITY_TS before=$DONE_BEFORE_TS"
 
 SHOW_OUTPUT="$(bash "$REPO_ROOT/bridge-task.sh" show 1)"
 assert_contains "$SHOW_OUTPUT" "status: done"
 assert_contains "$SHOW_OUTPUT" "note: smoke ok"
 
+NOTICE_CREATE_OUTPUT="$(bash "$REPO_ROOT/bridge-task.sh" create --to "$SMOKE_AGENT" --title "smoke queue notice" --body-file "$BRIDGE_SHARED_DIR/note.md" --from "$REQUESTER_AGENT")"
+assert_contains "$NOTICE_CREATE_OUTPUT" "created task #"
+bash "$REPO_ROOT/bridge-task.sh" "done" 2 --agent "$SMOKE_AGENT" --note "notice ok" >/dev/null
+
 REQUESTER_INBOX_OUTPUT="$(bash "$REPO_ROOT/bridge-task.sh" inbox "$REQUESTER_AGENT")"
-assert_contains "$REQUESTER_INBOX_OUTPUT" "[task-complete] smoke queue"
-REQUESTER_SHOW_OUTPUT="$(bash "$REPO_ROOT/bridge-task.sh" show 2)"
+assert_contains "$REQUESTER_INBOX_OUTPUT" "[task-complete] smoke queue notice"
+REQUESTER_SHOW_OUTPUT="$(bash "$REPO_ROOT/bridge-task.sh" show 3)"
 assert_contains "$REQUESTER_SHOW_OUTPUT" "assigned_to: $REQUESTER_AGENT"
-assert_contains "$REQUESTER_SHOW_OUTPUT" "original_task: #1"
+assert_contains "$REQUESTER_SHOW_OUTPUT" "original_task: #2"
 assert_contains "$REQUESTER_SHOW_OUTPUT" "completed_by: $SMOKE_AGENT"
 
 SUMMARY_OUTPUT="$("$REPO_ROOT/agb" summary "$SMOKE_AGENT")"
@@ -735,16 +752,22 @@ log "inventorying legacy runtime references"
 LEGACY_ROOT="$TMP_ROOT/legacy-runtime"
 mkdir -p "$LEGACY_ROOT/cron" "$LEGACY_ROOT/scripts" "$LEGACY_ROOT/skills/sample-skill" "$LEGACY_ROOT/credentials"
 mkdir -p "$LEGACY_ROOT/shared/tools" "$LEGACY_ROOT/shared/references" "$LEGACY_ROOT/memory"
-mkdir -p "$LEGACY_ROOT/secrets"
+mkdir -p "$LEGACY_ROOT/secrets" "$LEGACY_ROOT/data"
 cat >"$LEGACY_ROOT/scripts/morning-briefing.py" <<'EOF'
-#!/usr/bin/env bash
-cat ~/.openclaw/credentials/example.txt
-cat ~/.openclaw/secrets/example.token
+#!/usr/bin/env python3
+import os
+import sys
+
+sys.path.insert(0, os.path.expanduser("~/.openclaw/scripts"))
+CRED_DIR = os.path.expanduser("~/.openclaw/credentials")
+SECRET_DIR = os.path.expanduser("~/.openclaw/secrets")
+DB_PATH = os.path.expanduser("~/.openclaw/data/example.db")
 EOF
 printf '# sample skill\n' >"$LEGACY_ROOT/skills/sample-skill/SKILL.md"
 printf 'tool note\n' >"$LEGACY_ROOT/shared/tools/tool.md"
 printf 'reference note\n' >"$LEGACY_ROOT/shared/references/ref.md"
 : >"$LEGACY_ROOT/memory/$SMOKE_AGENT.sqlite"
+printf 'sqlite-placeholder\n' >"$LEGACY_ROOT/data/example.db"
 printf '{"channels":{"discord":{"accounts":{"default":{"token":"smoke-token"}}}}}\n' >"$LEGACY_ROOT/openclaw.json"
 printf 'cred\n' >"$LEGACY_ROOT/credentials/example.txt"
 printf 'secret\n' >"$LEGACY_ROOT/secrets/example.token"
@@ -798,6 +821,7 @@ assert_contains "$RUNTIME_SYNC_OUTPUT" "item[scripts]"
 [[ -f "$BRIDGE_HOME/runtime/shared/tools/tool.md" ]] || die "expected runtime shared tools copy"
 [[ -f "$BRIDGE_HOME/runtime/shared/references/ref.md" ]] || die "expected runtime shared references copy"
 [[ -f "$BRIDGE_HOME/runtime/memory/$SMOKE_AGENT.sqlite" ]] || die "expected runtime memory copy"
+[[ -f "$BRIDGE_HOME/runtime/data/example.db" ]] || die "expected runtime data copy"
 [[ -f "$BRIDGE_HOME/runtime/credentials/example.txt" ]] || die "expected runtime credentials copy"
 [[ -f "$BRIDGE_HOME/runtime/secrets/example.token" ]] || die "expected runtime secrets copy"
 [[ -f "$BRIDGE_HOME/runtime/openclaw.json" ]] || die "expected runtime config copy"
@@ -821,8 +845,10 @@ grep -q 'needs_human_followup=true' "$LEGACY_ROOT/cron/jobs.json" || die "expect
 log "rewriting copied runtime files to bridge-local paths"
 RUNTIME_FILE_REWRITE_OUTPUT="$("$REPO_ROOT/agent-bridge" migrate runtime rewrite-files --bridge-home "$BRIDGE_HOME" --legacy-home "$LEGACY_ROOT" --runtime-root "$BRIDGE_HOME/runtime")"
 assert_contains "$RUNTIME_FILE_REWRITE_OUTPUT" "status: rewritten"
-grep -q "$BRIDGE_HOME/runtime/credentials/example.txt" "$BRIDGE_HOME/runtime/scripts/morning-briefing.py" || die "expected rewritten runtime credentials path"
-grep -q "$BRIDGE_HOME/runtime/secrets/example.token" "$BRIDGE_HOME/runtime/scripts/morning-briefing.py" || die "expected rewritten runtime secrets path"
+grep -q "$BRIDGE_HOME/runtime/scripts" "$BRIDGE_HOME/runtime/scripts/morning-briefing.py" || die "expected rewritten runtime scripts import path"
+grep -q "$BRIDGE_HOME/runtime/credentials" "$BRIDGE_HOME/runtime/scripts/morning-briefing.py" || die "expected rewritten runtime credentials path"
+grep -q "$BRIDGE_HOME/runtime/secrets" "$BRIDGE_HOME/runtime/scripts/morning-briefing.py" || die "expected rewritten runtime secrets path"
+grep -q "$BRIDGE_HOME/runtime/data/example.db" "$BRIDGE_HOME/runtime/scripts/morning-briefing.py" || die "expected rewritten runtime data path"
 
 log "processing one queued cron-dispatch task through the daemon"
 RUN_ID="smoke-job-1234--2026-04-05T10-00-00Z"

@@ -58,6 +58,8 @@ AGENT_RUNTIME_FILES = {
 }
 AGENT_RUNTIME_DIRS = {"references", "skills"}
 SHARED_RUNTIME_DIRS = {"references", "tools"}
+RUNTIME_SURFACE_DIRS = {"scripts", "skills", "patches", "shared", "data"}
+RUNTIME_SURFACE_FILES = {"openclaw.json"}
 
 
 def pretty_path(path: Path) -> str:
@@ -76,8 +78,11 @@ def legacy_aliases(legacy_home: Path) -> list[str]:
         relative = None
     if relative is not None:
         aliases.append(f"~/{relative}")
+        aliases.append(f"$HOME/{relative}")
     if legacy_home.name == ".openclaw":
         aliases.append("~/.openclaw")
+        aliases.append("$HOME/.openclaw")
+        aliases.append(".openclaw")
     return list(dict.fromkeys(aliases))
 
 
@@ -103,10 +108,12 @@ def category_patterns(legacy_home: Path) -> dict[str, list[re.Pattern[str]]]:
             re.compile(r"\bop (?:read|run|inject)\b"),
         ],
         "db": [
+            re.compile(rf"(?:{legacy_root})/data/"),
             re.compile(r"\bagent-db\b"),
             re.compile(r"\b(?:postgres|psql|supabase)\b", re.IGNORECASE),
             re.compile(r"\b(?:pinchtab|railway-db|vendor-db|production-db|cost-db|syrs-commerce-db)\b"),
             re.compile(r"\.sqlite\b"),
+            re.compile(r"\.db\b"),
         ],
         "notify": [
             re.compile(r"\bopenclaw message send\b"),
@@ -145,6 +152,7 @@ def source_inventory(legacy_home: Path) -> dict[str, dict[str, object]]:
         "patches": {"path": legacy_home / "patches", "count": count_files(legacy_home / "patches")},
         "media": {"path": legacy_home / "media", "count": count_files(legacy_home / "media")},
         "vault": {"path": legacy_home / "vault", "count": count_files(legacy_home / "vault")},
+        "data": {"path": legacy_home / "data", "count": count_files(legacy_home / "data")},
         "credentials": {"path": legacy_home / "credentials", "count": count_files(legacy_home / "credentials")},
         "secrets": {"path": legacy_home / "secrets", "count": count_files(legacy_home / "secrets")},
         "memory_sqlite": {"path": legacy_home / "memory", "count": count_files(legacy_home / "memory", "*.sqlite")},
@@ -323,6 +331,18 @@ def iter_curated_runtime_files(bridge_home: Path):
                     if item.is_file() and is_probably_text(item):
                         yield item
 
+    runtime_root = bridge_home / "runtime"
+    if runtime_root.exists():
+        for child in sorted(runtime_root.iterdir()):
+            if child.name in SKIP_DIRS:
+                continue
+            if child.is_file() and child.name in RUNTIME_SURFACE_FILES and is_probably_text(child):
+                yield child
+            elif child.is_dir() and child.name in RUNTIME_SURFACE_DIRS:
+                for item in child.rglob("*"):
+                    if item.is_file() and is_probably_text(item):
+                        yield item
+
 
 def scan_runtime_surface(bridge_home: Path, patterns: dict[str, list[re.Pattern[str]]]) -> dict[str, object]:
     category_counts = Counter()
@@ -439,6 +459,7 @@ def runtime_prefixes(bridge_home: Path) -> dict[str, str]:
         "patches": pretty_path(runtime_root / "patches"),
         "media": pretty_path(runtime_root / "media"),
         "vault": pretty_path(runtime_root / "vault"),
+        "data": pretty_path(runtime_root / "data"),
         "logs": pretty_path(bridge_home / "logs"),
         "shared_tools": pretty_path(runtime_root / "shared" / "tools"),
         "shared_references": pretty_path(runtime_root / "shared" / "references"),
@@ -446,6 +467,9 @@ def runtime_prefixes(bridge_home: Path) -> dict[str, str]:
         "credentials": pretty_path(runtime_root / "credentials"),
         "secrets": pretty_path(runtime_root / "secrets"),
         "config": pretty_path(runtime_root / "openclaw.json"),
+        "agents": pretty_path(bridge_home / "agents"),
+        "patch_home": pretty_path(bridge_home / "agents" / "patch"),
+        "watchdog": pretty_path(bridge_home / "state" / "watchdog"),
         "shared": pretty_path(bridge_home / "shared"),
     }
 
@@ -453,65 +477,55 @@ def runtime_prefixes(bridge_home: Path) -> dict[str, str]:
 def legacy_rewrite_rules(bridge_home: Path, legacy_home: Path) -> list[tuple[str, str, str]]:
     runtime = runtime_prefixes(bridge_home)
     abs_legacy = str(legacy_home)
-    return [
-        ("scripts", f"{abs_legacy}/scripts/", f"{runtime['scripts']}/"),
-        ("scripts", "~/.openclaw/scripts/", f"{runtime['scripts']}/"),
-        ("scripts", "$HOME/.openclaw/scripts/", f"{runtime['scripts']}/"),
-        ("skills", f"{abs_legacy}/skills/", f"{runtime['skills']}/"),
-        ("skills", "~/.openclaw/skills/", f"{runtime['skills']}/"),
-        ("skills", "$HOME/.openclaw/skills/", f"{runtime['skills']}/"),
-        ("patches", f"{abs_legacy}/patches/", f"{runtime['patches']}/"),
-        ("patches", "~/.openclaw/patches/", f"{runtime['patches']}/"),
-        ("patches", "$HOME/.openclaw/patches/", f"{runtime['patches']}/"),
-        ("media", f"{abs_legacy}/media/", f"{runtime['media']}/"),
-        ("media", "~/.openclaw/media/", f"{runtime['media']}/"),
-        ("media", "$HOME/.openclaw/media/", f"{runtime['media']}/"),
-        ("vault", f"{abs_legacy}/vault/", f"{runtime['vault']}/"),
-        ("vault", "~/.openclaw/vault/", f"{runtime['vault']}/"),
-        ("vault", "$HOME/.openclaw/vault/", f"{runtime['vault']}/"),
-        ("logs", f"{abs_legacy}/logs/", f"{runtime['logs']}/"),
-        ("logs", "~/.openclaw/logs/", f"{runtime['logs']}/"),
-        ("logs", "$HOME/.openclaw/logs/", f"{runtime['logs']}/"),
-        ("shared_tools", f"{abs_legacy}/shared/tools/", f"{runtime['shared_tools']}/"),
-        ("shared_tools", "~/.openclaw/shared/tools/", f"{runtime['shared_tools']}/"),
-        ("shared_tools", "$HOME/.openclaw/shared/tools/", f"{runtime['shared_tools']}/"),
-        ("shared_references", f"{abs_legacy}/shared/references/", f"{runtime['shared_references']}/"),
-        ("shared_references", "~/.openclaw/shared/references/", f"{runtime['shared_references']}/"),
-        ("shared_references", "$HOME/.openclaw/shared/references/", f"{runtime['shared_references']}/"),
-        ("shared", f"{abs_legacy}/shared/a2a-files/", f"{runtime['shared']}/a2a-files/"),
-        ("shared", "~/.openclaw/shared/a2a-files/", f"{runtime['shared']}/a2a-files/"),
-        ("shared", "$HOME/.openclaw/shared/a2a-files/", f"{runtime['shared']}/a2a-files/"),
-        ("shared", f"{abs_legacy}/shared/ROSTER.md", f"{runtime['shared']}/ROSTER.md"),
-        ("shared", "~/.openclaw/shared/ROSTER.md", f"{runtime['shared']}/ROSTER.md"),
-        ("shared", "$HOME/.openclaw/shared/ROSTER.md", f"{runtime['shared']}/ROSTER.md"),
-        ("shared", f"{abs_legacy}/shared/SYRS-CONTEXT.md", f"{runtime['shared']}/SYRS-CONTEXT.md"),
-        ("shared", "~/.openclaw/shared/SYRS-CONTEXT.md", f"{runtime['shared']}/SYRS-CONTEXT.md"),
-        ("shared", "$HOME/.openclaw/shared/SYRS-CONTEXT.md", f"{runtime['shared']}/SYRS-CONTEXT.md"),
-        ("shared", f"{abs_legacy}/shared/SYRS-RULES.md", f"{runtime['shared']}/SYRS-RULES.md"),
-        ("shared", "~/.openclaw/shared/SYRS-RULES.md", f"{runtime['shared']}/SYRS-RULES.md"),
-        ("shared", "$HOME/.openclaw/shared/SYRS-RULES.md", f"{runtime['shared']}/SYRS-RULES.md"),
-        ("shared", f"{abs_legacy}/shared/SYRS-USER.md", f"{runtime['shared']}/SYRS-USER.md"),
-        ("shared", "~/.openclaw/shared/SYRS-USER.md", f"{runtime['shared']}/SYRS-USER.md"),
-        ("shared", "$HOME/.openclaw/shared/SYRS-USER.md", f"{runtime['shared']}/SYRS-USER.md"),
-        ("shared", f"{abs_legacy}/shared/TOOLS.md", f"{runtime['shared']}/TOOLS.md"),
-        ("shared", "~/.openclaw/shared/TOOLS.md", f"{runtime['shared']}/TOOLS.md"),
-        ("shared", "$HOME/.openclaw/shared/TOOLS.md", f"{runtime['shared']}/TOOLS.md"),
-        ("shared", f"{abs_legacy}/shared/TOOLS-REGISTRY.md", f"{runtime['shared']}/TOOLS-REGISTRY.md"),
-        ("shared", "~/.openclaw/shared/TOOLS-REGISTRY.md", f"{runtime['shared']}/TOOLS-REGISTRY.md"),
-        ("shared", "$HOME/.openclaw/shared/TOOLS-REGISTRY.md", f"{runtime['shared']}/TOOLS-REGISTRY.md"),
-        ("memory", f"{abs_legacy}/memory/", f"{runtime['memory']}/"),
-        ("memory", "~/.openclaw/memory/", f"{runtime['memory']}/"),
-        ("memory", "$HOME/.openclaw/memory/", f"{runtime['memory']}/"),
-        ("credentials", f"{abs_legacy}/credentials/", f"{runtime['credentials']}/"),
-        ("credentials", "~/.openclaw/credentials/", f"{runtime['credentials']}/"),
-        ("credentials", "$HOME/.openclaw/credentials/", f"{runtime['credentials']}/"),
-        ("secrets", f"{abs_legacy}/secrets/", f"{runtime['secrets']}/"),
-        ("secrets", "~/.openclaw/secrets/", f"{runtime['secrets']}/"),
-        ("secrets", "$HOME/.openclaw/secrets/", f"{runtime['secrets']}/"),
-        ("config", f"{abs_legacy}/openclaw.json", runtime["config"]),
-        ("config", "~/.openclaw/openclaw.json", runtime["config"]),
-        ("config", "$HOME/.openclaw/openclaw.json", runtime["config"]),
-    ]
+    def dir_rules(category: str, legacy_rel: str, target: str) -> list[tuple[str, str, str]]:
+        bases = (
+            f"{abs_legacy}/{legacy_rel}",
+            f"~/.openclaw/{legacy_rel}",
+            f"$HOME/.openclaw/{legacy_rel}",
+        )
+        rules: list[tuple[str, str, str]] = []
+        hidden_target = target.replace("~/.agent-bridge/", ".agent-bridge/")
+        for base in bases:
+            rules.append((category, f"{base}/", f"{target}/"))
+            rules.append((category, base, target))
+        rules.append((category, f".openclaw/{legacy_rel}/", f"{hidden_target}/"))
+        rules.append((category, f".openclaw/{legacy_rel}", hidden_target))
+        return rules
+
+    def file_rules(category: str, legacy_rel: str, target: str) -> list[tuple[str, str, str]]:
+        hidden_target = target.replace("~/.agent-bridge/", ".agent-bridge/")
+        return [
+            (category, f"{abs_legacy}/{legacy_rel}", target),
+            (category, f"~/.openclaw/{legacy_rel}", target),
+            (category, f"$HOME/.openclaw/{legacy_rel}", target),
+            (category, f".openclaw/{legacy_rel}", hidden_target),
+        ]
+
+    rules: list[tuple[str, str, str]] = []
+    rules.extend(dir_rules("scripts", "scripts", runtime["scripts"]))
+    rules.extend(dir_rules("skills", "skills", runtime["skills"]))
+    rules.extend(dir_rules("patches", "patches", runtime["patches"]))
+    rules.extend(dir_rules("media", "media", runtime["media"]))
+    rules.extend(dir_rules("vault", "vault", runtime["vault"]))
+    rules.extend(dir_rules("data", "data", runtime["data"]))
+    rules.extend(dir_rules("logs", "logs", runtime["logs"]))
+    rules.extend(dir_rules("shared_tools", "shared/tools", runtime["shared_tools"]))
+    rules.extend(dir_rules("shared_references", "shared/references", runtime["shared_references"]))
+    rules.extend(dir_rules("shared", "shared/a2a-files", f"{runtime['shared']}/a2a-files"))
+    rules.extend(dir_rules("memory", "memory", runtime["memory"]))
+    rules.extend(dir_rules("credentials", "credentials", runtime["credentials"]))
+    rules.extend(dir_rules("secrets", "secrets", runtime["secrets"]))
+    rules.extend(dir_rules("agents", "agents", runtime["agents"]))
+    rules.extend(dir_rules("watchdog", "watchdog", runtime["watchdog"]))
+    rules.extend(dir_rules("patch_home", "patch", runtime["patch_home"]))
+    rules.extend(file_rules("shared", "shared/ROSTER.md", f"{runtime['shared']}/ROSTER.md"))
+    rules.extend(file_rules("shared", "shared/SYRS-CONTEXT.md", f"{runtime['shared']}/SYRS-CONTEXT.md"))
+    rules.extend(file_rules("shared", "shared/SYRS-RULES.md", f"{runtime['shared']}/SYRS-RULES.md"))
+    rules.extend(file_rules("shared", "shared/SYRS-USER.md", f"{runtime['shared']}/SYRS-USER.md"))
+    rules.extend(file_rules("shared", "shared/TOOLS.md", f"{runtime['shared']}/TOOLS.md"))
+    rules.extend(file_rules("shared", "shared/TOOLS-REGISTRY.md", f"{runtime['shared']}/TOOLS-REGISTRY.md"))
+    rules.extend(file_rules("config", "openclaw.json", runtime["config"]))
+    return rules
 
 
 def rewrite_string(value: str, rules: list[tuple[str, str, str]]) -> tuple[str, Counter]:
