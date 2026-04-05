@@ -31,9 +31,27 @@ nudge_agent_session() {
   local title
   local message
   local status=0
+  local open_task_shell=""
+  local task_id=""
+  local task_title=""
+  local task_priority=""
 
   title="queued tasks waiting (${queued})"
   message="agb inbox ${agent}"
+  open_task_shell="$(bridge_queue_cli find-open --agent "$agent" --format shell 2>/dev/null || true)"
+  if [[ -n "$open_task_shell" ]]; then
+    # shellcheck disable=SC1091
+    source /dev/stdin <<<"$open_task_shell"
+  fi
+  if [[ -n "$TASK_ID" && -n "$TASK_TITLE" ]]; then
+    task_id="$TASK_ID"
+    task_title="$TASK_TITLE"
+    task_priority="${TASK_PRIORITY:-normal}"
+    message+=$'\n'
+    message+="next: #${task_id} [${task_priority}] ${task_title}"
+  fi
+  message+=$'\n'
+  message+="queue DB is source of truth"
   if ! bridge_dispatch_notification "$agent" "$title" "$message" "" "normal"; then
     status=$?
     if [[ "$status" == "2" ]]; then
