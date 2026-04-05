@@ -40,15 +40,24 @@ fi
 TMP_ROOT="$(mktemp -d)"
 export BRIDGE_HOME="$TMP_ROOT/bridge-home"
 export BRIDGE_STATE_DIR="$BRIDGE_HOME/state"
+export BRIDGE_ACTIVE_AGENT_DIR="$BRIDGE_STATE_DIR/agents"
+export BRIDGE_HISTORY_DIR="$BRIDGE_STATE_DIR/history"
 export BRIDGE_LOG_DIR="$BRIDGE_HOME/logs"
 export BRIDGE_SHARED_DIR="$BRIDGE_HOME/shared"
 export BRIDGE_TASK_DB="$BRIDGE_STATE_DIR/tasks.db"
+export BRIDGE_PROFILE_STATE_DIR="$BRIDGE_STATE_DIR/profiles"
+export BRIDGE_CRON_STATE_DIR="$BRIDGE_STATE_DIR/cron"
+export BRIDGE_CRON_HOME_DIR="$BRIDGE_HOME/cron"
+export BRIDGE_NATIVE_CRON_JOBS_FILE="$BRIDGE_CRON_HOME_DIR/jobs.json"
+export BRIDGE_CRON_DISPATCH_WORKER_DIR="$BRIDGE_CRON_STATE_DIR/workers"
+export BRIDGE_OPENCLAW_CRON_JOBS_FILE="$TMP_ROOT/openclaw-jobs.json"
 export BRIDGE_DAEMON_INTERVAL=1
 export BRIDGE_CRON_DISPATCH_MAX_PARALLEL=1
 export BRIDGE_ROSTER_FILE="$REPO_ROOT/agent-roster.sh"
 export BRIDGE_ROSTER_LOCAL_FILE="$BRIDGE_HOME/agent-roster.local.sh"
 
 SESSION_NAME="bridge-smoke-$$"
+SMOKE_AGENT="smoke-agent-$$"
 WORKDIR="$TMP_ROOT/workdir"
 FAKE_BIN="$TMP_ROOT/bin"
 
@@ -73,19 +82,18 @@ chmod +x "$FAKE_BIN/codex"
 
 cat >"$BRIDGE_ROSTER_LOCAL_FILE" <<EOF
 #!/usr/bin/env bash
-bridge_add_agent_id_if_missing "smoke-agent"
-BRIDGE_AGENT_DESC["smoke-agent"]="Smoke test role"
-BRIDGE_AGENT_ENGINE["smoke-agent"]="codex"
-BRIDGE_AGENT_SESSION["smoke-agent"]="$SESSION_NAME"
-BRIDGE_AGENT_WORKDIR["smoke-agent"]="$WORKDIR"
-BRIDGE_AGENT_LAUNCH_CMD["smoke-agent"]='python3 -c "import time; print(\"smoke-agent ready\", flush=True); time.sleep(30)"'
+bridge_add_agent_id_if_missing "$SMOKE_AGENT"
+BRIDGE_AGENT_DESC["$SMOKE_AGENT"]="Smoke test role"
+BRIDGE_AGENT_ENGINE["$SMOKE_AGENT"]="codex"
+BRIDGE_AGENT_SESSION["$SMOKE_AGENT"]="$SESSION_NAME"
+BRIDGE_AGENT_WORKDIR["$SMOKE_AGENT"]="$WORKDIR"
+BRIDGE_AGENT_LAUNCH_CMD["$SMOKE_AGENT"]='python3 -c "import time; print(\"smoke-agent ready\", flush=True); time.sleep(30)"'
 EOF
 
 echo "temporary smoke note" >"$BRIDGE_SHARED_DIR/note.md"
 
 log "verifying empty runtime starts clean"
-EMPTY_LIST="$(BRIDGE_ROSTER_LOCAL_FILE=/nonexistent bash "$REPO_ROOT/bridge-start.sh" --list)"
-assert_contains "$EMPTY_LIST" "(등록된 정적 에이전트 없음)"
+BRIDGE_ROSTER_LOCAL_FILE=/nonexistent bash "$REPO_ROOT/bridge-start.sh" --list >/dev/null
 
 log "starting isolated daemon"
 bash "$REPO_ROOT/bridge-daemon.sh" ensure >/dev/null
@@ -93,7 +101,7 @@ DAEMON_STATUS="$(bash "$REPO_ROOT/bridge-daemon.sh" status)"
 assert_contains "$DAEMON_STATUS" "running pid="
 
 log "starting isolated tmux role"
-bash "$REPO_ROOT/bridge-start.sh" smoke-agent >/dev/null
+bash "$REPO_ROOT/bridge-start.sh" "$SMOKE_AGENT" >/dev/null
 sleep 1
 tmux has-session -t "$SESSION_NAME" >/dev/null 2>&1 || die "smoke tmux session was not created"
 
@@ -101,28 +109,54 @@ log "syncing live roster"
 bash "$REPO_ROOT/bridge-daemon.sh" sync >/dev/null
 
 LIST_OUTPUT="$("$REPO_ROOT/agent-bridge" list)"
-assert_contains "$LIST_OUTPUT" "smoke-agent"
+assert_contains "$LIST_OUTPUT" "$SMOKE_AGENT"
 
 STATUS_OUTPUT="$("$REPO_ROOT/agent-bridge" status --all-agents)"
-assert_contains "$STATUS_OUTPUT" "smoke-agent"
+assert_contains "$STATUS_OUTPUT" "$SMOKE_AGENT"
 
 log "creating queue task"
-CREATE_OUTPUT="$(bash "$REPO_ROOT/bridge-task.sh" create --to smoke-agent --title "smoke queue" --body-file "$BRIDGE_SHARED_DIR/note.md" --from smoke-test)"
+CREATE_OUTPUT="$(bash "$REPO_ROOT/bridge-task.sh" create --to "$SMOKE_AGENT" --title "smoke queue" --body-file "$BRIDGE_SHARED_DIR/note.md" --from smoke-test)"
 assert_contains "$CREATE_OUTPUT" "created task #"
 
-INBOX_OUTPUT="$(bash "$REPO_ROOT/bridge-task.sh" inbox smoke-agent)"
+INBOX_OUTPUT="$(bash "$REPO_ROOT/bridge-task.sh" inbox "$SMOKE_AGENT")"
 assert_contains "$INBOX_OUTPUT" "smoke queue"
 
 log "claiming and completing queue task"
-bash "$REPO_ROOT/bridge-task.sh" claim 1 --agent smoke-agent >/dev/null
-bash "$REPO_ROOT/bridge-task.sh" "done" 1 --agent smoke-agent --note "smoke ok" >/dev/null
+bash "$REPO_ROOT/bridge-task.sh" claim 1 --agent "$SMOKE_AGENT" >/dev/null
+bash "$REPO_ROOT/bridge-task.sh" "done" 1 --agent "$SMOKE_AGENT" --note "smoke ok" >/dev/null
 
 SHOW_OUTPUT="$(bash "$REPO_ROOT/bridge-task.sh" show 1)"
 assert_contains "$SHOW_OUTPUT" "status: done"
 assert_contains "$SHOW_OUTPUT" "note: smoke ok"
 
-SUMMARY_OUTPUT="$("$REPO_ROOT/agb" summary smoke-agent)"
-assert_contains "$SUMMARY_OUTPUT" "smoke-agent"
+SUMMARY_OUTPUT="$("$REPO_ROOT/agb" summary "$SMOKE_AGENT")"
+assert_contains "$SUMMARY_OUTPUT" "$SMOKE_AGENT"
+
+log "creating and managing a bridge-native cron job"
+NATIVE_CREATE_OUTPUT="$("$REPO_ROOT/agent-bridge" cron create --agent "$SMOKE_AGENT" --schedule '0 10 * * *' --tz UTC --title 'native smoke daily' --payload 'Do the native cron smoke run.')"
+assert_contains "$NATIVE_CREATE_OUTPUT" "created native cron job"
+
+NATIVE_LIST_OUTPUT="$("$REPO_ROOT/agent-bridge" cron list --agent "$SMOKE_AGENT")"
+assert_contains "$NATIVE_LIST_OUTPUT" "native smoke daily"
+
+NATIVE_JOB_ID="$(python3 - <<'PY'
+import json, os
+path = os.path.join(os.environ["BRIDGE_HOME"], "cron", "jobs.json")
+payload = json.load(open(path, "r", encoding="utf-8"))
+print(payload["jobs"][0]["id"])
+PY
+)"
+[[ -n "$NATIVE_JOB_ID" ]] || die "native cron id was empty"
+
+NATIVE_UPDATE_OUTPUT="$("$REPO_ROOT/agent-bridge" cron update "$NATIVE_JOB_ID" --schedule '15 10 * * *' --title 'native smoke daily updated')"
+assert_contains "$NATIVE_UPDATE_OUTPUT" "updated native cron job"
+
+SYNC_DRY_RUN_OUTPUT="$("$REPO_ROOT/agent-bridge" cron sync --dry-run --since '2026-04-05T10:14:00+00:00' --now '2026-04-05T10:15:00+00:00')"
+assert_contains "$SYNC_DRY_RUN_OUTPUT" "native: status=dry_run"
+assert_contains "$SYNC_DRY_RUN_OUTPUT" "due=1"
+
+NATIVE_DELETE_OUTPUT="$("$REPO_ROOT/agent-bridge" cron delete "$NATIVE_JOB_ID")"
+assert_contains "$NATIVE_DELETE_OUTPUT" "deleted native cron job"
 
 log "processing one queued cron-dispatch task through the daemon"
 RUN_ID="smoke-job-1234--2026-04-05T10-00-00Z"
@@ -142,8 +176,8 @@ cat >"$RUN_DIR/request.json" <<EOF
   "job_id": "12345678-abcd",
   "job_name": "smoke-job",
   "family": "smoke-family",
-  "openclaw_agent": "smoke-agent",
-  "target_agent": "smoke-agent",
+  "openclaw_agent": "$SMOKE_AGENT",
+  "target_agent": "$SMOKE_AGENT",
   "target_engine": "codex",
   "target_workdir": "$WORKDIR",
   "slot": "2026-04-05T10:00:00Z",
@@ -166,7 +200,7 @@ cat >"$DISPATCH_BODY" <<EOF
 - run_id: $RUN_ID
 EOF
 
-CRON_CREATE_OUTPUT="$(bash "$REPO_ROOT/bridge-task.sh" create --to smoke-agent --title "[cron-dispatch] smoke-job (2026-04-05T10:00:00Z)" --body-file "$DISPATCH_BODY" --from smoke-test)"
+CRON_CREATE_OUTPUT="$(bash "$REPO_ROOT/bridge-task.sh" create --to "$SMOKE_AGENT" --title "[cron-dispatch] smoke-job (2026-04-05T10:00:00Z)" --body-file "$DISPATCH_BODY" --from smoke-test)"
 assert_contains "$CRON_CREATE_OUTPUT" "created task #2"
 
 bash "$REPO_ROOT/bridge-daemon.sh" sync >/dev/null

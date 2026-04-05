@@ -12,6 +12,10 @@ usage() {
 Usage:
   $(basename "$0") inventory [--agent <openclaw-agent>] [--family <family>] [--mode recurring|one-shot|all] [--enabled yes|no|all] [--limit <count>] [--json]
   $(basename "$0") show <job-name-or-id> [--json]
+  $(basename "$0") list [--agent <bridge-agent>] [--enabled yes|no|all] [--limit <count>] [--json]
+  $(basename "$0") create --agent <bridge-agent> --schedule "<cron-expr>" --title "<title>" [--payload "<text>" | --payload-file <path>] [--tz <iana-tz>]
+  $(basename "$0") update <job-id> [--agent <bridge-agent>] [--schedule "<cron-expr>"] [--title "<title>"] [--payload "<text>" | --payload-file <path>] [--tz <iana-tz>] [--enable|--disable]
+  $(basename "$0") delete <job-id>
   $(basename "$0") enqueue <job-name-or-id> [--slot <slot-key>] [--target <bridge-agent>] [--from <actor>] [--priority normal|high] [--dry-run]
   $(basename "$0") sync [--dry-run] [--json] [--since <iso-datetime>] [--now <iso-datetime>]
   $(basename "$0") run-subagent <run-id> [--dry-run]
@@ -83,9 +87,113 @@ run_show() {
   bridge_cron_python "${py_args[@]}"
 }
 
+run_list() {
+  local py_args=(
+    native-list
+    --jobs-file "$BRIDGE_NATIVE_CRON_JOBS_FILE"
+  )
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --agent|--enabled|--limit)
+        [[ $# -lt 2 ]] && bridge_die "$1 뒤에 값을 지정하세요."
+        py_args+=("$1" "$2")
+        shift 2
+        ;;
+      --json)
+        py_args+=("$1")
+        shift
+        ;;
+      -h|--help)
+        usage
+        exit 0
+        ;;
+      *)
+        bridge_die "지원하지 않는 list 옵션입니다: $1"
+        ;;
+    esac
+  done
+
+  bridge_cron_python "${py_args[@]}"
+}
+
+run_create() {
+  local py_args=(
+    native-create
+    --jobs-file "$BRIDGE_NATIVE_CRON_JOBS_FILE"
+  )
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --agent|--schedule|--title|--payload|--payload-file|--tz|--actor)
+        [[ $# -lt 2 ]] && bridge_die "$1 뒤에 값을 지정하세요."
+        py_args+=("$1" "$2")
+        shift 2
+        ;;
+      --disabled)
+        py_args+=("$1")
+        shift
+        ;;
+      -h|--help)
+        usage
+        exit 0
+        ;;
+      *)
+        bridge_die "지원하지 않는 create 옵션입니다: $1"
+        ;;
+    esac
+  done
+
+  bridge_cron_python "${py_args[@]}"
+}
+
+run_update() {
+  local job_ref="${1:-}"
+  local py_args=(
+    native-update
+    --jobs-file "$BRIDGE_NATIVE_CRON_JOBS_FILE"
+  )
+
+  shift || true
+  [[ -n "$job_ref" ]] || bridge_die "Usage: $(basename "$0") update <job-id> [--agent <bridge-agent>] [--schedule <cron-expr>] [--title <title>] [--payload <text>|--payload-file <path>] [--tz <iana-tz>] [--enable|--disable]"
+  py_args+=("$job_ref")
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --agent|--schedule|--title|--payload|--payload-file|--tz|--actor)
+        [[ $# -lt 2 ]] && bridge_die "$1 뒤에 값을 지정하세요."
+        py_args+=("$1" "$2")
+        shift 2
+        ;;
+      --enable|--disable)
+        py_args+=("$1")
+        shift
+        ;;
+      -h|--help)
+        usage
+        exit 0
+        ;;
+      *)
+        bridge_die "지원하지 않는 update 옵션입니다: $1"
+        ;;
+    esac
+  done
+
+  bridge_cron_python "${py_args[@]}"
+}
+
+run_delete() {
+  local job_ref="${1:-}"
+  [[ -n "$job_ref" ]] || bridge_die "Usage: $(basename "$0") delete <job-id>"
+  shift || true
+  [[ $# -eq 0 ]] || bridge_die "지원하지 않는 delete 옵션입니다: $1"
+  bridge_cron_python native-delete --jobs-file "$BRIDGE_NATIVE_CRON_JOBS_FILE" "$job_ref"
+}
+
 write_materialized_payload() {
   local payload_file="$1"
   local slot="$2"
+  local source_file="$3"
 
   mkdir -p "$(dirname "$payload_file")"
   {
@@ -94,7 +202,7 @@ write_materialized_payload() {
     printf -- '- openclaw_agent: %s\n' "$CRON_JOB_AGENT"
     printf -- '- family: %s\n' "$CRON_JOB_FAMILY"
     printf -- '- schedule: %s\n' "$CRON_JOB_SCHEDULE_TEXT"
-    printf -- '- source_file: %s\n' "$BRIDGE_OPENCLAW_CRON_JOBS_FILE"
+    printf -- '- source_file: %s\n' "$source_file"
     printf -- '- payload_kind: %s\n' "$CRON_JOB_PAYLOAD_KIND"
     printf '\n## Original Payload\n\n'
     printf '%s\n' "$CRON_JOB_PAYLOAD_TEXT"
@@ -135,7 +243,8 @@ write_dispatch_body() {
 }
 
 run_enqueue() {
-  local job_ref="${1:-}"
+  local job_ref=""
+  local jobs_file="$BRIDGE_OPENCLAW_CRON_JOBS_FILE"
   local slot=""
   local target=""
   local actor=""
@@ -164,14 +273,12 @@ run_enqueue() {
   local created_at=""
   local shell_payload=""
 
-  shift || true
-  [[ -n "$job_ref" ]] || bridge_die "Usage: $(basename "$0") enqueue <job-name-or-id> [--slot <slot-key>] [--target <bridge-agent>] [--from <actor>] [--priority normal|high] [--dry-run]"
-
   while [[ $# -gt 0 ]]; do
     case "$1" in
-      --slot|--target|--from|--priority)
+      --slot|--target|--from|--priority|--jobs-file)
         [[ $# -lt 2 ]] && bridge_die "$1 뒤에 값을 지정하세요."
         case "$1" in
+          --jobs-file) jobs_file="$2" ;;
           --slot) slot="$2" ;;
           --target) target="$2" ;;
           --from) actor="$2" ;;
@@ -188,10 +295,17 @@ run_enqueue() {
         exit 0
         ;;
       *)
+        if [[ -z "$job_ref" ]]; then
+          job_ref="$1"
+          shift
+          continue
+        fi
         bridge_die "지원하지 않는 옵션입니다: $1"
         ;;
     esac
   done
+
+  [[ -n "$job_ref" ]] || bridge_die "Usage: $(basename "$0") enqueue <job-name-or-id> [--jobs-file <path>] [--slot <slot-key>] [--target <bridge-agent>] [--from <actor>] [--priority normal|high] [--dry-run]"
 
   case "$priority" in
     normal|high) ;;
@@ -200,7 +314,7 @@ run_enqueue() {
       ;;
   esac
 
-  bridge_require_openclaw_cron_jobs
+  [[ -f "$jobs_file" ]] || bridge_die "cron jobs 파일이 없습니다: $jobs_file"
   bridge_load_roster
 
   local CRON_JOB_ID=""
@@ -213,7 +327,7 @@ run_enqueue() {
   local CRON_JOB_PAYLOAD_KIND=""
   local CRON_JOB_PAYLOAD_TEXT=""
 
-  shell_payload="$(bridge_cron_python show --jobs-file "$BRIDGE_OPENCLAW_CRON_JOBS_FILE" --format shell "$job_ref")" || exit $?
+  shell_payload="$(bridge_cron_python show --jobs-file "$jobs_file" --format shell "$job_ref")" || exit $?
   # shellcheck disable=SC1090
   source <(printf '%s\n' "$shell_payload")
 
@@ -282,7 +396,7 @@ run_enqueue() {
     return 0
   fi
 
-  write_materialized_payload "$payload_file" "$slot"
+  write_materialized_payload "$payload_file" "$slot" "$jobs_file"
   write_dispatch_body "$body_file" "$slot" "$run_id" "$payload_file" "$request_file" "$result_file" "$status_file" "$target" "$target_engine"
   create_output="$(bridge_queue_cli create --to "$target" --title "$title" --from "$actor" --priority "$priority" --body-file "$body_file")"
   printf '%s\n' "$create_output"
@@ -294,9 +408,9 @@ run_enqueue() {
   fi
 
   created_at="$(bridge_now_iso)"
-  bridge_cron_write_request "$request_file" "$run_id" "$CRON_JOB_ID" "$CRON_JOB_NAME" "$CRON_JOB_FAMILY" "$CRON_JOB_AGENT" "$target" "$slot" "$task_id" "$created_at" "$body_file" "$payload_file" "$result_file" "$status_file" "$stdout_log" "$stderr_log" "$BRIDGE_OPENCLAW_CRON_JOBS_FILE" "$CRON_JOB_PAYLOAD_KIND" "$target_engine" "$target_workdir"
+  bridge_cron_write_request "$request_file" "$run_id" "$CRON_JOB_ID" "$CRON_JOB_NAME" "$CRON_JOB_FAMILY" "$CRON_JOB_AGENT" "$target" "$slot" "$task_id" "$created_at" "$body_file" "$payload_file" "$result_file" "$status_file" "$stdout_log" "$stderr_log" "$jobs_file" "$CRON_JOB_PAYLOAD_KIND" "$target_engine" "$target_workdir"
   bridge_cron_write_status "$status_file" "$run_id" "queued" "$target_engine" "$request_file" "$result_file" "$created_at"
-  bridge_cron_write_manifest "$manifest_file" "$CRON_JOB_ID" "$CRON_JOB_NAME" "$CRON_JOB_FAMILY" "$CRON_JOB_AGENT" "$target" "$slot" "$task_id" "$created_at" "$body_file" "$BRIDGE_OPENCLAW_CRON_JOBS_FILE" "$run_id" "$request_file" "$payload_file" "$result_file" "$status_file" "$stdout_log" "$stderr_log"
+  bridge_cron_write_manifest "$manifest_file" "$CRON_JOB_ID" "$CRON_JOB_NAME" "$CRON_JOB_FAMILY" "$CRON_JOB_AGENT" "$target" "$slot" "$task_id" "$created_at" "$body_file" "$jobs_file" "$run_id" "$request_file" "$payload_file" "$result_file" "$status_file" "$stdout_log" "$stderr_log"
   printf 'run_id: %s\n' "$run_id"
   printf 'request_file: %s\n' "$request_rel"
   printf 'result_file: %s\n' "$result_rel"
@@ -345,8 +459,12 @@ run_sync() {
   local json_output=0
   local since=""
   local now=""
-  local state_file
-  local args=()
+  local openclaw_state_file="$BRIDGE_CRON_STATE_DIR/openclaw-scheduler-state.json"
+  local native_state_file="$BRIDGE_CRON_STATE_DIR/native-scheduler-state.json"
+  local tmp_dir=""
+  local openclaw_json=""
+  local native_json=""
+  local status=0
 
   while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -376,35 +494,152 @@ run_sync() {
     esac
   done
 
-  if [[ ! -f "$BRIDGE_OPENCLAW_CRON_JOBS_FILE" ]]; then
+  if [[ ! -f "$BRIDGE_OPENCLAW_CRON_JOBS_FILE" && ! -f "$BRIDGE_NATIVE_CRON_JOBS_FILE" ]]; then
     printf 'status: skipped\n'
-    printf 'reason: no_openclaw_jobs_file\n'
-    printf 'jobs_file: %s\n' "$BRIDGE_OPENCLAW_CRON_JOBS_FILE"
+    printf 'reason: no_cron_jobs_files\n'
+    printf 'openclaw_jobs_file: %s\n' "$BRIDGE_OPENCLAW_CRON_JOBS_FILE"
+    printf 'native_jobs_file: %s\n' "$BRIDGE_NATIVE_CRON_JOBS_FILE"
     return 0
   fi
-  state_file="$(bridge_cron_scheduler_state_file)"
-  args=(
-    sync
-    --jobs-file "$BRIDGE_OPENCLAW_CRON_JOBS_FILE"
-    --state-file "$state_file"
-    --bridge-cron "$SCRIPT_DIR/bridge-cron.sh"
-    --repo-root "$SCRIPT_DIR"
-  )
 
-  if [[ -n "$since" ]]; then
-    args+=(--since "$since")
-  fi
-  if [[ -n "$now" ]]; then
-    args+=(--now "$now")
-  fi
-  if [[ $dry_run -eq 1 ]]; then
-    args+=(--dry-run)
-  fi
-  if [[ $json_output -eq 1 ]]; then
-    args+=(--json)
+  tmp_dir="$(mktemp -d)"
+  trap 'rm -rf "$tmp_dir"' RETURN
+
+  if [[ -f "$BRIDGE_OPENCLAW_CRON_JOBS_FILE" ]]; then
+    local openclaw_args=(
+      sync
+      --jobs-file "$BRIDGE_OPENCLAW_CRON_JOBS_FILE"
+      --state-file "$openclaw_state_file"
+      --bridge-cron "$SCRIPT_DIR/bridge-cron.sh"
+      --repo-root "$SCRIPT_DIR"
+      --json
+    )
+    if [[ -n "$since" ]]; then
+      openclaw_args+=(--since "$since")
+    fi
+    if [[ -n "$now" ]]; then
+      openclaw_args+=(--now "$now")
+    fi
+    if [[ $dry_run -eq 1 ]]; then
+      openclaw_args+=(--dry-run)
+    fi
+    if ! bridge_cron_scheduler_python "${openclaw_args[@]}" >"$tmp_dir/openclaw.json"; then
+      status=1
+    fi
+    openclaw_json="$tmp_dir/openclaw.json"
   fi
 
-  bridge_cron_scheduler_python "${args[@]}"
+  if [[ -f "$BRIDGE_NATIVE_CRON_JOBS_FILE" ]]; then
+    local native_args=(
+      sync
+      --jobs-file "$BRIDGE_NATIVE_CRON_JOBS_FILE"
+      --state-file "$native_state_file"
+      --bridge-cron "$SCRIPT_DIR/bridge-cron.sh"
+      --repo-root "$SCRIPT_DIR"
+      --enqueue-jobs-file "$BRIDGE_NATIVE_CRON_JOBS_FILE"
+      --json
+    )
+    if [[ -n "$since" ]]; then
+      native_args+=(--since "$since")
+    fi
+    if [[ -n "$now" ]]; then
+      native_args+=(--now "$now")
+    fi
+    if [[ $dry_run -eq 1 ]]; then
+      native_args+=(--dry-run)
+    fi
+    if ! bridge_cron_scheduler_python "${native_args[@]}" >"$tmp_dir/native.json"; then
+      status=1
+    fi
+    native_json="$tmp_dir/native.json"
+  fi
+
+  bridge_require_python
+  python3 - "$openclaw_json" "$native_json" "$json_output" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+openclaw_path, native_path, json_output = sys.argv[1], sys.argv[2], sys.argv[3] == "1"
+
+def load(path_value):
+    if not path_value:
+        return None
+    path = Path(path_value)
+    if not path.is_file():
+        return None
+    return json.loads(path.read_text(encoding="utf-8"))
+
+sources = {}
+for name, path_value in (("openclaw", openclaw_path), ("native", native_path)):
+    payload = load(path_value)
+    if payload is not None:
+        sources[name] = payload
+
+if not sources:
+    payload = {"status": "skipped", "reason": "no_sources"}
+    if json_output:
+        print(json.dumps(payload, ensure_ascii=False, indent=2))
+    else:
+        print("status: skipped")
+        print("reason: no_sources")
+    raise SystemExit(0)
+
+totals = {
+    "eligible_jobs": 0,
+    "due_occurrences": 0,
+    "created": 0,
+    "already_enqueued": 0,
+    "errors": 0,
+}
+statuses = []
+for source_payload in sources.values():
+    summary = source_payload.get("summary", {})
+    totals["eligible_jobs"] += int(summary.get("eligible", 0))
+    totals["due_occurrences"] += int(summary.get("due_occurrences", 0))
+    totals["created"] += sum(1 for item in source_payload.get("results", []) if item.get("status") == "created")
+    totals["already_enqueued"] += sum(1 for item in source_payload.get("results", []) if item.get("status") == "already_enqueued")
+    totals["errors"] += sum(1 for item in source_payload.get("results", []) if item.get("status") == "error")
+    statuses.append(source_payload.get("status", "ok"))
+
+if any(status == "error" for status in statuses) or totals["errors"] > 0:
+    status_value = "error"
+elif statuses and all(status == "dry_run" for status in statuses):
+    status_value = "dry_run"
+else:
+    status_value = "ok"
+
+payload = {
+    "status": status_value,
+    "sources": sources,
+    "totals": totals,
+}
+
+if json_output:
+    print(json.dumps(payload, ensure_ascii=False, indent=2))
+else:
+    print(f"status: {status_value}")
+    print(f"sources: {', '.join(sorted(sources))}")
+    for name in sorted(sources):
+        source_payload = sources[name]
+        summary = source_payload.get("summary", {})
+        results = source_payload.get("results", [])
+        created = sum(1 for item in results if item.get("status") == "created")
+        already = sum(1 for item in results if item.get("status") == "already_enqueued")
+        errors = sum(1 for item in results if item.get("status") == "error")
+        print(
+            f"{name}: status={source_payload.get('status', 'ok')} "
+            f"eligible={summary.get('eligible', 0)} "
+            f"due={summary.get('due_occurrences', 0)} "
+            f"created={created} already_enqueued={already} errors={errors}"
+        )
+    print(f"eligible_jobs: {totals['eligible_jobs']}")
+    print(f"due_occurrences: {totals['due_occurrences']}")
+    print(f"created: {totals['created']}")
+    print(f"already_enqueued: {totals['already_enqueued']}")
+    print(f"errors: {totals['errors']}")
+PY
+  return "$status"
 }
 
 run_errors() {
@@ -523,6 +758,18 @@ case "$subcommand" in
     ;;
   show)
     run_show "$@"
+    ;;
+  list)
+    run_list "$@"
+    ;;
+  create)
+    run_create "$@"
+    ;;
+  update)
+    run_update "$@"
+    ;;
+  delete)
+    run_delete "$@"
     ;;
   enqueue)
     run_enqueue "$@"

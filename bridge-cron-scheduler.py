@@ -344,10 +344,16 @@ def enqueue_due_runs(args: argparse.Namespace, due_runs: list[DueRun]) -> tuple[
             bash_bin,
             args.bridge_cron,
             "enqueue",
-            run.job_id,
-            "--slot",
-            run.slot,
         ]
+        if args.enqueue_jobs_file:
+            command.extend(["--jobs-file", args.enqueue_jobs_file])
+        command.extend(
+            [
+                run.job_id,
+                "--slot",
+                run.slot,
+            ]
+        )
         if args.dry_run:
             command.append("--dry-run")
 
@@ -509,6 +515,7 @@ def build_parser() -> argparse.ArgumentParser:
     sync_parser.add_argument("--state-file", required=True)
     sync_parser.add_argument("--bridge-cron", required=True)
     sync_parser.add_argument("--repo-root", required=True)
+    sync_parser.add_argument("--enqueue-jobs-file")
     sync_parser.add_argument("--bootstrap-lookback", type=int, default=int(os.environ.get("BRIDGE_CRON_BOOTSTRAP_LOOKBACK_SECONDS", "3600")))
     sync_parser.add_argument("--max-occurrences-per-job", type=int, default=int(os.environ.get("BRIDGE_CRON_MAX_CATCHUP_OCCURRENCES_PER_JOB", "12")))
     sync_parser.add_argument("--since")

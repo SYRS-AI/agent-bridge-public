@@ -2,6 +2,8 @@
 import argparse
 import json
 import os
+import re
+import secrets
 import shlex
 import sys
 import tempfile
@@ -32,6 +34,31 @@ def load_jobs_payload(path):
 def load_jobs(path):
     _, jobs = load_jobs_payload(path)
     return jobs
+
+
+def load_native_jobs_payload(path):
+    jobs_path = Path(path).expanduser()
+    if not jobs_path.exists():
+        return {
+            "format": "agent-bridge-cron-v1",
+            "updatedAt": datetime.now().astimezone().isoformat(),
+            "jobs": [],
+        }, []
+    return load_jobs_payload(jobs_path)
+
+
+def now_epoch_ms():
+    return int(datetime.now(timezone.utc).timestamp() * 1000)
+
+
+def default_tz_name():
+    zone_name = getattr(LOCAL_TZ, "key", None)
+    if zone_name:
+        return zone_name
+    zone_name = datetime.now().astimezone().tzname()
+    if zone_name and "/" in zone_name:
+        return zone_name
+    return "UTC"
 
 
 def parse_iso_datetime(value):
@@ -123,6 +150,64 @@ def schedule_text(schedule):
     if kind == "at":
         return f"at {schedule.get('at', '-')}"
     return json.dumps(schedule, ensure_ascii=False, sort_keys=True)
+
+
+def cron_field_bounds(index):
+    if index == 0:
+        return 0, 59
+    if index == 1:
+        return 0, 23
+    if index == 2:
+        return 1, 31
+    if index == 3:
+        return 1, 12
+    return 0, 7
+
+
+def expand_cron_atom(atom, minimum, maximum):
+    step = 1
+    base = atom
+    if "/" in atom:
+        base, step_text = atom.split("/", 1)
+        step = int(step_text)
+        if step <= 0:
+            raise ValueError(f"invalid cron step: {atom}")
+
+    if base == "*":
+        start = minimum
+        end = maximum
+    elif "-" in base:
+        start_text, end_text = base.split("-", 1)
+        start = int(start_text)
+        end = int(end_text)
+    else:
+        start = int(base)
+        end = int(base)
+
+    if start > end:
+        raise ValueError(f"invalid cron range: {atom}")
+
+    values = set()
+    for value in range(start, end + 1, step):
+        normalized = 0 if maximum == 7 and value == 7 else value
+        if normalized < minimum or normalized > maximum:
+            raise ValueError(f"cron value out of range: {atom}")
+        values.add(normalized)
+    return values
+
+
+def validate_cron_expr(expr):
+    fields = expr.split()
+    if len(fields) != 5:
+        raise ValueError("cron schedule must contain 5 fields")
+    for index, field in enumerate(fields):
+        minimum, maximum = cron_field_bounds(index)
+        for atom in field.split(","):
+            atom = atom.strip()
+            if not atom:
+                raise ValueError(f"invalid empty cron atom in field {index + 1}")
+            expand_cron_atom(atom, minimum, maximum)
+    return expr
 
 
 def agent_matches(agent_id, expected):
@@ -536,6 +621,217 @@ def atomic_write_jobs(jobs_path, raw_payload):
     os.replace(temp_path, jobs_path)
 
 
+def slugify_title(value):
+    slug = re.sub(r"[^A-Za-z0-9._-]+", "-", value.strip()).strip("-").lower()
+    return slug or "job"
+
+
+def read_payload_argument(payload_text, payload_file):
+    if payload_text is not None:
+        return payload_text
+    if payload_file is not None:
+        return Path(payload_file).expanduser().read_text(encoding="utf-8")
+    return ""
+
+
+def resolve_native_job(records, ref):
+    return resolve_show_record(records, ref)
+
+
+def native_job_payload(job):
+    payload = job.get("payload") or {}
+    return payload.get("text") or payload.get("message") or ""
+
+
+def build_native_job(*, job_id, title, agent, schedule_expr, tz_name, payload_text, enabled, actor, existing_job=None):
+    now_ms_value = now_epoch_ms()
+    schedule = {
+        "kind": "cron",
+        "expr": validate_cron_expr(schedule_expr),
+        "tz": tz_name or default_tz_name(),
+    }
+    job = dict(existing_job or {})
+    job.update(
+        {
+            "id": job_id,
+            "name": title,
+            "agentId": agent,
+            "enabled": bool(enabled),
+            "createdAtMs": job.get("createdAtMs") or now_ms_value,
+            "updatedAtMs": now_ms_value,
+            "schedule": schedule,
+            "payload": {
+                "kind": "text",
+                "text": payload_text,
+            },
+            "sessionTarget": "agent-bridge",
+            "wakeMode": "queue-dispatch",
+            "state": dict(job.get("state") or {}),
+            "metadata": {
+                **dict(job.get("metadata") or {}),
+                "source": "bridge-native",
+                "createdBy": actor,
+            },
+        }
+    )
+    return job
+
+
+def print_native_list(args, records):
+    filtered = []
+    for record in records:
+        if args.agent and not agent_matches(record["agent"], args.agent):
+            continue
+        if args.enabled != "all":
+            expected_enabled = args.enabled == "yes"
+            if record["enabled"] != expected_enabled:
+                continue
+        filtered.append(record)
+
+    filtered = sorted(filtered, key=record_sort_key)
+    if args.limit not in (None, 0):
+        filtered = filtered[: args.limit]
+
+    if args.json:
+        payload = {
+            "source_file": str(Path(args.jobs_file).expanduser()),
+            "generated_at": datetime.now().astimezone().isoformat(),
+            "filters": {
+                "agent": args.agent,
+                "enabled": args.enabled,
+                "limit": args.limit,
+            },
+            "jobs": [serialize_record(record, include_payload=True) for record in filtered],
+            "jobs_total": len(filtered),
+        }
+        print(json.dumps(payload, ensure_ascii=False, indent=2))
+        return 0
+
+    if not filtered:
+        print("(no native cron jobs)")
+        return 0
+
+    print(f"source_file: {Path(args.jobs_file).expanduser()}")
+    print("id  enabled  agent            schedule                title")
+    for record in filtered:
+        schedule_value = record["schedule_text"]
+        if len(schedule_value) > 22:
+            schedule_value = schedule_value[:19] + "..."
+        print(
+            f"{record['id']:<12} "
+            f"{('yes' if record['enabled'] else 'no'):<7} "
+            f"{record['agent']:<15} "
+            f"{schedule_value:<22} "
+            f"{record['name']}"
+        )
+    return 0
+
+
+def run_native_create(args):
+    raw_payload, jobs = load_native_jobs_payload(args.jobs_file)
+    records = [build_job_record(job) for job in jobs]
+    actor = args.actor or os.environ.get("USER", "unknown")
+    title = args.title.strip()
+    payload_text = read_payload_argument(args.payload, args.payload_file)
+    base_slug = slugify_title(title)
+    job_id = f"{base_slug}-{secrets.token_hex(4)}"
+
+    existing = [record for record in records if record["name"] == title and record["agent"] == args.agent]
+    if existing:
+        raise ValueError(f"native cron job already exists for agent/title: {args.agent} / {title}")
+
+    job = build_native_job(
+        job_id=job_id,
+        title=title,
+        agent=args.agent,
+        schedule_expr=args.schedule,
+        tz_name=args.tz,
+        payload_text=payload_text,
+        enabled=not args.disabled,
+        actor=actor,
+    )
+    jobs.append(job)
+    raw_payload["jobs"] = jobs
+    raw_payload["updatedAt"] = datetime.now().astimezone().isoformat()
+    jobs_path = Path(args.jobs_file).expanduser()
+    jobs_path.parent.mkdir(parents=True, exist_ok=True)
+    atomic_write_jobs(jobs_path, raw_payload)
+
+    print(f"created native cron job {job_id} for {args.agent}")
+    return 0
+
+
+def run_native_update(args):
+    raw_payload, jobs = load_native_jobs_payload(args.jobs_file)
+    records = [build_job_record(job) for job in jobs]
+    actor = args.actor or os.environ.get("USER", "unknown")
+    try:
+        record = resolve_native_job(records, args.job_ref)
+    except ValueError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+
+    job_index = next((index for index, job in enumerate(jobs) if job.get("id") == record["id"]), -1)
+    if job_index < 0:
+        print(f"error: native job not found: {args.job_ref}", file=sys.stderr)
+        return 2
+
+    existing = dict(jobs[job_index])
+    title = args.title.strip() if args.title is not None else existing.get("name", record["name"])
+    agent = args.agent or existing.get("agentId") or existing.get("agent") or record["agent"]
+    schedule_expr = args.schedule or (existing.get("schedule") or {}).get("expr") or ""
+    tz_name = args.tz or (existing.get("schedule") or {}).get("tz") or default_tz_name()
+    payload_text = native_job_payload(existing)
+    if args.payload is not None or args.payload_file is not None:
+        payload_text = read_payload_argument(args.payload, args.payload_file)
+
+    enabled = existing.get("enabled", True)
+    if args.enable:
+        enabled = True
+    if args.disable:
+        enabled = False
+
+    updated_job = build_native_job(
+        job_id=record["id"],
+        title=title,
+        agent=agent,
+        schedule_expr=schedule_expr,
+        tz_name=tz_name,
+        payload_text=payload_text,
+        enabled=enabled,
+        actor=actor,
+        existing_job=existing,
+    )
+    jobs[job_index] = updated_job
+    raw_payload["jobs"] = jobs
+    raw_payload["updatedAt"] = datetime.now().astimezone().isoformat()
+    atomic_write_jobs(Path(args.jobs_file).expanduser(), raw_payload)
+
+    print(f"updated native cron job {record['id']}")
+    return 0
+
+
+def run_native_delete(args):
+    raw_payload, jobs = load_native_jobs_payload(args.jobs_file)
+    records = [build_job_record(job) for job in jobs]
+    try:
+        record = resolve_native_job(records, args.job_ref)
+    except ValueError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+
+    remaining_jobs = [job for job in jobs if job.get("id") != record["id"]]
+    if len(remaining_jobs) == len(jobs):
+        print(f"error: native job not found: {args.job_ref}", file=sys.stderr)
+        return 2
+
+    raw_payload["jobs"] = remaining_jobs
+    raw_payload["updatedAt"] = datetime.now().astimezone().isoformat()
+    atomic_write_jobs(Path(args.jobs_file).expanduser(), raw_payload)
+    print(f"deleted native cron job {record['id']}")
+    return 0
+
+
 def run_cleanup_prune(args, raw_payload, records):
     candidates = sorted(cleanup_candidates(records, args.mode), key=record_sort_key)
     candidate_ids = {record["id"] for record in candidates}
@@ -727,7 +1023,7 @@ def print_show(args, records):
 
 
 def build_parser():
-    parser = argparse.ArgumentParser(description="OpenClaw cron inventory, enqueue metadata, and cleanup helpers for Agent Bridge.")
+    parser = argparse.ArgumentParser(description="Cron inventory and native cron helpers for Agent Bridge.")
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     inventory_parser = subparsers.add_parser("inventory", help="Summarize and filter cron jobs.")
@@ -762,12 +1058,89 @@ def build_parser():
     cleanup_prune_parser.add_argument("--jobs-file", required=True)
     cleanup_prune_parser.add_argument("--mode", choices=("expired-one-shot",), default="expired-one-shot")
     cleanup_prune_parser.add_argument("--dry-run", action="store_true")
+
+    native_list_parser = subparsers.add_parser("native-list", help="List bridge-native cron jobs.")
+    native_list_parser.add_argument("--jobs-file", required=True)
+    native_list_parser.add_argument("--agent")
+    native_list_parser.add_argument("--enabled", choices=("all", "yes", "no"), default="all")
+    native_list_parser.add_argument("--limit", type=int, default=None)
+    native_list_parser.add_argument("--json", action="store_true")
+
+    native_create_parser = subparsers.add_parser("native-create", help="Create a bridge-native cron job.")
+    native_create_parser.add_argument("--jobs-file", required=True)
+    native_create_parser.add_argument("--agent", required=True)
+    native_create_parser.add_argument("--schedule", required=True)
+    native_create_parser.add_argument("--title", required=True)
+    native_payload_group = native_create_parser.add_mutually_exclusive_group()
+    native_payload_group.add_argument("--payload")
+    native_payload_group.add_argument("--payload-file")
+    native_create_parser.add_argument("--tz", default=default_tz_name())
+    native_create_parser.add_argument("--actor")
+    native_create_parser.add_argument("--disabled", action="store_true")
+
+    native_update_parser = subparsers.add_parser("native-update", help="Update a bridge-native cron job.")
+    native_update_parser.add_argument("--jobs-file", required=True)
+    native_update_parser.add_argument("job_ref")
+    native_update_parser.add_argument("--agent")
+    native_update_parser.add_argument("--schedule")
+    native_update_parser.add_argument("--title")
+    native_update_payload_group = native_update_parser.add_mutually_exclusive_group()
+    native_update_payload_group.add_argument("--payload")
+    native_update_payload_group.add_argument("--payload-file")
+    native_update_parser.add_argument("--tz")
+    native_update_parser.add_argument("--actor")
+    enabled_group = native_update_parser.add_mutually_exclusive_group()
+    enabled_group.add_argument("--enable", action="store_true")
+    enabled_group.add_argument("--disable", action="store_true")
+
+    native_delete_parser = subparsers.add_parser("native-delete", help="Delete a bridge-native cron job.")
+    native_delete_parser.add_argument("--jobs-file", required=True)
+    native_delete_parser.add_argument("job_ref")
     return parser
 
 
 def main():
     parser = build_parser()
     args = parser.parse_args()
+
+    if args.command == "native-list":
+        try:
+            _, jobs = load_native_jobs_payload(args.jobs_file)
+            records = [build_job_record(job) for job in jobs]
+        except (ValueError, json.JSONDecodeError) as exc:
+            print(f"error: failed to read jobs file: {exc}", file=sys.stderr)
+            return 2
+        if args.limit is not None and args.limit < 0:
+            print("error: --limit must be >= 0", file=sys.stderr)
+            return 2
+        return print_native_list(args, records)
+
+    if args.command == "native-create":
+        try:
+            return run_native_create(args)
+        except FileNotFoundError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 2
+        except ValueError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 2
+
+    if args.command == "native-update":
+        try:
+            return run_native_update(args)
+        except FileNotFoundError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 2
+        except ValueError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 2
+
+    if args.command == "native-delete":
+        try:
+            return run_native_delete(args)
+        except ValueError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 2
 
     try:
         raw_payload, jobs = load_jobs_payload(args.jobs_file)

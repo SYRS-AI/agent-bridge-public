@@ -18,6 +18,7 @@ bridge_init_dirs() {
   mkdir -p \
     "$BRIDGE_HOME" \
     "$BRIDGE_STATE_DIR" \
+    "$BRIDGE_CRON_HOME_DIR" \
     "$BRIDGE_PROFILE_STATE_DIR" \
     "$BRIDGE_ACTIVE_AGENT_DIR" \
     "$BRIDGE_HISTORY_DIR" \

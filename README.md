@@ -227,6 +227,19 @@ If your daemon environment does not inherit the same `PATH` as your interactive 
 
 `cron cleanup report` and `cron cleanup prune --dry-run` are the safe way to inspect stale one-shot jobs before deleting them. The current prune target is intentionally narrow: expired `schedule.kind=at` jobs with `deleteAfterRun=true` and `enabled=false`.
 
+### Bridge-native cron jobs
+
+For recurring work discovered inside Agent Bridge itself, use the bridge-native cron store instead of relying on OpenClaw:
+
+```bash
+./agent-bridge cron list --agent main
+./agent-bridge cron create --agent main --schedule "0 9 * * *" --title "Daily check" --payload "Review the daily queue and summarize anything that needs follow-up."
+./agent-bridge cron update <job-id> --schedule "0 10 * * *"
+./agent-bridge cron delete <job-id>
+```
+
+Bridge-native jobs live at `~/.agent-bridge/cron/jobs.json`. `cron sync` now aggregates both legacy OpenClaw recurring jobs and bridge-native recurring jobs into the same disposable-child dispatch path.
+
 The status dashboard also includes a lightweight health check for active sessions. It classifies them as `ok`, `warn`, or `crit` from recorded session activity age. Inactive on-demand roles are not treated as stale. Defaults are `BRIDGE_HEALTH_WARN_SECONDS=3600` and `BRIDGE_HEALTH_CRITICAL_SECONDS=14400`, and you can override them in `agent-roster.local.sh`.
 
 ### Optional: search legacy OpenClaw memory
@@ -287,6 +300,7 @@ The current directory becomes the agent's workdir. `agent-bridge` will also inst
 
 - Codex: `.agents/skills/agent-bridge-project/SKILL.md`
 - Claude: `.claude/skills/agent-bridge-project/SKILL.md`
+- Claude shared cron skill: `.claude/skills/cron-manager/SKILL.md`
 
 ### Queue-first workflow
 
@@ -369,6 +383,8 @@ That creates an isolated git worktree under `~/.agent-bridge/worktrees/` instead
 ./agent-bridge profile diff <agent>
 ./agent-bridge profile deploy <agent> --dry-run
 ./agent-bridge cron inventory --mode one-shot --limit 20
+./agent-bridge cron list --agent main
+./agent-bridge cron create --agent main --schedule "0 9 * * *" --title "Daily check"
 ./agent-bridge cron enqueue <memory-daily-job-id> --slot 2026-04-05 --dry-run
 ./agent-bridge cron enqueue <monthly-highlights-job-id> --dry-run
 ./agent-bridge cron errors report --limit 20
@@ -387,7 +403,7 @@ bash ./scripts/oss-preflight.sh
 - `agb`: shorthand wrapper for `agent-bridge`
 - `bridge-start.sh`, `bridge-run.sh`: session startup paths
 - `bridge-task.sh`, `bridge-queue.py`: queue API and SQLite backend
-- `bridge-cron.sh`, `bridge-cron.py`: OpenClaw cron inventory, error reporting, queue adapters, and cleanup helpers
+- `bridge-cron.sh`, `bridge-cron.py`, `bridge-cron-scheduler.py`: bridge-native cron CRUD plus legacy OpenClaw cron inventory, scheduling, queue adapters, and cleanup helpers
 - `bridge-send.sh`, `bridge-action.sh`: urgent interrupts and predefined actions
 - `bridge-status.sh`, `bridge-daemon.sh`, `bridge-sync.sh`: status, background sync, and heartbeats
 - `bridge-lib.sh`: thin loader for shared shell modules
