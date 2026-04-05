@@ -9,7 +9,7 @@ source "$SCRIPT_DIR/bridge-lib.sh"
 bridge_load_roster
 
 usage() {
-  echo "Usage: bash $SCRIPT_DIR/bridge-run.sh <agent> [--once] [--dry-run]"
+  echo "Usage: bash $SCRIPT_DIR/bridge-run.sh <agent> [--once] [--continue|--no-continue] [--dry-run]"
   echo "       bash $SCRIPT_DIR/bridge-run.sh --list"
   echo ""
   echo "등록된 에이전트:"
@@ -19,6 +19,8 @@ usage() {
 LIST_ONLY=0
 ONCE=0
 DRY_RUN=0
+CONTINUE_EXPLICIT=0
+CONTINUE_MODE=1
 AGENT=""
 
 while [[ $# -gt 0 ]]; do
@@ -33,6 +35,16 @@ while [[ $# -gt 0 ]]; do
       ;;
     --dry-run)
       DRY_RUN=1
+      shift
+      ;;
+    --continue)
+      CONTINUE_EXPLICIT=1
+      CONTINUE_MODE=1
+      shift
+      ;;
+    --no-continue)
+      CONTINUE_EXPLICIT=1
+      CONTINUE_MODE=0
       shift
       ;;
     -*)
@@ -60,6 +72,10 @@ if [[ -z "$AGENT" ]]; then
 fi
 
 bridge_require_agent "$AGENT"
+
+if [[ $CONTINUE_EXPLICIT -eq 1 ]]; then
+  BRIDGE_AGENT_CONTINUE["$AGENT"]="$CONTINUE_MODE"
+fi
 
 WORK_DIR="$(bridge_agent_workdir "$AGENT")"
 LAUNCH_CMD="$(bridge_agent_launch_cmd "$AGENT")"

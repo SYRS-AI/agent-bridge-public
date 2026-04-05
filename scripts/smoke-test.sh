@@ -374,6 +374,20 @@ CLAUDE_LAUNCH_CONTINUE="$("$BASH4_BIN" -c '
 ')"
 assert_contains "$CLAUDE_LAUNCH_CONTINUE" "claude --continue --dangerously-skip-permissions --name claude-static --channels plugin:discord@claude-plugins-official"
 
+STATIC_HISTORY_CONTINUE="$("$BASH4_BIN" -c '
+  source "'"$REPO_ROOT"'/bridge-lib.sh"
+  bridge_load_roster
+  history_file="$(bridge_history_file_for_agent "claude-static")"
+  cat >"$history_file" <<EOF
+AGENT_ID=claude-static
+AGENT_CONTINUE=0
+AGENT_SESSION_ID=history-session-id
+EOF
+  bridge_load_roster
+  printf "%s" "$(bridge_agent_continue "claude-static")"
+')"
+[[ "$STATIC_HISTORY_CONTINUE" == "1" ]] || die "static history should not override continue defaults"
+
 log "configuring admin role and launching it"
 SETUP_ADMIN_OUTPUT="$("$REPO_ROOT/agent-bridge" setup admin "$SMOKE_AGENT")"
 assert_contains "$SETUP_ADMIN_OUTPUT" "admin_agent: $SMOKE_AGENT"

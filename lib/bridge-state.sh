@@ -288,7 +288,6 @@ bridge_load_static_agent_history() {
   local agent="$1"
   local file
   local AGENT_ID=""
-  local AGENT_CONTINUE=""
   local AGENT_SESSION_ID=""
   local AGENT_HISTORY_KEY=""
   local AGENT_CREATED_AT=""
@@ -304,9 +303,6 @@ bridge_load_static_agent_history() {
     return 0
   fi
 
-  if [[ -n "$AGENT_CONTINUE" ]]; then
-    BRIDGE_AGENT_CONTINUE["$agent"]="$AGENT_CONTINUE"
-  fi
   if [[ -n "$AGENT_SESSION_ID" ]]; then
     BRIDGE_AGENT_SESSION_ID["$agent"]="$AGENT_SESSION_ID"
   fi
