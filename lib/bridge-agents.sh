@@ -374,9 +374,65 @@ bridge_agent_profile_home() {
   printf '%s' "${BRIDGE_AGENT_PROFILE_HOME[$agent]-}"
 }
 
+bridge_agent_launch_cmd_raw() {
+  local agent="$1"
+  printf '%s' "${BRIDGE_AGENT_LAUNCH_CMD[$agent]-}"
+}
+
+bridge_agent_uses_discord_plugin() {
+  local agent="$1"
+  [[ "$(bridge_agent_launch_cmd_raw "$agent")" == *"plugin:discord"* ]]
+}
+
+bridge_agent_discord_channel_from_access() {
+  local agent="$1"
+  local access_file=""
+
+  access_file="$(bridge_agent_workdir "$agent")/.discord/access.json"
+  [[ -f "$access_file" ]] || return 1
+
+  bridge_require_python
+  python3 - "$access_file" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+try:
+    payload = json.loads(path.read_text(encoding="utf-8"))
+except Exception:
+    raise SystemExit(1)
+
+groups = payload.get("groups") or {}
+for key in groups.keys():
+    if key:
+        print(str(key))
+        raise SystemExit(0)
+
+raise SystemExit(1)
+PY
+}
+
 bridge_agent_discord_channel_id() {
   local agent="$1"
-  printf '%s' "${BRIDGE_AGENT_DISCORD_CHANNEL_ID[$agent]-}"
+  local explicit=""
+  local inferred=""
+
+  explicit="${BRIDGE_AGENT_DISCORD_CHANNEL_ID[$agent]-}"
+  if [[ -n "$explicit" ]]; then
+    printf '%s' "$explicit"
+    return 0
+  fi
+
+  if bridge_agent_uses_discord_plugin "$agent"; then
+    inferred="$(bridge_agent_discord_channel_from_access "$agent" 2>/dev/null || true)"
+    if [[ -n "$inferred" ]]; then
+      printf '%s' "$inferred"
+      return 0
+    fi
+  fi
+
+  printf '%s' ""
 }
 
 bridge_agent_notify_kind() {

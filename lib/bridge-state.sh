@@ -198,6 +198,14 @@ bridge_load_dynamic_agent_file() {
     return 0
   fi
 
+  if bridge_agent_exists "$AGENT_ID" && [[ "$(bridge_agent_source "$AGENT_ID")" == "static" ]]; then
+    BRIDGE_AGENT_SESSION_ID["$AGENT_ID"]="${AGENT_SESSION_ID:-${BRIDGE_AGENT_SESSION_ID[$AGENT_ID]-}}"
+    BRIDGE_AGENT_HISTORY_KEY["$AGENT_ID"]="${AGENT_HISTORY_KEY:-${BRIDGE_AGENT_HISTORY_KEY[$AGENT_ID]-}}"
+    BRIDGE_AGENT_CREATED_AT["$AGENT_ID"]="${AGENT_CREATED_AT:-${BRIDGE_AGENT_CREATED_AT[$AGENT_ID]-}}"
+    BRIDGE_AGENT_UPDATED_AT["$AGENT_ID"]="${AGENT_UPDATED_AT:-${BRIDGE_AGENT_UPDATED_AT[$AGENT_ID]-}}"
+    return 0
+  fi
+
   bridge_add_agent_id_if_missing "$AGENT_ID"
   BRIDGE_AGENT_DESC["$AGENT_ID"]="${AGENT_DESC:-$AGENT_ID}"
   BRIDGE_AGENT_ENGINE["$AGENT_ID"]="$AGENT_ENGINE"
