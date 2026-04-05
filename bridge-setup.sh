@@ -146,13 +146,14 @@ run_discord() {
   local workdir=""
   local discord_dir=""
   local suggested_channel=""
-  local openclaw_config="$BRIDGE_OPENCLAW_HOME/openclaw.json"
+  local openclaw_config=""
   local py_args=()
   local base_args=()
 
   shift || true
   [[ -n "$agent" ]] || bridge_die "Usage: $(basename "$0") discord <agent> [...]"
   bridge_require_agent "$agent"
+  openclaw_config="$(bridge_compat_config_file)"
 
   while [[ $# -gt 0 ]]; do
     case "$1" in

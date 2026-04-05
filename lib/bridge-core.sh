@@ -32,7 +32,9 @@ bridge_init_dirs() {
     "$BRIDGE_RUNTIME_SKILLS_DIR" \
     "$BRIDGE_RUNTIME_SHARED_TOOLS_DIR" \
     "$BRIDGE_RUNTIME_SHARED_REFERENCES_DIR" \
-    "$BRIDGE_RUNTIME_MEMORY_DIR"
+    "$BRIDGE_RUNTIME_MEMORY_DIR" \
+    "$BRIDGE_RUNTIME_CREDENTIALS_DIR" \
+    "$BRIDGE_RUNTIME_SECRETS_DIR"
 }
 
 bridge_require_python() {
@@ -174,6 +176,9 @@ bridge_export_env_prefix() {
     BRIDGE_RUNTIME_SHARED_TOOLS_DIR
     BRIDGE_RUNTIME_SHARED_REFERENCES_DIR
     BRIDGE_RUNTIME_MEMORY_DIR
+    BRIDGE_RUNTIME_CREDENTIALS_DIR
+    BRIDGE_RUNTIME_SECRETS_DIR
+    BRIDGE_RUNTIME_CONFIG_FILE
     BRIDGE_LOG_DIR
     BRIDGE_SHARED_DIR
     BRIDGE_TASK_NOTE_DIR
@@ -207,6 +212,30 @@ bridge_project_root_for_path() {
   fi
 
   (cd "$path" && pwd -P)
+}
+
+bridge_compat_config_file() {
+  if [[ -f "$BRIDGE_RUNTIME_CONFIG_FILE" ]]; then
+    printf '%s' "$BRIDGE_RUNTIME_CONFIG_FILE"
+    return 0
+  fi
+  printf '%s/openclaw.json' "$BRIDGE_OPENCLAW_HOME"
+}
+
+bridge_compat_credentials_dir() {
+  if [[ -d "$BRIDGE_RUNTIME_CREDENTIALS_DIR" ]]; then
+    printf '%s' "$BRIDGE_RUNTIME_CREDENTIALS_DIR"
+    return 0
+  fi
+  printf '%s/credentials' "$BRIDGE_OPENCLAW_HOME"
+}
+
+bridge_compat_secrets_dir() {
+  if [[ -d "$BRIDGE_RUNTIME_SECRETS_DIR" ]]; then
+    printf '%s' "$BRIDGE_RUNTIME_SECRETS_DIR"
+    return 0
+  fi
+  printf '%s/secrets' "$BRIDGE_OPENCLAW_HOME"
 }
 
 bridge_path_relative_to_root() {

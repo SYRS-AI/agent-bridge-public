@@ -14,6 +14,7 @@ Usage:
   bash $SCRIPT_DIR/bridge-migrate.sh runtime inventory [--json] [--report <path>]
   bash $SCRIPT_DIR/bridge-migrate.sh runtime sync [--dry-run]
   bash $SCRIPT_DIR/bridge-migrate.sh runtime rewrite-cron [--dry-run] [--json]
+  bash $SCRIPT_DIR/bridge-migrate.sh runtime rewrite-files [--dry-run] [--json]
   bash $SCRIPT_DIR/bridge-migrate.sh docs audit [--all] [agent...]
   bash $SCRIPT_DIR/bridge-migrate.sh docs apply [--all] [agent...] [--dry-run] [--report <path>]
   bash $SCRIPT_DIR/bridge-migrate.sh workspace plan <agent>
@@ -49,27 +50,46 @@ runtime_sync_one() {
   local dry_run="$5"
   local source_files=0
   local target_files=0
+  local target_parent=""
 
-  [[ -d "$source_root" ]] || return 0
+  [[ -e "$source_root" ]] || return 0
 
-  source_files="$(runtime_count_files "$source_root")"
-  target_files="$(runtime_count_files "$target_root")"
+  if [[ -d "$source_root" ]]; then
+    source_files="$(runtime_count_files "$source_root")"
+  else
+    source_files=1
+  fi
+  if [[ -d "$target_root" ]]; then
+    target_files="$(runtime_count_files "$target_root")"
+  elif [[ -e "$target_root" ]]; then
+    target_files=1
+  fi
   printf 'item[%s]: %s -> %s\n' "$label" "$source_root" "$target_root"
   printf '  source_files: %s\n' "$source_files"
   printf '  target_files_before: %s\n' "$target_files"
 
   if [[ "$dry_run" == "1" ]]; then
-    printf '  action: merge-copy (dry-run)\n'
+    if [[ -d "$source_root" ]]; then
+      printf '  action: merge-copy (dry-run)\n'
+    else
+      printf '  action: copy-file (dry-run)\n'
+    fi
     return 0
   fi
 
-  mkdir -p "$(dirname "$target_root")" "$backup_root"
-  if [[ -d "$target_root" && ! -e "$backup_root/$label" ]]; then
+  target_parent="$(dirname "$target_root")"
+  mkdir -p "$target_parent" "$backup_root"
+  if [[ -e "$target_root" && ! -e "$backup_root/$label" ]]; then
     cp -RP "$target_root" "$backup_root/$label"
   fi
-  mkdir -p "$target_root"
-  cp -RP "$source_root/." "$target_root/"
-  printf '  target_files_after: %s\n' "$(runtime_count_files "$target_root")"
+  if [[ -d "$source_root" ]]; then
+    mkdir -p "$target_root"
+    cp -RP "$source_root/." "$target_root/"
+    printf '  target_files_after: %s\n' "$(runtime_count_files "$target_root")"
+  else
+    cp -RP "$source_root" "$target_root"
+    printf '  target_files_after: 1\n'
+  fi
 }
 
 cmd_runtime_sync() {
@@ -119,6 +139,9 @@ cmd_runtime_sync() {
   runtime_sync_one "shared-tools" "$legacy_home/shared/tools" "$runtime_root/shared/tools" "$backup_root" "$dry_run"
   runtime_sync_one "shared-references" "$legacy_home/shared/references" "$runtime_root/shared/references" "$backup_root" "$dry_run"
   runtime_sync_one "memory" "$legacy_home/memory" "$runtime_root/memory" "$backup_root" "$dry_run"
+  runtime_sync_one "credentials" "$legacy_home/credentials" "$runtime_root/credentials" "$backup_root" "$dry_run"
+  runtime_sync_one "secrets" "$legacy_home/secrets" "$runtime_root/secrets" "$backup_root" "$dry_run"
+  runtime_sync_one "config" "$legacy_home/openclaw.json" "$runtime_root/openclaw.json" "$backup_root" "$dry_run"
 }
 
 MIGRATE_AGENT=""
@@ -514,6 +537,9 @@ case "$subcommand" in
         ;;
       rewrite-cron)
         run_runtime_helper rewrite-cron "$@"
+        ;;
+      rewrite-files)
+        run_runtime_helper rewrite-files "$@"
         ;;
       ""|-h|--help|help)
         usage

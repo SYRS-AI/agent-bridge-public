@@ -735,11 +735,19 @@ log "inventorying legacy runtime references"
 LEGACY_ROOT="$TMP_ROOT/legacy-runtime"
 mkdir -p "$LEGACY_ROOT/cron" "$LEGACY_ROOT/scripts" "$LEGACY_ROOT/skills/sample-skill" "$LEGACY_ROOT/credentials"
 mkdir -p "$LEGACY_ROOT/shared/tools" "$LEGACY_ROOT/shared/references" "$LEGACY_ROOT/memory"
-printf 'echo runtime smoke\n' >"$LEGACY_ROOT/scripts/morning-briefing.py"
+mkdir -p "$LEGACY_ROOT/secrets"
+cat >"$LEGACY_ROOT/scripts/morning-briefing.py" <<'EOF'
+#!/usr/bin/env bash
+cat ~/.openclaw/credentials/example.txt
+cat ~/.openclaw/secrets/example.token
+EOF
 printf '# sample skill\n' >"$LEGACY_ROOT/skills/sample-skill/SKILL.md"
 printf 'tool note\n' >"$LEGACY_ROOT/shared/tools/tool.md"
 printf 'reference note\n' >"$LEGACY_ROOT/shared/references/ref.md"
 : >"$LEGACY_ROOT/memory/$SMOKE_AGENT.sqlite"
+printf '{"channels":{"discord":{"accounts":{"default":{"token":"smoke-token"}}}}}\n' >"$LEGACY_ROOT/openclaw.json"
+printf 'cred\n' >"$LEGACY_ROOT/credentials/example.txt"
+printf 'secret\n' >"$LEGACY_ROOT/secrets/example.token"
 cat >"$LEGACY_ROOT/cron/jobs.json" <<EOF
 {
   "jobs": [
@@ -778,12 +786,26 @@ assert_contains "$RUNTIME_SYNC_OUTPUT" "item[scripts]"
 [[ -f "$BRIDGE_HOME/runtime/shared/tools/tool.md" ]] || die "expected runtime shared tools copy"
 [[ -f "$BRIDGE_HOME/runtime/shared/references/ref.md" ]] || die "expected runtime shared references copy"
 [[ -f "$BRIDGE_HOME/runtime/memory/$SMOKE_AGENT.sqlite" ]] || die "expected runtime memory copy"
+[[ -f "$BRIDGE_HOME/runtime/credentials/example.txt" ]] || die "expected runtime credentials copy"
+[[ -f "$BRIDGE_HOME/runtime/secrets/example.token" ]] || die "expected runtime secrets copy"
+[[ -f "$BRIDGE_HOME/runtime/openclaw.json" ]] || die "expected runtime config copy"
+
+RUNTIME_COMPAT_PATHS_OUTPUT="$("$BASH4_BIN" -lc "source \"$REPO_ROOT/bridge-lib.sh\"; bridge_load_roster; printf '%s\n%s\n%s\n' \"\$(bridge_compat_config_file)\" \"\$(bridge_compat_credentials_dir)\" \"\$(bridge_compat_secrets_dir)\"")"
+assert_contains "$RUNTIME_COMPAT_PATHS_OUTPUT" "$BRIDGE_HOME/runtime/openclaw.json"
+assert_contains "$RUNTIME_COMPAT_PATHS_OUTPUT" "$BRIDGE_HOME/runtime/credentials"
+assert_contains "$RUNTIME_COMPAT_PATHS_OUTPUT" "$BRIDGE_HOME/runtime/secrets"
 
 log "rewriting cron payloads to bridge-local runtime paths"
 RUNTIME_REWRITE_OUTPUT="$("$REPO_ROOT/agent-bridge" migrate runtime rewrite-cron --bridge-home "$BRIDGE_HOME" --legacy-home "$LEGACY_ROOT" --jobs-file "$LEGACY_ROOT/cron/jobs.json")"
 assert_contains "$RUNTIME_REWRITE_OUTPUT" "status: rewritten"
 assert_contains "$RUNTIME_REWRITE_OUTPUT" "changed_jobs: 1"
 grep -q "$BRIDGE_HOME/runtime/scripts/morning-briefing.py" "$LEGACY_ROOT/cron/jobs.json" || die "expected rewritten runtime script path"
+
+log "rewriting copied runtime files to bridge-local paths"
+RUNTIME_FILE_REWRITE_OUTPUT="$("$REPO_ROOT/agent-bridge" migrate runtime rewrite-files --bridge-home "$BRIDGE_HOME" --legacy-home "$LEGACY_ROOT" --runtime-root "$BRIDGE_HOME/runtime")"
+assert_contains "$RUNTIME_FILE_REWRITE_OUTPUT" "status: rewritten"
+grep -q "$BRIDGE_HOME/runtime/credentials/example.txt" "$BRIDGE_HOME/runtime/scripts/morning-briefing.py" || die "expected rewritten runtime credentials path"
+grep -q "$BRIDGE_HOME/runtime/secrets/example.token" "$BRIDGE_HOME/runtime/scripts/morning-briefing.py" || die "expected rewritten runtime secrets path"
 
 log "processing one queued cron-dispatch task through the daemon"
 RUN_ID="smoke-job-1234--2026-04-05T10-00-00Z"

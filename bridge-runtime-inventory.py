@@ -272,6 +272,26 @@ def is_probably_text(path: Path) -> bool:
     return b"\0" not in sample
 
 
+def iter_text_files(root: Path):
+    if not root.exists():
+        return
+    for current_root, dirnames, filenames in os.walk(root):
+        dirnames[:] = [name for name in dirnames if name not in SKIP_DIRS]
+        current_path = Path(current_root)
+        for name in sorted(filenames):
+            path = current_path / name
+            if path.name.startswith(".") and path.name not in {".mcp.json"}:
+                continue
+            try:
+                if path.stat().st_size > MAX_TEXT_BYTES:
+                    continue
+            except OSError:
+                continue
+            if not is_probably_text(path):
+                continue
+            yield path
+
+
 def iter_curated_runtime_files(bridge_home: Path):
     agents_root = bridge_home / "agents"
     if agents_root.exists():
@@ -448,6 +468,12 @@ def legacy_rewrite_rules(bridge_home: Path, legacy_home: Path) -> list[tuple[str
         ("shared", "~/.openclaw/shared/TOOLS-REGISTRY.md", f"{runtime['shared']}/TOOLS-REGISTRY.md"),
         ("memory", f"{abs_legacy}/memory/", f"{runtime['memory']}/"),
         ("memory", "~/.openclaw/memory/", f"{runtime['memory']}/"),
+        ("credentials", f"{abs_legacy}/credentials/", f"{pretty_path(bridge_home / 'runtime' / 'credentials')}/"),
+        ("credentials", "~/.openclaw/credentials/", f"{pretty_path(bridge_home / 'runtime' / 'credentials')}/"),
+        ("secrets", f"{abs_legacy}/secrets/", f"{pretty_path(bridge_home / 'runtime' / 'secrets')}/"),
+        ("secrets", "~/.openclaw/secrets/", f"{pretty_path(bridge_home / 'runtime' / 'secrets')}/"),
+        ("config", f"{abs_legacy}/openclaw.json", f"{pretty_path(bridge_home / 'runtime' / 'openclaw.json')}"),
+        ("config", "~/.openclaw/openclaw.json", f"{pretty_path(bridge_home / 'runtime' / 'openclaw.json')}"),
     ]
 
 
@@ -548,6 +574,53 @@ def rewrite_cron_jobs(bridge_home: Path, legacy_home: Path, jobs_file: Path, dry
     return result
 
 
+def rewrite_runtime_files(bridge_home: Path, legacy_home: Path, runtime_root: Path, dry_run: bool) -> dict[str, object]:
+    rules = legacy_rewrite_rules(bridge_home, legacy_home)
+    changed_files = 0
+    replacement_counts: Counter = Counter()
+    examples: list[dict[str, object]] = []
+    backup_root = runtime_root.parent / "state-unused"
+    if bridge_home.name == ".agent-bridge":
+        backup_root = bridge_home / "state" / "runtime-rewrite" / datetime.now().astimezone().strftime("%Y%m%d-%H%M%S")
+
+    for path in iter_text_files(runtime_root):
+        try:
+            original = path.read_text(encoding="utf-8", errors="ignore")
+        except OSError:
+            continue
+        rewritten, changed, counts = rewrite_value(original, rules)
+        if not changed:
+            continue
+        changed_files += 1
+        replacement_counts.update(counts)
+        if len(examples) < 8:
+            preview = next((line for line in rewritten.splitlines() if "~/.agent-bridge/runtime/" in line or "~/.agent-bridge/shared/" in line), first_line(rewritten))
+            examples.append({"path": pretty_path(path), "preview": first_line(preview)})
+        if dry_run:
+            continue
+        relative = path.relative_to(runtime_root)
+        backup_path = backup_root / relative
+        backup_path.parent.mkdir(parents=True, exist_ok=True)
+        backup_path.write_text(original, encoding="utf-8")
+        path.write_text(rewritten, encoding="utf-8")
+
+    result = {
+        "generated_at": iso_now(),
+        "runtime_root": pretty_path(runtime_root),
+        "bridge_home": pretty_path(bridge_home),
+        "legacy_home": pretty_path(legacy_home),
+        "changed_files": changed_files,
+        "replacement_counts": dict(replacement_counts),
+        "examples": examples,
+    }
+    if dry_run or changed_files == 0:
+        result["status"] = "dry_run" if dry_run else "no_changes"
+    else:
+        result["status"] = "rewritten"
+        result["backup_root"] = pretty_path(backup_root)
+    return result
+
+
 def print_human(data: dict[str, object]) -> None:
     cron = data["cron"]
     docs = data["live_runtime"]
@@ -596,14 +669,25 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     rewrite.add_argument("--jobs-file", default=None)
     rewrite.add_argument("--dry-run", action="store_true")
     rewrite.add_argument("--json", action="store_true")
+
+    rewrite_files = subparsers.add_parser("rewrite-files", help="Rewrite copied runtime files to bridge-local paths.")
+    rewrite_files.add_argument("--bridge-home", default=os.environ.get("BRIDGE_HOME", str(HOME / ".agent-bridge")))
+    rewrite_files.add_argument("--legacy-home", default=os.environ.get("BRIDGE_LEGACY_HOME", str(HOME / ".openclaw")))
+    rewrite_files.add_argument("--runtime-root", default=None)
+    rewrite_files.add_argument("--dry-run", action="store_true")
+    rewrite_files.add_argument("--json", action="store_true")
     return parser.parse_args(argv)
 
 
 def print_rewrite_result(result: dict[str, object]) -> None:
     print(f"status: {result['status']}")
-    print(f"jobs_file: {result['jobs_file']}")
-    print(f"total_jobs: {result['total_jobs']}")
-    print(f"changed_jobs: {result['changed_jobs']}")
+    if "jobs_file" in result:
+        print(f"jobs_file: {result['jobs_file']}")
+        print(f"total_jobs: {result['total_jobs']}")
+        print(f"changed_jobs: {result['changed_jobs']}")
+    else:
+        print(f"runtime_root: {result['runtime_root']}")
+        print(f"changed_files: {result['changed_files']}")
     print("replacement_counts:")
     counts = result.get("replacement_counts", {})
     if not counts:
@@ -613,13 +697,16 @@ def print_rewrite_result(result: dict[str, object]) -> None:
             print(f"  - {category}: {count}")
     if result.get("backup_file"):
         print(f"backup_file: {result['backup_file']}")
+    if result.get("backup_root"):
+        print(f"backup_root: {result['backup_root']}")
     print("examples:")
     examples = result.get("examples", [])
     if not examples:
         print("  - none")
     else:
         for example in examples[:5]:
-            print(f"  - {example['job']} :: {example['preview']}")
+            label = example.get("job") or example.get("path") or "<unknown>"
+            print(f"  - {label} :: {example['preview']}")
 
 
 def main(argv: list[str]) -> int:
@@ -646,6 +733,16 @@ def main(argv: list[str]) -> int:
 
     if args.command == "rewrite-cron":
         result = rewrite_cron_jobs(bridge_home, legacy_home, jobs_file, args.dry_run)
+        if args.json:
+            json.dump(result, sys.stdout, ensure_ascii=False, indent=2)
+            sys.stdout.write("\n")
+        else:
+            print_rewrite_result(result)
+        return 0
+
+    if args.command == "rewrite-files":
+        runtime_root = Path(args.runtime_root).expanduser() if args.runtime_root else bridge_home / "runtime"
+        result = rewrite_runtime_files(bridge_home, legacy_home, runtime_root, args.dry_run)
         if args.json:
             json.dump(result, sys.stdout, ensure_ascii=False, indent=2)
             sys.stdout.write("\n")

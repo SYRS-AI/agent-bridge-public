@@ -25,6 +25,7 @@ Usage:
   $CLI_NAME migrate runtime inventory [--json] [--report <path>]
   $CLI_NAME migrate runtime sync [--dry-run]
   $CLI_NAME migrate runtime rewrite-cron [--dry-run] [--json]
+  $CLI_NAME migrate runtime rewrite-files [--dry-run] [--json]
   $CLI_NAME migrate docs audit [--all] [agent...]
   $CLI_NAME migrate docs apply [--all] [agent...] [--dry-run]
   $CLI_NAME migrate workspace plan <agent>
@@ -82,6 +83,7 @@ Examples:
   $CLI_NAME migrate runtime inventory
   $CLI_NAME migrate runtime sync --dry-run
   $CLI_NAME migrate runtime rewrite-cron --dry-run
+  $CLI_NAME migrate runtime rewrite-files --dry-run
   $CLI_NAME migrate docs audit --all
   $CLI_NAME migrate docs apply --all --dry-run
   $CLI_NAME migrate workspace plan <agent>

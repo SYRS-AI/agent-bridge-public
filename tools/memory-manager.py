@@ -52,6 +52,13 @@ def runtime_memory_dir(bridge_home):
     return Path(bridge_home) / "runtime" / "memory"
 
 
+def default_config_path(bridge_home, openclaw_root):
+    runtime_candidate = Path(bridge_home) / "runtime" / "openclaw.json"
+    if runtime_candidate.exists():
+        return str(runtime_candidate)
+    return str(Path(openclaw_root) / "openclaw.json")
+
+
 def looks_like_workspace(path):
     candidate = Path(path)
     if not candidate.is_dir():
@@ -96,7 +103,7 @@ def parse_args():
     search = subparsers.add_parser("search")
     search.add_argument("--agent", required=True, help="OpenClaw agent id or a bridge alias")
     search.add_argument("query", help="Search query")
-    search.add_argument("--config", default=str(Path.home() / ".openclaw" / "openclaw.json"))
+    search.add_argument("--config")
     search.add_argument("--openclaw-root", default=str(Path.home() / ".openclaw"))
     search.add_argument("--bridge-home", default=os.environ.get("BRIDGE_HOME", str(Path.home() / ".agent-bridge")))
     search.add_argument("--agent-home-root", default=os.environ.get("BRIDGE_AGENT_HOME_ROOT"))
@@ -617,9 +624,10 @@ def render_text(payload):
 
 
 def cmd_search(args):
+    config_path = args.config or default_config_path(args.bridge_home, args.openclaw_root)
     settings = load_agent_settings(
         args.agent,
-        args.config,
+        config_path,
         args.openclaw_root,
         args.bridge_home,
         args.agent_home_root,
