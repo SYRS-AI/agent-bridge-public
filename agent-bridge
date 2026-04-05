@@ -18,7 +18,7 @@ Usage:
   $CLI_NAME urgent <agent> "<message>" [--wait <seconds>]
   $CLI_NAME task <create|inbox|show|claim|done|handoff|summary> ...
   $CLI_NAME profile <status|diff|deploy> ...
-  $CLI_NAME cron <inventory|show|enqueue|run-subagent|errors|cleanup> ...
+  $CLI_NAME cron <inventory|show|enqueue|sync|run-subagent|errors|cleanup> ...
   $CLI_NAME discord <status|sync>
   $CLI_NAME migrate workspace plan <agent>
   $CLI_NAME migrate workspace copy <agent> [--dry-run]
@@ -38,6 +38,7 @@ Usage:
   $CLI_NAME cron inventory [--mode recurring|one-shot|all] [--family <family>] [--limit <count>]
   $CLI_NAME cron show <job-name-or-id>
   $CLI_NAME cron enqueue <job-name-or-id> [--slot <slot-key>] [--dry-run]
+  $CLI_NAME cron sync [--dry-run] [--json] [--since <iso-datetime>] [--now <iso-datetime>]
   $CLI_NAME cron run-subagent <run-id> [--dry-run]
   $CLI_NAME cron errors report [--agent <bridge|openclaw>] [--family <family>] [--limit <count>] [--json]
   $CLI_NAME cron cleanup report [--mode expired-one-shot] [--json]
@@ -56,6 +57,7 @@ Examples:
   $CLI_NAME worktree list
   $CLI_NAME cron inventory --family memory-daily --limit 10
   $CLI_NAME cron enqueue <memory-daily-job-id> --slot 2026-04-05 --dry-run
+  $CLI_NAME cron sync --dry-run
   $CLI_NAME cron run-subagent <run-id> --dry-run
   $CLI_NAME cron errors report --limit 20
   $CLI_NAME cron cleanup report

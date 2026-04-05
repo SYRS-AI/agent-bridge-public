@@ -19,6 +19,11 @@ bridge_cron_runner_python() {
   python3 "$BRIDGE_SCRIPT_DIR/bridge-cron-runner.py" "$@"
 }
 
+bridge_cron_scheduler_python() {
+  bridge_require_python
+  python3 "$BRIDGE_SCRIPT_DIR/bridge-cron-scheduler.py" "$@"
+}
+
 bridge_cron_default_slot() {
   local family="${1:-memory-daily}"
 
@@ -36,6 +41,10 @@ bridge_cron_family_allowed() {
   local family="$1"
   local allowed
 
+  if [[ ${#BRIDGE_CRON_ENQUEUE_FAMILIES[@]} -eq 0 ]]; then
+    return 0
+  fi
+
   for allowed in "${BRIDGE_CRON_ENQUEUE_FAMILIES[@]}"; do
     if [[ "$allowed" == "$family" ]]; then
       return 0
@@ -43,6 +52,10 @@ bridge_cron_family_allowed() {
   done
 
   return 1
+}
+
+bridge_cron_scheduler_state_file() {
+  printf '%s/scheduler-state.json' "$BRIDGE_CRON_STATE_DIR"
 }
 
 bridge_cron_safe_component() {

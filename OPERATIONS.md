@@ -107,6 +107,7 @@ Use these first:
 ~/agent-bridge/agent-bridge cron inventory --mode one-shot --limit 20
 ~/agent-bridge/agent-bridge cron enqueue <memory-daily-job-id> --slot 2026-04-05 --dry-run
 ~/agent-bridge/agent-bridge cron enqueue <monthly-highlights-job-id> --dry-run
+~/agent-bridge/agent-bridge cron sync --dry-run
 ~/agent-bridge/agent-bridge cron errors report --limit 20
 ~/agent-bridge/agent-bridge cron cleanup report
 ```
@@ -124,7 +125,12 @@ When you start bridging one recurring family into the queue, begin with a dry ru
 ```bash
 ~/agent-bridge/agent-bridge cron enqueue <memory-daily-job-id> --slot 2026-04-05 --dry-run
 ~/agent-bridge/agent-bridge cron enqueue <monthly-highlights-job-id> --dry-run
+~/agent-bridge/agent-bridge cron sync --dry-run
 ```
+
+Automatic recurring scheduling is opt-in. Set `BRIDGE_OPENCLAW_CRON_SYNC_ENABLED=1`
+in `agent-roster.local.sh` only on machines that are actively migrating legacy
+OpenClaw cron jobs.
 
 Before deleting stale one-shot jobs, inspect the candidate set first:
 

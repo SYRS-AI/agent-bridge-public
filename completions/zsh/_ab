@@ -50,7 +50,8 @@ case "$state" in
         _values 'cron subcommand' \
           'inventory[summarize and filter OpenClaw cron jobs]' \
           'show[show one cron job]' \
-          'enqueue[enqueue one supported cron job into the bridge queue]' \
+          'enqueue[enqueue one recurring cron job into the bridge queue]' \
+          'sync[schedule due recurring OpenClaw jobs into the bridge queue]' \
           'errors[report recurring cron errors]' \
           'cleanup[report or prune expired one-shot cron jobs]'
         ;;

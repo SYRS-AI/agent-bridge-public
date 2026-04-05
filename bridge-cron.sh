@@ -13,6 +13,7 @@ Usage:
   $(basename "$0") inventory [--agent <openclaw-agent>] [--family <family>] [--mode recurring|one-shot|all] [--enabled yes|no|all] [--limit <count>] [--json]
   $(basename "$0") show <job-name-or-id> [--json]
   $(basename "$0") enqueue <job-name-or-id> [--slot <slot-key>] [--target <bridge-agent>] [--from <actor>] [--priority normal|high] [--dry-run]
+  $(basename "$0") sync [--dry-run] [--json] [--since <iso-datetime>] [--now <iso-datetime>]
   $(basename "$0") run-subagent <run-id> [--dry-run]
   $(basename "$0") errors report [--agent <bridge|openclaw-agent>] [--family <family>] [--limit <count>] [--json]
   $(basename "$0") cleanup report [--mode expired-one-shot] [--json]
@@ -338,6 +339,73 @@ run_subagent() {
   bridge_cron_runner_python "${args[@]}"
 }
 
+run_sync() {
+  local dry_run=0
+  local json_output=0
+  local since=""
+  local now=""
+  local state_file
+  local args=()
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --dry-run)
+        dry_run=1
+        shift
+        ;;
+      --json)
+        json_output=1
+        shift
+        ;;
+      --since|--now)
+        [[ $# -lt 2 ]] && bridge_die "$1 뒤에 값을 지정하세요."
+        case "$1" in
+          --since) since="$2" ;;
+          --now) now="$2" ;;
+        esac
+        shift 2
+        ;;
+      -h|--help)
+        usage
+        exit 0
+        ;;
+      *)
+        bridge_die "지원하지 않는 sync 옵션입니다: $1"
+        ;;
+    esac
+  done
+
+  if [[ ! -f "$BRIDGE_OPENCLAW_CRON_JOBS_FILE" ]]; then
+    printf 'status: skipped\n'
+    printf 'reason: no_openclaw_jobs_file\n'
+    printf 'jobs_file: %s\n' "$BRIDGE_OPENCLAW_CRON_JOBS_FILE"
+    return 0
+  fi
+  state_file="$(bridge_cron_scheduler_state_file)"
+  args=(
+    sync
+    --jobs-file "$BRIDGE_OPENCLAW_CRON_JOBS_FILE"
+    --state-file "$state_file"
+    --bridge-cron "$SCRIPT_DIR/bridge-cron.sh"
+    --repo-root "$SCRIPT_DIR"
+  )
+
+  if [[ -n "$since" ]]; then
+    args+=(--since "$since")
+  fi
+  if [[ -n "$now" ]]; then
+    args+=(--now "$now")
+  fi
+  if [[ $dry_run -eq 1 ]]; then
+    args+=(--dry-run)
+  fi
+  if [[ $json_output -eq 1 ]]; then
+    args+=(--json)
+  fi
+
+  bridge_cron_scheduler_python "${args[@]}"
+}
+
 run_errors() {
   local errors_cmd="${1:-}"
   shift || true
@@ -457,6 +525,9 @@ case "$subcommand" in
     ;;
   enqueue)
     run_enqueue "$@"
+    ;;
+  sync)
+    run_sync "$@"
     ;;
   run-subagent)
     run_subagent "$@"

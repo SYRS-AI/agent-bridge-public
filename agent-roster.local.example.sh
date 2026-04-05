@@ -59,6 +59,10 @@ BRIDGE_AGENT_SESSION["codex-developer"]="codex-developer"
 # BRIDGE_OPENCLAW_AGENT_TARGET["legacy-agent"]="tester"
 # BRIDGE_OPENCLAW_AGENT_TARGET["legacy-ops"]="developer"
 
+# Optional: enable the bridge-owned recurring OpenClaw scheduler on machines
+# that are actively migrating legacy cron jobs. Keep this off for fresh installs.
+# BRIDGE_OPENCLAW_CRON_SYNC_ENABLED=1
+
 BRIDGE_AGENT_LAUNCH_CMD["tester"]='claude -c --dangerously-skip-permissions'
 BRIDGE_AGENT_LAUNCH_CMD["developer"]='claude -c --dangerously-skip-permissions'
 BRIDGE_AGENT_LAUNCH_CMD["codex-tester"]='codex --dangerously-bypass-approvals-and-sandbox --no-alt-screen'
@@ -69,7 +73,8 @@ BRIDGE_AGENT_ACTION["tester:clear"]="/clear"
 BRIDGE_AGENT_ACTION["developer:resume"]="/resume"
 BRIDGE_AGENT_ACTION["developer:clear"]="/clear"
 
-# Optional: allowlist bridge cron enqueue families. Defaults to memory-daily + monthly-highlights.
+# Optional: restrict recurring bridge cron enqueue to a family allowlist.
+# Leave it unset or empty to allow all recurring families.
 # BRIDGE_CRON_ENQUEUE_FAMILIES=("memory-daily" "monthly-highlights")
 
 # Optional: dashboard health-check thresholds for active sessions.

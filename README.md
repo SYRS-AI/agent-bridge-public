@@ -207,6 +207,7 @@ If you are migrating existing OpenClaw cron jobs into Agent Bridge, start with t
 ./agent-bridge cron show <job-id>
 ./agent-bridge cron enqueue <memory-daily-job-id> --slot 2026-04-05 --dry-run
 ./agent-bridge cron enqueue <monthly-highlights-job-id> --dry-run
+./agent-bridge cron sync --dry-run
 ./agent-bridge cron errors report --limit 20
 ./agent-bridge cron cleanup report
 ./agent-bridge cron cleanup prune --dry-run
@@ -214,7 +215,9 @@ If you are migrating existing OpenClaw cron jobs into Agent Bridge, start with t
 
 By default the inventory reads `~/.openclaw/cron/jobs.json`. Override it with `BRIDGE_OPENCLAW_CRON_JOBS_FILE=/path/to/jobs.json` when testing snapshots.
 
-`cron enqueue` is the first bridge adapter path for recurring OpenClaw jobs. It currently allows `memory-daily` and `monthly-highlights`, writes a materialized note under `shared/cron/`, and records a per-slot manifest under `state/cron/dispatch/` so duplicate runs do not create duplicate tasks.
+`cron enqueue` now works for recurring OpenClaw jobs in general. It writes a materialized note under `shared/cron/`, records per-slot manifests under `state/cron/dispatch/`, and creates compact `[cron-dispatch]` queue tasks that tell the long-lived parent session to run a disposable child via `agent-bridge cron run-subagent <run-id>`.
+
+`cron sync` is the bridge-owned recurring scheduler. It scans legacy recurring jobs, derives due occurrence slots, and enqueues each occurrence through the same disposable-child path. The daemon only runs this automatically when you opt in with `BRIDGE_OPENCLAW_CRON_SYNC_ENABLED=1` in `agent-roster.local.sh`. Fresh installs should leave it disabled.
 
 `cron errors report` is the report-only view for recurring cron failures. It shows `lastErrorAt`, consecutive error counts, family and prefix summaries, and the highest-error outliers first so model-switch fallout is easy to separate from older failures.
 
