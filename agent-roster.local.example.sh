@@ -68,6 +68,12 @@ BRIDGE_AGENT_LAUNCH_CMD["developer"]='claude -c --dangerously-skip-permissions'
 BRIDGE_AGENT_LAUNCH_CMD["codex-tester"]='codex --dangerously-bypass-approvals-and-sandbox --no-alt-screen'
 BRIDGE_AGENT_LAUNCH_CMD["codex-developer"]='codex --dangerously-bypass-approvals-and-sandbox --no-alt-screen'
 
+# Optional: on-demand auto-stop timeout in seconds. Leave unset for long-lived
+# developer roles that should stay up continuously. Set this only for roles you
+# explicitly want the daemon to stop after inactivity.
+# BRIDGE_AGENT_IDLE_TIMEOUT["tester"]="900"
+# BRIDGE_AGENT_IDLE_TIMEOUT["codex-tester"]="300"
+
 BRIDGE_AGENT_ACTION["tester:resume"]="/resume"
 BRIDGE_AGENT_ACTION["tester:clear"]="/clear"
 BRIDGE_AGENT_ACTION["developer:resume"]="/resume"
