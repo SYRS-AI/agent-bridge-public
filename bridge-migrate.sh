@@ -12,6 +12,93 @@ usage() {
   cat <<EOF
 Usage:
   bash $SCRIPT_DIR/bridge-migrate.sh workspace plan <agent>
+  bash $SCRIPT_DIR/bridge-migrate.sh workspace copy <agent> [--dry-run]
+EOF
+}
+
+MIGRATE_AGENT=""
+MIGRATE_CURRENT_WORKDIR=""
+MIGRATE_EXPLICIT_PROFILE_HOME=""
+MIGRATE_EFFECTIVE_PROFILE_HOME=""
+MIGRATE_TARGET_HOME=""
+MIGRATE_STATUS=""
+
+resolve_workspace_context() {
+  local agent="$1"
+
+  bridge_require_agent "$agent"
+
+  MIGRATE_AGENT="$agent"
+  MIGRATE_CURRENT_WORKDIR="$(bridge_agent_workdir "$agent")"
+  MIGRATE_EXPLICIT_PROFILE_HOME="$(bridge_agent_profile_home "$agent")"
+  if [[ -n "$MIGRATE_EXPLICIT_PROFILE_HOME" ]]; then
+    MIGRATE_EFFECTIVE_PROFILE_HOME="$MIGRATE_EXPLICIT_PROFILE_HOME"
+  else
+    MIGRATE_EFFECTIVE_PROFILE_HOME="$(bridge_agent_default_profile_home "$agent")"
+  fi
+  MIGRATE_TARGET_HOME="$(bridge_agent_default_home "$agent")"
+  MIGRATE_STATUS="already_standard"
+
+  if [[ "$MIGRATE_CURRENT_WORKDIR" != "$MIGRATE_TARGET_HOME" || "$MIGRATE_EFFECTIVE_PROFILE_HOME" != "$MIGRATE_TARGET_HOME" ]]; then
+    MIGRATE_STATUS="needs_migration"
+  fi
+}
+
+backup_root_for() {
+  local agent="$1"
+  local stamp="$2"
+
+  printf '%s/migrations/%s-%s' "$BRIDGE_STATE_DIR" "$agent" "$stamp"
+}
+
+path_kind() {
+  local path="$1"
+
+  if [[ -L "$path" ]]; then
+    printf 'link'
+  elif [[ -d "$path" ]]; then
+    printf 'dir'
+  elif [[ -e "$path" ]]; then
+    printf 'file'
+  else
+    printf 'missing'
+  fi
+}
+
+remove_path() {
+  local path="$1"
+
+  if [[ -L "$path" || -f "$path" ]]; then
+    rm -f "$path"
+    return 0
+  fi
+  if [[ -d "$path" ]]; then
+    rm -rf "$path"
+  fi
+}
+
+copy_roots_tsv() {
+  if [[ -d "$MIGRATE_CURRENT_WORKDIR" && "$MIGRATE_CURRENT_WORKDIR" != "$MIGRATE_TARGET_HOME" ]]; then
+    printf 'workdir\t%s\n' "$MIGRATE_CURRENT_WORKDIR"
+  fi
+
+  if [[ -n "$MIGRATE_EXPLICIT_PROFILE_HOME" && "$MIGRATE_EXPLICIT_PROFILE_HOME" != "$MIGRATE_CURRENT_WORKDIR" && "$MIGRATE_EXPLICIT_PROFILE_HOME" != "$MIGRATE_TARGET_HOME" && -d "$MIGRATE_EXPLICIT_PROFILE_HOME" ]]; then
+    printf 'profile_home\t%s\n' "$MIGRATE_EXPLICIT_PROFILE_HOME"
+  fi
+}
+
+write_backup_manifest() {
+  local backup_root="$1"
+  local stamp="$2"
+
+  mkdir -p "$backup_root"
+  cat >"$backup_root/manifest.txt" <<EOF
+agent=$MIGRATE_AGENT
+timestamp=$stamp
+current_workdir=$MIGRATE_CURRENT_WORKDIR
+current_profile_home=$MIGRATE_EFFECTIVE_PROFILE_HOME
+target_home=$MIGRATE_TARGET_HOME
+status=$MIGRATE_STATUS
 EOF
 }
 
@@ -75,45 +162,26 @@ print_entry_group() {
 
 cmd_workspace_plan() {
   local agent="$1"
-  local current_workdir=""
-  local explicit_profile_home=""
-  local effective_profile_home=""
-  local target_home=""
-  local status="already_standard"
+  resolve_workspace_context "$agent"
 
-  bridge_require_agent "$agent"
-
-  current_workdir="$(bridge_agent_workdir "$agent")"
-  explicit_profile_home="$(bridge_agent_profile_home "$agent")"
-  if [[ -n "$explicit_profile_home" ]]; then
-    effective_profile_home="$explicit_profile_home"
-  else
-    effective_profile_home="$(bridge_agent_default_profile_home "$agent")"
-  fi
-  target_home="$(bridge_agent_default_home "$agent")"
-
-  if [[ "$current_workdir" != "$target_home" || "$effective_profile_home" != "$target_home" ]]; then
-    status="needs_migration"
-  fi
-
-  printf 'agent: %s\n' "$agent"
+  printf 'agent: %s\n' "$MIGRATE_AGENT"
   printf 'engine: %s\n' "$(bridge_agent_engine "$agent")"
-  printf 'status: %s\n' "$status"
-  printf 'current_workdir: %s\n' "$current_workdir"
-  printf 'current_profile_home: %s\n' "$effective_profile_home"
-  printf 'target_home: %s\n' "$target_home"
-  printf 'target_profile_home: %s\n' "$target_home"
+  printf 'status: %s\n' "$MIGRATE_STATUS"
+  printf 'current_workdir: %s\n' "$MIGRATE_CURRENT_WORKDIR"
+  printf 'current_profile_home: %s\n' "$MIGRATE_EFFECTIVE_PROFILE_HOME"
+  printf 'target_home: %s\n' "$MIGRATE_TARGET_HOME"
+  printf 'target_profile_home: %s\n' "$MIGRATE_TARGET_HOME"
   printf '\n'
 
   printf 'recommended_roster_changes:\n'
-  if [[ "$current_workdir" == "$target_home" ]]; then
+  if [[ "$MIGRATE_CURRENT_WORKDIR" == "$MIGRATE_TARGET_HOME" ]]; then
     printf '  - workdir already points at the standard home\n'
   else
     printf '  - BRIDGE_AGENT_WORKDIR["%s"]="$BRIDGE_AGENT_HOME_ROOT/%s"\n' "$agent" "$agent"
   fi
-  if [[ -z "$explicit_profile_home" ]]; then
+  if [[ -z "$MIGRATE_EXPLICIT_PROFILE_HOME" ]]; then
     printf '  - BRIDGE_AGENT_PROFILE_HOME["%s"] is not set; default already resolves to target\n' "$agent"
-  elif [[ "$explicit_profile_home" == "$target_home" ]]; then
+  elif [[ "$MIGRATE_EXPLICIT_PROFILE_HOME" == "$MIGRATE_TARGET_HOME" ]]; then
     printf '  - unset '\''BRIDGE_AGENT_PROFILE_HOME[%s]'\'' to use the default standard home\n' "$agent"
   else
     printf '  - BRIDGE_AGENT_PROFILE_HOME["%s"]="$BRIDGE_AGENT_HOME_ROOT/%s" or unset the override after cutover\n' "$agent" "$agent"
@@ -121,45 +189,151 @@ cmd_workspace_plan() {
   printf '\n'
 
   printf 'copy_sources:\n'
-  if [[ -d "$current_workdir" ]]; then
-    printf '  - workdir: %s\n' "$current_workdir"
+  if [[ -d "$MIGRATE_CURRENT_WORKDIR" ]]; then
+    printf '  - workdir: %s\n' "$MIGRATE_CURRENT_WORKDIR"
   else
-    printf '  - workdir: %s (missing)\n' "$current_workdir"
+    printf '  - workdir: %s (missing)\n' "$MIGRATE_CURRENT_WORKDIR"
   fi
-  if [[ -n "$explicit_profile_home" ]]; then
-    if [[ "$explicit_profile_home" == "$current_workdir" ]]; then
+  if [[ -n "$MIGRATE_EXPLICIT_PROFILE_HOME" ]]; then
+    if [[ "$MIGRATE_EXPLICIT_PROFILE_HOME" == "$MIGRATE_CURRENT_WORKDIR" ]]; then
       printf '  - profile home is the same path as workdir\n'
-    elif [[ -d "$explicit_profile_home" ]]; then
-      printf '  - profile_home: %s\n' "$explicit_profile_home"
+    elif [[ -d "$MIGRATE_EXPLICIT_PROFILE_HOME" ]]; then
+      printf '  - profile_home: %s\n' "$MIGRATE_EXPLICIT_PROFILE_HOME"
     else
-      printf '  - profile_home: %s (missing)\n' "$explicit_profile_home"
+      printf '  - profile_home: %s (missing)\n' "$MIGRATE_EXPLICIT_PROFILE_HOME"
     fi
   else
     printf '  - profile_home: (default target; no separate legacy override)\n'
   fi
   printf '\n'
 
-  if [[ -d "$current_workdir" ]]; then
-    printf 'workdir_inventory: %s\n' "$current_workdir"
-    print_entry_group "$current_workdir" "preserve:" "preserve"
-    print_entry_group "$current_workdir" "live_only:" "live_only"
-    print_entry_group "$current_workdir" "other:" "other"
+  if [[ -d "$MIGRATE_CURRENT_WORKDIR" ]]; then
+    printf 'workdir_inventory: %s\n' "$MIGRATE_CURRENT_WORKDIR"
+    print_entry_group "$MIGRATE_CURRENT_WORKDIR" "preserve:" "preserve"
+    print_entry_group "$MIGRATE_CURRENT_WORKDIR" "live_only:" "live_only"
+    print_entry_group "$MIGRATE_CURRENT_WORKDIR" "other:" "other"
     printf '\n'
   fi
 
-  if [[ -n "$explicit_profile_home" && "$explicit_profile_home" != "$current_workdir" && -d "$explicit_profile_home" ]]; then
-    printf 'profile_inventory: %s\n' "$explicit_profile_home"
-    print_entry_group "$explicit_profile_home" "preserve:" "preserve"
-    print_entry_group "$explicit_profile_home" "live_only:" "live_only"
-    print_entry_group "$explicit_profile_home" "other:" "other"
+  if [[ -n "$MIGRATE_EXPLICIT_PROFILE_HOME" && "$MIGRATE_EXPLICIT_PROFILE_HOME" != "$MIGRATE_CURRENT_WORKDIR" && -d "$MIGRATE_EXPLICIT_PROFILE_HOME" ]]; then
+    printf 'profile_inventory: %s\n' "$MIGRATE_EXPLICIT_PROFILE_HOME"
+    print_entry_group "$MIGRATE_EXPLICIT_PROFILE_HOME" "preserve:" "preserve"
+    print_entry_group "$MIGRATE_EXPLICIT_PROFILE_HOME" "live_only:" "live_only"
+    print_entry_group "$MIGRATE_EXPLICIT_PROFILE_HOME" "other:" "other"
     printf '\n'
   fi
 
   printf 'next_steps:\n'
   printf '  1. review this plan and confirm the target root is correct\n'
-  printf '  2. copy live-home files into %s without deleting the source\n' "$target_home"
+  printf '  2. copy live-home files into %s without deleting the source\n' "$MIGRATE_TARGET_HOME"
   printf '  3. switch roster paths to the standard home\n'
   printf '  4. deploy tracked profile material into the new live home\n'
+}
+
+copy_one_entry() {
+  local source_root="$1"
+  local name="$2"
+  local target_root="$3"
+  local backup_root="$4"
+  local dry_run="$5"
+  local src="$source_root/$name"
+  local dst="$target_root/$name"
+  local backup_path="$backup_root/target-before/$name"
+  local src_kind=""
+  local dst_kind=""
+
+  [[ -e "$src" || -L "$src" ]] || return 0
+
+  src_kind="$(path_kind "$src")"
+  dst_kind="$(path_kind "$dst")"
+
+  if [[ "$dry_run" == "1" ]]; then
+    if [[ "$dst_kind" != "missing" ]]; then
+      printf '  - backup existing %s -> %s\n' "$dst" "$backup_path"
+    fi
+    if [[ "$src_kind" == "dir" ]]; then
+      printf '  - merge %s/. -> %s/\n' "$src" "$dst"
+    else
+      printf '  - copy %s -> %s\n' "$src" "$dst"
+    fi
+    return 0
+  fi
+
+  mkdir -p "$target_root" "$backup_root/target-before"
+  if [[ "$dst_kind" != "missing" && ! -e "$backup_path" && ! -L "$backup_path" ]]; then
+    mkdir -p "$(dirname "$backup_path")"
+    cp -RP "$dst" "$backup_path"
+  fi
+
+  if [[ "$src_kind" == "dir" ]]; then
+    if [[ "$dst_kind" != "missing" && "$dst_kind" != "dir" ]]; then
+      remove_path "$dst"
+    fi
+    mkdir -p "$dst"
+    cp -RP "$src/." "$dst/"
+    return 0
+  fi
+
+  if [[ "$dst_kind" == "dir" ]]; then
+    remove_path "$dst"
+  fi
+  mkdir -p "$(dirname "$dst")"
+  cp -RP "$src" "$dst"
+}
+
+cmd_workspace_copy() {
+  local agent="$1"
+  local dry_run="${2:-0}"
+  local stamp=""
+  local backup_root=""
+  local label=""
+  local source_root=""
+  local copied_count=0
+  local seen_any=0
+  local name=""
+
+  resolve_workspace_context "$agent"
+
+  stamp="$(date '+%Y%m%d-%H%M%S')"
+  backup_root="$(backup_root_for "$agent" "$stamp")"
+
+  printf 'agent: %s\n' "$MIGRATE_AGENT"
+  printf 'mode: %s\n' "$([[ "$dry_run" == "1" ]] && printf 'dry-run' || printf 'copy')"
+  printf 'status: %s\n' "$MIGRATE_STATUS"
+  printf 'target_home: %s\n' "$MIGRATE_TARGET_HOME"
+  printf 'backup_root: %s\n' "$backup_root"
+  printf 'source_deleted: no\n'
+  printf '\n'
+
+  while IFS=$'\t' read -r label source_root; do
+    [[ -n "$label" && -n "$source_root" ]] || continue
+    seen_any=1
+    printf 'source[%s]: %s\n' "$label" "$source_root"
+    while IFS= read -r name; do
+      [[ -n "$name" ]] || continue
+      copy_one_entry "$source_root" "$name" "$MIGRATE_TARGET_HOME" "$backup_root" "$dry_run"
+      copied_count=$((copied_count + 1))
+    done < <(list_top_level_entries "$source_root")
+    printf '\n'
+  done < <(copy_roots_tsv)
+
+  if [[ $seen_any -eq 0 ]]; then
+    printf 'actions:\n'
+    printf '  - no legacy source directories need copying\n'
+    return 0
+  fi
+
+  if [[ "$dry_run" == "0" ]]; then
+    write_backup_manifest "$backup_root" "$stamp"
+  fi
+
+  printf 'summary:\n'
+  printf '  - top_level_entries: %s\n' "$copied_count"
+  if [[ "$dry_run" == "1" ]]; then
+    printf '  - dry-run only; target was not modified\n'
+  else
+    printf '  - backup manifest: %s/manifest.txt\n' "$backup_root"
+  fi
 }
 
 subcommand="${1:-}"
@@ -172,6 +346,31 @@ case "$subcommand" in
         shift
         [[ $# -eq 1 ]] || bridge_die "Usage: bash $SCRIPT_DIR/bridge-migrate.sh workspace plan <agent>"
         cmd_workspace_plan "$1"
+        ;;
+      copy)
+        shift
+        dry_run=0
+        agent=""
+        while [[ $# -gt 0 ]]; do
+          case "$1" in
+            --dry-run)
+              dry_run=1
+              shift
+              ;;
+            -*)
+              bridge_die "알 수 없는 옵션: $1"
+              ;;
+            *)
+              if [[ -n "$agent" ]]; then
+                bridge_die "agent는 하나만 지정할 수 있습니다."
+              fi
+              agent="$1"
+              shift
+              ;;
+          esac
+        done
+        [[ -n "$agent" ]] || bridge_die "Usage: bash $SCRIPT_DIR/bridge-migrate.sh workspace copy <agent> [--dry-run]"
+        cmd_workspace_copy "$agent" "$dry_run"
         ;;
       ""|-h|--help|help)
         usage
