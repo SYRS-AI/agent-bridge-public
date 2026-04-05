@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import sqlite3
 import subprocess
 import sys
 import time
@@ -52,13 +53,14 @@ def read_snapshot(path: Path) -> list[dict[str, Any]]:
             line = line.rstrip("\n")
             if not line:
                 continue
-            agent, channel_id, active, idle_timeout = line.split("\t")
+            agent, channel_id, active, idle_timeout, session = line.split("\t")
             rows.append(
                 {
                     "agent": agent,
                     "channel_id": channel_id,
                     "active": active == "1",
                     "idle_timeout": int(idle_timeout),
+                    "session": session,
                 }
             )
     return rows
@@ -167,6 +169,38 @@ def enqueue_task(bridge_home: Path, agent: str, channel_id: str, messages: list[
     return result.stdout.strip()
 
 
+def tmux_session_active(session: str) -> bool:
+    if not session:
+        return False
+    result = subprocess.run(
+        ["tmux", "has-session", "-t", session],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    return result.returncode == 0
+
+
+def has_open_wake_task(bridge_home: Path, agent: str) -> bool:
+    db_path = bridge_home / "state" / "tasks.db"
+    if not db_path.exists():
+        return False
+
+    with sqlite3.connect(db_path) as conn:
+        row = conn.execute(
+            """
+            SELECT 1
+            FROM tasks
+            WHERE assigned_to = ?
+              AND created_by = 'discord-relay'
+              AND status IN ('queued', 'claimed', 'blocked')
+            LIMIT 1
+            """,
+            (agent,),
+        ).fetchone()
+    return row is not None
+
+
 def cmd_sync(args: argparse.Namespace) -> int:
     snapshot = read_snapshot(Path(args.agent_snapshot))
     if not snapshot:
@@ -217,16 +251,23 @@ def cmd_sync(args: argparse.Namespace) -> int:
         channel_state["last_seen_id"] = latest_id
         channel_state["last_seen_ts"] = now_ts
 
-        if row["active"]:
+        live_active = row["active"] or tmux_session_active(str(row.get("session") or ""))
+        if live_active:
             continue
 
         human_messages = [item for item in new_messages if not ((item.get("author") or {}).get("bot"))]
         if not human_messages:
             continue
 
+        if has_open_wake_task(Path(args.bridge_home), row["agent"]):
+            channel_state["last_suppressed_ts"] = now_ts
+            channel_state["last_suppressed_reason"] = "open_wake_task"
+            continue
+
         last_enqueue_ts = int(channel_state.get("last_enqueue_ts") or 0)
         if args.cooldown_seconds > 0 and now_ts - last_enqueue_ts < args.cooldown_seconds:
             channel_state["last_suppressed_ts"] = now_ts
+            channel_state["last_suppressed_reason"] = "cooldown"
             continue
 
         output = enqueue_task(Path(args.bridge_home), row["agent"], channel_id, human_messages)

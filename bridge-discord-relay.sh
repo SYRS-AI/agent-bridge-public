@@ -29,7 +29,7 @@ cmd_status() {
   echo "monitored_agents: ${count}"
   if (( count > 0 )); then
     echo "agents:"
-    while IFS=$'\t' read -r agent channel_id active timeout; do
+    while IFS=$'\t' read -r agent channel_id active timeout _session; do
       [[ -n "$agent" ]] || continue
       printf '  %s | channel=%s | active=%s | idle_timeout=%ss\n' "$agent" "$channel_id" "$active" "$timeout"
     done < <(bridge_discord_relay_rows_tsv)

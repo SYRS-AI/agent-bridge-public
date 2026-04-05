@@ -673,7 +673,9 @@ def cmd_daemon_step(args: argparse.Namespace) -> int:
             continue
         nudge_key = ",".join(str(task_id) for task_id in queue_ids)
         last_nudge_ts = int(row["last_nudge_ts"] or 0)
-        if row["last_nudge_key"] == nudge_key and last_nudge_ts and current_ts - last_nudge_ts < nudge_cooldown:
+        if last_nudge_ts and current_ts - last_nudge_ts < nudge_cooldown:
+            continue
+        if last_nudge_ts and int(activity_ts) and last_nudge_ts >= int(activity_ts):
             continue
         printed = True
         print(

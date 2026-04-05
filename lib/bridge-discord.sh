@@ -14,6 +14,7 @@ bridge_discord_relay_rows_tsv() {
   local channel_id
   local timeout
   local active
+  local session
 
   for agent in "${BRIDGE_AGENT_IDS[@]}"; do
     [[ "$(bridge_agent_source "$agent")" == "static" ]] || continue
@@ -27,13 +28,14 @@ bridge_discord_relay_rows_tsv() {
     else
       active=0
     fi
-    printf '%s\t%s\t%s\t%s\n' "$agent" "$channel_id" "$active" "$timeout"
+    session="$(bridge_agent_session "$agent")"
+    printf '%s\t%s\t%s\t%s\t%s\n' "$agent" "$channel_id" "$active" "$timeout" "$session"
   done
 }
 
 bridge_discord_relay_count() {
   local count=0
-  while IFS=$'\t' read -r _agent _channel _active _timeout; do
+  while IFS=$'\t' read -r _agent _channel _active _timeout _session; do
     [[ -n "${_agent:-}" ]] || continue
     count=$((count + 1))
   done < <(bridge_discord_relay_rows_tsv)

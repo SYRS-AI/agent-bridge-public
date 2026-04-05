@@ -22,7 +22,7 @@ nudge_agent_session() {
   local message
   local engine
 
-  message="[Agent Bridge] inbox에 대기 중인 task가 ${queued}건 있습니다. 현재 작업 경계에서 ${BRIDGE_HOME}/agent-bridge inbox ${agent} 로 확인하고 필요한 task를 claim하세요."
+  message="[Agent Bridge] inbox에 대기 중인 task가 ${queued}건 있습니다. 현재 작업 경계에서 `agb inbox ${agent}` 또는 `${BRIDGE_HOME}/agent-bridge inbox ${agent}` 로 확인하고 필요한 task를 claim하세요."
   engine="$(bridge_agent_engine "$agent")"
   bridge_tmux_send_and_submit "$session" "$engine" "$message" || return 1
   bridge_task_note_nudge "$agent" "$nudge_key" || true
