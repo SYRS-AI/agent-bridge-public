@@ -158,7 +158,7 @@ cmd_run_cron_worker() {
   pid_file="$(bridge_cron_worker_pid_file "$task_id")"
   mkdir -p "$(dirname "$pid_file")"
   echo "$$" >"$pid_file"
-  trap 'rm -f "$pid_file"' EXIT
+  trap "rm -f '$pid_file'" EXIT
 
   # shellcheck disable=SC1090
   source <(bridge_queue_cli show "$task_id" --format shell)
