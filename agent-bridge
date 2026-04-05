@@ -22,6 +22,8 @@ Usage:
   $CLI_NAME setup <discord|agent|admin> ...
   $CLI_NAME cron <inventory|show|list|create|update|delete|enqueue|sync|run-subagent|errors|cleanup> ...
   $CLI_NAME discord <status|sync>
+  $CLI_NAME migrate docs audit [--all] [agent...]
+  $CLI_NAME migrate docs apply [--all] [agent...] [--dry-run]
   $CLI_NAME migrate workspace plan <agent>
   $CLI_NAME migrate workspace copy <agent> [--dry-run]
   $CLI_NAME migrate workspace cutover <agent> --dry-run
@@ -74,6 +76,8 @@ Examples:
   $CLI_NAME cron cleanup report
   $CLI_NAME setup discord tester
   $CLI_NAME setup agent tester
+  $CLI_NAME migrate docs audit --all
+  $CLI_NAME migrate docs apply --all --dry-run
   $CLI_NAME migrate workspace plan <agent>
   $CLI_NAME migrate workspace copy <agent> --dry-run
   $CLI_NAME migrate workspace cutover <agent> --dry-run

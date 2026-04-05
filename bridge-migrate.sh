@@ -11,10 +11,17 @@ bridge_load_roster
 usage() {
   cat <<EOF
 Usage:
+  bash $SCRIPT_DIR/bridge-migrate.sh docs audit [--all] [agent...]
+  bash $SCRIPT_DIR/bridge-migrate.sh docs apply [--all] [agent...] [--dry-run] [--report <path>]
   bash $SCRIPT_DIR/bridge-migrate.sh workspace plan <agent>
   bash $SCRIPT_DIR/bridge-migrate.sh workspace copy <agent> [--dry-run]
   bash $SCRIPT_DIR/bridge-migrate.sh workspace cutover <agent> --dry-run
 EOF
+}
+
+run_docs_helper() {
+  bridge_require_python
+  python3 "$SCRIPT_DIR/bridge-docs.py" "$@"
 }
 
 MIGRATE_AGENT=""
@@ -398,6 +405,21 @@ subcommand="${1:-}"
 shift || true
 
 case "$subcommand" in
+  docs)
+    action="${1:-}"
+    shift || true
+    case "$action" in
+      audit|apply)
+        run_docs_helper "$action" "$@"
+        ;;
+      ""|-h|--help|help)
+        usage
+        ;;
+      *)
+        bridge_die "지원하지 않는 migrate docs 명령입니다: $action"
+        ;;
+    esac
+    ;;
   workspace)
     case "${1:-}" in
       plan)
