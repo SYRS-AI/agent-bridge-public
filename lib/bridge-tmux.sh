@@ -47,6 +47,57 @@ bridge_tmux_engine_requires_prompt() {
   esac
 }
 
+bridge_tmux_claude_blocker_state_from_text() {
+  local text="$1"
+
+  if [[ "$text" == *"Quick safety check:"* && "$text" == *"Yes, I trust this folder"* ]]; then
+    printf '%s' "trust"
+    return 0
+  fi
+
+  if [[ "$text" == *"Resume from summary (recommended)"* && "$text" == *"Resume full session as-is"* ]]; then
+    printf '%s' "summary"
+    return 0
+  fi
+
+  printf '%s' "none"
+}
+
+bridge_tmux_claude_blocker_state() {
+  local session="$1"
+  local recent=""
+
+  recent="$(bridge_capture_recent "$session" 80 2>/dev/null || true)"
+  [[ -n "$recent" ]] || {
+    printf '%s' "none"
+    return 0
+  }
+
+  bridge_tmux_claude_blocker_state_from_text "$recent"
+}
+
+bridge_tmux_claude_prompt_line_ready() {
+  local trimmed="$1"
+  local remainder=""
+
+  if [[ "$trimmed" == ❯* ]]; then
+    remainder="${trimmed#❯}"
+  elif [[ "$trimmed" == '>'* ]]; then
+    remainder="${trimmed#>}"
+  else
+    return 1
+  fi
+
+  remainder="${remainder#"${remainder%%[![:space:]]*}"}"
+  if [[ -z "$remainder" ]]; then
+    return 0
+  fi
+  if [[ "$remainder" =~ ^[0-9]+\.[[:space:]] ]]; then
+    return 1
+  fi
+  return 0
+}
+
 bridge_tmux_session_has_prompt() {
   local session="$1"
   local engine="$2"
@@ -58,6 +109,12 @@ bridge_tmux_session_has_prompt() {
   recent="$(bridge_capture_recent "$session" 20 2>/dev/null || true)"
   [[ -n "$recent" ]] || return 1
 
+  if [[ "$engine" == "claude" ]]; then
+    if [[ "$(bridge_tmux_claude_blocker_state_from_text "$recent")" != "none" ]]; then
+      return 1
+    fi
+  fi
+
   while IFS= read -r line; do
     line="${line//$'\r'/}"
     line="${line//$'\u00A0'/ }"
@@ -65,7 +122,7 @@ bridge_tmux_session_has_prompt() {
     trimmed="${trimmed%"${trimmed##*[![:space:]]}"}"
     case "$engine" in
       claude)
-        if [[ "$trimmed" == ❯* || "$trimmed" == '>'* ]]; then
+        if bridge_tmux_claude_prompt_line_ready "$trimmed"; then
           return 0
         fi
         ;;
@@ -85,12 +142,30 @@ bridge_tmux_session_has_prompt() {
   return 1
 }
 
+bridge_tmux_claude_advance_blocker() {
+  local session="$1"
+  local state=""
+
+  state="$(bridge_tmux_claude_blocker_state "$session")"
+  case "$state" in
+    trust|summary)
+      tmux send-keys -t "$session" C-m
+      sleep 0.3
+      return 0
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
 bridge_tmux_wait_for_prompt() {
   local session="$1"
   local engine="$2"
   local timeout="${3:-$BRIDGE_TMUX_PROMPT_WAIT_SECONDS}"
   local start_ts
   local elapsed
+  local bootstrap_actions=0
 
   bridge_tmux_engine_requires_prompt "$engine" || return 0
   if bridge_tmux_session_has_prompt "$session" "$engine"; then
@@ -101,7 +176,18 @@ bridge_tmux_wait_for_prompt() {
 
   start_ts="$(date +%s)"
   while true; do
-    sleep 0.2
+    if [[ "$engine" == "claude" ]]; then
+      if bridge_tmux_claude_advance_blocker "$session"; then
+        bootstrap_actions=$((bootstrap_actions + 1))
+        if (( bootstrap_actions >= 4 )); then
+          return 1
+        fi
+      else
+        sleep 0.2
+      fi
+    else
+      sleep 0.2
+    fi
     if bridge_tmux_session_has_prompt "$session" "$engine"; then
       return 0
     fi
@@ -109,6 +195,32 @@ bridge_tmux_wait_for_prompt() {
     if (( elapsed >= timeout )); then
       return 1
     fi
+  done
+}
+
+bridge_tmux_prepare_claude_session() {
+  local session="$1"
+  local timeout="${2:-8}"
+  local start_ts
+  local elapsed
+  local advanced=0
+
+  start_ts="$(date +%s)"
+  while true; do
+    if [[ "$(bridge_tmux_claude_blocker_state "$session")" == "none" ]]; then
+      return 0
+    fi
+    if bridge_tmux_claude_advance_blocker "$session"; then
+      advanced=$((advanced + 1))
+      if (( advanced >= 4 )); then
+        return 1
+      fi
+    fi
+    elapsed=$(( $(date +%s) - start_ts ))
+    if (( elapsed >= timeout )); then
+      return 1
+    fi
+    sleep 0.2
   done
 }
 

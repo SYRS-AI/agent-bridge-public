@@ -310,6 +310,69 @@ def cmd_link_shared_settings(args: argparse.Namespace) -> int:
     return 0
 
 
+def claude_user_settings_path(args: argparse.Namespace) -> Path:
+    user_file = getattr(args, "claude_user_file", None)
+    if user_file:
+        return Path(user_file).expanduser()
+    return Path.home() / ".claude.json"
+
+
+def cmd_ensure_project_trust(args: argparse.Namespace) -> int:
+    user_file = claude_user_settings_path(args)
+    workdir = str(Path(args.workdir).expanduser())
+    payload = load_json(user_file)
+    if payload in (None, ""):
+        payload = {}
+    if not isinstance(payload, dict):
+        raise SystemExit(f"claude user settings root must be a JSON object: {user_file}")
+
+    projects = payload.get("projects")
+    if not isinstance(projects, dict):
+        projects = {}
+        payload["projects"] = projects
+
+    project = projects.get(workdir)
+    if not isinstance(project, dict):
+        project = {}
+        projects[workdir] = project
+
+    changed = False
+    if project.get("hasTrustDialogAccepted") is not True:
+        project["hasTrustDialogAccepted"] = True
+        changed = True
+    if not isinstance(project.get("allowedTools"), list):
+        project["allowedTools"] = []
+        changed = True
+    if not isinstance(project.get("mcpContextUris"), list):
+        project["mcpContextUris"] = []
+        changed = True
+    if not isinstance(project.get("mcpServers"), dict):
+        project["mcpServers"] = {}
+        changed = True
+    if not isinstance(project.get("enabledMcpjsonServers"), list):
+        project["enabledMcpjsonServers"] = []
+        changed = True
+    if not isinstance(project.get("disabledMcpjsonServers"), list):
+        project["disabledMcpjsonServers"] = []
+        changed = True
+
+    if changed:
+        save_json(user_file, payload)
+
+    status = "updated" if changed else "unchanged"
+    if args.format == "shell":
+        print(shell_line("HOOK_SETTINGS_FILE", str(user_file)))
+        print(shell_line("HOOK_STATUS", status))
+        print(shell_line("HOOK_PROJECT", workdir))
+        print(shell_line("HOOK_TRUST_ACCEPTED", "true"))
+    else:
+        print(f"settings_file: {user_file}")
+        print(f"status: {status}")
+        print(f"project: {workdir}")
+        print("trust_accepted: true")
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="bridge-hooks.py")
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -351,6 +414,12 @@ def build_parser() -> argparse.ArgumentParser:
     link_shared_parser.add_argument("--shared-settings-file", required=True)
     link_shared_parser.add_argument("--format", choices=("text", "shell"), default="text")
     link_shared_parser.set_defaults(handler=cmd_link_shared_settings)
+
+    trust_parser = subparsers.add_parser("ensure-project-trust")
+    trust_parser.add_argument("--workdir", required=True)
+    trust_parser.add_argument("--claude-user-file")
+    trust_parser.add_argument("--format", choices=("text", "shell"), default="text")
+    trust_parser.set_defaults(handler=cmd_ensure_project_trust)
 
     return parser
 

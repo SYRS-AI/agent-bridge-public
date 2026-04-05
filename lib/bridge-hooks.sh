@@ -37,6 +37,11 @@ bridge_link_claude_settings_to_shared() {
   bridge_hooks_python link-shared-settings --workdir "$workdir" --shared-settings-file "$(bridge_hook_shared_settings_file)"
 }
 
+bridge_ensure_claude_project_trust() {
+  local workdir="$1"
+  bridge_hooks_python ensure-project-trust --workdir "$workdir"
+}
+
 bridge_claude_stop_hook_status() {
   local workdir="$1"
   if [[ "$(bridge_claude_settings_mode "$workdir")" == "shared" ]]; then

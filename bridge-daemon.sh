@@ -45,6 +45,30 @@ nudge_agent_session() {
   echo "[info] nudged ${agent} (queued=${queued}, claimed=${claimed}, idle=${idle}s)"
 }
 
+recover_claude_bootstrap_blockers() {
+  local agent
+  local session
+  local state=""
+
+  for agent in "${BRIDGE_AGENT_IDS[@]}"; do
+    [[ "$(bridge_agent_engine "$agent")" == "claude" ]] || continue
+    session="$(bridge_agent_session "$agent")"
+    [[ -n "$session" ]] || continue
+    bridge_tmux_session_exists "$session" || continue
+
+    state="$(bridge_tmux_claude_blocker_state "$session" 2>/dev/null || true)"
+    case "$state" in
+      trust|summary)
+        if bridge_tmux_prepare_claude_session "$session" 6 >/dev/null 2>&1; then
+          echo "[info] advanced claude startup blocker for ${agent} (${state})"
+        else
+          bridge_warn "failed to advance claude startup blocker for '${agent}' (${state})"
+        fi
+        ;;
+    esac
+  done
+}
+
 cron_worker_running_count() {
   local worker_dir
   local pid_file
@@ -314,6 +338,7 @@ cmd_sync_cycle() {
     "$BRIDGE_BASH_BIN" "$SCRIPT_DIR/bridge-cron.sh" sync >/dev/null 2>&1 || bridge_warn "cron sync failed"
   fi
   bridge_reconcile_idle_markers || true
+  recover_claude_bootstrap_blockers || true
 
   snapshot_file="$(mktemp)"
   ready_agents_file="$(mktemp)"

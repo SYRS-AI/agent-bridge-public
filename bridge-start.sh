@@ -132,6 +132,9 @@ if tmux has-session -t "$SESSION" 2>/dev/null; then
 fi
 
 if [[ "$ENGINE" == "claude" ]]; then
+  if ! bridge_ensure_claude_project_trust "$WORK_DIR" >/dev/null 2>&1; then
+    bridge_warn "Claude project trust seed failed: $WORK_DIR"
+  fi
   if ! bridge_ensure_claude_stop_hook "$WORK_DIR" >/dev/null; then
     bridge_die "Claude Stop hook 설정에 실패했습니다: $WORK_DIR"
   fi
@@ -153,6 +156,7 @@ bridge_persist_agent_state "$AGENT"
 tmux new-session -d -s "$SESSION" -c "$WORK_DIR" "$SESSION_CMD"
 bridge_tmux_bootstrap_session_options "$SESSION"
 if [[ "$ENGINE" == "claude" ]]; then
+  bridge_tmux_prepare_claude_session "$SESSION" 8 >/dev/null 2>&1 || true
   bridge_agent_mark_idle_now "$AGENT"
 fi
 if [[ -z "$(bridge_agent_session_id "$AGENT")" ]]; then

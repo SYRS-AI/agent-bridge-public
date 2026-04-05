@@ -480,10 +480,21 @@ bridge_agent_has_wake_channel() {
 
 bridge_agent_wake_status() {
   local agent="$1"
+  local session=""
 
   if ! bridge_agent_requires_wake_channel "$agent"; then
     printf '%s' "-"
     return 0
+  fi
+
+  session="$(bridge_agent_session "$agent")"
+  if [[ -n "$session" ]] && bridge_tmux_session_exists "$session"; then
+    case "$(bridge_tmux_claude_blocker_state "$session" 2>/dev/null || true)" in
+      trust|summary)
+        printf '%s' "block"
+        return 0
+        ;;
+    esac
   fi
 
   if bridge_agent_has_wake_channel "$agent"; then
