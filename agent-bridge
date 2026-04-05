@@ -108,20 +108,27 @@ prompt_spawn_mode() {
   local choice=""
   local index=1
   local candidate
+  local state=""
 
-  echo "[info] 현재 프로젝트에 비활성 정적 ${ENGINE} 역할이 있습니다: $project_root" >&2
+  echo "[info] 현재 프로젝트에 정적 ${ENGINE} 역할이 있습니다: $project_root" >&2
   for candidate in "${candidates[@]}"; do
-    printf '  %d. %s | session=%s | workdir=%s\n' \
+    if bridge_agent_is_active "$candidate"; then
+      state="active (연결됨)"
+    else
+      state="stopped"
+    fi
+    printf '  %d. %s | session=%s | %s | workdir=%s\n' \
       "$index" \
       "$candidate" \
       "$(bridge_agent_session "$candidate")" \
+      "$state" \
       "$(bridge_agent_workdir "$candidate")" >&2
     index=$((index + 1))
   done
   echo >&2
-  echo "1) 기존 정적 역할 깨우기" >&2
+  echo "1) 기존 정적 역할 연결/깨우기 (권장)" >&2
   if [[ "$can_create_worktree" == "1" ]]; then
-    echo "2) 새 isolated worktree worker 만들기 (권장)" >&2
+    echo "2) 새 isolated worktree worker 만들기 (고급)" >&2
     echo "3) 현재 checkout에서 새 dynamic worker 만들기" >&2
   else
     echo "2) 현재 checkout에서 새 dynamic worker 만들기" >&2
@@ -159,15 +166,26 @@ prompt_static_candidate() {
   local choice=""
   local index=1
   local candidate
+  local state=""
 
   if [[ ${#candidates[@]} -eq 1 ]]; then
     printf '%s' "${candidates[0]}"
     return 0
   fi
 
-  echo "[info] 깨울 정적 역할을 선택하세요." >&2
+  echo "[info] 연결/깨울 정적 역할을 선택하세요." >&2
   for candidate in "${candidates[@]}"; do
-    printf '  %d. %s | workdir=%s\n' "$index" "$candidate" "$(bridge_agent_workdir "$candidate")" >&2
+    if bridge_agent_is_active "$candidate"; then
+      state="active (연결됨)"
+    else
+      state="stopped"
+    fi
+    printf '  %d. %s | session=%s | %s | workdir=%s\n' \
+      "$index" \
+      "$candidate" \
+      "$(bridge_agent_session "$candidate")" \
+      "$state" \
+      "$(bridge_agent_workdir "$candidate")" >&2
     index=$((index + 1))
   done
 
@@ -366,6 +384,13 @@ esac
 
 WORKDIR="$(cd "$WORKDIR" && pwd -P)"
 
+if ! bridge_agent_exists "$NAME"; then
+  if RESOLVED_AGENT="$(bridge_agent_id_for_session "$NAME")"; then
+    echo "[info] 세션 '$NAME'은(는) 역할 '$RESOLVED_AGENT'에 연결됩니다."
+    NAME="$RESOLVED_AGENT"
+  fi
+fi
+
 if bridge_agent_exists "$NAME" && [[ "$(bridge_agent_source "$NAME")" == "static" ]]; then
   STATIC_ENGINE="$(bridge_agent_engine "$NAME")"
   STATIC_WORKDIR="$(bridge_agent_workdir "$NAME")"
@@ -396,7 +421,11 @@ if [[ ${#STATIC_CANDIDATES[@]} -gt 0 ]]; then
     SPAWN_PREFERENCE="$(prompt_spawn_mode "$IS_GIT_PROJECT" "$PROJECT_ROOT" "${STATIC_CANDIDATES[@]}")"
     echo
   elif [[ -z "$SPAWN_PREFERENCE" ]]; then
-    SPAWN_PREFERENCE="shared"
+    if [[ ${#STATIC_CANDIDATES[@]} -eq 1 ]]; then
+      SPAWN_PREFERENCE="wake"
+    else
+      SPAWN_PREFERENCE="shared"
+    fi
   fi
 
   case "$SPAWN_PREFERENCE" in
@@ -416,6 +445,7 @@ if [[ ${#STATIC_CANDIDATES[@]} -gt 0 ]]; then
         bridge_die "현재 경로는 git 프로젝트가 아니어서 isolated worktree를 만들 수 없습니다: $WORKDIR"
       fi
       WORKDIR="$(bridge_prepare_isolated_worktree "$ENGINE" "$NAME" "$WORKDIR")"
+      REPLACE_MODE=1
       echo "[info] isolated worktree를 사용합니다: $WORKDIR"
       ;;
     shared)

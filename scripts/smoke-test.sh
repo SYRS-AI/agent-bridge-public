@@ -29,6 +29,16 @@ require_cmd tmux
 require_cmd python3
 require_cmd git
 
+BASH4_BIN=""
+for candidate in /opt/homebrew/bin/bash /usr/local/bin/bash "$(command -v bash 2>/dev/null || true)"; do
+  [[ -n "$candidate" && -x "$candidate" ]] || continue
+  if "$candidate" -lc '[[ ${BASH_VERSINFO[0]:-0} -ge 4 ]]' >/dev/null 2>&1; then
+    BASH4_BIN="$candidate"
+    break
+  fi
+done
+[[ -n "$BASH4_BIN" ]] || die "missing bash 4+ interpreter"
+
 log "linting shell entry points"
 bash -n "$REPO_ROOT"/*.sh "$REPO_ROOT"/agent-bridge "$REPO_ROOT"/agb "$REPO_ROOT"/scripts/smoke-test.sh
 if command -v shellcheck >/dev/null 2>&1; then
@@ -62,8 +72,12 @@ SESSION_NAME="bridge-smoke-$$"
 REQUESTER_SESSION="bridge-requester-$$"
 SMOKE_AGENT="smoke-agent-$$"
 REQUESTER_AGENT="requester-agent-$$"
+STATIC_AGENT="static-role-$$"
+STATIC_SESSION="static-session-$$"
+WORKTREE_AGENT="worker-reuse-$$"
 WORKDIR="$TMP_ROOT/workdir"
 REQUESTER_WORKDIR="$TMP_ROOT/requester-workdir"
+PROJECT_ROOT="$TMP_ROOT/git-project"
 HOOK_WORKDIR="$TMP_ROOT/claude-hook-workdir"
 MCP_WORKDIR="$TMP_ROOT/claude-mcp-workdir"
 FAKE_BIN="$TMP_ROOT/bin"
@@ -75,6 +89,8 @@ cleanup() {
   bash "$REPO_ROOT/bridge-daemon.sh" stop >/dev/null 2>&1 || true
   tmux kill-session -t "$SESSION_NAME" >/dev/null 2>&1 || true
   tmux kill-session -t "$REQUESTER_SESSION" >/dev/null 2>&1 || true
+  tmux kill-session -t "$STATIC_SESSION" >/dev/null 2>&1 || true
+  tmux kill-session -t "$WORKTREE_AGENT" >/dev/null 2>&1 || true
   if [[ -n "$FAKE_DISCORD_PID" ]]; then
     kill "$FAKE_DISCORD_PID" >/dev/null 2>&1 || true
     wait "$FAKE_DISCORD_PID" >/dev/null 2>&1 || true
@@ -88,6 +104,15 @@ mkdir -p "$HOOK_WORKDIR/.claude"
 mkdir -p "$MCP_WORKDIR"
 mkdir -p "$FAKE_BIN"
 export PATH="$FAKE_BIN:$PATH"
+
+mkdir -p "$PROJECT_ROOT"
+PROJECT_ROOT="$(cd "$PROJECT_ROOT" && pwd -P)"
+git -C "$PROJECT_ROOT" init -q
+git -C "$PROJECT_ROOT" config user.email smoke@example.com
+git -C "$PROJECT_ROOT" config user.name "Smoke Test"
+echo "smoke" >"$PROJECT_ROOT/README.md"
+git -C "$PROJECT_ROOT" add README.md
+git -C "$PROJECT_ROOT" commit -qm "init"
 
 cat >"$FAKE_BIN/codex" <<'EOF'
 #!/usr/bin/env bash
@@ -219,6 +244,57 @@ assert_contains "$LIST_OUTPUT" "$SMOKE_AGENT"
 
 STATUS_OUTPUT="$("$REPO_ROOT/agent-bridge" status --all-agents)"
 assert_contains "$STATUS_OUTPUT" "$SMOKE_AGENT"
+
+log "verifying session alias resolution and worktree replace"
+tmux new-session -d -s "$WORKTREE_AGENT" -c "$PROJECT_ROOT" 'python3 -c "import time; print(\"worker active\", flush=True); time.sleep(30)"'
+cat >>"$BRIDGE_ROSTER_LOCAL_FILE" <<EOF
+bridge_add_agent_id_if_missing "$STATIC_AGENT"
+BRIDGE_AGENT_DESC["$STATIC_AGENT"]="Static project role"
+BRIDGE_AGENT_ENGINE["$STATIC_AGENT"]="codex"
+BRIDGE_AGENT_SESSION["$STATIC_AGENT"]="$STATIC_SESSION"
+BRIDGE_AGENT_WORKDIR["$STATIC_AGENT"]="$PROJECT_ROOT"
+BRIDGE_AGENT_LAUNCH_CMD["$STATIC_AGENT"]='python3 -c "import time; print(\"static role ready\", flush=True); time.sleep(30)"'
+EOF
+
+"$BASH4_BIN" -c '
+  source "'"$REPO_ROOT"'/bridge-lib.sh"
+  bridge_load_roster
+  bridge_add_agent_id_if_missing "'"$WORKTREE_AGENT"'"
+  BRIDGE_AGENT_DESC["'"$WORKTREE_AGENT"'"]="Existing worker"
+  BRIDGE_AGENT_ENGINE["'"$WORKTREE_AGENT"'"]="codex"
+  BRIDGE_AGENT_SESSION["'"$WORKTREE_AGENT"'"]="'"$WORKTREE_AGENT"'"
+  BRIDGE_AGENT_WORKDIR["'"$WORKTREE_AGENT"'"]="'"$PROJECT_ROOT"'"
+  BRIDGE_AGENT_SOURCE["'"$WORKTREE_AGENT"'"]="dynamic"
+  BRIDGE_AGENT_LOOP["'"$WORKTREE_AGENT"'"]="0"
+  BRIDGE_AGENT_CONTINUE["'"$WORKTREE_AGENT"'"]="1"
+  BRIDGE_AGENT_HISTORY_KEY["'"$WORKTREE_AGENT"'"]="smoke-history"
+  bridge_persist_agent_state "'"$WORKTREE_AGENT"'"
+'
+
+bash "$REPO_ROOT/bridge-start.sh" "$STATIC_AGENT" >/dev/null
+STATIC_CANDIDATE_OUTPUT="$("$BASH4_BIN" -c '
+  source "'"$REPO_ROOT"'/bridge-lib.sh"
+  bridge_load_roster
+  bridge_static_agents_for_project_engine "'"$PROJECT_ROOT"'" codex
+')"
+assert_contains "$STATIC_CANDIDATE_OUTPUT" "$STATIC_AGENT"
+
+ALIAS_OUTPUT="$("$REPO_ROOT/agent-bridge" --codex --name "$STATIC_SESSION" --workdir "$PROJECT_ROOT" --no-attach 2>&1)"
+assert_contains "$ALIAS_OUTPUT" "세션 '$STATIC_SESSION'은(는) 역할 '$STATIC_AGENT'에 연결됩니다."
+
+WORKTREE_OUTPUT="$("$REPO_ROOT/agent-bridge" --codex --name "$WORKTREE_AGENT" --workdir "$PROJECT_ROOT" --prefer new --no-attach 2>&1)"
+assert_contains "$WORKTREE_OUTPUT" "isolated worktree를 사용합니다:"
+
+EXPECTED_WORKTREE_DIR="$("$BASH4_BIN" -c '
+  source "'"$REPO_ROOT"'/bridge-lib.sh"
+  bridge_load_roster
+  bridge_worktree_launch_dir_for "'"$PROJECT_ROOT"'" "'"$WORKTREE_AGENT"'"
+')"
+ACTIVE_WORKTREE_DIR="$("$BASH4_BIN" -c '
+  source "'"$BRIDGE_ACTIVE_AGENT_DIR"'/'"$WORKTREE_AGENT"'.env"
+  printf "%s" "$AGENT_WORKDIR"
+')"
+[[ "$ACTIVE_WORKTREE_DIR" == "$EXPECTED_WORKTREE_DIR" ]] || die "worktree spawn reused stale session: expected $EXPECTED_WORKTREE_DIR got $ACTIVE_WORKTREE_DIR"
 
 log "creating queue task"
 CREATE_OUTPUT="$(bash "$REPO_ROOT/bridge-task.sh" create --to "$SMOKE_AGENT" --title "smoke queue" --body-file "$BRIDGE_SHARED_DIR/note.md" --from "$REQUESTER_AGENT")"

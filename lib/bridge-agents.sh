@@ -166,9 +166,6 @@ bridge_static_agents_for_project_engine() {
     [[ "$(bridge_agent_engine "$agent")" == "$engine" ]] || continue
     agent_root="$(bridge_agent_project_root "$agent")"
     [[ "$agent_root" == "$project_root" ]] || continue
-    if bridge_agent_is_active "$agent"; then
-      continue
-    fi
     printf '%s\n' "$agent"
   done
 }
@@ -279,6 +276,20 @@ bridge_require_agent() {
   echo "등록된 에이전트:"
   bridge_list_agents >&2
   bridge_die "'$agent'은(는) 등록된 에이전트가 아닙니다."
+}
+
+bridge_agent_id_for_session() {
+  local requested_session="$1"
+  local agent
+
+  for agent in "${BRIDGE_AGENT_IDS[@]}"; do
+    if [[ "$(bridge_agent_session "$agent")" == "$requested_session" ]]; then
+      printf '%s' "$agent"
+      return 0
+    fi
+  done
+
+  return 1
 }
 
 bridge_agent_desc() {
