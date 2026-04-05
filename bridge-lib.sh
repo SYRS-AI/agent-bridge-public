@@ -14,7 +14,16 @@ if (( ${BASH_VERSINFO[0]:-0} < 4 )); then
 fi
 
 BRIDGE_SCRIPT_DIR="$(cd -P "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
-BRIDGE_HOME="${BRIDGE_HOME:-$BRIDGE_SCRIPT_DIR}"
+if [[ -z "${BRIDGE_HOME:-}" ]]; then
+  BRIDGE_HOME="$BRIDGE_SCRIPT_DIR"
+  bridge_installed_cli="$(type -P agent-bridge 2>/dev/null || true)"
+  if [[ -n "$bridge_installed_cli" ]]; then
+    bridge_installed_home="$(cd -P "$(dirname "$bridge_installed_cli")" && pwd -P)"
+    if [[ -f "$bridge_installed_home/bridge-lib.sh" && "$bridge_installed_home" != "$BRIDGE_SCRIPT_DIR" ]]; then
+      BRIDGE_HOME="$bridge_installed_home"
+    fi
+  fi
+fi
 BRIDGE_ROSTER_FILE="${BRIDGE_ROSTER_FILE:-$BRIDGE_HOME/agent-roster.sh}"
 BRIDGE_ROSTER_LOCAL_FILE="${BRIDGE_ROSTER_LOCAL_FILE:-$BRIDGE_HOME/agent-roster.local.sh}"
 BRIDGE_STATE_DIR="${BRIDGE_STATE_DIR:-$BRIDGE_HOME/state}"
