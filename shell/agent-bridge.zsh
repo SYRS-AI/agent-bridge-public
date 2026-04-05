@@ -1,6 +1,7 @@
 typeset -g AGENT_BRIDGE_HOME="${AGENT_BRIDGE_HOME:-${${(%):-%N}:A:h:h}}"
 typeset -gU path fpath
 
+export BRIDGE_HOME="${BRIDGE_HOME:-$AGENT_BRIDGE_HOME}"
 path=("$AGENT_BRIDGE_HOME" "$path[@]")
 fpath=("$AGENT_BRIDGE_HOME/completions/zsh" "$fpath[@]")
 export PATH="${(j/:/)path}"
