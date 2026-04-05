@@ -31,27 +31,18 @@ bridge_cron_default_slot() {
     monthly-highlights)
       TZ=Asia/Seoul date +%Y-%m
       ;;
-    *)
+    memory-daily)
       TZ=Asia/Seoul date +%F
       ;;
+    *)
+      bridge_require_python
+      python3 - <<'PY'
+from datetime import datetime, timezone
+
+print(datetime.now(timezone.utc).astimezone().replace(second=0, microsecond=0).isoformat(timespec="minutes"))
+PY
+      ;;
   esac
-}
-
-bridge_cron_family_allowed() {
-  local family="$1"
-  local allowed
-
-  if [[ ${#BRIDGE_CRON_ENQUEUE_FAMILIES[@]} -eq 0 ]]; then
-    return 0
-  fi
-
-  for allowed in "${BRIDGE_CRON_ENQUEUE_FAMILIES[@]}"; do
-    if [[ "$allowed" == "$family" ]]; then
-      return 0
-    fi
-  done
-
-  return 1
 }
 
 bridge_cron_scheduler_state_file() {

@@ -73,10 +73,6 @@ BRIDGE_AGENT_ACTION["tester:clear"]="/clear"
 BRIDGE_AGENT_ACTION["developer:resume"]="/resume"
 BRIDGE_AGENT_ACTION["developer:clear"]="/clear"
 
-# Optional: restrict recurring bridge cron enqueue to a family allowlist.
-# Leave it unset or empty to allow all recurring families.
-# BRIDGE_CRON_ENQUEUE_FAMILIES=("memory-daily" "monthly-highlights")
-
 # Optional: dashboard health-check thresholds for active sessions.
 # BRIDGE_HEALTH_WARN_SECONDS=3600
 # BRIDGE_HEALTH_CRITICAL_SECONDS=14400

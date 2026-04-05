@@ -162,6 +162,7 @@ run_enqueue() {
   local create_output=""
   local task_id=""
   local created_at=""
+  local shell_payload=""
 
   shift || true
   [[ -n "$job_ref" ]] || bridge_die "Usage: $(basename "$0") enqueue <job-name-or-id> [--slot <slot-key>] [--target <bridge-agent>] [--from <actor>] [--priority normal|high] [--dry-run]"
@@ -212,12 +213,12 @@ run_enqueue() {
   local CRON_JOB_PAYLOAD_KIND=""
   local CRON_JOB_PAYLOAD_TEXT=""
 
+  shell_payload="$(bridge_cron_python show --jobs-file "$BRIDGE_OPENCLAW_CRON_JOBS_FILE" --format shell "$job_ref")" || exit $?
   # shellcheck disable=SC1090
-  source <(bridge_cron_python show --jobs-file "$BRIDGE_OPENCLAW_CRON_JOBS_FILE" --format shell "$job_ref")
+  source <(printf '%s\n' "$shell_payload")
 
   [[ "$CRON_JOB_ENABLED" == "1" ]] || bridge_die "비활성 cron job은 enqueue할 수 없습니다: $CRON_JOB_NAME"
   [[ "$CRON_JOB_KIND" == "recurring" ]] || bridge_die "recurring cron job만 enqueue할 수 있습니다: $CRON_JOB_NAME"
-  bridge_cron_family_allowed "$CRON_JOB_FAMILY" || bridge_die "허용되지 않은 cron family입니다: $CRON_JOB_FAMILY"
 
   if [[ -z "$slot" ]]; then
     slot="$(bridge_cron_default_slot "$CRON_JOB_FAMILY")"

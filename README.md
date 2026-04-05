@@ -217,6 +217,8 @@ By default the inventory reads `~/.openclaw/cron/jobs.json`. Override it with `B
 
 `cron enqueue` now works for recurring OpenClaw jobs in general. It writes a materialized note under `shared/cron/`, records per-slot manifests under `state/cron/dispatch/`, and creates compact `[cron-dispatch]` queue tasks that tell the long-lived parent session to run a disposable child via `agent-bridge cron run-subagent <run-id>`.
 
+For `memory-daily` the default slot is `YYYY-MM-DD`. For `monthly-highlights` it is `YYYY-MM`. Other recurring jobs default to the current minute as an ISO timestamp, so repeated enqueue calls on the same day do not collapse into one slot.
+
 `cron sync` is the bridge-owned recurring scheduler. It scans legacy recurring jobs, derives due occurrence slots, and enqueues each occurrence through the same disposable-child path. The daemon only runs this automatically when you opt in with `BRIDGE_OPENCLAW_CRON_SYNC_ENABLED=1` in `agent-roster.local.sh`. Fresh installs should leave it disabled.
 
 `cron errors report` is the report-only view for recurring cron failures. It shows `lastErrorAt`, consecutive error counts, family and prefix summaries, and the highest-error outliers first so model-switch fallout is easy to separate from older failures.

@@ -50,6 +50,3 @@ declare -Ag BRIDGE_AGENT_NOTIFY_ACCOUNT=()
 
 # shellcheck disable=SC2034
 declare -Ag BRIDGE_OPENCLAW_AGENT_TARGET=()
-
-# shellcheck disable=SC2034
-declare -ag BRIDGE_CRON_ENQUEUE_FAMILIES=()
