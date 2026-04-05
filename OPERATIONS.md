@@ -12,6 +12,14 @@ bash ~/agent-bridge/bridge-daemon.sh ensure
 bash ~/agent-bridge/bridge-daemon.sh status
 ```
 
+On macOS, keep it under `launchd` so crashes auto-restart:
+
+```bash
+cd ~/agent-bridge
+./scripts/install-daemon-launchagent.sh --apply --load
+launchctl print gui/$UID/ai.agent-bridge.daemon
+```
+
 3. If you use static roles, verify them:
 
 ```bash
@@ -31,6 +39,14 @@ If your live runtime is `~/.agent-bridge` while development happens in `~/agent-
 cd ~/agent-bridge
 ./scripts/deploy-live-install.sh --dry-run
 ./scripts/deploy-live-install.sh --restart-daemon
+```
+
+If the daemon misbehaves, check:
+
+```bash
+tail -n 80 ~/.agent-bridge/state/daemon.log
+tail -n 80 ~/.agent-bridge/state/daemon-crash.log
+tail -n 80 ~/.agent-bridge/state/launchagent.log
 ```
 
 ## Recommended Collaboration Pattern

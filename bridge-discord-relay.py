@@ -53,7 +53,16 @@ def read_snapshot(path: Path) -> list[dict[str, Any]]:
             line = line.rstrip("\n")
             if not line:
                 continue
-            agent, channel_id, active, idle_timeout, session = line.split("\t")
+            parts = line.split("\t")
+            if len(parts) < 4:
+                print(f"[discord-relay] malformed snapshot row fields={len(parts)} raw={line!r}", file=sys.stderr)
+                continue
+            if len(parts) == 4:
+                agent, channel_id, active, idle_timeout = parts
+                session = ""
+            else:
+                agent, channel_id, active, idle_timeout = parts[:4]
+                session = "\t".join(parts[4:])
             rows.append(
                 {
                     "agent": agent,

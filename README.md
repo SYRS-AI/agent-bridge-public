@@ -193,6 +193,13 @@ bash bridge-daemon.sh ensure
 
 The daemon keeps the live roster, queue heartbeats, and idle nudges in sync.
 
+On macOS you can also register it as a `LaunchAgent` so crashes auto-restart:
+
+```bash
+./scripts/install-daemon-launchagent.sh --apply --load
+launchctl print gui/$UID/ai.agent-bridge.daemon
+```
+
 ## Quick Start
 
 ### Run an agent against the bridge repo itself
@@ -350,6 +357,14 @@ That is expected in a new folder. Confirm the prompt once, then future resumes w
 ```bash
 bash ~/agent-bridge/bridge-daemon.sh ensure
 bash ~/agent-bridge/bridge-daemon.sh status
+```
+
+If it keeps dying, inspect:
+
+```bash
+tail -n 80 ~/.agent-bridge/state/daemon.log
+tail -n 80 ~/.agent-bridge/state/daemon-crash.log
+tail -n 80 ~/.agent-bridge/state/launchagent.log
 ```
 
 ### You want to inspect everything at once

@@ -12,6 +12,15 @@ usage() {
   echo "Usage: bash $SCRIPT_DIR/bridge-daemon.sh <start|ensure|run|stop|status|sync>"
 }
 
+daemon_log_event() {
+  local message="$1"
+  local timestamp
+
+  timestamp="$(date '+%Y-%m-%dT%H:%M:%S%z')"
+  mkdir -p "$BRIDGE_STATE_DIR"
+  printf '[%s] %s\n' "$timestamp" "$message" >>"$BRIDGE_DAEMON_CRASH_LOG"
+}
+
 nudge_agent_session() {
   local agent="$1"
   local session="$2"
@@ -126,34 +135,49 @@ cmd_sync_cycle() {
 }
 
 cmd_start() {
+  local start_deadline
+
   if bridge_daemon_is_running; then
     echo "[info] bridge daemon already running (pid=$(bridge_daemon_pid))"
     return 0
   fi
 
   mkdir -p "$BRIDGE_STATE_DIR" "$BRIDGE_LOG_DIR"
-  if command -v setsid >/dev/null 2>&1; then
+  if [[ "$(uname -s)" != "Darwin" ]] && command -v setsid >/dev/null 2>&1; then
     setsid "$BRIDGE_BASH_BIN" "$SCRIPT_DIR/bridge-daemon.sh" run </dev/null >>"$BRIDGE_DAEMON_LOG" 2>&1 &
   else
     nohup "$BRIDGE_BASH_BIN" "$SCRIPT_DIR/bridge-daemon.sh" run </dev/null >>"$BRIDGE_DAEMON_LOG" 2>&1 &
     disown || true
   fi
-  sleep 0.2
 
-  if bridge_daemon_is_running; then
-    echo "[info] bridge daemon started (pid=$(bridge_daemon_pid))"
-    return 0
-  fi
+  start_deadline=$(( $(date +%s) + BRIDGE_DAEMON_START_WAIT_SECONDS ))
+  while (( $(date +%s) <= start_deadline )); do
+    if bridge_daemon_is_running; then
+      echo "[info] bridge daemon started (pid=$(bridge_daemon_pid))"
+      return 0
+    fi
+    sleep 0.1
+  done
 
   bridge_die "bridge daemon start failed"
 }
 
 cmd_run() {
-  trap 'rm -f "$BRIDGE_DAEMON_PID_FILE"' EXIT
+  local cycle_status
+
+  trap 'daemon_log_event "received SIGTERM"; exit 0' TERM
+  trap 'daemon_log_event "received SIGINT"; exit 0' INT
+  trap 'daemon_log_event "received SIGHUP"; exit 0' HUP
+  trap 'status=$?; rm -f "$BRIDGE_DAEMON_PID_FILE"; if (( status != 0 )); then daemon_log_event "daemon exiting with status=$status"; fi' EXIT
   echo "$$" >"$BRIDGE_DAEMON_PID_FILE"
 
   while true; do
-    cmd_sync_cycle
+    if cmd_sync_cycle; then
+      :
+    else
+      cycle_status=$?
+      daemon_log_event "sync cycle failed with exit=$cycle_status"
+    fi
     sleep "$BRIDGE_DAEMON_INTERVAL"
   done
 }
