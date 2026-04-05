@@ -284,6 +284,12 @@ def rewrite_shared_legacy_text(name: str, bridge_home: Path, text: str) -> str:
         "~/.openclaw/data/": f"{runtime_root}/data/",
         "$HOME/.openclaw/data/": f"{runtime_root}/data/",
         "/Users/soonseokoh/.openclaw/data/": f"{runtime_root}/data/",
+        "~/.openclaw/assets/": f"{runtime_root}/assets/",
+        "$HOME/.openclaw/assets/": f"{runtime_root}/assets/",
+        "/Users/soonseokoh/.openclaw/assets/": f"{runtime_root}/assets/",
+        "~/.openclaw/extensions/": f"{runtime_root}/extensions/",
+        "$HOME/.openclaw/extensions/": f"{runtime_root}/extensions/",
+        "/Users/soonseokoh/.openclaw/extensions/": f"{runtime_root}/extensions/",
         "~/.openclaw/shared/a2a-files/": "~/.agent-bridge/shared/a2a-files/",
         "$HOME/.openclaw/shared/a2a-files/": "~/.agent-bridge/shared/a2a-files/",
         "/Users/soonseokoh/.openclaw/shared/a2a-files/": "~/.agent-bridge/shared/a2a-files/",
@@ -334,6 +340,12 @@ def rewrite_agent_runtime_text(agent_dir: Path, text: str) -> str:
         "~/.openclaw/data/": f"{runtime_root}/data/",
         "$HOME/.openclaw/data/": f"{runtime_root}/data/",
         "/Users/soonseokoh/.openclaw/data/": f"{runtime_root}/data/",
+        "~/.openclaw/assets/": f"{runtime_root}/assets/",
+        "$HOME/.openclaw/assets/": f"{runtime_root}/assets/",
+        "/Users/soonseokoh/.openclaw/assets/": f"{runtime_root}/assets/",
+        "~/.openclaw/extensions/": f"{runtime_root}/extensions/",
+        "$HOME/.openclaw/extensions/": f"{runtime_root}/extensions/",
+        "/Users/soonseokoh/.openclaw/extensions/": f"{runtime_root}/extensions/",
         "~/.openclaw/memory/": f"{runtime_root}/memory/",
         "$HOME/.openclaw/memory/": f"{runtime_root}/memory/",
         "/Users/soonseokoh/.openclaw/memory/": f"{runtime_root}/memory/",
@@ -444,13 +456,23 @@ def normalize_legacy_paths(text: str) -> str:
         r"~/.agent-bridge/agents/\1",
         text,
     )
+    text = re.sub(
+        r"(?:~|/Users/soonseokoh)/\.openclaw/workspace\b",
+        "~/.agent-bridge/agents/main",
+        text,
+    )
     return normalize_openclaw_home_variants(text)
 
 
 def normalize_openclaw_home_variants(text: str) -> str:
-    return re.sub(
+    text = re.sub(
         r"\$HOME/\.openclaw/workspace-([A-Za-z0-9._-]+)",
         r"~/.agent-bridge/agents/\1",
+        text,
+    )
+    return re.sub(
+        r"\$HOME/\.openclaw/workspace\b",
+        "~/.agent-bridge/agents/main",
         text,
     )
 
@@ -684,7 +706,7 @@ def render_agent_skills_md(agent_dir: Path) -> str:
         "## Runtime Skill Rules",
         "- 공용 bridge 명령은 `TOOLS.md`와 `~/.agent-bridge/shared/SKILLS.md`를 먼저 본다.",
         "- local `skills/`가 있으면 해당 파일을 먼저 읽고 절차를 따른다.",
-        "- 레거시 `~/.openclaw/skills/...` 경로는 compatibility note로만 본다. bridge-local 대체가 있으면 그쪽이 우선이다.",
+        "- 예전 외부 skill 경로는 compatibility note로만 본다. bridge-local 대체가 있으면 그쪽이 우선이다.",
         "",
         "## Local Inventory",
     ]

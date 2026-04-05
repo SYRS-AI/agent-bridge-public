@@ -151,7 +151,9 @@ def source_inventory(legacy_home: Path) -> dict[str, dict[str, object]]:
         "shared_tools": {"path": legacy_home / "shared" / "tools", "count": count_files(legacy_home / "shared" / "tools")},
         "patches": {"path": legacy_home / "patches", "count": count_files(legacy_home / "patches")},
         "media": {"path": legacy_home / "media", "count": count_files(legacy_home / "media")},
+        "assets": {"path": legacy_home / "assets", "count": count_files(legacy_home / "assets")},
         "vault": {"path": legacy_home / "vault", "count": count_files(legacy_home / "vault")},
+        "extensions": {"path": legacy_home / "extensions", "count": count_files(legacy_home / "extensions")},
         "data": {"path": legacy_home / "data", "count": count_files(legacy_home / "data")},
         "credentials": {"path": legacy_home / "credentials", "count": count_files(legacy_home / "credentials")},
         "secrets": {"path": legacy_home / "secrets", "count": count_files(legacy_home / "secrets")},
@@ -292,6 +294,8 @@ def iter_text_files(root: Path):
         for name in sorted(filenames):
             path = current_path / name
             if path.name.startswith(".") and path.name not in {".mcp.json"}:
+                continue
+            if ".bak" in path.name:
                 continue
             try:
                 if path.stat().st_size > MAX_TEXT_BYTES:
@@ -458,7 +462,9 @@ def runtime_prefixes(bridge_home: Path) -> dict[str, str]:
         "skills": pretty_path(runtime_root / "skills"),
         "patches": pretty_path(runtime_root / "patches"),
         "media": pretty_path(runtime_root / "media"),
+        "assets": pretty_path(runtime_root / "assets"),
         "vault": pretty_path(runtime_root / "vault"),
+        "extensions": pretty_path(runtime_root / "extensions"),
         "data": pretty_path(runtime_root / "data"),
         "logs": pretty_path(bridge_home / "logs"),
         "shared_tools": pretty_path(runtime_root / "shared" / "tools"),
@@ -469,6 +475,7 @@ def runtime_prefixes(bridge_home: Path) -> dict[str, str]:
         "config": pretty_path(runtime_root / "openclaw.json"),
         "agents": pretty_path(bridge_home / "agents"),
         "patch_home": pretty_path(bridge_home / "agents" / "patch"),
+        "main_home": pretty_path(bridge_home / "agents" / "main"),
         "watchdog": pretty_path(bridge_home / "state" / "watchdog"),
         "shared": pretty_path(bridge_home / "shared"),
     }
@@ -506,7 +513,9 @@ def legacy_rewrite_rules(bridge_home: Path, legacy_home: Path) -> list[tuple[str
     rules.extend(dir_rules("skills", "skills", runtime["skills"]))
     rules.extend(dir_rules("patches", "patches", runtime["patches"]))
     rules.extend(dir_rules("media", "media", runtime["media"]))
+    rules.extend(dir_rules("assets", "assets", runtime["assets"]))
     rules.extend(dir_rules("vault", "vault", runtime["vault"]))
+    rules.extend(dir_rules("extensions", "extensions", runtime["extensions"]))
     rules.extend(dir_rules("data", "data", runtime["data"]))
     rules.extend(dir_rules("logs", "logs", runtime["logs"]))
     rules.extend(dir_rules("shared_tools", "shared/tools", runtime["shared_tools"]))
@@ -537,6 +546,30 @@ def rewrite_string(value: str, rules: list[tuple[str, str, str]]) -> tuple[str, 
         occurrences = result.count(old)
         result = result.replace(old, new)
         counts[category] += occurrences
+    result, variant_counts = rewrite_workspace_variants(result)
+    counts.update(variant_counts)
+    return result, counts
+
+
+def rewrite_workspace_variants(text: str) -> tuple[str, Counter]:
+    counts: Counter = Counter()
+    patterns = [
+        (
+            "agents",
+            re.compile(r"(?:/Users/soonseokoh|\$HOME|~)?/\.openclaw/workspace-([A-Za-z0-9._-]+)"),
+            r"~/.agent-bridge/agents/\1",
+        ),
+        (
+            "main_home",
+            re.compile(r"(?:/Users/soonseokoh|\$HOME|~)?/\.openclaw/workspace\b"),
+            "~/.agent-bridge/agents/main",
+        ),
+    ]
+    result = text
+    for category, pattern, replacement in patterns:
+        result, changed = pattern.subn(replacement, result)
+        if changed:
+            counts[category] += changed
     return result, counts
 
 

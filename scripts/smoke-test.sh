@@ -752,7 +752,7 @@ log "inventorying legacy runtime references"
 LEGACY_ROOT="$TMP_ROOT/legacy-runtime"
 mkdir -p "$LEGACY_ROOT/cron" "$LEGACY_ROOT/scripts" "$LEGACY_ROOT/skills/sample-skill" "$LEGACY_ROOT/credentials"
 mkdir -p "$LEGACY_ROOT/shared/tools" "$LEGACY_ROOT/shared/references" "$LEGACY_ROOT/memory"
-mkdir -p "$LEGACY_ROOT/secrets" "$LEGACY_ROOT/data"
+mkdir -p "$LEGACY_ROOT/secrets" "$LEGACY_ROOT/data" "$LEGACY_ROOT/assets/sample" "$LEGACY_ROOT/extensions/sample-ext"
 cat >"$LEGACY_ROOT/scripts/morning-briefing.py" <<'EOF'
 #!/usr/bin/env python3
 import os
@@ -762,13 +762,16 @@ sys.path.insert(0, os.path.expanduser("~/.openclaw/scripts"))
 CRED_DIR = os.path.expanduser("~/.openclaw/credentials")
 SECRET_DIR = os.path.expanduser("~/.openclaw/secrets")
 DB_PATH = os.path.expanduser("~/.openclaw/data/example.db")
+ASSET_PATH = os.path.expanduser("~/.openclaw/assets/sample/logo.txt")
 EOF
 printf '# sample skill\n' >"$LEGACY_ROOT/skills/sample-skill/SKILL.md"
 printf 'tool note\n' >"$LEGACY_ROOT/shared/tools/tool.md"
 printf 'reference note\n' >"$LEGACY_ROOT/shared/references/ref.md"
 : >"$LEGACY_ROOT/memory/$SMOKE_AGENT.sqlite"
 printf 'sqlite-placeholder\n' >"$LEGACY_ROOT/data/example.db"
-printf '{"channels":{"discord":{"accounts":{"default":{"token":"smoke-token"}}}}}\n' >"$LEGACY_ROOT/openclaw.json"
+printf 'asset\n' >"$LEGACY_ROOT/assets/sample/logo.txt"
+printf 'extension\n' >"$LEGACY_ROOT/extensions/sample-ext/README.md"
+printf '{"channels":{"discord":{"accounts":{"default":{"token":"smoke-token"}}}},"extensions":{"sample-ext":{"installPath":"~/.openclaw/extensions/sample-ext"}}}\n' >"$LEGACY_ROOT/openclaw.json"
 printf 'cred\n' >"$LEGACY_ROOT/credentials/example.txt"
 printf 'secret\n' >"$LEGACY_ROOT/secrets/example.token"
 cat >"$LEGACY_ROOT/cron/jobs.json" <<EOF
@@ -822,6 +825,8 @@ assert_contains "$RUNTIME_SYNC_OUTPUT" "item[scripts]"
 [[ -f "$BRIDGE_HOME/runtime/shared/references/ref.md" ]] || die "expected runtime shared references copy"
 [[ -f "$BRIDGE_HOME/runtime/memory/$SMOKE_AGENT.sqlite" ]] || die "expected runtime memory copy"
 [[ -f "$BRIDGE_HOME/runtime/data/example.db" ]] || die "expected runtime data copy"
+[[ -f "$BRIDGE_HOME/runtime/assets/sample/logo.txt" ]] || die "expected runtime assets copy"
+[[ -f "$BRIDGE_HOME/runtime/extensions/sample-ext/README.md" ]] || die "expected runtime extensions copy"
 [[ -f "$BRIDGE_HOME/runtime/credentials/example.txt" ]] || die "expected runtime credentials copy"
 [[ -f "$BRIDGE_HOME/runtime/secrets/example.token" ]] || die "expected runtime secrets copy"
 [[ -f "$BRIDGE_HOME/runtime/openclaw.json" ]] || die "expected runtime config copy"
@@ -849,6 +854,8 @@ grep -q "$BRIDGE_HOME/runtime/scripts" "$BRIDGE_HOME/runtime/scripts/morning-bri
 grep -q "$BRIDGE_HOME/runtime/credentials" "$BRIDGE_HOME/runtime/scripts/morning-briefing.py" || die "expected rewritten runtime credentials path"
 grep -q "$BRIDGE_HOME/runtime/secrets" "$BRIDGE_HOME/runtime/scripts/morning-briefing.py" || die "expected rewritten runtime secrets path"
 grep -q "$BRIDGE_HOME/runtime/data/example.db" "$BRIDGE_HOME/runtime/scripts/morning-briefing.py" || die "expected rewritten runtime data path"
+grep -q "$BRIDGE_HOME/runtime/assets/sample/logo.txt" "$BRIDGE_HOME/runtime/scripts/morning-briefing.py" || die "expected rewritten runtime asset path"
+grep -q "$BRIDGE_HOME/runtime/extensions/sample-ext" "$BRIDGE_HOME/runtime/openclaw.json" || die "expected rewritten runtime extension installPath"
 
 log "processing one queued cron-dispatch task through the daemon"
 RUN_ID="smoke-job-1234--2026-04-05T10-00-00Z"
