@@ -193,6 +193,9 @@ cmd_runtime_sync() {
 
   runtime_sync_one "scripts" "$legacy_home/scripts" "$runtime_root/scripts" "$backup_root" "$dry_run"
   runtime_sync_one "skills" "$legacy_home/skills" "$runtime_root/skills" "$backup_root" "$dry_run"
+  runtime_sync_one "patches" "$legacy_home/patches" "$runtime_root/patches" "$backup_root" "$dry_run"
+  runtime_sync_one "media" "$legacy_home/media" "$runtime_root/media" "$backup_root" "$dry_run"
+  runtime_sync_one "vault" "$legacy_home/vault" "$runtime_root/vault" "$backup_root" "$dry_run"
   runtime_sync_one "shared-tools" "$legacy_home/shared/tools" "$runtime_root/shared/tools" "$backup_root" "$dry_run"
   runtime_sync_one "shared-references" "$legacy_home/shared/references" "$runtime_root/shared/references" "$backup_root" "$dry_run"
   runtime_sync_one "memory" "$legacy_home/memory" "$runtime_root/memory" "$backup_root" "$dry_run"

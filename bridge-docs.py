@@ -19,7 +19,7 @@ TODAY = datetime.now().strftime("%Y-%m-%d")
 REMOVABLE_DOCS = ("AGENTS.md", "IDENTITY.md", "BOOTSTRAP.md")
 SHARED_SOURCE_FILES = ("ROSTER.md", "SYRS-CONTEXT.md", "SYRS-RULES.md", "SYRS-USER.md")
 AGENT_SHARED_LINKS = ("TOOLS.md", "ROSTER.md", "SYRS-CONTEXT.md", "SYRS-RULES.md", "SYRS-USER.md")
-AGENT_RUNTIME_REWRITE_FILES = ("SOUL.md", "HEARTBEAT.md", "CHECKLIST.md")
+AGENT_RUNTIME_REWRITE_FILES = ("SOUL.md", "HEARTBEAT.md", "CHECKLIST.md", "MEMORY.md")
 LEGACY_PATTERNS = (
     "openclaw message send",
     "sessions_send",
@@ -256,10 +256,10 @@ def render_shared_skills_md(bridge_home: Path) -> str:
 - `skills/`에 있는 문서형 스킬은 해당 파일을 먼저 읽고 절차를 따른다.
 - `references/`는 supporting material이지 실행 명령 목록이 아니다.
 
-## Legacy Compatibility
-- 예전 프롬프트에 나오는 외부 skill 경로는 compatibility note로만 취급한다.
+## Migration Compatibility
+- 예전 메모나 참고 문서에 외부 skill 경로가 남아 있더라도 canonical runtime은 bridge-local skill registry다.
 - bridge-local 대체가 있으면 그쪽을 우선한다.
-- 아직 마이그레이션되지 않은 OpenClaw skill은 반드시 현재 동작 여부를 검증한 뒤 사용한다.
+- 아직 외부 위치에 남은 스킬은 실행 전 현재 동작 여부를 검증하고 migration debt로 기록한다.
 """
 
 
@@ -267,16 +267,22 @@ def rewrite_shared_legacy_text(name: str, bridge_home: Path, text: str) -> str:
     runtime_root = pretty_path(bridge_home / "runtime")
     replacements = {
         "~/.openclaw/credentials/": f"{runtime_root}/credentials/",
+        "$HOME/.openclaw/credentials/": f"{runtime_root}/credentials/",
         "/Users/soonseokoh/.openclaw/credentials/": f"{runtime_root}/credentials/",
         "~/.openclaw/secrets/": f"{runtime_root}/secrets/",
+        "$HOME/.openclaw/secrets/": f"{runtime_root}/secrets/",
         "/Users/soonseokoh/.openclaw/secrets/": f"{runtime_root}/secrets/",
         "~/.openclaw/openclaw.json": f"{runtime_root}/openclaw.json",
+        "$HOME/.openclaw/openclaw.json": f"{runtime_root}/openclaw.json",
         "/Users/soonseokoh/.openclaw/openclaw.json": f"{runtime_root}/openclaw.json",
         "~/.openclaw/scripts/": f"{runtime_root}/scripts/",
+        "$HOME/.openclaw/scripts/": f"{runtime_root}/scripts/",
         "/Users/soonseokoh/.openclaw/scripts/": f"{runtime_root}/scripts/",
         "~/.openclaw/skills/": f"{runtime_root}/skills/",
+        "$HOME/.openclaw/skills/": f"{runtime_root}/skills/",
         "/Users/soonseokoh/.openclaw/skills/": f"{runtime_root}/skills/",
         "~/.openclaw/shared/a2a-files/": "~/.agent-bridge/shared/a2a-files/",
+        "$HOME/.openclaw/shared/a2a-files/": "~/.agent-bridge/shared/a2a-files/",
         "/Users/soonseokoh/.openclaw/shared/a2a-files/": "~/.agent-bridge/shared/a2a-files/",
         "bash ~/.openclaw/scripts/codex-review.sh review main": "agent-bridge task create --to patch --title \"[REVIEW] 변경 검토\" --body \"변경 내용과 검토 포인트를 함께 전달\"",
         "bash ~/.openclaw/scripts/codex-review.sh plan /path/to/plan.md": "agent-bridge task create --to patch --title \"[PLAN-REVIEW] 계획 검토\" --body-file /path/to/plan.md",
@@ -308,16 +314,22 @@ def rewrite_agent_runtime_text(agent_dir: Path, text: str) -> str:
     runtime_root = "~/.agent-bridge/runtime"
     replacements = {
         "~/.openclaw/credentials/": f"{runtime_root}/credentials/",
+        "$HOME/.openclaw/credentials/": f"{runtime_root}/credentials/",
         "/Users/soonseokoh/.openclaw/credentials/": f"{runtime_root}/credentials/",
         "~/.openclaw/secrets/": f"{runtime_root}/secrets/",
+        "$HOME/.openclaw/secrets/": f"{runtime_root}/secrets/",
         "/Users/soonseokoh/.openclaw/secrets/": f"{runtime_root}/secrets/",
         "~/.openclaw/openclaw.json": f"{runtime_root}/openclaw.json",
+        "$HOME/.openclaw/openclaw.json": f"{runtime_root}/openclaw.json",
         "/Users/soonseokoh/.openclaw/openclaw.json": f"{runtime_root}/openclaw.json",
         "~/.openclaw/scripts/": f"{runtime_root}/scripts/",
+        "$HOME/.openclaw/scripts/": f"{runtime_root}/scripts/",
         "/Users/soonseokoh/.openclaw/scripts/": f"{runtime_root}/scripts/",
         "~/.openclaw/skills/": f"{runtime_root}/skills/",
+        "$HOME/.openclaw/skills/": f"{runtime_root}/skills/",
         "/Users/soonseokoh/.openclaw/skills/": f"{runtime_root}/skills/",
         "~/.openclaw/memory/": f"{runtime_root}/memory/",
+        "$HOME/.openclaw/memory/": f"{runtime_root}/memory/",
         "/Users/soonseokoh/.openclaw/memory/": f"{runtime_root}/memory/",
         "sessions_send": "agent-bridge task create",
         "sessions_spawn": "bridge disposable child",
@@ -332,6 +344,19 @@ def rewrite_agent_runtime_text(agent_dir: Path, text: str) -> str:
     if agent_dir.name == "patch":
         text = text.replace("~/.openclaw/patch/", "~/.agent-bridge/agents/patch/")
         text = text.replace("/Users/soonseokoh/.openclaw/patch/", "~/.agent-bridge/agents/patch/")
+        text = text.replace("~/.agent-bridge/agents/patches/", "~/.agent-bridge/runtime/patches/")
+        text = text.replace(
+            "- **⚠️ `agent-bridge task create`로 patch 호출 불가** — allow 리스트에서 제거됨, 에러 발생함",
+            "- patch 호출은 `agent-bridge task create --to patch` 또는 `agent-bridge urgent patch \"...\"`를 사용한다.",
+        )
+        text = text.replace(
+            "- **⚠️ 기존 `curl `agent-bridge urgent patch``는 사용 금지** — 코드는 남아있지만(롤백용) 에이전트는 Discord webhook만 사용",
+            "- **⚠️ 기존 localhost patch trigger는 사용 금지** — 지금은 `agent-bridge task create --to patch` 또는 `agent-bridge urgent patch \"...\"`만 사용한다.",
+        )
+        text = text.replace(
+            "- LaunchAgent logs: `~/.openclaw/logs/gateway.log`, `gateway.err.log`",
+            "- Bridge logs: `~/.agent-bridge/logs/`",
+        )
 
     return text
 
@@ -398,15 +423,27 @@ def normalize_legacy_paths(text: str) -> str:
         "~/agent-bridge/shared/": "~/.agent-bridge/shared/",
         "/Users/soonseokoh/.openclaw/shared/": "~/.agent-bridge/shared/",
         "~/.openclaw/shared/": "~/.agent-bridge/shared/",
+        "$HOME/.openclaw/shared/": "~/.agent-bridge/shared/",
         "/Users/soonseokoh/.openclaw/patch/": "~/.agent-bridge/agents/patch/",
         "/Users/soonseokoh/.openclaw/patch": "~/.agent-bridge/agents/patch",
         "~/.openclaw/patch/": "~/.agent-bridge/agents/patch/",
         "~/.openclaw/patch": "~/.agent-bridge/agents/patch",
+        "$HOME/.openclaw/patch/": "~/.agent-bridge/agents/patch/",
+        "$HOME/.openclaw/patch": "~/.agent-bridge/agents/patch",
     }
     for old, new in replacements.items():
         text = text.replace(old, new)
-    return re.sub(
+    text = re.sub(
         r"(?:~|/Users/soonseokoh)/\.openclaw/workspace-([A-Za-z0-9._-]+)",
+        r"~/.agent-bridge/agents/\1",
+        text,
+    )
+    return normalize_openclaw_home_variants(text)
+
+
+def normalize_openclaw_home_variants(text: str) -> str:
+    return re.sub(
+        r"\$HOME/\.openclaw/workspace-([A-Za-z0-9._-]+)",
         r"~/.agent-bridge/agents/\1",
         text,
     )
@@ -482,6 +519,7 @@ COMMON_CLAUDE_REPLACEMENTS = {
     '- Old `sessions_send` consults become `agent-bridge task create --to <agent>`.': '- consult handoff는 `agent-bridge task create --to <agent>`를 사용한다.',
     '- Old `sessions_send`/`sessions_spawn` style QA orchestration becomes bridge tasks plus Claude subagent features only when explicitly needed inside Claude Code.': '- QA handoff는 bridge task를 기본으로 하고, 정말 필요할 때만 Claude-native subagent를 사용한다.',
     '- Keep executing scripted workloads (e.g., `morning-briefing.py`, `evening-digest.py`, `memory-daily-*`, `event-reminder-*`, `iran-crisis-monitor`) from `~/.openclaw/scripts/`. Keep track of their logs to track regressions.': '- recurring workflow는 bridge-managed cron family와 disposable-child run을 기준으로 본다. legacy helper가 아직 필요하면 실제 존재 여부를 확인한 뒤 compatibility 경로로만 다룬다.',
+    '- Mention the regime of skills you still rely on: `agent-db`, `pinchtab`, `naver-maps`, `naver-search`, `openclaw-config`, `patch`, `agent-factory`. Flag `agent-factory` as gateway infrastructure to revisit later if / when it gets rebuilt.': '- Mention the bridge-local integrations you still rely on. If a dependency still lives outside `~/.agent-bridge/runtime`, call it out explicitly as migration debt instead of presenting it as a default tool.',
 }
 
 
