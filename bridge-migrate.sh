@@ -42,6 +42,63 @@ runtime_count_files() {
   find "$path" -type f | wc -l | tr -d ' '
 }
 
+runtime_copy_tree() {
+  local source_root="$1"
+  local target_root="$2"
+
+  bridge_require_python
+  python3 - "$source_root" "$target_root" <<'PY'
+import os
+import shutil
+import sys
+from pathlib import Path
+
+src = Path(sys.argv[1]).expanduser()
+dst = Path(sys.argv[2]).expanduser()
+ignore_names = {".git", "__pycache__", ".DS_Store"}
+
+def remove_path(path: Path) -> None:
+    if path.is_symlink() or path.is_file():
+        path.unlink()
+    elif path.is_dir():
+        shutil.rmtree(path)
+
+def same_file(left: Path, right: Path) -> bool:
+    try:
+        return right.exists() and os.path.samefile(left, right)
+    except OSError:
+        return False
+
+def copy_entry(source: Path, target: Path) -> None:
+    if source.name in ignore_names:
+        return
+    if source.is_symlink():
+        link_target = os.readlink(source)
+        if target.is_symlink() and os.readlink(target) == link_target:
+            return
+        if target.exists() or target.is_symlink():
+            remove_path(target)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.symlink_to(link_target)
+        return
+    if source.is_dir():
+        target.mkdir(parents=True, exist_ok=True)
+        for child in source.iterdir():
+            copy_entry(child, target / child.name)
+        return
+    if same_file(source, target):
+        return
+    if target.exists() or target.is_symlink():
+        remove_path(target)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(source, target, follow_symlinks=False)
+
+dst.mkdir(parents=True, exist_ok=True)
+for item in src.iterdir():
+    copy_entry(item, dst / item.name)
+PY
+}
+
 runtime_sync_one() {
   local label="$1"
   local source_root="$2"
@@ -84,7 +141,7 @@ runtime_sync_one() {
   fi
   if [[ -d "$source_root" ]]; then
     mkdir -p "$target_root"
-    cp -RP "$source_root/." "$target_root/"
+    runtime_copy_tree "$source_root" "$target_root"
     printf '  target_files_after: %s\n' "$(runtime_count_files "$target_root")"
   else
     cp -RP "$source_root" "$target_root"

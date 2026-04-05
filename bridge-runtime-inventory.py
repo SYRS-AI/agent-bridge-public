@@ -489,6 +489,85 @@ def rewrite_string(value: str, rules: list[tuple[str, str, str]]) -> tuple[str, 
     return result, counts
 
 
+def extract_session_target_agent(text: str) -> str | None:
+    patterns = (
+        r'sessionKey="agent:([^:"]+):',
+        r"sessionKey='agent:([^:']+):",
+        r'agent:([^:"]+):discord:',
+        r"agent:([^:']+):discord:",
+    )
+    for pattern in patterns:
+        match = re.search(pattern, text)
+        if match:
+            return match.group(1)
+    return None
+
+
+def replace_with_indent(line: str, replacement: str) -> str:
+    prefix = re.match(r"\s*", line).group(0)
+    return f"{prefix}{replacement}"
+
+
+def rewrite_cron_delivery_text(text: str, agent_id: str) -> tuple[str, Counter]:
+    if "sessions_send" not in text and "openclaw message send" not in text:
+        return text, Counter()
+
+    counts: Counter = Counter()
+    lines = text.splitlines()
+    output: list[str] = []
+    banner_added = False
+
+    def add_banner() -> None:
+        nonlocal banner_added
+        if banner_added:
+            return
+        output.extend(
+            [
+                "Bridge cron delivery rules:",
+                "- direct-send legacy primitive는 실행하지 않는다.",
+                "- 다른 에이전트 도움이 필요하면 결과에 durable handoff 필요 여부를 적고 `agent-bridge task create --to <agent>` 기준으로 넘긴다.",
+                "- 사람-facing 알림이 필요하면 `needs_human_followup=true`와 함께 채널/DM용 메시지 초안을 결과에 남긴다.",
+                "",
+            ]
+        )
+        banner_added = True
+
+    for line in lines:
+        if "sessions_send" in line:
+            add_banner()
+            target_agent = extract_session_target_agent(line)
+            if target_agent and target_agent != agent_id:
+                output.append(
+                    replace_with_indent(
+                        line,
+                        f"- cross-agent 전달이 필요하면 `agent-bridge task create --to {target_agent}` handoff가 필요하다고 결과에 적고, 전달할 메시지 초안을 함께 남긴다.",
+                    )
+                )
+                counts["notify_handoff"] += 1
+            else:
+                output.append(
+                    replace_with_indent(
+                        line,
+                        "- direct-send 대신 `needs_human_followup=true`로 표시하고, 부모 세션이 채널에서 보낼 메시지 초안을 결과에 남긴다.",
+                    )
+                )
+                counts["notify_followup"] += 1
+            continue
+        if "openclaw message send" in line:
+            add_banner()
+            output.append(
+                replace_with_indent(
+                    line,
+                    "- direct send CLI는 사용하지 않는다. 채널/DM 보고가 필요하면 `needs_human_followup=true`로 표시하고, 대상과 메시지 초안을 결과에 남긴다.",
+                )
+            )
+            counts["notify_followup"] += 1
+            continue
+        output.append(line)
+
+    return "\n".join(output), counts
+
+
 def rewrite_value(value, rules: list[tuple[str, str, str]]):
     counts: Counter = Counter()
     changed = False
@@ -535,6 +614,18 @@ def rewrite_cron_jobs(bridge_home: Path, legacy_home: Path, jobs_file: Path, dry
 
     for job in jobs:
         rewritten, changed, counts = rewrite_value(job, rules)
+        agent_id = str(rewritten.get("agentId") or job.get("agentId") or "")
+        payload = rewritten.get("payload")
+        if isinstance(payload, dict):
+            for field in ("message", "text"):
+                raw = payload.get(field)
+                if not isinstance(raw, str):
+                    continue
+                delivery_rewritten, delivery_counts = rewrite_cron_delivery_text(raw, agent_id)
+                if delivery_rewritten != raw:
+                    payload[field] = delivery_rewritten
+                    changed = True
+                    counts.update(delivery_counts)
         rewritten_jobs.append(rewritten)
         if not changed:
             continue
@@ -542,7 +633,17 @@ def rewrite_cron_jobs(bridge_home: Path, legacy_home: Path, jobs_file: Path, dry
         replacement_counts.update(counts)
         if len(examples) < 8:
             texts = list(iter_strings(rewritten))
-            preview = next((first_line(text) for text in texts if "~/.agent-bridge/runtime/" in text or "~/.agent-bridge/shared/" in text), "")
+            preview = next(
+                (
+                    first_line(text)
+                    for text in texts
+                    if "~/.agent-bridge/runtime/" in text
+                    or "~/.agent-bridge/shared/" in text
+                    or "needs_human_followup=true" in text
+                    or "agent-bridge task create --to" in text
+                ),
+                "",
+            )
             examples.append(
                 {
                     "job": str(job.get("name") or job.get("id") or "<unnamed>"),

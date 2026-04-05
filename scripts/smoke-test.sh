@@ -762,7 +762,7 @@ cat >"$LEGACY_ROOT/cron/jobs.json" <<EOF
         "tz": "UTC"
       },
       "payload": {
-        "text": "python3 ~/.openclaw/scripts/morning-briefing.py && openclaw message send main"
+        "text": "python3 ~/.openclaw/scripts/morning-briefing.py\nsessions_send(sessionKey=\"agent:smoke-helper:discord:channel:123\", message=\"[ALERT] check queue\")\nexec: openclaw message send --channel discord --account smoke --target \"123\" --message \"done\""
       }
     }
   ]
@@ -800,6 +800,10 @@ RUNTIME_REWRITE_OUTPUT="$("$REPO_ROOT/agent-bridge" migrate runtime rewrite-cron
 assert_contains "$RUNTIME_REWRITE_OUTPUT" "status: rewritten"
 assert_contains "$RUNTIME_REWRITE_OUTPUT" "changed_jobs: 1"
 grep -q "$BRIDGE_HOME/runtime/scripts/morning-briefing.py" "$LEGACY_ROOT/cron/jobs.json" || die "expected rewritten runtime script path"
+grep -q 'agent-bridge task create --to smoke-helper' "$LEGACY_ROOT/cron/jobs.json" || die "expected rewritten runtime handoff guidance"
+grep -q 'needs_human_followup=true' "$LEGACY_ROOT/cron/jobs.json" || die "expected rewritten runtime follow-up guidance"
+! grep -q 'sessions_send' "$LEGACY_ROOT/cron/jobs.json" || die "expected sessions_send removed from cron payload"
+! grep -q 'openclaw message send' "$LEGACY_ROOT/cron/jobs.json" || die "expected direct send removed from cron payload"
 
 log "rewriting copied runtime files to bridge-local paths"
 RUNTIME_FILE_REWRITE_OUTPUT="$("$REPO_ROOT/agent-bridge" migrate runtime rewrite-files --bridge-home "$BRIDGE_HOME" --legacy-home "$LEGACY_ROOT" --runtime-root "$BRIDGE_HOME/runtime")"
