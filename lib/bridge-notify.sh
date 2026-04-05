@@ -54,10 +54,21 @@ bridge_notify_send() {
   bridge_notify_python "${args[@]}"
 }
 
-bridge_warn_missing_notify_transport() {
+bridge_warn_missing_wake_channel() {
   local agent="$1"
 
-  bridge_warn "Claude agent '${agent}' has no external webhook transport configured; bridge will rely on local tmux delivery when the session is active. To support channel delivery, configure BRIDGE_AGENT_NOTIFY_KIND/TARGET in agent-roster.local.sh."
+  bridge_warn "Claude agent '${agent}' has no webhook wake channel configured. Queue tasks remain durable, but idle wake is disabled until BRIDGE_AGENT_WEBHOOK_PORT is set."
+}
+
+bridge_claude_session_can_wake() {
+  local agent="$1"
+  local session="$2"
+
+  if bridge_agent_idle_marker_exists "$agent"; then
+    return 0
+  fi
+
+  bridge_tmux_session_has_prompt "$session" claude
 }
 
 bridge_notification_text() {
@@ -92,37 +103,28 @@ bridge_dispatch_notification() {
   local task_id="${4:-}"
   local priority="${5:-normal}"
   local engine=""
-  local kind=""
   local session=""
   local text=""
 
   engine="$(bridge_agent_engine "$agent")"
   case "$engine" in
     claude)
-      kind="$(bridge_agent_notify_kind "$agent")"
-      if bridge_agent_has_notify_transport "$agent"; then
-        case "$kind" in
-          discord)
-            ;;
-          *)
-            if bridge_notify_send "$agent" "$title" "$message" "$task_id" "$priority"; then
-              return 0
-            fi
-            bridge_warn "external notify failed for Claude agent '${agent}'; falling back to local tmux delivery if possible"
-            ;;
-        esac
-      fi
       session="$(bridge_agent_session "$agent")"
-      if [[ -n "$session" ]] && bridge_tmux_session_exists "$session"; then
-        text="$(bridge_notification_text "$title" "$message" "$task_id" "$priority")"
-        bridge_tmux_send_and_submit "$session" "$engine" "$text"
-        return $?
+      if [[ -z "$session" ]] || ! bridge_tmux_session_exists "$session"; then
+        return 2
       fi
-      if ! bridge_agent_has_notify_transport "$agent"; then
-        bridge_warn_missing_notify_transport "$agent"
-      elif [[ "$kind" == "discord" ]]; then
-        bridge_warn "discord bot channel posts do not reliably reach Claude sessions; use discord-webhook or keep the session active for local delivery: ${agent}"
+      if ! bridge_agent_has_wake_channel "$agent"; then
+        return 2
       fi
+      if ! bridge_claude_session_can_wake "$agent" "$session"; then
+        return 2
+      fi
+
+      text="$(bridge_notification_text "$title" "$message" "$task_id" "$priority")"
+      if bridge_post_channel_webhook "$agent" "$text"; then
+        return 0
+      fi
+      bridge_warn "Claude wake webhook delivery failed for '${agent}'"
       return 1
       ;;
     *)

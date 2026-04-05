@@ -42,9 +42,9 @@ BRIDGE_AGENT_SESSION["codex-developer"]="codex-developer"
 # BRIDGE_AGENT_PROFILE_HOME["tester"]="$HOME/project-test"
 # BRIDGE_AGENT_PROFILE_HOME["developer"]="$HOME/project-app"
 
-# Optional external notification transport for Claude Code agents. Prefer
-# `discord-webhook` for Discord-backed Claude sessions; plain `discord` bot
-# posts are not a reliable delivery surface for Claude Code.
+# Optional external notification transport. This is not the primary A2A
+# delivery path for Claude roles; Claude wake uses BRIDGE_AGENT_WEBHOOK_PORT.
+# Use these only when you explicitly want out-of-band Discord/Telegram posts.
 # BRIDGE_AGENT_NOTIFY_KIND["tester"]="discord-webhook"
 # BRIDGE_AGENT_NOTIFY_TARGET["tester"]="<discord-webhook-url>"
 # BRIDGE_AGENT_NOTIFY_ACCOUNT["tester"]="default"
@@ -52,8 +52,7 @@ BRIDGE_AGENT_SESSION["codex-developer"]="codex-developer"
 # BRIDGE_AGENT_NOTIFY_TARGET["developer"]="<telegram-chat-or-thread-id>"
 # BRIDGE_AGENT_NOTIFY_ACCOUNT["developer"]="default"
 # BRIDGE_AGENT_DISCORD_CHANNEL_ID["tester"]="123456789012345678"
-# The channel id is still useful for Discord wake relay / metadata, but not for
-# bot-authored Claude delivery.
+# The channel id is still useful for Discord wake relay / metadata.
 #
 # Optional: local Claude idle-wake webhook port. Static roles should set one
 # explicitly; dynamic Claude roles get a state-managed port automatically.

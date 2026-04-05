@@ -23,17 +23,24 @@ daemon_log_event() {
 
 nudge_agent_session() {
   local agent="$1"
-  local session="$2"
+  local _session="$2"
   local queued="$3"
   local claimed="$4"
   local idle="$5"
   local nudge_key="${6:-}"
   local title
   local message
+  local status=0
 
   title="queued tasks waiting (${queued})"
   message="agb inbox ${agent}"
-  bridge_dispatch_notification "$agent" "$title" "$message" "" "normal" || return 1
+  if ! bridge_dispatch_notification "$agent" "$title" "$message" "" "normal"; then
+    status=$?
+    if [[ "$status" == "2" ]]; then
+      return 2
+    fi
+    return 1
+  fi
   bridge_task_note_nudge "$agent" "$nudge_key" || true
   echo "[info] nudged ${agent} (queued=${queued}, claimed=${claimed}, idle=${idle}s)"
 }
@@ -45,7 +52,9 @@ webhook_wake_agent_session() {
   local idle="$4"
   local nudge_key="${5:-}"
   local fallback_idle="${BRIDGE_CLAUDE_IDLE_FALLBACK_SECONDS:-300}"
-  local message="agb inbox ${agent}"
+  local title
+  local message
+  local status=0
 
   [[ "$fallback_idle" =~ ^[0-9]+$ ]] || fallback_idle=300
   [[ "$idle" =~ ^[0-9]+$ ]] || idle=0
@@ -54,10 +63,17 @@ webhook_wake_agent_session() {
     return 2
   fi
 
-  if bridge_post_channel_webhook "$agent" "$message"; then
+  title="queued tasks waiting (${queued})"
+  message="agb inbox ${agent}"
+  if bridge_dispatch_notification "$agent" "$title" "$message" "" "normal"; then
     bridge_task_note_nudge "$agent" "$nudge_key" || true
     echo "[info] webhook woke ${agent} (queued=${queued}, claimed=${claimed}, idle=${idle}s)"
     return 0
+  fi
+
+  status=$?
+  if [[ "$status" == "2" ]]; then
+    return 2
   fi
 
   return 1
@@ -348,7 +364,10 @@ cmd_sync_cycle() {
     fi
 
     engine="$(bridge_agent_engine "$agent")"
-    if [[ "$engine" == "claude" ]] && bridge_agent_has_webhook_port "$agent"; then
+    if [[ "$engine" == "claude" ]]; then
+      if ! bridge_agent_has_wake_channel "$agent"; then
+        continue
+      fi
       if webhook_wake_agent_session "$agent" "$queued" "$claimed" "$idle" "$nudge_key"; then
         continue
       fi
@@ -357,9 +376,17 @@ cmd_sync_cycle() {
           continue
           ;;
       esac
+      continue
     fi
 
-    nudge_agent_session "$agent" "$session" "$queued" "$claimed" "$idle" "$nudge_key" || true
+    if nudge_agent_session "$agent" "$session" "$queued" "$claimed" "$idle" "$nudge_key"; then
+      continue
+    fi
+    case "$?" in
+      2)
+        continue
+        ;;
+    esac
   done <<<"$nudge_output"
 
   bridge_discord_relay_step || true

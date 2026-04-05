@@ -132,6 +132,9 @@ bridge_persist_agent_state "$AGENT"
 
 tmux new-session -d -s "$SESSION" -c "$WORK_DIR" "$SESSION_CMD"
 bridge_tmux_bootstrap_session_options "$SESSION"
+if [[ "$ENGINE" == "claude" ]]; then
+  bridge_agent_mark_idle_now "$AGENT"
+fi
 if [[ -z "$(bridge_agent_session_id "$AGENT")" ]]; then
   bridge_refresh_agent_session_id "$AGENT" 12 0.25 >/dev/null 2>&1 || true
 fi

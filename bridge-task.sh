@@ -47,9 +47,13 @@ notify_task_requester() {
   local TASK_CREATED_BY=""
   local TASK_PRIORITY=""
   local creator
-  local engine
-  local message
-  local title
+  local creator_engine=""
+  local completion_title=""
+  local completion_body=""
+  local notice_message=""
+  local ORIG_TASK_ID=""
+  local ORIG_TASK_TITLE=""
+  local ORIG_TASK_PRIORITY=""
 
   # shellcheck disable=SC1090
   source <(bridge_queue_cli show "$task_id" --format shell)
@@ -58,20 +62,34 @@ notify_task_requester() {
   [[ -n "$creator" ]] || return 0
   [[ "$creator" != "$actor" ]] || return 0
   bridge_agent_exists "$creator" || return 0
+  [[ "$TASK_TITLE" == \[task-complete\]* ]] && return 0
+  creator_engine="$(bridge_agent_engine "$creator")"
 
-  engine="$(bridge_agent_engine "$creator")"
-  if [[ "$engine" != "claude" ]] && ! bridge_agent_is_active "$creator"; then
+  ORIG_TASK_ID="$TASK_ID"
+  ORIG_TASK_TITLE="$TASK_TITLE"
+  ORIG_TASK_PRIORITY="$TASK_PRIORITY"
+  completion_title="[task-complete] ${ORIG_TASK_TITLE}"
+  completion_body="completed_by: ${actor}"
+  completion_body+=$'\n'"original_task: #${ORIG_TASK_ID}"
+  completion_body+=$'\n'"inspect: agb show ${ORIG_TASK_ID}"
+  if [[ -n "$note" ]]; then
+    completion_body+=$'\n\n'"completion_note:"$'\n'"${note}"
+  elif [[ -n "$note_file" ]]; then
+    completion_body+=$'\n'"completion_note_file: ${note_file}"
+  fi
+
+  TASK_ID=""
+  TASK_TITLE=""
+  TASK_PRIORITY=""
+  # shellcheck disable=SC1090
+  source <(bridge_queue_cli create --to "$creator" --title "$completion_title" --from bridge --priority "$ORIG_TASK_PRIORITY" --body "$completion_body" --format shell)
+
+  if [[ "$creator_engine" != "claude" ]] && ! bridge_agent_is_active "$creator"; then
     return 0
   fi
 
-  title="$TASK_TITLE"
-  message="completed by ${actor}"
-  message+=$'\n'"agb show ${TASK_ID}"
-  if [[ -n "$note" || -n "$note_file" ]]; then
-    message+=$'\n'"completion note attached"
-  fi
-
-  bridge_dispatch_notification "$creator" "$title" "$message" "$TASK_ID" "$TASK_PRIORITY" || true
+  notice_message="agb inbox ${creator}"
+  bridge_dispatch_notification "$creator" "$TASK_TITLE" "$notice_message" "$TASK_ID" "$TASK_PRIORITY" || true
 }
 
 cmd_create() {

@@ -35,6 +35,10 @@ bridge_build_dynamic_launch_cmd() {
 bridge_build_resume_launch_cmd() {
   local agent="$1"
   local engine continue_mode session_id
+  local original_cmd=""
+  local env_prefix=""
+  local channels_flag=""
+  local resume_cmd=""
 
   engine="$(bridge_agent_engine "$agent")"
   continue_mode="$(bridge_agent_continue "$agent")"
@@ -49,7 +53,22 @@ bridge_build_resume_launch_cmd() {
       bridge_join_quoted codex resume "$session_id" --dangerously-bypass-approvals-and-sandbox --no-alt-screen
       ;;
     claude)
-      bridge_join_quoted claude --resume "$session_id" --dangerously-skip-permissions --name "$agent"
+      original_cmd="${BRIDGE_AGENT_LAUNCH_CMD[$agent]-}"
+      if [[ "$original_cmd" =~ ^([A-Z_]+=[^ ]+[[:space:]]+)+ ]]; then
+        env_prefix="${BASH_REMATCH[0]}"
+      fi
+      if [[ "$original_cmd" == *"--channels "* ]]; then
+        channels_flag="$(printf '%s' "$original_cmd" | grep -oE -- '--channels [^ ]+' || true)"
+      fi
+      resume_cmd="$(bridge_join_quoted claude --resume "$session_id" --dangerously-skip-permissions --name "$agent")"
+      if [[ -n "$channels_flag" ]]; then
+        resume_cmd="${resume_cmd} ${channels_flag//$'\n'/ }"
+      fi
+      if [[ -n "$env_prefix" ]]; then
+        printf '%s%s' "$env_prefix" "$resume_cmd"
+      else
+        printf '%s' "$resume_cmd"
+      fi
       ;;
     *)
       return 1
@@ -635,20 +654,20 @@ bridge_write_roster_status_snapshot() {
   local file="$1"
   local agent
   local active
-  local notify
+  local wake
   local session
 
   {
-    echo -e "agent\tengine\tsession\tworkdir\tsource\tactive\tnotify"
+    echo -e "agent\tengine\tsession\tworkdir\tsource\tactive\twake"
     for agent in "${BRIDGE_AGENT_IDS[@]}"; do
       active=0
-      notify="$(bridge_agent_notify_status "$agent")"
+      wake="$(bridge_agent_wake_status "$agent")"
       session="$(bridge_agent_session "$agent")"
       if bridge_agent_is_active "$agent"; then
         active=1
       fi
 
-      echo -e "${agent}\t$(bridge_agent_engine "$agent")\t${session}\t$(bridge_agent_workdir "$agent")\t$(bridge_agent_source "$agent")\t${active}\t${notify}"
+      echo -e "${agent}\t$(bridge_agent_engine "$agent")\t${session}\t$(bridge_agent_workdir "$agent")\t$(bridge_agent_source "$agent")\t${active}\t${wake}"
     done
   } >"$file"
 }

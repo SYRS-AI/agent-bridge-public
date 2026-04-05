@@ -427,6 +427,37 @@ bridge_agent_notify_status() {
   printf '%s' "miss"
 }
 
+bridge_agent_requires_wake_channel() {
+  local agent="$1"
+  [[ "$(bridge_agent_engine "$agent")" == "claude" ]]
+}
+
+bridge_agent_has_wake_channel() {
+  local agent="$1"
+
+  if ! bridge_agent_requires_wake_channel "$agent"; then
+    return 1
+  fi
+
+  bridge_agent_has_webhook_port "$agent"
+}
+
+bridge_agent_wake_status() {
+  local agent="$1"
+
+  if ! bridge_agent_requires_wake_channel "$agent"; then
+    printf '%s' "-"
+    return 0
+  fi
+
+  if bridge_agent_has_wake_channel "$agent"; then
+    printf '%s' "ok"
+    return 0
+  fi
+
+  printf '%s' "miss"
+}
+
 bridge_agent_loop() {
   local agent="$1"
   printf '%s' "${BRIDGE_AGENT_LOOP[$agent]-1}"

@@ -59,8 +59,11 @@ export BRIDGE_WEBHOOK_PORT_RANGE_START=9301
 export BRIDGE_WEBHOOK_PORT_RANGE_END=9399
 
 SESSION_NAME="bridge-smoke-$$"
+REQUESTER_SESSION="bridge-requester-$$"
 SMOKE_AGENT="smoke-agent-$$"
+REQUESTER_AGENT="requester-agent-$$"
 WORKDIR="$TMP_ROOT/workdir"
+REQUESTER_WORKDIR="$TMP_ROOT/requester-workdir"
 HOOK_WORKDIR="$TMP_ROOT/claude-hook-workdir"
 MCP_WORKDIR="$TMP_ROOT/claude-mcp-workdir"
 FAKE_BIN="$TMP_ROOT/bin"
@@ -71,6 +74,7 @@ FAKE_DISCORD_PID=""
 cleanup() {
   bash "$REPO_ROOT/bridge-daemon.sh" stop >/dev/null 2>&1 || true
   tmux kill-session -t "$SESSION_NAME" >/dev/null 2>&1 || true
+  tmux kill-session -t "$REQUESTER_SESSION" >/dev/null 2>&1 || true
   if [[ -n "$FAKE_DISCORD_PID" ]]; then
     kill "$FAKE_DISCORD_PID" >/dev/null 2>&1 || true
     wait "$FAKE_DISCORD_PID" >/dev/null 2>&1 || true
@@ -79,7 +83,7 @@ cleanup() {
 }
 trap cleanup EXIT
 
-mkdir -p "$BRIDGE_HOME" "$BRIDGE_STATE_DIR" "$BRIDGE_LOG_DIR" "$BRIDGE_SHARED_DIR" "$WORKDIR"
+mkdir -p "$BRIDGE_HOME" "$BRIDGE_STATE_DIR" "$BRIDGE_LOG_DIR" "$BRIDGE_SHARED_DIR" "$WORKDIR" "$REQUESTER_WORKDIR"
 mkdir -p "$HOOK_WORKDIR/.claude"
 mkdir -p "$MCP_WORKDIR"
 mkdir -p "$FAKE_BIN"
@@ -96,12 +100,18 @@ chmod +x "$FAKE_BIN/codex"
 cat >"$BRIDGE_ROSTER_LOCAL_FILE" <<EOF
 #!/usr/bin/env bash
 bridge_add_agent_id_if_missing "$SMOKE_AGENT"
+bridge_add_agent_id_if_missing "$REQUESTER_AGENT"
 BRIDGE_AGENT_DESC["$SMOKE_AGENT"]="Smoke test role"
+BRIDGE_AGENT_DESC["$REQUESTER_AGENT"]="Requester role"
 BRIDGE_AGENT_ENGINE["$SMOKE_AGENT"]="codex"
+BRIDGE_AGENT_ENGINE["$REQUESTER_AGENT"]="codex"
 BRIDGE_AGENT_SESSION["$SMOKE_AGENT"]="$SESSION_NAME"
+BRIDGE_AGENT_SESSION["$REQUESTER_AGENT"]="$REQUESTER_SESSION"
 BRIDGE_AGENT_WORKDIR["$SMOKE_AGENT"]="$WORKDIR"
+BRIDGE_AGENT_WORKDIR["$REQUESTER_AGENT"]="$REQUESTER_WORKDIR"
 BRIDGE_AGENT_DISCORD_CHANNEL_ID["$SMOKE_AGENT"]="123456789012345678"
 BRIDGE_AGENT_LAUNCH_CMD["$SMOKE_AGENT"]='python3 -c "import time; print(\"smoke-agent ready\", flush=True); time.sleep(30)"'
+BRIDGE_AGENT_LAUNCH_CMD["$REQUESTER_AGENT"]='python3 -c "import time; print(\"requester-agent ready\", flush=True); time.sleep(30)"'
 EOF
 
 echo "temporary smoke note" >"$BRIDGE_SHARED_DIR/note.md"
@@ -196,8 +206,10 @@ assert_contains "$DAEMON_STATUS" "running pid="
 
 log "starting isolated tmux role"
 bash "$REPO_ROOT/bridge-start.sh" "$SMOKE_AGENT" >/dev/null
+bash "$REPO_ROOT/bridge-start.sh" "$REQUESTER_AGENT" >/dev/null
 sleep 1
 tmux has-session -t "$SESSION_NAME" >/dev/null 2>&1 || die "smoke tmux session was not created"
+tmux has-session -t "$REQUESTER_SESSION" >/dev/null 2>&1 || die "requester tmux session was not created"
 
 log "syncing live roster"
 bash "$REPO_ROOT/bridge-daemon.sh" sync >/dev/null
@@ -209,7 +221,7 @@ STATUS_OUTPUT="$("$REPO_ROOT/agent-bridge" status --all-agents)"
 assert_contains "$STATUS_OUTPUT" "$SMOKE_AGENT"
 
 log "creating queue task"
-CREATE_OUTPUT="$(bash "$REPO_ROOT/bridge-task.sh" create --to "$SMOKE_AGENT" --title "smoke queue" --body-file "$BRIDGE_SHARED_DIR/note.md" --from smoke-test)"
+CREATE_OUTPUT="$(bash "$REPO_ROOT/bridge-task.sh" create --to "$SMOKE_AGENT" --title "smoke queue" --body-file "$BRIDGE_SHARED_DIR/note.md" --from "$REQUESTER_AGENT")"
 assert_contains "$CREATE_OUTPUT" "created task #"
 
 INBOX_OUTPUT="$(bash "$REPO_ROOT/bridge-task.sh" inbox "$SMOKE_AGENT")"
@@ -222,6 +234,13 @@ bash "$REPO_ROOT/bridge-task.sh" "done" 1 --agent "$SMOKE_AGENT" --note "smoke o
 SHOW_OUTPUT="$(bash "$REPO_ROOT/bridge-task.sh" show 1)"
 assert_contains "$SHOW_OUTPUT" "status: done"
 assert_contains "$SHOW_OUTPUT" "note: smoke ok"
+
+REQUESTER_INBOX_OUTPUT="$(bash "$REPO_ROOT/bridge-task.sh" inbox "$REQUESTER_AGENT")"
+assert_contains "$REQUESTER_INBOX_OUTPUT" "[task-complete] smoke queue"
+REQUESTER_SHOW_OUTPUT="$(bash "$REPO_ROOT/bridge-task.sh" show 2)"
+assert_contains "$REQUESTER_SHOW_OUTPUT" "assigned_to: $REQUESTER_AGENT"
+assert_contains "$REQUESTER_SHOW_OUTPUT" "original_task: #1"
+assert_contains "$REQUESTER_SHOW_OUTPUT" "completed_by: $SMOKE_AGENT"
 
 SUMMARY_OUTPUT="$("$REPO_ROOT/agb" summary "$SMOKE_AGENT")"
 assert_contains "$SUMMARY_OUTPUT" "$SMOKE_AGENT"
@@ -239,6 +258,7 @@ assert_contains "$(cat "$FAKE_DISCORD_REQUESTS")" "[Agent Bridge setup]"
 log "running broader agent preflight"
 SETUP_AGENT_OUTPUT="$("$REPO_ROOT/agent-bridge" setup agent "$SMOKE_AGENT" --skip-discord)"
 assert_contains "$SETUP_AGENT_OUTPUT" "claude_md: n/a (engine=codex)"
+assert_contains "$SETUP_AGENT_OUTPUT" "wake_channel: -"
 assert_contains "$SETUP_AGENT_OUTPUT" "start_dry_run: ok"
 
 log "ensuring Claude Stop hook settings merge"
@@ -467,12 +487,12 @@ cat >"$DISPATCH_BODY" <<EOF
 EOF
 
 CRON_CREATE_OUTPUT="$(bash "$REPO_ROOT/bridge-task.sh" create --to "$SMOKE_AGENT" --title "[cron-dispatch] smoke-job (2026-04-05T10:00:00Z)" --body-file "$DISPATCH_BODY" --from smoke-test)"
-assert_contains "$CRON_CREATE_OUTPUT" "created task #2"
+assert_contains "$CRON_CREATE_OUTPUT" "created task #3"
 
 bash "$REPO_ROOT/bridge-daemon.sh" sync >/dev/null
 
 for _ in $(seq 1 20); do
-  SHOW_CRON_OUTPUT="$(bash "$REPO_ROOT/bridge-task.sh" show 2)"
+  SHOW_CRON_OUTPUT="$(bash "$REPO_ROOT/bridge-task.sh" show 3)"
   if [[ "$SHOW_CRON_OUTPUT" == *"status: done"* ]]; then
     break
   fi

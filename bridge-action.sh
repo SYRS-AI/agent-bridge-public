@@ -82,6 +82,10 @@ fi
 SESSION="$(bridge_agent_session "$TARGET")"
 ENGINE="$(bridge_agent_engine "$TARGET")"
 
+if [[ "$ENGINE" == "claude" ]]; then
+  bridge_die "Claude actions no longer use tmux send-keys under A2A v2. Use queued tasks or the agent's native channel instead: ${TARGET}/${ACTION}"
+fi
+
 if [[ $DRY_RUN -eq 1 ]]; then
   echo "agent=$TARGET"
   echo "session=$SESSION"

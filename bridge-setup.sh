@@ -167,7 +167,7 @@ run_agent() {
   local prompt_hook_output=""
   local webhook_output=""
   local webhook_port=""
-  local notify_status=""
+  local wake_status=""
   local roster_channel=""
   local access_channel=""
   local access_channels=()
@@ -206,7 +206,7 @@ run_agent() {
   session="$(bridge_agent_session "$agent")"
   workdir="$(bridge_agent_workdir "$agent")"
   profile_target="$(bridge_resolve_profile_target "$agent" || true)"
-  notify_status="$(bridge_agent_notify_status "$agent")"
+  wake_status="$(bridge_agent_wake_status "$agent")"
   roster_channel="$(bridge_agent_discord_channel_id "$agent")"
   access_channel="$(bridge_setup_primary_access_channel "$(bridge_agent_discord_state_dir "$agent")" || true)"
   mapfile -t access_channels < <(bridge_setup_access_channels "$(bridge_agent_discord_state_dir "$agent")" || true)
@@ -232,7 +232,7 @@ run_agent() {
   else
     printf 'roster_discord_channel: (unset)\n'
   fi
-  printf 'notify_transport: %s\n' "$notify_status"
+  printf 'wake_channel: %s\n' "$wake_status"
 
   if [[ "$engine" == "claude" ]]; then
     echo
@@ -347,8 +347,8 @@ run_agent() {
       warnings+=("Roster Discord channel $roster_channel is not in $(bridge_agent_discord_state_dir "$agent")/access.json. Re-run 'agent-bridge setup discord $agent' or update the allowlist.")
     fi
   fi
-  if [[ "$engine" == "claude" && "$notify_status" == "miss" ]]; then
-    warnings+=("Claude role has no notify transport metadata. Queue tasks still work, but configure BRIDGE_AGENT_NOTIFY_* if you want external notifications.")
+  if [[ "$engine" == "claude" && "$wake_status" == "miss" ]]; then
+    warnings+=("Claude role has no webhook wake channel. Queue tasks remain durable, but configure BRIDGE_AGENT_WEBHOOK_PORT for static roles so idle wake works without tmux send-keys.")
   fi
 
   if [[ ${#warnings[@]} -gt 0 ]]; then

@@ -156,7 +156,14 @@ SAFE_MSG="$(bridge_sanitize_text "$MESSAGE")"
 echo "[${TIMESTAMP}] !URGENT ${TARGET}/${SESSION:-none} task=${TASK_ID}: ${SAFE_MSG}" >> "$LOGFILE"
 
 if ! bridge_dispatch_notification "$TARGET" "$TASK_TITLE" "$NOTICE_MESSAGE" "$TASK_ID" "urgent"; then
-  bridge_warn "urgent attention signal was not delivered; task #${TASK_ID} remains queued for ${TARGET}"
+  case "$?" in
+    2)
+      bridge_info "urgent task #${TASK_ID} queued for ${TARGET}; direct wake deferred until the session is idle"
+      ;;
+    *)
+      bridge_warn "urgent attention signal was not delivered; task #${TASK_ID} remains queued for ${TARGET}"
+      ;;
+  esac
 fi
 
 echo -e "${GREEN}[${TIMESTAMP}] !URGENT ${TARGET}: task #${TASK_ID} queued (${MSG_LEN}자)${NC}"

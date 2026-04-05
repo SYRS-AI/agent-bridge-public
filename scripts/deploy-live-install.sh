@@ -11,6 +11,7 @@ RESTART_DAEMON=0
 COPIED_COUNT=0
 VERIFIED_COUNT=0
 SKIPPED_COUNT=0
+DRIFT_COUNT=0
 
 usage() {
   cat <<EOF
@@ -94,6 +95,26 @@ verify_tracked_file() {
   VERIFIED_COUNT=$((VERIFIED_COUNT + 1))
 }
 
+report_reverse_drift() {
+  local relpath="$1"
+  local src="$SOURCE_ROOT/$relpath"
+  local dst="$TARGET_ROOT/$relpath"
+
+  if should_skip_relpath "$relpath"; then
+    return 0
+  fi
+
+  [[ -f "$src" ]] || return 0
+  [[ -f "$dst" ]] || return 0
+
+  if cmp -s "$src" "$dst"; then
+    return 0
+  fi
+
+  DRIFT_COUNT=$((DRIFT_COUNT + 1))
+  printf '[warn] live file differs from repo: %s\n' "$relpath" >&2
+}
+
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --target)
@@ -132,6 +153,14 @@ fi
 mkdir -p "$TARGET_ROOT"
 
 while IFS= read -r -d '' relpath; do
+  report_reverse_drift "$relpath"
+done < <(git -C "$SOURCE_ROOT" ls-files -z)
+
+if [[ "$DRIFT_COUNT" -gt 0 ]]; then
+  printf '[warn] detected %s live files that differ from repo before deploy\n' "$DRIFT_COUNT" >&2
+fi
+
+while IFS= read -r -d '' relpath; do
   copy_tracked_file "$relpath"
 done < <(git -C "$SOURCE_ROOT" ls-files -z)
 
@@ -155,6 +184,7 @@ printf 'source_root: %s\n' "$SOURCE_ROOT"
 printf 'target_root: %s\n' "$TARGET_ROOT"
 printf 'copied_files: %s\n' "$COPIED_COUNT"
 printf 'skipped_runtime_paths: %s\n' "$SKIPPED_COUNT"
+printf 'predeploy_live_drift: %s\n' "$DRIFT_COUNT"
 if [[ "$DRY_RUN" == "0" ]]; then
   printf 'verified_files: %s\n' "$VERIFIED_COUNT"
 fi

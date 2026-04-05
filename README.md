@@ -171,31 +171,6 @@ cd ~/agent-bridge
 
 The deploy helper copies every tracked file from the working tree, verifies the copied bytes, and preserves target-only runtime files such as `agent-roster.local.sh`, `state/`, `logs/`, and `shared/`.
 
-### Configure queue notifications for Claude roles
-
-Queue-backed tasks still work without any extra transport. For Claude Code
-roles, the bridge uses short prompt-gated local `tmux` delivery when the target
-session is active. If you also want external channel delivery, configure a
-webhook transport.
-
-Add one of these to `agent-roster.local.sh`:
-
-```bash
-BRIDGE_AGENT_DISCORD_CHANNEL_ID["tester"]="123456789012345678"
-```
-
-Or:
-
-```bash
-BRIDGE_AGENT_NOTIFY_KIND["tester"]="discord-webhook"
-BRIDGE_AGENT_NOTIFY_TARGET["tester"]="<discord-webhook-url>"
-BRIDGE_AGENT_NOTIFY_ACCOUNT["tester"]="default"
-```
-
-Use `telegram` only when the Claude session genuinely consumes Telegram as its
-primary inbound surface. Plain Discord bot posts are not a reliable delivery
-surface for Claude Code sessions.
-
 ### Enable Claude idle wake webhooks
 
 For Claude roles that should wake themselves when queue work arrives at a task
@@ -207,6 +182,23 @@ BRIDGE_AGENT_WEBHOOK_PORT["tester"]="9001"
 
 Dynamic Claude agents get a state-managed port automatically from the bridge's
 local range. Static roles should set a fixed port explicitly.
+
+Queue-backed work remains durable even without a webhook port, but `wake=miss`
+will show up in `agent-bridge status` and idle Claude sessions will not be
+nudged automatically.
+
+### Optional external channel notifications
+
+`bridge-notify.py` still supports explicit Discord webhooks or Telegram posts,
+but that is not the core A2A delivery path for Claude roles.
+
+Use these only when you intentionally want an out-of-band notification:
+
+```bash
+BRIDGE_AGENT_NOTIFY_KIND["tester"]="discord-webhook"
+BRIDGE_AGENT_NOTIFY_TARGET["tester"]="<discord-webhook-url>"
+BRIDGE_AGENT_NOTIFY_ACCOUNT["tester"]="default"
+```
 
 ### Onboard a Discord-backed agent
 
