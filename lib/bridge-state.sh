@@ -76,6 +76,74 @@ bridge_build_resume_launch_cmd() {
   esac
 }
 
+bridge_build_static_claude_launch_cmd() {
+  local agent="$1"
+  local fallback=""
+  local continue_mode=""
+  local session_id=""
+
+  fallback="${BRIDGE_AGENT_LAUNCH_CMD[$agent]-}"
+  [[ -n "$fallback" ]] || return 1
+
+  continue_mode="$(bridge_agent_continue "$agent")"
+  session_id="$(bridge_agent_session_id "$agent")"
+
+  bridge_require_python
+  python3 - "$agent" "$continue_mode" "$session_id" "$fallback" <<'PY'
+import shlex
+import sys
+
+agent, continue_mode, session_id, original = sys.argv[1:]
+parts = shlex.split(original)
+
+env_prefix = []
+idx = 0
+while idx < len(parts):
+    token = parts[idx]
+    if token.startswith("-") or "=" not in token:
+        break
+    name = token.split("=", 1)[0]
+    if not name or not all(ch.isalnum() or ch == "_" for ch in name):
+        break
+    env_prefix.append(token)
+    idx += 1
+
+args = parts[idx:]
+if not args or args[0] != "claude":
+    print(original)
+    raise SystemExit(0)
+
+rest = args[1:]
+extras = []
+j = 0
+while j < len(rest):
+    token = rest[j]
+    if token in {"-c", "--continue", "--dangerously-skip-permissions"}:
+      j += 1
+      continue
+    if token in {"--resume", "--name"}:
+      j += 2 if j + 1 < len(rest) else 1
+      continue
+    extras.append(token)
+    if token.startswith("--") and j + 1 < len(rest) and not rest[j + 1].startswith("-"):
+      extras.append(rest[j + 1])
+      j += 2
+      continue
+    j += 1
+
+base = ["claude"]
+if continue_mode == "1":
+    if session_id:
+        base.extend(["--resume", session_id])
+    else:
+        base.append("--continue")
+base.extend(["--dangerously-skip-permissions", "--name", agent])
+base.extend(extras)
+
+print(" ".join(shlex.quote(token) for token in env_prefix + base))
+PY
+}
+
 bridge_agent_launch_cmd() {
   local agent="$1"
   local fallback=""
@@ -94,6 +162,11 @@ bridge_agent_launch_cmd() {
   fi
 
   fallback="${BRIDGE_AGENT_LAUNCH_CMD[$agent]-}"
+  if [[ "$(bridge_agent_engine "$agent")" == "claude" ]] && launch_cmd="$(bridge_build_static_claude_launch_cmd "$agent")"; then
+    launch_cmd="$(bridge_claude_launch_with_webhook "$agent" "$launch_cmd")"
+    printf '%s' "$launch_cmd"
+    return 0
+  fi
   if launch_cmd="$(bridge_build_resume_launch_cmd "$agent")"; then
     launch_cmd="$(bridge_claude_launch_with_webhook "$agent" "$launch_cmd")"
     printf '%s' "$launch_cmd"

@@ -147,6 +147,10 @@ BRIDGE_ADMIN_AGENT_ID="developer"
 After that, `agent-bridge admin` and `agb admin` always open that role using
 its configured engine and home, regardless of the current working directory.
 
+For Claude static roles, keep `BRIDGE_AGENT_LAUNCH_CMD` free of `-c`,
+`--continue`, or `--resume`. The bridge manages continue/resume itself so
+subcommands like `agent-bridge admin --no-continue` can work predictably.
+
 ### Optional zsh shell integration
 
 If you use `zsh` and do not want to type `./agent-bridge`, install the shell integration:

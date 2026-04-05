@@ -80,6 +80,7 @@ REQUESTER_WORKDIR="$TMP_ROOT/requester-workdir"
 PROJECT_ROOT="$TMP_ROOT/git-project"
 HOOK_WORKDIR="$TMP_ROOT/claude-hook-workdir"
 MCP_WORKDIR="$TMP_ROOT/claude-mcp-workdir"
+CLAUDE_STATIC_WORKDIR="$TMP_ROOT/claude-static-workdir"
 FAKE_BIN="$TMP_ROOT/bin"
 FAKE_DISCORD_PORT_FILE="$TMP_ROOT/fake-discord.port"
 FAKE_DISCORD_REQUESTS="$TMP_ROOT/fake-discord-requests.jsonl"
@@ -102,6 +103,7 @@ trap cleanup EXIT
 mkdir -p "$BRIDGE_HOME" "$BRIDGE_STATE_DIR" "$BRIDGE_LOG_DIR" "$BRIDGE_SHARED_DIR" "$WORKDIR" "$REQUESTER_WORKDIR"
 mkdir -p "$HOOK_WORKDIR/.claude"
 mkdir -p "$MCP_WORKDIR"
+mkdir -p "$CLAUDE_STATIC_WORKDIR"
 mkdir -p "$FAKE_BIN"
 export PATH="$FAKE_BIN:$PATH"
 
@@ -126,19 +128,34 @@ cat >"$BRIDGE_ROSTER_LOCAL_FILE" <<EOF
 #!/usr/bin/env bash
 bridge_add_agent_id_if_missing "$SMOKE_AGENT"
 bridge_add_agent_id_if_missing "$REQUESTER_AGENT"
+bridge_add_agent_id_if_missing "claude-static"
 BRIDGE_ADMIN_AGENT_ID="$SMOKE_AGENT"
 BRIDGE_AGENT_DESC["$SMOKE_AGENT"]="Smoke test role"
 BRIDGE_AGENT_DESC["$REQUESTER_AGENT"]="Requester role"
+BRIDGE_AGENT_DESC["claude-static"]="Claude static role"
 BRIDGE_AGENT_ENGINE["$SMOKE_AGENT"]="codex"
 BRIDGE_AGENT_ENGINE["$REQUESTER_AGENT"]="codex"
+BRIDGE_AGENT_ENGINE["claude-static"]="claude"
 BRIDGE_AGENT_SESSION["$SMOKE_AGENT"]="$SESSION_NAME"
 BRIDGE_AGENT_SESSION["$REQUESTER_AGENT"]="$REQUESTER_SESSION"
+BRIDGE_AGENT_SESSION["claude-static"]="claude-static-$SESSION_NAME"
 BRIDGE_AGENT_WORKDIR["$SMOKE_AGENT"]="$WORKDIR"
 BRIDGE_AGENT_WORKDIR["$REQUESTER_AGENT"]="$REQUESTER_WORKDIR"
+BRIDGE_AGENT_WORKDIR["claude-static"]="$CLAUDE_STATIC_WORKDIR"
 BRIDGE_AGENT_DISCORD_CHANNEL_ID["$SMOKE_AGENT"]="123456789012345678"
 BRIDGE_AGENT_LAUNCH_CMD["$SMOKE_AGENT"]='python3 -c "import time; print(\"smoke-agent ready\", flush=True); time.sleep(30)"'
 BRIDGE_AGENT_LAUNCH_CMD["$REQUESTER_AGENT"]='python3 -c "import time; print(\"requester-agent ready\", flush=True); time.sleep(30)"'
+BRIDGE_AGENT_LAUNCH_CMD["claude-static"]='DISCORD_STATE_DIR=REPLACE_CLAUDE_DISCORD claude -c --dangerously-skip-permissions --channels plugin:discord@claude-plugins-official'
 EOF
+
+python3 - "$BRIDGE_ROSTER_LOCAL_FILE" "$CLAUDE_STATIC_WORKDIR/.discord" <<'PY'
+from pathlib import Path
+import sys
+
+path = Path(sys.argv[1])
+text = path.read_text(encoding="utf-8")
+path.write_text(text.replace("REPLACE_CLAUDE_DISCORD", sys.argv[2]), encoding="utf-8")
+PY
 
 echo "temporary smoke note" >"$BRIDGE_SHARED_DIR/note.md"
 echo "# Smoke CLAUDE" >"$WORKDIR/CLAUDE.md"
@@ -337,6 +354,25 @@ SETUP_AGENT_OUTPUT="$("$REPO_ROOT/agent-bridge" setup agent "$SMOKE_AGENT" --ski
 assert_contains "$SETUP_AGENT_OUTPUT" "claude_md: n/a (engine=codex)"
 assert_contains "$SETUP_AGENT_OUTPUT" "wake_channel: -"
 assert_contains "$SETUP_AGENT_OUTPUT" "start_dry_run: ok"
+
+log "ensuring static Claude launch command is bridge-controlled"
+CLAUDE_LAUNCH_NO_CONTINUE="$("$BASH4_BIN" -c '
+  source "'"$REPO_ROOT"'/bridge-lib.sh"
+  bridge_load_roster
+  BRIDGE_AGENT_CONTINUE["claude-static"]="0"
+  bridge_agent_launch_cmd "claude-static"
+')"
+assert_contains "$CLAUDE_LAUNCH_NO_CONTINUE" "claude --dangerously-skip-permissions --name claude-static --channels plugin:discord@claude-plugins-official"
+[[ "$CLAUDE_LAUNCH_NO_CONTINUE" != *" -c "* ]] || die "static Claude launch still contains -c"
+
+CLAUDE_LAUNCH_CONTINUE="$("$BASH4_BIN" -c '
+  source "'"$REPO_ROOT"'/bridge-lib.sh"
+  bridge_load_roster
+  BRIDGE_AGENT_CONTINUE["claude-static"]="1"
+  unset BRIDGE_AGENT_SESSION_ID["claude-static"]
+  bridge_agent_launch_cmd "claude-static"
+')"
+assert_contains "$CLAUDE_LAUNCH_CONTINUE" "claude --continue --dangerously-skip-permissions --name claude-static --channels plugin:discord@claude-plugins-official"
 
 log "configuring admin role and launching it"
 SETUP_ADMIN_OUTPUT="$("$REPO_ROOT/agent-bridge" setup admin "$SMOKE_AGENT")"

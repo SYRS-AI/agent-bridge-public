@@ -77,8 +77,8 @@ BRIDGE_AGENT_SESSION["codex-developer"]="codex-developer"
 # that are actively migrating legacy cron jobs. Keep this off for fresh installs.
 # BRIDGE_OPENCLAW_CRON_SYNC_ENABLED=1
 
-BRIDGE_AGENT_LAUNCH_CMD["tester"]='claude -c --dangerously-skip-permissions'
-BRIDGE_AGENT_LAUNCH_CMD["developer"]='claude -c --dangerously-skip-permissions'
+BRIDGE_AGENT_LAUNCH_CMD["tester"]='claude --dangerously-skip-permissions'
+BRIDGE_AGENT_LAUNCH_CMD["developer"]='claude --dangerously-skip-permissions'
 BRIDGE_AGENT_LAUNCH_CMD["codex-tester"]='codex --dangerously-bypass-approvals-and-sandbox --no-alt-screen'
 BRIDGE_AGENT_LAUNCH_CMD["codex-developer"]='codex --dangerously-bypass-approvals-and-sandbox --no-alt-screen'
 
@@ -103,5 +103,5 @@ BRIDGE_AGENT_ACTION["developer:clear"]="/clear"
 # BRIDGE_AGENT_ENGINE["reviewer"]="claude"
 # BRIDGE_AGENT_SESSION["reviewer"]="reviewer"
 # BRIDGE_AGENT_WORKDIR["reviewer"]="$HOME/some-project"
-# BRIDGE_AGENT_LAUNCH_CMD["reviewer"]='claude -c --dangerously-skip-permissions'
+# BRIDGE_AGENT_LAUNCH_CMD["reviewer"]='claude --dangerously-skip-permissions'
 # BRIDGE_AGENT_ACTION["reviewer:resume"]="/resume"
