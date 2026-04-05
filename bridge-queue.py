@@ -294,6 +294,20 @@ def cmd_create(args: argparse.Namespace) -> int:
             to_agent=args.assigned_to,
         )
 
+    if args.format == "shell":
+        fields = {
+            "TASK_ID": task_id,
+            "TASK_TITLE": args.title.strip(),
+            "TASK_ASSIGNED_TO": args.assigned_to,
+            "TASK_CREATED_BY": actor,
+            "TASK_PRIORITY": args.priority,
+            "TASK_BODY_PATH": body_path or "",
+            "TASK_BODY_TEXT": body_text or "",
+        }
+        for key, value in fields.items():
+            print(f"{key}={shlex.quote(str(value))}")
+        return 0
+
     print(f"created task #{task_id} for {args.assigned_to} [{args.priority}] {args.title.strip()}")
     return 0
 
@@ -729,6 +743,7 @@ def build_parser() -> argparse.ArgumentParser:
     create_parser.add_argument("--title", required=True)
     create_parser.add_argument("--from", dest="actor")
     create_parser.add_argument("--priority", choices=PRIORITY_CHOICES, default="normal")
+    create_parser.add_argument("--format", choices=("text", "shell"), default="text")
     body_group = create_parser.add_mutually_exclusive_group()
     body_group.add_argument("--body")
     body_group.add_argument("--body-file")

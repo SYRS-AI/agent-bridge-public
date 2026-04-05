@@ -20,6 +20,58 @@ usage() {
   bridge_list_agents
 }
 
+infer_actor_if_possible() {
+  local actor="${1:-}"
+
+  if [[ -n "$actor" ]]; then
+    printf '%s' "$actor"
+    return 0
+  fi
+
+  if actor="$(bridge_infer_current_agent 2>/dev/null)"; then
+    printf '%s' "$actor"
+    return 0
+  fi
+
+  printf '%s' "${USER:-unknown}"
+}
+
+trim_line() {
+  local value="$1"
+
+  value="${value#"${value%%[![:space:]]*}"}"
+  value="${value%"${value##*[![:space:]]}"}"
+  printf '%s' "$value"
+}
+
+urgent_task_title() {
+  local message="$1"
+  local first_line="${message%%$'\n'*}"
+  local title=""
+
+  title="$(trim_line "$(bridge_sanitize_text "${first_line//$'\r'/ }")")"
+  if [[ -z "$title" ]]; then
+    title="urgent task"
+  fi
+  if (( ${#title} > 120 )); then
+    title="${title:0:117}..."
+  fi
+  printf '%s' "$title"
+}
+
+urgent_task_body() {
+  local message="$1"
+  local title="$2"
+  local compact_message=""
+
+  compact_message="$(trim_line "$(bridge_sanitize_text "$message")")"
+  if [[ "$compact_message" == "$title" && "$message" != *$'\n'* ]]; then
+    printf '%s' ""
+    return 0
+  fi
+  printf '%s' "$message"
+}
+
 LIST_ONLY=0
 URGENT_ONLY=0
 TARGET=""
@@ -80,23 +132,40 @@ if [[ $MSG_LEN -gt $BRIDGE_MAX_MESSAGE_LEN ]]; then
   bridge_warn "메시지가 ${MSG_LEN}자입니다. 길면 $BRIDGE_SHARED_DIR 아래 파일에 저장하고 경로만 전달하세요."
 fi
 
+ACTOR="$(infer_actor_if_possible "")"
+TASK_ID=""
+TASK_TITLE=""
+TITLE="$(urgent_task_title "$MESSAGE")"
+BODY="$(urgent_task_body "$MESSAGE" "$TITLE")"
+
+CREATE_ARGS=(create --to "$TARGET" --title "$TITLE" --from "$ACTOR" --priority urgent --format shell)
+if [[ -n "$BODY" ]]; then
+  CREATE_ARGS+=(--body "$BODY")
+fi
+# shellcheck disable=SC1090
+source <(bridge_queue_cli "${CREATE_ARGS[@]}")
+
 SESSION="$(bridge_agent_session "$TARGET")"
-ENGINE="$(bridge_agent_engine "$TARGET")"
-bridge_require_tmux_session "$SESSION"
+NOTICE_MESSAGE="agb inbox ${TARGET}"
 
 mkdir -p "$BRIDGE_LOG_DIR"
 TIMESTAMP="$(date '+%H:%M:%S')"
 LOGFILE="$BRIDGE_LOG_DIR/bridge-$(date '+%Y%m%d').log"
 SAFE_MSG="$(bridge_sanitize_text "$MESSAGE")"
-OUTBOUND_MESSAGE="[AGENT BRIDGE URGENT] $MESSAGE"
 
-echo "[${TIMESTAMP}] !URGENT ${TARGET}/${SESSION}: ${SAFE_MSG}" >> "$LOGFILE"
+echo "[${TIMESTAMP}] !URGENT ${TARGET}/${SESSION:-none} task=${TASK_ID}: ${SAFE_MSG}" >> "$LOGFILE"
 
-bridge_tmux_send_and_submit "$SESSION" "$ENGINE" "$OUTBOUND_MESSAGE"
+if ! bridge_dispatch_notification "$TARGET" "$TASK_TITLE" "$NOTICE_MESSAGE" "$TASK_ID" "urgent"; then
+  bridge_warn "urgent attention signal was not delivered; task #${TASK_ID} remains queued for ${TARGET}"
+fi
 
-echo -e "${GREEN}[${TIMESTAMP}] !URGENT ${TARGET}: 전송 완료 (${MSG_LEN}자)${NC}"
+echo -e "${GREEN}[${TIMESTAMP}] !URGENT ${TARGET}: task #${TASK_ID} queued (${MSG_LEN}자)${NC}"
 
 if [[ $WAIT_SECONDS -gt 0 ]]; then
+  if [[ -z "$SESSION" ]] || ! bridge_tmux_session_exists "$SESSION"; then
+    bridge_warn "세션이 없어 응답 캡처를 건너뜁니다: ${TARGET}"
+    exit 0
+  fi
   bridge_info "[대기] ${WAIT_SECONDS}초 후 응답 캡처..."
   sleep "$WAIT_SECONDS"
   bridge_info "--- ${TARGET} 세션 최근 출력 (마지막 30줄) ---"

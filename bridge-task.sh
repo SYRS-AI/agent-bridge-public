@@ -44,16 +44,12 @@ notify_task_requester() {
   local note_file="$4"
   local TASK_ID=""
   local TASK_TITLE=""
-  local TASK_STATUS=""
-  local TASK_ASSIGNED_TO=""
   local TASK_CREATED_BY=""
   local TASK_PRIORITY=""
-  local TASK_CLAIMED_BY=""
-  local TASK_BODY_PATH=""
   local creator
-  local session
   local engine
   local message
+  local title
 
   # shellcheck disable=SC1090
   source <(bridge_queue_cli show "$task_id" --format shell)
@@ -62,18 +58,20 @@ notify_task_requester() {
   [[ -n "$creator" ]] || return 0
   [[ "$creator" != "$actor" ]] || return 0
   bridge_agent_exists "$creator" || return 0
-  bridge_agent_is_active "$creator" || return 0
 
-  session="$(bridge_agent_session "$creator")"
   engine="$(bridge_agent_engine "$creator")"
-  message="[Agent Bridge] task #${TASK_ID} \"${TASK_TITLE}\" completed by ${actor}"
-  if [[ -n "$note" ]]; then
-    message+=": ${note}"
-  elif [[ -n "$note_file" ]]; then
-    message+=" (note_file: ${note_file})"
+  if [[ "$engine" != "claude" ]] && ! bridge_agent_is_active "$creator"; then
+    return 0
   fi
 
-  bridge_tmux_send_and_submit "$session" "$engine" "$message" || true
+  title="$TASK_TITLE"
+  message="completed by ${actor}"
+  message+=$'\n'"agb show ${TASK_ID}"
+  if [[ -n "$note" || -n "$note_file" ]]; then
+    message+=$'\n'"completion note attached"
+  fi
+
+  bridge_dispatch_notification "$creator" "$title" "$message" "$TASK_ID" "$TASK_PRIORITY" || true
 }
 
 cmd_create() {
