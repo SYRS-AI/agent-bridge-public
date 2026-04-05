@@ -68,6 +68,7 @@ bridge_require_agent "$AGENT"
 
 SESSION="$(bridge_agent_session "$AGENT")"
 WORK_DIR="$(bridge_agent_workdir "$AGENT")"
+DEFAULT_WORK_DIR="$(bridge_agent_default_home "$AGENT")"
 RUNNER="$SCRIPT_DIR/bridge-run.sh"
 ENV_PREFIX="$(bridge_export_env_prefix)"
 SESSION_CMD="$(bridge_join_quoted "$BRIDGE_BASH_BIN" "$RUNNER" "$AGENT")"
@@ -84,6 +85,14 @@ if [[ $DRY_RUN -eq 1 ]]; then
   echo "workdir=$WORK_DIR"
   echo "tmux_command=$SESSION_CMD"
   exit 0
+fi
+
+if [[ ! -d "$WORK_DIR" ]]; then
+  if [[ "$WORK_DIR" == "$DEFAULT_WORK_DIR" ]]; then
+    mkdir -p "$WORK_DIR"
+  else
+    bridge_die "workdir가 없습니다: $WORK_DIR"
+  fi
 fi
 
 if tmux has-session -t "$SESSION" 2>/dev/null; then

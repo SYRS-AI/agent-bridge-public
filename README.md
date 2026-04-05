@@ -111,11 +111,19 @@ cp ~/agent-bridge/agent-roster.local.example.sh ~/agent-bridge/agent-roster.loca
 
 `agent-roster.local.sh` is git-ignored and is sourced after the default roster, so you can add your own workdirs, descriptions, launch commands, and actions without changing the tracked repo.
 
-If a tracked profile should deploy into a different live home than the bridge workdir, declare that separately:
+By default, static roles can live under the standard bridge-owned home root:
 
 ```bash
-BRIDGE_AGENT_PROFILE_HOME["patch"]="$HOME/.openclaw/patch"
-BRIDGE_AGENT_PROFILE_HOME["shopify"]="$HOME/syrs-shopify"
+BRIDGE_AGENT_HOME_ROOT="$HOME/.agent-bridge/agents"
+```
+
+If `BRIDGE_AGENT_WORKDIR["agent"]` is omitted, the bridge now defaults that role to `$BRIDGE_AGENT_HOME_ROOT/<agent>`. For tracked profiles, `profile deploy` also defaults to that same target.
+
+Only declare `BRIDGE_AGENT_PROFILE_HOME` when the live CLI home differs from the workdir:
+
+```bash
+BRIDGE_AGENT_WORKDIR["shopify"]="$HOME/project-shopify"
+BRIDGE_AGENT_PROFILE_HOME["shopify"]="$HOME/.agent-bridge/agents/shopify"
 ```
 
 ### Optional zsh shell integration

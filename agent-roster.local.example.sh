@@ -24,12 +24,21 @@ BRIDGE_AGENT_SESSION["developer"]="developer"
 BRIDGE_AGENT_SESSION["codex-tester"]="codex-tester"
 BRIDGE_AGENT_SESSION["codex-developer"]="codex-developer"
 
-BRIDGE_AGENT_WORKDIR["tester"]="$HOME/project-test"
-BRIDGE_AGENT_WORKDIR["developer"]="$HOME/project-app"
-BRIDGE_AGENT_WORKDIR["codex-tester"]="$HOME/project-test"
-BRIDGE_AGENT_WORKDIR["codex-developer"]="$HOME/project-app"
+# Optional: standard long-lived roles can live under $BRIDGE_HOME/agents/<agent>.
+# If you follow that layout, you can omit BRIDGE_AGENT_WORKDIR entirely and the
+# bridge will default to $BRIDGE_AGENT_HOME_ROOT/<agent>.
+# BRIDGE_AGENT_HOME_ROOT="$HOME/.agent-bridge/agents"
 
-# Optional: tracked profile deploy target, separate from workdir when needed.
+# Optional: override workdirs when a role should launch inside another repo or
+# directory instead of the standard live home root.
+# BRIDGE_AGENT_WORKDIR["tester"]="$HOME/project-test"
+# BRIDGE_AGENT_WORKDIR["developer"]="$HOME/project-app"
+# BRIDGE_AGENT_WORKDIR["codex-tester"]="$HOME/project-test"
+# BRIDGE_AGENT_WORKDIR["codex-developer"]="$HOME/project-app"
+
+# Optional: tracked profile deploy target. If omitted for a tracked agent, the
+# bridge defaults to $BRIDGE_AGENT_HOME_ROOT/<agent>. Override this only when
+# the live CLI home differs from the workdir.
 # BRIDGE_AGENT_PROFILE_HOME["tester"]="$HOME/project-test"
 # BRIDGE_AGENT_PROFILE_HOME["developer"]="$HOME/project-app"
 

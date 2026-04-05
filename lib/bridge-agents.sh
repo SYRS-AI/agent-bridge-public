@@ -301,9 +301,31 @@ bridge_agent_session() {
   printf '%s' "${BRIDGE_AGENT_SESSION[$agent]-}"
 }
 
+bridge_agent_default_home() {
+  local agent="$1"
+  printf '%s/%s' "$BRIDGE_AGENT_HOME_ROOT" "$agent"
+}
+
+bridge_agent_default_profile_home() {
+  local agent="$1"
+  bridge_agent_default_home "$agent"
+}
+
+bridge_agent_default_discord_state_dir() {
+  local agent="$1"
+  printf '%s/.discord' "$(bridge_agent_default_home "$agent")"
+}
+
 bridge_agent_workdir() {
   local agent="$1"
-  printf '%s' "${BRIDGE_AGENT_WORKDIR[$agent]-}"
+  local explicit="${BRIDGE_AGENT_WORKDIR[$agent]-}"
+
+  if [[ -n "$explicit" ]]; then
+    printf '%s' "$explicit"
+    return 0
+  fi
+
+  bridge_agent_default_home "$agent"
 }
 
 bridge_agent_profile_home() {

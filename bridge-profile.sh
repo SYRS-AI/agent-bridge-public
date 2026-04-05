@@ -50,7 +50,7 @@ run_status() {
 
   for ((i = 0; i < ${#profile_agents[@]}; i++)); do
     agent="${profile_agents[$i]}"
-    target_root="$(bridge_agent_profile_home "$agent")"
+    target_root="$(bridge_resolve_profile_target "$agent" || true)"
     active_flag="$(bridge_profile_active_flag "$agent")"
     py_args=(
       status

@@ -44,13 +44,31 @@ bridge_require_profile_target() {
   local agent="$1"
   local target_root
 
+  target_root="$(bridge_resolve_profile_target "$agent" || true)"
+  if [[ -n "$target_root" ]]; then
+    printf '%s' "$target_root"
+    return 0
+  fi
+
+  bridge_die "profile target을 찾을 수 없습니다: $agent"
+}
+
+bridge_resolve_profile_target() {
+  local agent="$1"
+  local target_root=""
+
   target_root="$(bridge_agent_profile_home "$agent")"
   if [[ -n "$target_root" ]]; then
     printf '%s' "$target_root"
     return 0
   fi
 
-  bridge_die "agent-roster.local.sh에 BRIDGE_AGENT_PROFILE_HOME[\"$agent\"]를 설정하세요."
+  if bridge_profile_has_source "$agent"; then
+    bridge_agent_default_profile_home "$agent"
+    return 0
+  fi
+
+  return 1
 }
 
 bridge_profile_active_flag() {
