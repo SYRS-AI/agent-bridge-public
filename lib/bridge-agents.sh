@@ -338,6 +338,59 @@ bridge_agent_discord_channel_id() {
   printf '%s' "${BRIDGE_AGENT_DISCORD_CHANNEL_ID[$agent]-}"
 }
 
+bridge_agent_notify_kind() {
+  local agent="$1"
+  local explicit="${BRIDGE_AGENT_NOTIFY_KIND[$agent]-}"
+
+  if [[ -n "$explicit" ]]; then
+    printf '%s' "$explicit"
+    return 0
+  fi
+
+  if [[ -n "$(bridge_agent_discord_channel_id "$agent")" ]]; then
+    printf 'discord'
+    return 0
+  fi
+
+  printf '%s' ""
+}
+
+bridge_agent_notify_target() {
+  local agent="$1"
+  local explicit="${BRIDGE_AGENT_NOTIFY_TARGET[$agent]-}"
+
+  if [[ -n "$explicit" ]]; then
+    printf '%s' "$explicit"
+    return 0
+  fi
+
+  printf '%s' "$(bridge_agent_discord_channel_id "$agent")"
+}
+
+bridge_agent_notify_account() {
+  local agent="$1"
+  local explicit="${BRIDGE_AGENT_NOTIFY_ACCOUNT[$agent]-}"
+  local kind
+
+  if [[ -n "$explicit" ]]; then
+    printf '%s' "$explicit"
+    return 0
+  fi
+
+  kind="$(bridge_agent_notify_kind "$agent")"
+  case "$kind" in
+    discord)
+      printf '%s' "${BRIDGE_DISCORD_RELAY_ACCOUNT:-default}"
+      ;;
+    telegram)
+      printf 'default'
+      ;;
+    *)
+      printf '%s' ""
+      ;;
+  esac
+}
+
 bridge_agent_loop() {
   local agent="$1"
   printf '%s' "${BRIDGE_AGENT_LOOP[$agent]-1}"
