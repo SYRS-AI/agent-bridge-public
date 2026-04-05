@@ -34,6 +34,72 @@ bridge_tmux_bootstrap_session_options() {
   tmux set-option -t "$session" history-limit 10000 >/dev/null 2>&1 || true
 }
 
+bridge_tmux_engine_requires_prompt() {
+  local engine="$1"
+
+  case "$engine" in
+    claude|codex)
+      return 0
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
+bridge_tmux_session_has_prompt() {
+  local session="$1"
+  local engine="$2"
+  local recent=""
+  local line=""
+  local trimmed=""
+
+  bridge_tmux_engine_requires_prompt "$engine" || return 0
+  recent="$(bridge_capture_recent "$session" 20 2>/dev/null || true)"
+  [[ -n "$recent" ]] || return 1
+
+  while IFS= read -r line; do
+    line="${line//$'\r'/}"
+    line="${line//$'\u00A0'/ }"
+    trimmed="${line#"${line%%[![:space:]]*}"}"
+    trimmed="${trimmed%"${trimmed##*[![:space:]]}"}"
+    case "$trimmed" in
+      "❯"|">"|"›")
+        return 0
+        ;;
+    esac
+  done <<<"$recent"
+
+  return 1
+}
+
+bridge_tmux_wait_for_prompt() {
+  local session="$1"
+  local engine="$2"
+  local timeout="${3:-$BRIDGE_TMUX_PROMPT_WAIT_SECONDS}"
+  local start_ts
+  local elapsed
+
+  bridge_tmux_engine_requires_prompt "$engine" || return 0
+  if bridge_tmux_session_has_prompt "$session" "$engine"; then
+    return 0
+  fi
+  [[ "$timeout" =~ ^[0-9]+$ ]] || timeout=0
+  (( timeout > 0 )) || return 1
+
+  start_ts="$(date +%s)"
+  while true; do
+    sleep 0.2
+    if bridge_tmux_session_has_prompt "$session" "$engine"; then
+      return 0
+    fi
+    elapsed=$(( $(date +%s) - start_ts ))
+    if (( elapsed >= timeout )); then
+      return 1
+    fi
+  done
+}
+
 bridge_tmux_paste_and_submit() {
   local session="$1"
   local text="$2"
@@ -71,6 +137,11 @@ bridge_tmux_send_and_submit() {
   local session="$1"
   local engine="$2"
   local text="$3"
+
+  if ! bridge_tmux_wait_for_prompt "$session" "$engine"; then
+    bridge_warn "session prompt unavailable; skipping send to '$session'"
+    return 1
+  fi
 
   case "$engine" in
     claude)
