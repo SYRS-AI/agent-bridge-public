@@ -333,21 +333,28 @@ def cmd_sync(args: argparse.Namespace) -> int:
 
     # DM monitoring: open DM channels for allowlisted users and poll them
     dm_channels = state.setdefault("dm_channels", {})
-    agent_home_root = str(Path(args.bridge_home) / "agents")
+    agent_home_root = Path(args.bridge_home) / "agents"
 
-    seen_agents: set[str] = set()
-    for row in snapshot:
-        agent = row["agent"]
-        if agent in seen_agents:
-            continue
-        seen_agents.add(agent)
+    # Scan ALL agents with .discord dirs — not just snapshot (which only has active agents)
+    all_dm_agents: list[str] = []
+    if agent_home_root.is_dir():
+        for agent_dir in sorted(agent_home_root.iterdir()):
+            if not agent_dir.is_dir() or agent_dir.name.startswith("."):
+                continue
+            if (agent_dir / ".discord" / ".env").exists():
+                all_dm_agents.append(agent_dir.name)
 
-        allow_ids = load_dm_allowlist(agent_home_root, agent)
+    # Build session lookup from snapshot for active check
+    session_by_agent = {row["agent"]: row.get("session", "") for row in snapshot}
+
+    for agent in all_dm_agents:
+
+        allow_ids = load_dm_allowlist(str(agent_home_root), agent)
         if not allow_ids:
             continue
 
         # Use agent's own bot token if available, otherwise skip
-        agent_env_path = Path(agent_home_root) / agent / ".discord" / ".env"
+        agent_env_path = agent_home_root / agent / ".discord" / ".env"
         if not agent_env_path.exists():
             continue
         try:
@@ -391,8 +398,8 @@ def cmd_sync(args: argparse.Namespace) -> int:
             dm_state["last_seen_id"] = latest_id
             dm_state["last_seen_ts"] = now_ts
 
-            live_active = tmux_session_active(str(row.get("session") or ""))
-            if live_active:
+            session_name = session_by_agent.get(agent, agent)
+            if tmux_session_active(session_name):
                 continue
 
             human_messages = [item for item in new_messages if not ((item.get("author") or {}).get("bot"))]
