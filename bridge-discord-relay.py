@@ -91,6 +91,39 @@ def snowflake_int(value: str | int | None) -> int:
     return int(str(value))
 
 
+def open_dm_channel(token: str, recipient_id: str) -> str | None:
+    """POST /users/@me/channels to open/get a DM channel with a user."""
+    payload = json.dumps({"recipient_id": recipient_id}).encode("utf-8")
+    req = Request(
+        "https://discord.com/api/v10/users/@me/channels",
+        data=payload,
+        headers={
+            "Authorization": f"Bot {token}",
+            "Content-Type": "application/json",
+            "User-Agent": "agent-bridge-relay/0.1",
+        },
+        method="POST",
+    )
+    try:
+        with urlopen(req, timeout=15) as response:
+            data = json.loads(response.read().decode("utf-8"))
+            return str(data.get("id") or "")
+    except (HTTPError, URLError):
+        return None
+
+
+def load_dm_allowlist(agent_home_root: str, agent: str) -> list[str]:
+    """Read allowFrom user IDs from agent's .discord/access.json."""
+    access_path = Path(agent_home_root) / agent / ".discord" / "access.json"
+    if not access_path.exists():
+        return []
+    try:
+        data = json.loads(access_path.read_text(encoding="utf-8"))
+        return [str(uid) for uid in (data.get("allowFrom") or []) if uid]
+    except Exception:
+        return []
+
+
 def fetch_channel_messages(token: str, channel_id: str, limit: int) -> list[dict[str, Any]]:
     query = urlencode({"limit": str(limit)})
     url = f"https://discord.com/api/v10/channels/{channel_id}/messages?{query}"
@@ -297,6 +330,84 @@ def cmd_sync(args: argparse.Namespace) -> int:
             f"[discord-relay] enqueued agent={row['agent']} channel={channel_id} "
             f"messages={len(human_messages)} :: {output}"
         )
+
+    # DM monitoring: open DM channels for allowlisted users and poll them
+    dm_channels = state.setdefault("dm_channels", {})
+    agent_home_root = str(Path(args.bridge_home) / "agents")
+
+    seen_agents: set[str] = set()
+    for row in snapshot:
+        agent = row["agent"]
+        if agent in seen_agents:
+            continue
+        seen_agents.add(agent)
+
+        allow_ids = load_dm_allowlist(agent_home_root, agent)
+        if not allow_ids:
+            continue
+
+        # Use agent's own bot token if available, otherwise skip
+        agent_env_path = Path(agent_home_root) / agent / ".discord" / ".env"
+        if not agent_env_path.exists():
+            continue
+        try:
+            agent_token = agent_env_path.read_text(encoding="utf-8").split("=", 1)[1].strip()
+        except Exception:
+            continue
+
+        for user_id in allow_ids:
+            dm_key = f"dm:{agent}:{user_id}"
+            dm_state = dm_channels.setdefault(dm_key, {"agent": agent, "user_id": user_id})
+
+            # Open/get DM channel if not cached
+            if not dm_state.get("channel_id"):
+                ch_id = open_dm_channel(agent_token, user_id)
+                if not ch_id:
+                    continue
+                dm_state["channel_id"] = ch_id
+
+            channel_id = dm_state["channel_id"]
+            try:
+                messages = fetch_channel_messages(agent_token, channel_id, args.poll_limit)
+            except (HTTPError, URLError):
+                continue
+
+            if not messages:
+                continue
+
+            messages.sort(key=lambda item: snowflake_int(item.get("id")))
+            latest_id = str(messages[-1].get("id"))
+            last_seen_id = dm_state.get("last_seen_id")
+
+            if not last_seen_id:
+                dm_state["last_seen_id"] = latest_id
+                dm_state["seeded_at"] = now_ts
+                continue
+
+            new_messages = [item for item in messages if snowflake_int(item.get("id")) > snowflake_int(last_seen_id)]
+            if not new_messages:
+                continue
+
+            dm_state["last_seen_id"] = latest_id
+            dm_state["last_seen_ts"] = now_ts
+
+            live_active = tmux_session_active(str(row.get("session") or ""))
+            if live_active:
+                continue
+
+            human_messages = [item for item in new_messages if not ((item.get("author") or {}).get("bot"))]
+            if not human_messages:
+                continue
+
+            if has_open_wake_task(Path(args.bridge_home), agent):
+                continue
+
+            output = enqueue_task(Path(args.bridge_home), agent, channel_id, human_messages)
+            dm_state["last_enqueue_ts"] = now_ts
+            print(
+                f"[discord-relay] DM enqueued agent={agent} user={user_id} "
+                f"messages={len(human_messages)} :: {output}"
+            )
 
     save_json(state_path, state)
     return 0
