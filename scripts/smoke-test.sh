@@ -301,6 +301,8 @@ assert_contains "$LIST_OUTPUT" "$SMOKE_AGENT"
 
 STATUS_OUTPUT="$("$REPO_ROOT/agent-bridge" status --all-agents)"
 assert_contains "$STATUS_OUTPUT" "$SMOKE_AGENT"
+assert_contains "$STATUS_OUTPUT" "state"
+printf '%s\n' "$STATUS_OUTPUT" | grep -E "$SMOKE_AGENT[[:space:]].*(idle|working)" >/dev/null || die "status should show activity state for $SMOKE_AGENT"
 
 RELAY_ROWS="$("$BASH4_BIN" -c '
   source "'"$REPO_ROOT"'/bridge-lib.sh"

@@ -298,7 +298,7 @@ def render_dashboard(args: argparse.Namespace) -> str:
     )
     lines.append("")
     lines.append("Agents")
-    lines.append("  #  agent           eng     on  q   c   b   idle  stale wake   nudge  load        session        workdir")
+    lines.append("  #  agent           eng     on  state    q   c   b   idle  stale wake   nudge  load        session        workdir")
 
     active_index = 0
     for row in roster:
@@ -316,6 +316,7 @@ def render_dashboard(args: argparse.Namespace) -> str:
         activity_ts = metric.get("session_activity_ts") or metric.get("last_seen_ts")
         last_nudge_ts = metric.get("last_nudge_ts")
         zombie = int(metric.get("zombie", 0) or 0)
+        activity_state = row.get("activity_state") or ("stopped" if not active else "working")
         stale = classify_stale(
             active,
             int(activity_ts) if activity_ts else None,
@@ -327,6 +328,7 @@ def render_dashboard(args: argparse.Namespace) -> str:
         lines.append(
             f"{idx_label}  {agent:<15} {row['engine']:<7} "
             f"{'yes' if active else 'no ':<3} "
+            f"{activity_state:<7} "
             f"{queued:>2}  {claimed:>2}  {blocked:>2}  "
             f"{fmt_idle(int(activity_ts) if activity_ts else None):>4}  "
             f"{stale:>5} "

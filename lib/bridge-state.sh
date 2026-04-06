@@ -792,19 +792,26 @@ bridge_write_roster_status_snapshot() {
   local active
   local wake
   local session
+  local activity_state
 
   {
-    echo -e "agent\tengine\tsession\tworkdir\tsource\tactive\twake"
+    echo -e "agent\tengine\tsession\tworkdir\tsource\tactive\twake\tactivity_state"
     for agent in "${BRIDGE_AGENT_IDS[@]}"; do
       active=0
       wake="-"
+      activity_state="stopped"
       session="$(bridge_agent_session "$agent")"
       if bridge_agent_is_active "$agent"; then
         active=1
         wake="$(bridge_agent_wake_status "$agent")"
+        if bridge_tmux_session_has_prompt "$session" "$(bridge_agent_engine "$agent")"; then
+          activity_state="idle"
+        else
+          activity_state="working"
+        fi
       fi
 
-      echo -e "${agent}\t$(bridge_agent_engine "$agent")\t${session}\t$(bridge_agent_workdir "$agent")\t$(bridge_agent_source "$agent")\t${active}\t${wake}"
+      echo -e "${agent}\t$(bridge_agent_engine "$agent")\t${session}\t$(bridge_agent_workdir "$agent")\t$(bridge_agent_source "$agent")\t${active}\t${wake}\t${activity_state}"
     done
   } >"$file"
 }
