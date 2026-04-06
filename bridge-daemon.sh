@@ -57,7 +57,6 @@ nudge_agent_session() {
   local task_priority=""
 
   title="queued tasks waiting (${queued})"
-  message="You have pending tasks. Run ~/.agent-bridge/agb inbox ${agent} NOW and process them."
   open_task_shell="$(bridge_queue_cli find-open --agent "$agent" --format shell 2>/dev/null || true)"
   if [[ -n "$open_task_shell" ]]; then
     # shellcheck disable=SC1091
@@ -67,11 +66,25 @@ nudge_agent_session() {
     task_id="$TASK_ID"
     task_title="$TASK_TITLE"
     task_priority="${TASK_PRIORITY:-normal}"
-    message+=$'\n'
-    message+="next: #${task_id} [${task_priority}] ${task_title}"
   fi
-  message+=$'\n'
-  message+="queue DB is source of truth"
+
+  # Inject full task content so agent acts on it directly
+  message="[Agent Bridge] ${queued} pending task(s) for ${agent}:"
+  if [[ -n "$task_id" && -n "$task_title" ]]; then
+    local task_body=""
+    task_body="$(bridge_queue_cli show "$task_id" --format text 2>/dev/null | sed -n '/^body:/,/^events:/p' | sed '1s/^body://' | sed '/^events:/d' | head -15 || true)"
+    message+=$'\n'
+    message+="--- Task #${task_id} [${task_priority}] ${task_title} ---"
+    if [[ -n "$task_body" ]]; then
+      message+=$'\n'
+      message+="${task_body}"
+    fi
+    message+=$'\n'
+    message+="Action: ~/.agent-bridge/agb claim ${task_id} --agent ${agent}"
+  else
+    message+=$'\n'
+    message+="Run: ~/.agent-bridge/agb inbox ${agent}"
+  fi
   if ! bridge_dispatch_notification "$agent" "$title" "$message" "" "normal"; then
     status=$?
     if [[ "$status" == "2" ]]; then
