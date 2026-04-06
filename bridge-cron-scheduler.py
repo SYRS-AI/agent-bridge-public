@@ -300,14 +300,14 @@ def enumerate_due_runs(
         schedule = job.get("schedule") or {}
         kind = schedule.get("kind")
 
-        # Handle one-shot "at" jobs — fire if at time is within window
+        # Handle one-shot "at" jobs — fire if at time has passed and not yet executed
         if kind == "at":
             at_str = schedule.get("at", "")
             at_dt = parse_iso(at_str)
             if at_dt is None:
                 counters["unsupported"] += 1
                 continue
-            if at_dt < start_dt or at_dt > end_dt:
+            if at_dt > end_dt:
                 counters["non_recurring"] += 1
                 continue
             counters["eligible"] += 1
@@ -315,10 +315,11 @@ def enumerate_due_runs(
             due_runs.append(DueRun(
                 job_id=job["id"],
                 job_name=job.get("name", job["id"]),
-                agent=job.get("agentId", ""),
                 family=family,
-                slot=format_slot(at_dt),
+                openclaw_agent=job.get("agentId", ""),
+                schedule_kind="at",
                 occurrence_at=at_dt,
+                slot=derive_slot(family, at_dt, job),
             ))
             continue
 
