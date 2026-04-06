@@ -57,7 +57,7 @@ BRIDGE_AGENT_SESSION["codex-developer"]="codex-developer"
 # BRIDGE_AGENT_NOTIFY_KIND["developer"]="telegram"
 # BRIDGE_AGENT_NOTIFY_TARGET["developer"]="<telegram-chat-or-thread-id>"
 # BRIDGE_AGENT_NOTIFY_ACCOUNT["developer"]="default"
-# BRIDGE_AGENT_DISCORD_CHANNEL_ID["tester"]="123456789012345678"
+# BRIDGE_AGENT_DISCORD_CHANNEL_ID["tester"]="<channel-id>"
 # The channel id is still useful for Discord wake relay / metadata.
 #
 # Optional/backlog: dormant custom channel port. The runtime path does not use
@@ -88,7 +88,7 @@ BRIDGE_AGENT_LAUNCH_CMD["codex-developer"]='codex --dangerously-bypass-approvals
 # static role as always-on: the daemon will keep it running and restart it if
 # its tmux session disappears.
 # BRIDGE_AGENT_IDLE_TIMEOUT["tester"]="900"
-# BRIDGE_AGENT_IDLE_TIMEOUT["mailbot"]="0"
+# BRIDGE_AGENT_IDLE_TIMEOUT["always-on-role"]="0"
 # BRIDGE_AGENT_IDLE_TIMEOUT["codex-tester"]="300"
 
 BRIDGE_AGENT_ACTION["tester:resume"]="/resume"

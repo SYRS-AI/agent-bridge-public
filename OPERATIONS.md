@@ -105,8 +105,8 @@ Use these first:
 ~/agent-bridge/agent-bridge list
 ~/agent-bridge/agent-bridge cron inventory --limit 20
 ~/agent-bridge/agent-bridge cron inventory --mode one-shot --limit 20
-~/agent-bridge/agent-bridge cron list --agent main
-~/agent-bridge/agent-bridge cron create --agent main --schedule "0 9 * * *" --title "Daily check"
+~/agent-bridge/agent-bridge cron list --agent <agent>
+~/agent-bridge/agent-bridge cron create --agent <agent> --schedule "0 9 * * *" --title "Daily check"
 ~/agent-bridge/agent-bridge cron enqueue <memory-daily-job-id> --slot 2026-04-05 --dry-run
 ~/agent-bridge/agent-bridge cron enqueue <monthly-highlights-job-id> --dry-run
 ~/agent-bridge/agent-bridge cron sync --dry-run

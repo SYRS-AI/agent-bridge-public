@@ -36,7 +36,7 @@ When you receive a `[cron-followup]` task:
 - `agb done` 전에 반드시 결과를 전달해야 한다 (채널 메시지, 요청자에게 task create 등)
 - `--note` 없는 done은 금지. 무엇을 했는지 반드시 기록
 - `[cron-followup]`의 `needs_human_followup=true`면 반드시 채널에 포스팅 후 done
-- 인프라 장애 감지 시 `agent-bridge urgent patch "..."` 에스컬레이션 필수
+- 인프라 장애 감지 시 `agent-bridge urgent <configured-admin-agent> "..."` 에스컬레이션 필수
 
 ## Prohibited
 

@@ -529,7 +529,7 @@ def render_agent_bridge_block(agent_dir: Path) -> str:
         "- **조용한 done 금지**: 결과를 아무에게도 전달하지 않은 채 done만 치는 것은 금지",
         "- **빈 note done 금지**: --note 없이 done 금지",
         "- `[cron-followup]`에 `needs_human_followup=true` → 반드시 사용자 채널로 전달 후 done",
-        "- 인프라 장애 → `agent-bridge urgent patch \"...\"`, 비즈니스 판단 필요 → 사람 채널로 에스컬레이션",
+        "- 인프라 장애 → `agent-bridge urgent <configured-admin-agent> \"...\"`, 비즈니스 판단 필요 → 사람 채널로 에스컬레이션",
         "- 15분 이상 blocked → `agb update <task_id> --status blocked --note \"사유\"`",
         "",
         "## Legacy Guardrails",

@@ -74,8 +74,8 @@ Examples:
   $CLI_NAME worktree list
   $CLI_NAME cron inventory --family memory-daily --limit 10
   $CLI_NAME cron import --dry-run
-  $CLI_NAME cron list --agent main
-  $CLI_NAME cron create --agent main --schedule "0 9 * * *" --title "일일 모니터링"
+  $CLI_NAME cron list --agent <agent>
+  $CLI_NAME cron create --agent <agent> --schedule "0 9 * * *" --title "일일 모니터링"
   $CLI_NAME cron enqueue <memory-daily-job-id> --slot 2026-04-05 --dry-run
   $CLI_NAME cron sync --dry-run
   $CLI_NAME cron run-subagent <run-id> --dry-run

@@ -232,7 +232,7 @@ If an agent should read and reply in Discord, set its primary channel metadata
 in `agent-roster.local.sh` first:
 
 ```bash
-BRIDGE_AGENT_DISCORD_CHANNEL_ID["tester"]="123456789012345678"
+BRIDGE_AGENT_DISCORD_CHANNEL_ID["tester"]="<channel-id>"
 ```
 
 Then run the guided setup:
@@ -310,8 +310,8 @@ If your daemon environment does not inherit the same `PATH` as your interactive 
 For recurring work defined inside Agent Bridge itself, use the bridge-native cron store:
 
 ```bash
-./agent-bridge cron list --agent main
-./agent-bridge cron create --agent main --schedule "0 9 * * *" --title "Daily check" --payload "Review the daily queue and summarize anything that needs follow-up."
+./agent-bridge cron list --agent <agent>
+./agent-bridge cron create --agent <agent> --schedule "0 9 * * *" --title "Daily check" --payload "Review the daily queue and summarize anything that needs follow-up."
 ./agent-bridge cron update <job-id> --schedule "0 10 * * *"
 ./agent-bridge cron delete <job-id>
 ```
@@ -467,8 +467,8 @@ That creates an isolated git worktree under `~/.agent-bridge/worktrees/` instead
 ./agent-bridge setup discord tester
 ./agent-bridge setup agent tester
 ./agent-bridge cron inventory --mode one-shot --limit 20
-./agent-bridge cron list --agent main
-./agent-bridge cron create --agent main --schedule "0 9 * * *" --title "Daily check"
+./agent-bridge cron list --agent <agent>
+./agent-bridge cron create --agent <agent> --schedule "0 9 * * *" --title "Daily check"
 ./agent-bridge cron enqueue <memory-daily-job-id> --slot 2026-04-05 --dry-run
 ./agent-bridge cron enqueue <monthly-highlights-job-id> --dry-run
 ./agent-bridge cron errors report --limit 20
