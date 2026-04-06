@@ -271,6 +271,7 @@ status = load(status_file)
 
 fields = {
     "CRON_RUN_ID": request.get("run_id", request_file.parent.name),
+    "CRON_JOB_ID": request.get("job_id", ""),
     "CRON_JOB_NAME": request.get("job_name", ""),
     "CRON_FAMILY": request.get("family", ""),
     "CRON_SLOT": request.get("slot", ""),

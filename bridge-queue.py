@@ -432,7 +432,18 @@ def cmd_find_open(args: argparse.Namespace) -> int:
     if args.title_prefix:
         sql += " AND title LIKE ?"
         params.append(f"{args.title_prefix}%")
-    sql += " ORDER BY id LIMIT 1"
+    sql += """
+        ORDER BY
+          CASE priority
+            WHEN 'urgent' THEN 0
+            WHEN 'high'   THEN 1
+            WHEN 'normal' THEN 2
+            WHEN 'low'    THEN 3
+            ELSE 4
+          END,
+          id
+        LIMIT 1
+    """
 
     with closing(connect()) as conn:
         row = conn.execute(sql, params).fetchone()
@@ -801,6 +812,103 @@ def cmd_daemon_step(args: argparse.Namespace) -> int:
                 from_agent=row["claimed_by"],
             )
 
+        # --- Compute idle agents (used by both cron dedup and stale requeue) ---
+        max_claim_age = int(getattr(args, "max_claim_age", 900))
+        idle_agents = set()
+        for row in snapshot_rows:
+            active = 1 if str(row.get("active", "0")) == "1" else 0
+            activity_ts = int(row.get("session_activity_ts") or 0)
+            if active and activity_ts and current_ts - activity_ts >= idle_threshold:
+                idle_agents.add(str(row["agent"]))
+
+        # --- Cron-dispatch dedup ---
+        # For each (agent, cron-job-name) combo, keep only the newest open
+        # dispatch and cancel older duplicates.  The newest one stays queued
+        # (or gets requeued if claimed by an idle agent) so it still runs.
+        # Single dispatches (e.g. one evening-digest) are untouched here;
+        # the stale-claim requeue below handles them if the agent is idle.
+        import re as _re
+        _cron_name_re = _re.compile(r"^\[cron-dispatch\]\s*(\S+)")
+        cron_open = conn.execute(
+            """
+            SELECT id, title, assigned_to, status, claimed_by, created_ts
+            FROM tasks
+            WHERE status IN ('queued', 'claimed')
+              AND title LIKE '[cron-dispatch]%'
+            ORDER BY created_ts DESC
+            """,
+        ).fetchall()
+        _cron_groups: dict[tuple[str, str], list[sqlite3.Row]] = {}
+        for row in cron_open:
+            m = _cron_name_re.match(row["title"])
+            job_name = m.group(1) if m else row["title"]
+            key = (str(row["assigned_to"]), job_name)
+            _cron_groups.setdefault(key, []).append(row)
+        for _key, group in _cron_groups.items():
+            if len(group) < 2:
+                continue
+            for row in group[1:]:
+                conn.execute(
+                    """
+                    UPDATE tasks
+                    SET status = 'cancelled',
+                        claimed_by = NULL,
+                        lease_until_ts = NULL,
+                        updated_ts = ?
+                    WHERE id = ?
+                    """,
+                    (current_ts, row["id"]),
+                )
+                emit_event(
+                    conn,
+                    int(row["id"]),
+                    event_type="cron_dedup_cancelled",
+                    actor="daemon",
+                    created_ts=current_ts,
+                    note_text=f"superseded by newer dispatch #{group[0]['id']}",
+                    from_agent=row["claimed_by"] or row["assigned_to"],
+                )
+
+        # --- Idle agent claimed task requeue ---
+        # ALL claimed tasks (cron or not) older than max_claim_age from idle
+        # agents get requeued.  An idle agent is at the prompt and not working
+        # on anything — its claimed tasks should be released.
+        stale_claimed = conn.execute(
+            """
+            SELECT id, claimed_by
+            FROM tasks
+            WHERE status = 'claimed'
+              AND claimed_ts IS NOT NULL
+              AND claimed_ts < ?
+            """,
+            (current_ts - max_claim_age,),
+        ).fetchall()
+        for row in stale_claimed:
+            agent_name = str(row["claimed_by"])
+            if agent_name not in idle_agents:
+                continue
+            conn.execute(
+                """
+                UPDATE tasks
+                SET status = 'queued',
+                    claimed_by = NULL,
+                    claimed_ts = NULL,
+                    lease_until_ts = NULL,
+                    updated_ts = ?
+                WHERE id = ?
+                """,
+                (current_ts, row["id"]),
+            )
+            emit_event(
+                conn,
+                int(row["id"]),
+                event_type="stale_claim_requeued",
+                actor="daemon",
+                created_ts=current_ts,
+                note_text=f"claimed for >{max_claim_age}s by idle agent",
+                from_agent=agent_name,
+            )
+
         rows = conn.execute(
             """
             SELECT assigned_to, id
@@ -842,7 +950,6 @@ def cmd_daemon_step(args: argparse.Namespace) -> int:
             LEFT JOIN claimed ON claimed.agent = agent_state.agent
             WHERE agent_state.active = 1
               AND COALESCE(assigned.queued_count, 0) > 0
-              AND COALESCE(claimed.claimed_count, 0) = 0
             ORDER BY agent_state.agent
             """
         ).fetchall()
@@ -997,6 +1104,10 @@ def build_parser() -> argparse.ArgumentParser:
     daemon_parser.add_argument(
         "--nudge-cooldown",
         default=os.environ.get("BRIDGE_TASK_NUDGE_COOLDOWN_SECONDS", "900"),
+    )
+    daemon_parser.add_argument(
+        "--max-claim-age",
+        default=os.environ.get("BRIDGE_TASK_MAX_CLAIM_AGE_SECONDS", "900"),
     )
     daemon_parser.add_argument("--ready-agents-file")
     daemon_parser.add_argument("--format", choices=("text", "tsv"), default="tsv")

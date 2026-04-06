@@ -29,7 +29,7 @@ if (( queued == 0 && blocked == 0 )); then
   exit 0
 fi
 
-# Inject full task content so agent sees it directly — no intermediate "run inbox" step
+# Show highest-priority task summary + direct agent to process all via inbox
 TASK_ID=""
 TASK_TITLE=""
 TASK_PRIORITY=""
@@ -40,22 +40,10 @@ if [[ -n "$open_task_shell" ]]; then
   source /dev/stdin <<<"$open_task_shell"
 fi
 
-printf '[Agent Bridge] %s pending task(s) for %s:\n' "$queued" "$AGENT_ID"
+printf '[Agent Bridge] %s pending task(s) for %s.\n' "$queued" "$AGENT_ID"
 
 if [[ -n "$TASK_ID" && -n "$TASK_TITLE" ]]; then
-  printf '\n--- Task #%s [%s] %s ---\n' "$TASK_ID" "${TASK_PRIORITY:-normal}" "$TASK_TITLE"
-
-  # Show task body (inline or from file, truncated to 500 chars)
-  task_body="$(bridge_queue_cli show "$TASK_ID" --format text 2>/dev/null | sed -n '/^body:/,/^events:/p' | sed '1s/^body://' | sed '/^events:/d' | head -20 || true)"
-  if [[ -n "$task_body" ]]; then
-    printf '%s\n' "$task_body"
-  fi
-
-  printf '\nAction required: claim and process this task.\n'
-  printf '  ~/.agent-bridge/agb claim %s --agent %s\n' "$TASK_ID" "$AGENT_ID"
-  printf '  (after completing) ~/.agent-bridge/agb done %s --agent %s --note "summary"\n' "$TASK_ID" "$AGENT_ID"
+  printf 'Highest priority: Task #%s [%s] %s\n' "$TASK_ID" "${TASK_PRIORITY:-normal}" "$TASK_TITLE"
 fi
 
-if (( queued > 1 )); then
-  printf '\n+%s more task(s) in queue. Run: ~/.agent-bridge/agb inbox %s\n' "$(( queued - 1 ))" "$AGENT_ID"
-fi
+printf 'Process all pending tasks now: ~/.agent-bridge/agb inbox %s\n' "$AGENT_ID"

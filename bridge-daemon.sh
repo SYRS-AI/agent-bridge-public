@@ -68,23 +68,14 @@ nudge_agent_session() {
     task_priority="${TASK_PRIORITY:-normal}"
   fi
 
-  # Inject full task content so agent acts on it directly
-  message="[Agent Bridge] ${queued} pending task(s) for ${agent}:"
+  # Show highest-priority task summary + direct agent to process all via inbox
+  message="[Agent Bridge] ${queued} pending task(s) for ${agent}."
   if [[ -n "$task_id" && -n "$task_title" ]]; then
-    local task_body=""
-    task_body="$(bridge_queue_cli show "$task_id" --format text 2>/dev/null | sed -n '/^body:/,/^events:/p' | sed '1s/^body://' | sed '/^events:/d' | head -15 || true)"
     message+=$'\n'
-    message+="--- Task #${task_id} [${task_priority}] ${task_title} ---"
-    if [[ -n "$task_body" ]]; then
-      message+=$'\n'
-      message+="${task_body}"
-    fi
-    message+=$'\n'
-    message+="Action: ~/.agent-bridge/agb claim ${task_id} --agent ${agent}"
-  else
-    message+=$'\n'
-    message+="Run: ~/.agent-bridge/agb inbox ${agent}"
+    message+="Highest priority: Task #${task_id} [${task_priority}] ${task_title}"
   fi
+  message+=$'\n'
+  message+="Process all pending tasks now: ~/.agent-bridge/agb inbox ${agent}"
   if ! bridge_dispatch_notification "$agent" "$title" "$message" "" "normal"; then
     status=$?
     if [[ "$status" == "2" ]]; then
@@ -223,6 +214,7 @@ cmd_run_cron_worker() {
   local TASK_CLAIMED_BY=""
   local TASK_BODY_PATH=""
   local CRON_RUN_ID=""
+  local CRON_JOB_ID=""
   local CRON_JOB_NAME=""
   local CRON_FAMILY=""
   local CRON_SLOT=""
@@ -286,15 +278,9 @@ cmd_run_cron_worker() {
     followup_priority="high"
   fi
 
-  # Always create followup if cron job has alwaysFollowup flag or has meaningful results
-  # This ensures parent agents see and report cron results even when needs_human_followup=false
-  if [[ "$CRON_NEEDS_HUMAN_FOLLOWUP" != "1" ]]; then
-    local always_followup=""
-    always_followup="$(bridge_cron_job_always_followup "$CRON_JOB_ID" 2>/dev/null || true)"
-    if [[ "$always_followup" == "1" ]]; then
-      CRON_NEEDS_HUMAN_FOLLOWUP="1"
-    fi
-  fi
+  # Trust the subagent's needs_human_followup decision.
+  # The alwaysFollowup override was creating noise tasks for no-op results
+  # (e.g. "after hours, skipped"). Subagents already set the flag correctly.
 
   if [[ "$CRON_NEEDS_HUMAN_FOLLOWUP" == "1" ]]; then
     followup_body_file="$(bridge_cron_dispatch_followup_file_by_id "$run_id")"
@@ -421,11 +407,13 @@ cmd_sync_cycle() {
   local idle
   local nudge_key
   local changed=1
+  local cron_sync_timeout="${BRIDGE_CRON_SYNC_TIMEOUT:-30}"
+  local timeout_bin=""
+
+  # Discord relay runs FIRST — lowest-latency path for DM wake
+  bridge_discord_relay_step || true
 
   "$BRIDGE_BASH_BIN" "$SCRIPT_DIR/bridge-sync.sh" >/dev/null 2>&1 || true
-  if [[ "${BRIDGE_CRON_SYNC_ENABLED:-${BRIDGE_OPENCLAW_CRON_SYNC_ENABLED:-0}}" == "1" ]]; then
-    "$BRIDGE_BASH_BIN" "$SCRIPT_DIR/bridge-cron.sh" sync >/dev/null 2>&1 || bridge_warn "cron sync failed"
-  fi
   bridge_reconcile_idle_markers || true
   recover_claude_bootstrap_blockers || true
 
@@ -455,14 +443,40 @@ cmd_sync_cycle() {
     esac
   done <<<"$nudge_output"
 
-  bridge_discord_relay_step || true
-
   summary_output="$(bridge_queue_cli summary --format tsv 2>/dev/null || true)"
   if [[ -n "$summary_output" ]] && process_on_demand_agents "$summary_output"; then
     changed=0
   fi
   if [[ "$changed" == "0" ]]; then
     "$BRIDGE_BASH_BIN" "$SCRIPT_DIR/bridge-sync.sh" >/dev/null 2>&1 || true
+  fi
+
+  # Cron sync runs LAST, in the background with a timeout, so it never blocks
+  # relay/auto-start above.  Only one sync runs at a time (PID-file guard).
+  if [[ "${BRIDGE_CRON_SYNC_ENABLED:-${BRIDGE_OPENCLAW_CRON_SYNC_ENABLED:-0}}" == "1" ]]; then
+    local cron_sync_pid_file="$BRIDGE_STATE_DIR/cron-sync.pid"
+    local cron_sync_running=0
+    if [[ -f "$cron_sync_pid_file" ]]; then
+      local prev_pid
+      prev_pid="$(<"$cron_sync_pid_file")"
+      if [[ -n "$prev_pid" ]] && kill -0 "$prev_pid" 2>/dev/null; then
+        cron_sync_running=1
+      else
+        rm -f "$cron_sync_pid_file"
+      fi
+    fi
+    if (( cron_sync_running == 0 )); then
+      timeout_bin="$(command -v gtimeout 2>/dev/null || command -v timeout 2>/dev/null || true)"
+      (
+        if [[ -n "$timeout_bin" ]]; then
+          "$timeout_bin" "$cron_sync_timeout" "$BRIDGE_BASH_BIN" "$SCRIPT_DIR/bridge-cron.sh" sync >/dev/null 2>&1
+        else
+          "$BRIDGE_BASH_BIN" "$SCRIPT_DIR/bridge-cron.sh" sync >/dev/null 2>&1
+        fi
+        rm -f "$cron_sync_pid_file"
+      ) &
+      echo "$!" >"$cron_sync_pid_file"
+    fi
   fi
 
   bridge_dashboard_post_if_changed "$summary_output" || true

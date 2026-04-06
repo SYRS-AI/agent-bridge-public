@@ -283,15 +283,37 @@ if [[ $# -gt 0 ]]; then
       ;;
     kill)
       if [[ $# -ne 2 ]]; then
-        bridge_die "Usage: $CLI_NAME kill <number|all>"
+        bridge_die "Usage: $CLI_NAME kill <number|name|all>"
       fi
 
       if [[ "$2" == "all" ]]; then
         bridge_kill_all_active_agents
-      else
+      elif [[ "$2" =~ ^[0-9]+$ ]]; then
         bridge_kill_active_agent_by_index "$2"
+      else
+        if bridge_agent_is_active "$2"; then
+          bridge_kill_agent_session "$2"
+          bridge_refresh_runtime_state
+        else
+          bridge_die "에이전트 '$2'가 활성 상태가 아닙니다."
+        fi
       fi
       exit 0
+      ;;
+    attach)
+      if [[ $# -ne 2 ]]; then
+        bridge_die "Usage: $CLI_NAME attach <number|name>"
+      fi
+      if [[ "$2" =~ ^[0-9]+$ ]]; then
+        agent="$(bridge_active_agent_id_by_index "$2")" || bridge_die "활성 에이전트 번호가 올바르지 않습니다: $2"
+      else
+        agent="$2"
+      fi
+      session="$(bridge_agent_session "$agent")"
+      if [[ -z "$session" ]] || ! bridge_tmux_session_exists "$session"; then
+        bridge_die "에이전트 '$agent' 세션이 존재하지 않습니다."
+      fi
+      bridge_attach_tmux_session "$session"
       ;;
     urgent)
       shift
