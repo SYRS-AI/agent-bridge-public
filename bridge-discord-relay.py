@@ -387,11 +387,12 @@ def cmd_sync(args: argparse.Namespace) -> int:
             last_seen_id = dm_state.get("last_seen_id")
 
             if not last_seen_id:
+                # DM: don't skip on seed — first message IS the wake signal
                 dm_state["last_seen_id"] = latest_id
                 dm_state["seeded_at"] = now_ts
-                continue
-
-            new_messages = [item for item in messages if snowflake_int(item.get("id")) > snowflake_int(last_seen_id)]
+                new_messages = messages  # treat all as new on first contact
+            else:
+                new_messages = [item for item in messages if snowflake_int(item.get("id")) > snowflake_int(last_seen_id)]
             if not new_messages:
                 continue
 
