@@ -230,7 +230,7 @@ bridge_tmux_paste_and_submit() {
   local buffer_name
 
   buffer_name="bridge-send-$$-$(bridge_nonce)"
-  tmux set-buffer -b "$buffer_name" "$text"
+  tmux set-buffer -b "$buffer_name" -- "$text"
   tmux paste-buffer -d -p -b "$buffer_name" -t "$session"
 
   sleep 0.05
@@ -248,7 +248,7 @@ bridge_tmux_type_and_submit() {
       tmux send-keys -t "$session" C-j
     fi
     if [[ -n "$line" ]]; then
-      tmux send-keys -t "$session" -l "$line"
+      tmux send-keys -t "$session" -l -- "$line"
     fi
     first_line=0
   done <<<"$text"
