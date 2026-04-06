@@ -440,6 +440,20 @@ runner_error = str(result.get("runner_error", "")).strip()
 if runner_error:
     lines.extend(["", "## Runner Error", "", runner_error])
 
+# Explicit delivery instruction so parent agent knows to report
+lines.extend([
+    "",
+    "## Action Required",
+    "",
+    "You are the parent agent receiving this cron result. You MUST:",
+    "1. Review the summary and findings above",
+    "2. Post a concise report to your Discord or Telegram channel",
+    "3. If recommended_next_steps includes DM or notification targets, execute them",
+    "4. Mark this task done with a note summarizing what you reported",
+    "",
+    "Do NOT just acknowledge this task silently. Your channel subscribers expect reports.",
+])
+
 body_path.parent.mkdir(parents=True, exist_ok=True)
 body_path.write_text("\n".join(lines).rstrip() + "\n", encoding="utf-8")
 PY

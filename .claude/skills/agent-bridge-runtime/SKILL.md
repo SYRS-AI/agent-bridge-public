@@ -19,9 +19,20 @@ description: "CRITICAL: When you see '[Agent Bridge]' in any message or context,
 4. Do the work described in the task
 5. Complete it: `~/.agent-bridge/agb done <task-id> --agent <your-agent-name> --note "summary"`
 
+## Cron Followup Tasks
+
+When you receive a `[cron-followup]` task:
+1. Read the summary and findings
+2. **Post a report to your Discord or Telegram channel** — this is mandatory, not optional
+3. If recommended_next_steps includes DM targets, send those DMs
+4. Mark done with a note of what you reported
+
+**Cron followups exist so YOU can report results to your channel. If you just "done" the task without posting, the cron result is invisible to users.**
+
 ## Prohibited
 
 - Responding to `[Agent Bridge]` with just "acknowledged" or "noted" without running inbox — FORBIDDEN
+- Closing a cron-followup without posting to your channel — FORBIDDEN
 - Skipping inbox check — FORBIDDEN
 - Assuming inbox is empty without running the command — FORBIDDEN
 - Using `bridge-task.sh`, sqlite queries, or filesystem searches instead of `agb` CLI — FORBIDDEN
@@ -38,6 +49,6 @@ description: "CRITICAL: When you see '[Agent Bridge]' in any message or context,
 ~/.agent-bridge/agb inbox newsbot
 ~/.agent-bridge/agb show 604
 ~/.agent-bridge/agb claim 604 --agent newsbot
-# ... do the work ...
-~/.agent-bridge/agb done 604 --agent newsbot --note "trend feed delivered"
+# ... post report to channel ...
+~/.agent-bridge/agb done 604 --agent newsbot --note "trend feed delivered to channel"
 ```
