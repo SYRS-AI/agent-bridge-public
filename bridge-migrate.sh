@@ -13,6 +13,7 @@ usage() {
 Usage:
   bash $SCRIPT_DIR/bridge-migrate.sh runtime inventory [--json] [--report <path>]
   bash $SCRIPT_DIR/bridge-migrate.sh runtime sync [--dry-run]
+  bash $SCRIPT_DIR/bridge-migrate.sh runtime canonicalize [--dry-run] [--runtime-root <path>]
   bash $SCRIPT_DIR/bridge-migrate.sh runtime rewrite-cron [--dry-run] [--json]
   bash $SCRIPT_DIR/bridge-migrate.sh runtime rewrite-files [--dry-run] [--json]
   bash $SCRIPT_DIR/bridge-migrate.sh docs audit [--all] [agent...]
@@ -214,6 +215,53 @@ cmd_runtime_sync() {
   runtime_sync_one "credentials" "$legacy_home/credentials" "$runtime_root/credentials" "$backup_root" "$dry_run"
   runtime_sync_one "secrets" "$legacy_home/secrets" "$runtime_root/secrets" "$backup_root" "$dry_run"
   runtime_sync_one "config" "$legacy_home/openclaw.json" "$runtime_root/openclaw.json" "$backup_root" "$dry_run"
+}
+
+cmd_runtime_canonicalize() {
+  local dry_run=0
+  local runtime_root="$BRIDGE_RUNTIME_ROOT"
+  local template_root="$SCRIPT_DIR/runtime-templates"
+  local rel=""
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --dry-run)
+        dry_run=1
+        shift
+        ;;
+      --runtime-root)
+        [[ $# -lt 2 ]] && bridge_die "$1 뒤에 값을 지정하세요."
+        runtime_root="$2"
+        shift 2
+        ;;
+      -h|--help)
+        usage
+        exit 0
+        ;;
+      *)
+        bridge_die "지원하지 않는 runtime canonicalize 옵션입니다: $1"
+        ;;
+    esac
+  done
+
+  [[ -d "$template_root" ]] || bridge_die "runtime template root가 없습니다: $template_root"
+
+  printf 'mode: %s\n' "$([[ "$dry_run" == "1" ]] && printf 'dry-run' || printf 'apply')"
+  printf 'template_root: %s\n' "$template_root"
+  printf 'runtime_root: %s\n' "$runtime_root"
+  printf '\n'
+
+  while IFS= read -r rel; do
+    [[ -n "$rel" ]] || continue
+    printf 'overlay[%s]: %s -> %s\n' "$rel" "$template_root/$rel" "$runtime_root/$rel"
+  done < <(cd "$template_root" && find . \( -type f -o -type l \) | sed 's#^\./##' | LC_ALL=C sort)
+
+  if [[ "$dry_run" == "1" ]]; then
+    return 0
+  fi
+
+  mkdir -p "$runtime_root"
+  runtime_copy_tree "$template_root" "$runtime_root"
 }
 
 MIGRATE_AGENT=""
@@ -606,6 +654,9 @@ case "$subcommand" in
         ;;
       sync)
         cmd_runtime_sync "$@"
+        ;;
+      canonicalize)
+        cmd_runtime_canonicalize "$@"
         ;;
       rewrite-cron)
         run_runtime_helper rewrite-cron "$@"

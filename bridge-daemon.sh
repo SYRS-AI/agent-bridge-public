@@ -461,9 +461,16 @@ cmd_run() {
 
 cmd_stop() {
   local pid
+  local recorded_pid
 
   pid="$(bridge_daemon_pid)"
+  recorded_pid="$(bridge_daemon_recorded_pid)"
   if [[ -z "$pid" ]]; then
+    if [[ -n "$recorded_pid" ]]; then
+      rm -f "$BRIDGE_DAEMON_PID_FILE"
+      echo "[info] stale bridge daemon pid removed"
+      return 0
+    fi
     echo "[info] bridge daemon not running"
     return 0
   fi

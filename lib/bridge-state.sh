@@ -724,16 +724,42 @@ bridge_refresh_agent_session_id() {
   return 1
 }
 
-bridge_daemon_pid() {
+bridge_daemon_recorded_pid() {
   if [[ -f "$BRIDGE_DAEMON_PID_FILE" ]]; then
     cat "$BRIDGE_DAEMON_PID_FILE"
   fi
 }
 
+bridge_daemon_pid() {
+  local pid=""
+  local candidate=""
+  local pattern=""
+
+  pid="$(bridge_daemon_recorded_pid)"
+  if [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null; then
+    printf '%s' "$pid"
+    return 0
+  fi
+
+  pattern="$BRIDGE_HOME/bridge-daemon.sh run"
+  while IFS= read -r candidate; do
+    [[ -n "$candidate" ]] || continue
+    if kill -0 "$candidate" 2>/dev/null; then
+      if [[ "$candidate" != "$pid" ]]; then
+        printf '%s\n' "$candidate" >"$BRIDGE_DAEMON_PID_FILE"
+      fi
+      printf '%s' "$candidate"
+      return 0
+    fi
+  done < <(pgrep -f "$pattern" 2>/dev/null || true)
+
+  return 1
+}
+
 bridge_daemon_is_running() {
   local pid
 
-  pid="$(bridge_daemon_pid)"
+  pid="$(bridge_daemon_pid 2>/dev/null || true)"
   [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null
 }
 
