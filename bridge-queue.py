@@ -98,11 +98,15 @@ def init_db(conn: sqlite3.Connection) -> None:
               last_heartbeat_ts INTEGER,
               session_activity_ts INTEGER,
               last_nudge_ts INTEGER,
-              last_nudge_key TEXT
+              last_nudge_key TEXT,
+              nudge_fail_count INTEGER NOT NULL DEFAULT 0,
+              zombie INTEGER NOT NULL DEFAULT 0
             )
             """
         )
         ensure_column(conn, "agent_state", "last_nudge_key", "TEXT")
+        ensure_column(conn, "agent_state", "nudge_fail_count", "INTEGER NOT NULL DEFAULT 0")
+        ensure_column(conn, "agent_state", "zombie", "INTEGER NOT NULL DEFAULT 0")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_tasks_assigned_status ON tasks(assigned_to, status)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_tasks_claimed_status ON tasks(claimed_by, status)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_tasks_lease ON tasks(status, lease_until_ts)")
@@ -150,8 +154,8 @@ def emit_event(
 def touch_agent_activity(conn: sqlite3.Connection, agent: str, activity_ts: int) -> None:
     conn.execute(
         """
-        INSERT INTO agent_state (agent, last_seen_ts, session_activity_ts)
-        VALUES (?, ?, ?)
+        INSERT INTO agent_state (agent, last_seen_ts, session_activity_ts, nudge_fail_count, zombie)
+        VALUES (?, ?, ?, 0, 0)
         ON CONFLICT(agent) DO UPDATE SET
           last_seen_ts = CASE
             WHEN agent_state.last_seen_ts IS NULL OR agent_state.last_seen_ts < excluded.last_seen_ts THEN excluded.last_seen_ts
@@ -160,7 +164,9 @@ def touch_agent_activity(conn: sqlite3.Connection, agent: str, activity_ts: int)
           session_activity_ts = CASE
             WHEN agent_state.session_activity_ts IS NULL OR agent_state.session_activity_ts < excluded.session_activity_ts THEN excluded.session_activity_ts
             ELSE agent_state.session_activity_ts
-          END
+          END,
+          nudge_fail_count = 0,
+          zombie = 0
         """,
         (agent, activity_ts, activity_ts),
     )
@@ -229,6 +235,8 @@ def agent_summary_rows(conn: sqlite3.Connection, agents: Iterable[str] | None) -
           agent_state.last_heartbeat_ts,
           agent_state.session_activity_ts,
           agent_state.last_nudge_ts,
+          agent_state.nudge_fail_count,
+          agent_state.zombie,
           COALESCE(agent_state.session, '') AS session,
           COALESCE(agent_state.engine, '') AS engine,
           COALESCE(agent_state.workdir, '') AS workdir
@@ -575,6 +583,7 @@ def cmd_update(args: argparse.Namespace) -> int:
 
         title = args.title.strip() if args.title is not None else task["title"]
         priority = args.priority or task["priority"]
+        status = args.status or task["status"]
         body_text = task["body_text"]
         body_path = task["body_path"]
 
@@ -590,20 +599,22 @@ def cmd_update(args: argparse.Namespace) -> int:
             UPDATE tasks
             SET title = ?,
                 priority = ?,
+                status = ?,
                 body_text = ?,
                 body_path = ?,
                 updated_ts = ?
             WHERE id = ?
             """,
-            (title, priority, body_text, body_path, current_ts, args.task_id),
+            (title, priority, status, body_text, body_path, current_ts, args.task_id),
         )
+        event_note = args.body or args.note
         emit_event(
             conn,
             args.task_id,
             event_type="updated",
             actor=actor,
             created_ts=current_ts,
-            note_text=args.body,
+            note_text=event_note,
             note_path=note_path,
             to_agent=task["assigned_to"],
         )
@@ -944,7 +955,9 @@ def cmd_daemon_step(args: argparse.Namespace) -> int:
               agent_state.session_activity_ts,
               agent_state.last_seen_ts,
               agent_state.last_nudge_ts,
-              agent_state.last_nudge_key
+              agent_state.last_nudge_key,
+              agent_state.nudge_fail_count,
+              agent_state.zombie
             FROM agent_state
             LEFT JOIN assigned ON assigned.agent = agent_state.agent
             LEFT JOIN claimed ON claimed.agent = agent_state.agent
@@ -969,6 +982,9 @@ def cmd_daemon_step(args: argparse.Namespace) -> int:
         nudge_key = ",".join(str(task_id) for task_id in queue_ids)
         last_nudge_ts = int(row["last_nudge_ts"] or 0)
         last_nudge_key = row["last_nudge_key"] or ""
+        zombie = int(row["zombie"] or 0)
+        if zombie:
+            continue
         last_nudged_ids = {item for item in last_nudge_key.split(",") if item}
         has_new_queue_ids = any(str(task_id) not in last_nudged_ids for task_id in queue_ids)
         if last_nudge_ts and current_ts - last_nudge_ts < nudge_cooldown and not has_new_queue_ids:
@@ -1001,15 +1017,101 @@ def cmd_note_nudge(args: argparse.Namespace) -> int:
     with closing(connect()) as conn, conn:
         conn.execute(
             """
-            INSERT INTO agent_state (agent, last_nudge_ts, last_nudge_key)
-            VALUES (?, ?, ?)
+            INSERT INTO agent_state (agent, last_nudge_ts, last_nudge_key, nudge_fail_count, zombie)
+            VALUES (?, ?, ?, 1, 0)
             ON CONFLICT(agent) DO UPDATE SET
               last_nudge_ts = excluded.last_nudge_ts,
-              last_nudge_key = excluded.last_nudge_key
+              last_nudge_key = excluded.last_nudge_key,
+              nudge_fail_count = COALESCE(agent_state.nudge_fail_count, 0) + 1,
+              zombie = CASE
+                WHEN COALESCE(agent_state.nudge_fail_count, 0) + 1 >= ? THEN 1
+                ELSE agent_state.zombie
+              END
             """,
-            (args.agent, current_ts, args.key),
+            (args.agent, current_ts, args.key, args.zombie_threshold),
         )
     print(f"recorded nudge for {args.agent}")
+    return 0
+
+
+def cmd_events(args: argparse.Namespace) -> int:
+    import json as _json
+
+    after_id = args.after_id
+    limit = args.limit
+    event_type = args.event_type
+
+    with closing(connect()) as conn:
+        query = """
+            SELECT
+                e.id, e.task_id, e.event_type, e.actor, e.created_ts,
+                e.note_text, e.note_path, e.from_agent, e.to_agent,
+                t.title AS task_title, t.body_text AS task_body,
+                t.body_path AS task_body_path,
+                t.assigned_to, t.created_by AS task_created_by
+            FROM task_events e
+            LEFT JOIN tasks t ON t.id = e.task_id
+            WHERE e.id > ?
+        """
+        params: list = [after_id]
+        if event_type:
+            query += " AND e.event_type = ?"
+            params.append(event_type)
+        query += " ORDER BY e.id ASC LIMIT ?"
+        params.append(limit)
+        rows = conn.execute(query, params).fetchall()
+
+    if args.format == "json":
+        events = []
+        for row in rows:
+            note_file_content = None
+            note_path = row["note_path"]
+            if note_path and os.path.isfile(note_path):
+                try:
+                    note_file_content = Path(note_path).read_text(
+                        encoding="utf-8", errors="replace"
+                    )[:4000]
+                except OSError:
+                    pass
+            # Resolve task body: prefer body_text, fall back to body_path file
+            task_body = row["task_body"]
+            if not task_body:
+                body_path = row["task_body_path"]
+                if body_path and os.path.isfile(body_path):
+                    try:
+                        task_body = Path(body_path).read_text(
+                            encoding="utf-8", errors="replace"
+                        )[:4000]
+                    except OSError:
+                        pass
+            events.append(
+                {
+                    "event_id": row["id"],
+                    "task_id": row["task_id"],
+                    "event_type": row["event_type"],
+                    "actor": row["actor"],
+                    "created_ts": row["created_ts"],
+                    "note_text": row["note_text"],
+                    "note_path": row["note_path"],
+                    "note_file_content": note_file_content,
+                    "from_agent": row["from_agent"],
+                    "to_agent": row["to_agent"],
+                    "task_title": row["task_title"],
+                    "task_body": task_body,
+                    "assigned_to": row["assigned_to"],
+                    "task_created_by": row["task_created_by"],
+                }
+            )
+        print(_json.dumps(events, ensure_ascii=False))
+    else:
+        for row in rows:
+            ts = datetime.fromtimestamp(
+                int(row["created_ts"]), tz=timezone.utc
+            ).strftime("%Y-%m-%dT%H:%M:%S%z")
+            print(
+                f"#{row['id']}  task={row['task_id']}  {row['event_type']}  "
+                f"actor={row['actor']}  {ts}  {row['note_text'] or ''}"
+            )
     return 0
 
 
@@ -1065,7 +1167,9 @@ def build_parser() -> argparse.ArgumentParser:
     update_parser.add_argument("task_id", type=int)
     update_parser.add_argument("--actor")
     update_parser.add_argument("--title")
+    update_parser.add_argument("--status", choices=OPEN_STATUSES)
     update_parser.add_argument("--priority", choices=PRIORITY_CHOICES)
+    update_parser.add_argument("--note")
     update_body_group = update_parser.add_mutually_exclusive_group()
     update_body_group.add_argument("--body")
     update_body_group.add_argument("--body-file")
@@ -1106,6 +1210,11 @@ def build_parser() -> argparse.ArgumentParser:
         default=os.environ.get("BRIDGE_TASK_NUDGE_COOLDOWN_SECONDS", "900"),
     )
     daemon_parser.add_argument(
+        "--zombie-threshold",
+        type=int,
+        default=int(os.environ.get("BRIDGE_ZOMBIE_NUDGE_THRESHOLD", "10")),
+    )
+    daemon_parser.add_argument(
         "--max-claim-age",
         default=os.environ.get("BRIDGE_TASK_MAX_CLAIM_AGE_SECONDS", "900"),
     )
@@ -1116,7 +1225,19 @@ def build_parser() -> argparse.ArgumentParser:
     nudge_parser = subparsers.add_parser("note-nudge")
     nudge_parser.add_argument("--agent", required=True)
     nudge_parser.add_argument("--key")
+    nudge_parser.add_argument(
+        "--zombie-threshold",
+        type=int,
+        default=int(os.environ.get("BRIDGE_ZOMBIE_NUDGE_THRESHOLD", "10")),
+    )
     nudge_parser.set_defaults(handler=cmd_note_nudge)
+
+    events_parser = subparsers.add_parser("events")
+    events_parser.add_argument("--type", dest="event_type")
+    events_parser.add_argument("--after-id", type=int, default=0)
+    events_parser.add_argument("--limit", type=int, default=100)
+    events_parser.add_argument("--format", choices=("text", "json"), default="text")
+    events_parser.set_defaults(handler=cmd_events)
 
     return parser
 

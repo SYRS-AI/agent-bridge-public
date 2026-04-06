@@ -16,6 +16,7 @@ Usage:
   bash $SCRIPT_DIR/bridge-task.sh show <task-id>
   bash $SCRIPT_DIR/bridge-task.sh claim <task-id> [--agent <agent>] [--lease <seconds>]
   bash $SCRIPT_DIR/bridge-task.sh done <task-id> [--agent <agent>] [--note <text> | --note-file <path>]
+  bash $SCRIPT_DIR/bridge-task.sh update <task-id> [--status queued|claimed|blocked] [--priority ...] [--title ...] [--note ...]
   bash $SCRIPT_DIR/bridge-task.sh handoff <task-id> --to <agent> [--from <agent>] [--note <text> | --note-file <path>]
   bash $SCRIPT_DIR/bridge-task.sh summary [agent...]
 EOF
@@ -299,6 +300,19 @@ cmd_done() {
   notify_task_requester "$task_id" "$agent" "$note" "$note_file"
 }
 
+cmd_update() {
+  local task_id=""
+  local actor=""
+
+  task_id="${1:-}"
+  shift || true
+  [[ -n "$task_id" ]] || bridge_die "task_id is required"
+
+  actor="$(infer_actor_if_possible "")"
+
+  bridge_queue_cli update "$task_id" --actor "$actor" "$@"
+}
+
 cmd_handoff() {
   local task_id=""
   local target=""
@@ -397,6 +411,9 @@ case "$COMMAND" in
     ;;
   handoff)
     cmd_handoff "$@"
+    ;;
+  update)
+    cmd_update "$@"
     ;;
   summary)
     cmd_summary "$@"

@@ -24,6 +24,12 @@ assert_contains() {
   [[ "$haystack" == *"$needle"* ]] || die "expected output to contain: $needle"
 }
 
+assert_not_contains() {
+  local haystack="$1"
+  local needle="$2"
+  [[ "$haystack" != *"$needle"* ]] || die "expected output to not contain: $needle"
+}
+
 require_cmd bash
 require_cmd tmux
 require_cmd python3
@@ -445,6 +451,50 @@ assert_contains "$REQUESTER_SHOW_OUTPUT" "completed_by: $SMOKE_AGENT"
 
 SUMMARY_OUTPUT="$("$REPO_ROOT/agb" summary "$SMOKE_AGENT")"
 assert_contains "$SUMMARY_OUTPUT" "$SMOKE_AGENT"
+
+log "marking zombie after repeated unanswered nudges and clearing on activity"
+for nudge_try in $(seq 1 10); do
+  python3 "$REPO_ROOT/bridge-queue.py" note-nudge --agent "$SMOKE_AGENT" --key "smoke-zombie-$nudge_try" --zombie-threshold 10 >/dev/null
+done
+ZOMBIE_STATUS_OUTPUT="$("$REPO_ROOT/agent-bridge" status --all-agents)"
+assert_contains "$ZOMBIE_STATUS_OUTPUT" "zombie=1"
+assert_contains "$ZOMBIE_STATUS_OUTPUT" "zmb"
+
+ZOMBIE_RESET_CREATE_OUTPUT="$(bash "$REPO_ROOT/bridge-task.sh" create --to "$SMOKE_AGENT" --title "zombie reset smoke" --body "reset" --from "$REQUESTER_AGENT")"
+assert_contains "$ZOMBIE_RESET_CREATE_OUTPUT" "created task #"
+ZOMBIE_RESET_TASK_ID="$(BRIDGE_TASK_DB="$BRIDGE_TASK_DB" python3 - <<'PY'
+import os
+import sqlite3
+
+db = os.environ["BRIDGE_TASK_DB"]
+with sqlite3.connect(db) as conn:
+    row = conn.execute(
+        "SELECT id FROM tasks WHERE title = ? ORDER BY id DESC LIMIT 1",
+        ("zombie reset smoke",),
+    ).fetchone()
+print(int(row[0]))
+PY
+)"
+python3 "$REPO_ROOT/bridge-queue.py" claim "$ZOMBIE_RESET_TASK_ID" --agent "$SMOKE_AGENT" --lease-seconds 60 >/dev/null
+python3 "$REPO_ROOT/bridge-queue.py" done "$ZOMBIE_RESET_TASK_ID" --agent "$SMOKE_AGENT" --note "cleared zombie" >/dev/null
+ZOMBIE_CLEARED_STATUS_OUTPUT="$("$REPO_ROOT/agent-bridge" status --all-agents)"
+assert_contains "$ZOMBIE_CLEARED_STATUS_OUTPUT" "zombie=0"
+assert_not_contains "$ZOMBIE_CLEARED_STATUS_OUTPUT" "zmb"
+
+log "ensuring events reader and supervisor prefilter"
+EVENTS_OUTPUT="$(python3 "$REPO_ROOT/bridge-queue.py" events --type done --after-id 0 --limit 5 --format json)"
+assert_contains "$EVENTS_OUTPUT" '"event_type": "done"'
+assert_contains "$EVENTS_OUTPUT" '"task_title"'
+EVENTS_TEXT="$(python3 "$REPO_ROOT/bridge-queue.py" events --type done --after-id 0 --limit 2 --format text)"
+assert_contains "$EVENTS_TEXT" "done"
+SUPERVISOR_STATUS="$(python3 "$REPO_ROOT/bridge-supervisor.py" status)"
+assert_contains "$SUPERVISOR_STATUS" "checkpoint:"
+assert_contains "$SUPERVISOR_STATUS" "model:"
+
+log "ensuring Task Processing Protocol in managed CLAUDE.md block"
+TEMPLATE_CLAUDE="$(cat "$REPO_ROOT/agents/_template/CLAUDE.md")"
+assert_contains "$TEMPLATE_CLAUDE" "Task Processing Protocol"
+assert_contains "$TEMPLATE_CLAUDE" "조용한 done 금지"
 
 log "auto-starting static role even when timeout=0"
 AUTO_START_OUTPUT="$(bash "$REPO_ROOT/bridge-task.sh" create --to "$AUTO_START_AGENT" --title "auto-start smoke" --body "wake" --from "$REQUESTER_AGENT")"

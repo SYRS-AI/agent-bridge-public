@@ -812,6 +812,7 @@ bridge_write_roster_status_snapshot() {
 bridge_task_daemon_step() {
   local snapshot_file="$1"
   local ready_agents_file="${2:-}"
+  local zombie_threshold="${BRIDGE_ZOMBIE_NUDGE_THRESHOLD:-10}"
   local args=(
     daemon-step
     --snapshot "$snapshot_file"
@@ -819,6 +820,7 @@ bridge_task_daemon_step() {
     --heartbeat-window "$BRIDGE_TASK_HEARTBEAT_WINDOW_SECONDS"
     --idle-threshold "$BRIDGE_TASK_IDLE_NUDGE_SECONDS"
     --nudge-cooldown "$BRIDGE_TASK_NUDGE_COOLDOWN_SECONDS"
+    --zombie-threshold "$zombie_threshold"
   )
 
   if [[ -n "$ready_agents_file" && -f "$ready_agents_file" ]]; then
@@ -831,7 +833,8 @@ bridge_task_daemon_step() {
 bridge_task_note_nudge() {
   local agent="$1"
   local key="${2:-}"
-  local args=(note-nudge --agent "$agent")
+  local zombie_threshold="${BRIDGE_ZOMBIE_NUDGE_THRESHOLD:-10}"
+  local args=(note-nudge --agent "$agent" --zombie-threshold "$zombie_threshold")
 
   if [[ -n "$key" ]]; then
     args+=(--key "$key")

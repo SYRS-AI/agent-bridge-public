@@ -17,7 +17,7 @@ Usage:
   $CLI_NAME admin [--replace] [--continue|--no-continue] [--no-attach] [--no-project-skill]
   $CLI_NAME kill <number|all>
   $CLI_NAME urgent <agent> "<message>" [--wait <seconds>]
-  $CLI_NAME task <create|inbox|show|claim|done|handoff|summary> ...
+  $CLI_NAME task <create|inbox|show|claim|done|update|handoff|summary> ...
   $CLI_NAME profile <status|diff|deploy> ...
   $CLI_NAME setup <discord|agent|admin> ...
   $CLI_NAME cron <inventory|show|import|list|create|update|delete|enqueue|sync|run-subagent|errors|cleanup> ...
@@ -35,6 +35,7 @@ Usage:
   $CLI_NAME show <task-id>
   $CLI_NAME claim <task-id> [--agent <agent>] [--lease <seconds>]
   $CLI_NAME done <task-id> [--agent <agent>] [--note <text> | --note-file <path>]
+  $CLI_NAME update <task-id> [--status queued|claimed|blocked] [--priority ...] [--note ...]
   $CLI_NAME handoff <task-id> --to <agent> [--from <agent>] [--note <text> | --note-file <path>]
   $CLI_NAME summary [agent...]
   $CLI_NAME worktree list
@@ -358,7 +359,7 @@ if [[ $# -gt 0 ]]; then
           ;;
       esac
       ;;
-    inbox|show|claim|done|handoff|summary|create)
+    inbox|show|claim|done|update|handoff|summary|create)
       exec "$BRIDGE_BASH_BIN" "$SCRIPT_DIR/bridge-task.sh" "$@"
       ;;
   esac

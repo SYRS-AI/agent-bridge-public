@@ -31,6 +31,13 @@ When you receive a `[cron-followup]` task:
 
 **Cron followups exist so YOU can report results to your channel. If you just "done" the task without posting, the cron result is invisible to users.**
 
+## Task Completion Rules
+
+- `agb done` 전에 반드시 결과를 전달해야 한다 (채널 메시지, 요청자에게 task create 등)
+- `--note` 없는 done은 금지. 무엇을 했는지 반드시 기록
+- `[cron-followup]`의 `needs_human_followup=true`면 반드시 채널에 포스팅 후 done
+- 인프라 장애 감지 시 `agent-bridge urgent patch "..."` 에스컬레이션 필수
+
 ## Prohibited
 
 - Responding to `[Agent Bridge]` with just "acknowledged", "noted", or "Cooking..." without running inbox — FORBIDDEN
@@ -38,6 +45,8 @@ When you receive a `[cron-followup]` task:
 - Skipping inbox check — FORBIDDEN
 - Assuming inbox is empty without running the command — FORBIDDEN
 - Using `bridge-task.sh`, sqlite queries, or filesystem searches instead of `agb` CLI — FORBIDDEN
+- Running `agb done` without delivering results to the requester — FORBIDDEN
+- Running `agb done` without `--note` — FORBIDDEN
 
 ## Queue Source of Truth
 

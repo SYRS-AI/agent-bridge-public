@@ -92,6 +92,10 @@ def db_connect(path: str) -> sqlite3.Connection:
     return conn
 
 
+def table_columns(conn: sqlite3.Connection, table: str) -> set[str]:
+    return {str(row["name"]) for row in conn.execute(f"PRAGMA table_info({table})")}
+
+
 def daemon_status(pid_file: str) -> tuple[bool, str]:
     try:
         pid = Path(pid_file).read_text(encoding="utf-8").strip()
@@ -111,6 +115,17 @@ def daemon_status(pid_file: str) -> tuple[bool, str]:
 
 
 def fetch_agent_metrics(conn: sqlite3.Connection) -> dict[str, dict[str, int | str | None]]:
+    agent_state_columns = table_columns(conn, "agent_state")
+    nudge_fail_expr = (
+        "COALESCE(agent_state.nudge_fail_count, 0) AS nudge_fail_count"
+        if "nudge_fail_count" in agent_state_columns
+        else "0 AS nudge_fail_count"
+    )
+    zombie_expr = (
+        "COALESCE(agent_state.zombie, 0) AS zombie"
+        if "zombie" in agent_state_columns
+        else "0 AS zombie"
+    )
     sql = """
       WITH assigned AS (
         SELECT
@@ -135,11 +150,13 @@ def fetch_agent_metrics(conn: sqlite3.Connection) -> dict[str, dict[str, int | s
         agent_state.last_seen_ts,
         agent_state.last_heartbeat_ts,
         agent_state.session_activity_ts,
-        agent_state.last_nudge_ts
+        agent_state.last_nudge_ts,
+        {nudge_fail_expr},
+        {zombie_expr}
       FROM agent_state
       LEFT JOIN assigned ON assigned.agent = agent_state.agent
       LEFT JOIN claimed ON claimed.agent = agent_state.agent
-    """
+    """.format(nudge_fail_expr=nudge_fail_expr, zombie_expr=zombie_expr)
     data: dict[str, dict[str, int | str | None]] = {}
     for row in conn.execute(sql):
         data[row["agent"]] = {
@@ -151,6 +168,8 @@ def fetch_agent_metrics(conn: sqlite3.Connection) -> dict[str, dict[str, int | s
             "last_heartbeat_ts": row["last_heartbeat_ts"],
             "session_activity_ts": row["session_activity_ts"],
             "last_nudge_ts": row["last_nudge_ts"],
+            "nudge_fail_count": row["nudge_fail_count"],
+            "zombie": row["zombie"],
         }
     return data
 
@@ -231,6 +250,7 @@ def render_dashboard(args: argparse.Namespace) -> str:
     health_warn_count = 0
     health_critical_count = 0
     wake_missing_count = sum(1 for row in roster if row.get("wake") == "miss")
+    zombie_count = sum(1 for metric in metrics.values() if int(metric.get("zombie", 0) or 0) == 1)
 
     for row in roster:
         metric = metrics.get(row["agent"], {})
@@ -264,7 +284,7 @@ def render_dashboard(args: argparse.Namespace) -> str:
     lines.append(
         f"updated {iso_now()} | daemon {'running' if daemon_running else 'stopped'} pid={daemon_pid} | "
         f"active {full_active_count}/{full_total_agents} | shown {visible_agents} | "
-        f"health warn={health_warn_count} crit={health_critical_count} | wake miss={wake_missing_count} | db {queue_db}"
+        f"health warn={health_warn_count} crit={health_critical_count} | wake miss={wake_missing_count} | zombie={zombie_count} | db {queue_db}"
     )
     lines.append("")
     lines.append(
@@ -295,6 +315,7 @@ def render_dashboard(args: argparse.Namespace) -> str:
         blocked = int(metric.get("blocked_count", 0) or 0)
         activity_ts = metric.get("session_activity_ts") or metric.get("last_seen_ts")
         last_nudge_ts = metric.get("last_nudge_ts")
+        zombie = int(metric.get("zombie", 0) or 0)
         stale = classify_stale(
             active,
             int(activity_ts) if activity_ts else None,
@@ -302,13 +323,14 @@ def render_dashboard(args: argparse.Namespace) -> str:
             args.stale_critical_seconds,
         )
         load_bar = f"q:{render_bar(queued, width=4, char='=')} c:{render_bar(claimed, width=4, char='*')}"
+        wake_state = "zmb" if zombie else (row.get("wake") or "-")
         lines.append(
             f"{idx_label}  {agent:<15} {row['engine']:<7} "
             f"{'yes' if active else 'no ':<3} "
             f"{queued:>2}  {claimed:>2}  {blocked:>2}  "
             f"{fmt_idle(int(activity_ts) if activity_ts else None):>4}  "
             f"{stale:>5} "
-            f"{(row.get('wake') or '-'):>6} "
+            f"{wake_state:>6} "
             f"{fmt_age(int(last_nudge_ts) if last_nudge_ts else None):>5}  "
             f"{load_bar:<12}  "
             f"{(row.get('session') or '-')[:12]:<12}  {short_path(row.get('workdir', ''))}"

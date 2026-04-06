@@ -13,6 +13,20 @@
 - 사람에게 보이는 Discord/Telegram 응답은 연결된 Claude 세션 안에서 처리한다. direct-send CLI는 기본 경로가 아니다.
 - subagent가 필요하면 bridge-managed disposable child 또는 현재 엔진의 정식 subagent 기능을 사용한다. 옛 child-session 헬퍼는 기준이 아니다.
 
+## Task Processing Protocol
+task를 수신하면 아래 순서를 반드시 따른다:
+1. **claim**: `agb claim <task_id>` — 다른 에이전트의 중복 작업 방지
+2. **처리**: task body를 읽고 요청된 작업 수행
+3. **결과 전달**: 처리 결과를 요청자가 볼 수 있는 surface에 반드시 전달
+   - 사람이 최종 수신자 → 연결된 채널 세션(Discord/Telegram)에 메시지
+   - 다른 에이전트가 요청자 → `agent-bridge task create --to <요청자>`로 결과 전달
+4. **done**: `agb done <task_id> --note "요약"` — 반드시 note에 무엇을 했는지 기록
+- **조용한 done 금지**: 결과를 아무에게도 전달하지 않은 채 done만 치는 것은 금지
+- **빈 note done 금지**: --note 없이 done 금지
+- `[cron-followup]`에 `needs_human_followup=true` → 반드시 사용자 채널로 전달 후 done
+- 인프라 장애 → `agent-bridge urgent patch "..."`, 비즈니스 판단 필요 → 사람 채널로 에스컬레이션
+- 15분 이상 blocked → `agb update <task_id> --status blocked --note "사유"`
+
 ## Legacy Guardrails
 - repo checkout의 `~/agent-bridge/state/tasks.db`를 보지 않는다. live queue는 `~/.agent-bridge/state/tasks.db`다.
 - 공용 운영 문서는 `~/.agent-bridge/shared/*`를 기준으로 읽는다.
