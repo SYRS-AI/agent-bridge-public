@@ -289,5 +289,8 @@ bridge_sanitize_text() {
 
 bridge_tmux_session_activity_ts() {
   local session="$1"
-  tmux display-message -p -t "$session" '#{session_activity}' 2>/dev/null || true
+  # Use window_activity (updates on pane output) instead of session_activity
+  # (only updates on key input). Agents produce output during conversations
+  # without key input, so session_activity causes false idle detection.
+  tmux display-message -p -t "$session" '#{window_activity}' 2>/dev/null || true
 }
