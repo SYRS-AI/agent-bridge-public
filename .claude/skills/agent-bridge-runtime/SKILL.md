@@ -46,9 +46,9 @@ When you receive a `[cron-followup]` task:
 ## Example
 
 ```bash
-~/.agent-bridge/agb inbox newsbot
-~/.agent-bridge/agb show 604
-~/.agent-bridge/agb claim 604 --agent newsbot
-# ... post report to channel ...
-~/.agent-bridge/agb done 604 --agent newsbot --note "trend feed delivered to channel"
+~/.agent-bridge/agb inbox <your-agent-name>
+~/.agent-bridge/agb show <task-id>
+~/.agent-bridge/agb claim <task-id> --agent <your-agent-name>
+# ... do the work / post report to channel ...
+~/.agent-bridge/agb done <task-id> --agent <your-agent-name> --note "summary of what was done"
 ```
