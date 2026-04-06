@@ -236,12 +236,16 @@ write_materialized_payload() {
   local payload_file="$1"
   local slot="$2"
   local source_file="$3"
+  local target="$4"
+  local delivery_mode="$5"
 
   mkdir -p "$(dirname "$payload_file")"
   {
     printf '# [cron] %s\n\n' "$CRON_JOB_NAME"
     printf -- '- slot: %s\n' "$slot"
     printf -- '- openclaw_agent: %s\n' "$CRON_JOB_AGENT"
+    printf -- '- target_agent: %s\n' "$target"
+    printf -- '- delivery_mode: %s\n' "$delivery_mode"
     printf -- '- family: %s\n' "$CRON_JOB_FAMILY"
     printf -- '- schedule: %s\n' "$CRON_JOB_SCHEDULE_TEXT"
     printf -- '- source_file: %s\n' "$source_file"
@@ -261,6 +265,7 @@ write_dispatch_body() {
   local status_file="$7"
   local target="$8"
   local target_engine="$9"
+  local delivery_mode="${10}"
 
   mkdir -p "$(dirname "$body_file")"
   {
@@ -269,6 +274,7 @@ write_dispatch_body() {
     printf -- '- slot: %s\n' "$slot"
     printf -- '- target_agent: %s\n' "$target"
     printf -- '- target_engine: %s\n' "$target_engine"
+    printf -- '- delivery_mode: %s\n' "$delivery_mode"
     printf -- '- openclaw_agent: %s\n' "$CRON_JOB_AGENT"
     printf -- '- family: %s\n' "$CRON_JOB_FAMILY"
     printf -- '- payload_file: %s\n' "$payload_file"
@@ -281,6 +287,9 @@ write_dispatch_body() {
     printf '2. The disposable child writes structured result artifacts under `state/cron/runs/%s/`\n' "$run_id"
     printf '3. The daemon closes this dispatch task when the child finishes\n'
     printf '4. If human follow-up is still needed, the daemon creates a separate `[cron-followup]` queue task\n'
+    if [[ "$delivery_mode" == "fallback" ]]; then
+      printf '5. This run was routed through the cron fallback agent because `%s` is not a registered cron delivery role\n' "$CRON_JOB_AGENT"
+    fi
   } >"$body_file"
 }
 
@@ -315,6 +324,8 @@ run_enqueue() {
   local task_id=""
   local created_at=""
   local shell_payload=""
+  local delivery_mode="resolved"
+  local fallback_agent=""
 
   while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -383,10 +394,20 @@ run_enqueue() {
   fi
 
   if [[ -n "$target" ]]; then
-    bridge_require_agent "$target"
+    bridge_require_cron_delivery_target "$target"
+    delivery_mode="explicit"
   else
-    target="$(bridge_resolve_openclaw_target "$CRON_JOB_AGENT" || true)"
-    [[ -n "$target" ]] || bridge_die "OpenClaw agent에 대응하는 bridge agent를 찾지 못했습니다: $CRON_JOB_AGENT"
+    target="$(bridge_resolve_cron_target "$CRON_JOB_AGENT" || true)"
+    if [[ -n "$target" ]]; then
+      delivery_mode="mapped"
+    else
+      fallback_agent="$(bridge_cron_fallback_agent || true)"
+      if [[ -z "$fallback_agent" ]]; then
+        bridge_die "cron target을 찾지 못했습니다: $CRON_JOB_AGENT (등록된 cron delivery role 매핑이나 BRIDGE_CRON_FALLBACK_AGENT/admin role이 필요합니다)"
+      fi
+      target="$fallback_agent"
+      delivery_mode="fallback"
+    fi
   fi
 
   actor="${actor:-cron:$CRON_JOB_NAME}"
@@ -426,6 +447,7 @@ run_enqueue() {
     printf 'family: %s\n' "$CRON_JOB_FAMILY"
     printf 'slot: %s\n' "$slot"
     printf 'target: %s\n' "$target"
+    printf 'delivery_mode: %s\n' "$delivery_mode"
     printf 'engine: %s\n' "$target_engine"
     printf 'actor: %s\n' "$actor"
     printf 'priority: %s\n' "$priority"
@@ -440,8 +462,8 @@ run_enqueue() {
     return 0
   fi
 
-  write_materialized_payload "$payload_file" "$slot" "$jobs_file"
-  write_dispatch_body "$body_file" "$slot" "$run_id" "$payload_file" "$request_file" "$result_file" "$status_file" "$target" "$target_engine"
+  write_materialized_payload "$payload_file" "$slot" "$jobs_file" "$target" "$delivery_mode"
+  write_dispatch_body "$body_file" "$slot" "$run_id" "$payload_file" "$request_file" "$result_file" "$status_file" "$target" "$target_engine" "$delivery_mode"
   create_output="$(bridge_queue_cli create --to "$target" --title "$title" --from "$actor" --priority "$priority" --body-file "$body_file")"
   printf '%s\n' "$create_output"
 

@@ -460,25 +460,45 @@ body_path.write_text("\n".join(lines).rstrip() + "\n", encoding="utf-8")
 PY
 }
 
-bridge_resolve_openclaw_target() {
-  local openclaw_agent="$1"
-  local explicit="${BRIDGE_OPENCLAW_AGENT_TARGET[$openclaw_agent]-}"
-  local suffix="${openclaw_agent##*-}"
+bridge_cron_fallback_agent() {
+  local fallback="${BRIDGE_CRON_FALLBACK_AGENT:-}"
+
+  if [[ -n "$fallback" ]]; then
+    bridge_require_cron_delivery_target "$fallback"
+    printf '%s' "$fallback"
+    return 0
+  fi
+
+  if [[ -n "$(bridge_admin_agent_id)" ]]; then
+    bridge_require_admin_agent
+    return 0
+  fi
+
+  return 1
+}
+
+bridge_resolve_cron_target() {
+  local requested_agent="$1"
+  local explicit="${BRIDGE_CRON_AGENT_TARGET[$requested_agent]-${BRIDGE_OPENCLAW_AGENT_TARGET[$requested_agent]-}}"
+  local suffix="${requested_agent##*-}"
   local candidate
   local matches=()
 
   if [[ -n "$explicit" ]]; then
-    bridge_require_agent "$explicit"
+    bridge_require_cron_delivery_target "$explicit"
     printf '%s' "$explicit"
     return 0
   fi
 
-  if bridge_agent_exists "$openclaw_agent"; then
-    printf '%s' "$openclaw_agent"
+  if bridge_agent_is_cron_delivery_target "$requested_agent"; then
+    printf '%s' "$requested_agent"
     return 0
   fi
 
   for candidate in "${BRIDGE_AGENT_IDS[@]}"; do
+    if ! bridge_agent_is_cron_delivery_target "$candidate"; then
+      continue
+    fi
     if [[ "$candidate" == "$suffix" ]]; then
       matches+=("$candidate")
     fi
@@ -490,6 +510,10 @@ bridge_resolve_openclaw_target() {
   fi
 
   return 1
+}
+
+bridge_resolve_openclaw_target() {
+  bridge_resolve_cron_target "$@"
 }
 
 bridge_cron_write_manifest() {

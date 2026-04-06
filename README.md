@@ -295,6 +295,8 @@ If you are migrating existing cron jobs into Agent Bridge, start with the read-o
 
 `cron enqueue` now works for recurring jobs in general. It writes a materialized note under `shared/cron/`, records per-slot manifests under `state/cron/dispatch/`, and creates compact `[cron-dispatch]` queue tasks for the bridge daemon. The daemon claims those tasks, runs `agent-bridge cron run-subagent <run-id>` in a disposable child, then closes the dispatch task when the result artifact is ready.
 
+Cron delivery targets are resolved against registered long-lived roles, not only currently running tmux sessions. A sleeping role can still receive cron work because the daemon auto-starts it when queued work appears. If a source job references an agent that is not mapped to any launchable long-lived role, set `BRIDGE_CRON_AGENT_TARGET["source-agent"]="bridge-role"` or configure `BRIDGE_CRON_FALLBACK_AGENT` so results go to a manager/admin role instead of hard-failing.
+
 For `memory-daily` the default slot is `YYYY-MM-DD`. For `monthly-highlights` it is `YYYY-MM`. Other recurring jobs default to the current minute as an ISO timestamp, so repeated enqueue calls on the same day do not collapse into one slot.
 
 `cron sync` is the bridge-owned recurring scheduler. It scans the bridge-native recurring job store, derives due occurrence slots, and enqueues each occurrence through the same disposable-child path. When `BRIDGE_CRON_SYNC_ENABLED=1`, the daemon also drains queued `[cron-dispatch]` tasks itself, so recurring jobs do not wake long-lived agent sessions unless a run explicitly needs a separate `[cron-followup]` task. The older `BRIDGE_OPENCLAW_CRON_SYNC_ENABLED` name still works as a compatibility alias.

@@ -270,6 +270,26 @@ bridge_agent_exists() {
   [[ -n "${BRIDGE_AGENT_SESSION[$agent]+x}" ]]
 }
 
+bridge_agent_is_static() {
+  local agent="$1"
+  [[ "$(bridge_agent_source "$agent")" == "static" ]]
+}
+
+bridge_agent_is_launchable_static() {
+  local agent="$1"
+  bridge_agent_exists "$agent" && bridge_agent_is_static "$agent"
+}
+
+bridge_agent_is_cron_delivery_target() {
+  local agent="$1"
+
+  bridge_agent_exists "$agent" || return 1
+  if bridge_agent_is_static "$agent"; then
+    return 0
+  fi
+  bridge_profile_has_source "$agent"
+}
+
 bridge_require_agent() {
   local agent="$1"
 
@@ -286,8 +306,26 @@ bridge_require_static_agent() {
   local agent="$1"
 
   bridge_require_agent "$agent"
-  if [[ "$(bridge_agent_source "$agent")" != "static" ]]; then
+  if ! bridge_agent_is_static "$agent"; then
     bridge_die "'$agent'은(는) 정적 역할이 아닙니다. 관리자 에이전트는 정적 역할로 설정하세요."
+  fi
+}
+
+bridge_require_launchable_static_agent() {
+  local agent="$1"
+
+  bridge_require_agent "$agent"
+  if ! bridge_agent_is_launchable_static "$agent"; then
+    bridge_die "'$agent'은(는) cron delivery 대상이 될 수 있는 정적 역할이 아닙니다."
+  fi
+}
+
+bridge_require_cron_delivery_target() {
+  local agent="$1"
+
+  bridge_require_agent "$agent"
+  if ! bridge_agent_is_cron_delivery_target "$agent"; then
+    bridge_die "'$agent'은(는) cron delivery 대상이 될 수 있는 등록된 장기 역할이 아닙니다."
   fi
 }
 

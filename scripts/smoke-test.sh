@@ -179,6 +179,7 @@ BRIDGE_AGENT_WORKDIR["$AUTO_START_AGENT"]="$AUTO_START_WORKDIR"
 BRIDGE_AGENT_WORKDIR["$ALWAYS_ON_AGENT"]="$AUTO_START_WORKDIR"
 BRIDGE_AGENT_WORKDIR["claude-static"]="$CLAUDE_STATIC_WORKDIR"
 BRIDGE_AGENT_DISCORD_CHANNEL_ID["$SMOKE_AGENT"]="123456789012345678"
+BRIDGE_CRON_AGENT_TARGET["legacy-ops"]="$AUTO_START_AGENT"
 BRIDGE_AGENT_LAUNCH_CMD["$SMOKE_AGENT"]='python3 -c "import time; print(\"smoke-agent ready\", flush=True); time.sleep(30)"'
 BRIDGE_AGENT_LAUNCH_CMD["$REQUESTER_AGENT"]='python3 -c "import time; print(\"requester-agent ready\", flush=True); time.sleep(30)"'
 BRIDGE_AGENT_LAUNCH_CMD["$AUTO_START_AGENT"]='python3 -c "import time; print(\"auto-start ready\", flush=True); time.sleep(30)"'
@@ -935,6 +936,49 @@ PY
 CRON_IMPORTED_SKIP_AT_OUTPUT="$("$REPO_ROOT/agent-bridge" cron sync --dry-run --since '2026-04-05T08:59:00+00:00' --now '2026-04-05T09:00:00+00:00')"
 assert_contains "$CRON_IMPORTED_SKIP_AT_OUTPUT" "native: status=dry_run"
 assert_contains "$CRON_IMPORTED_SKIP_AT_OUTPUT" "due=1"
+
+log "resolving cron targets for sleeping static roles and fallback delivery"
+CRON_ROUTE_JOBS_FILE="$TMP_ROOT/cron-route-jobs.json"
+cat >"$CRON_ROUTE_JOBS_FILE" <<EOF
+{
+  "jobs": [
+    {
+      "id": "mapped-route-job",
+      "name": "mapped-route-job",
+      "enabled": true,
+      "agentId": "legacy-ops",
+      "schedule": {
+        "kind": "cron",
+        "expr": "0 9 * * *",
+        "tz": "UTC"
+      },
+      "payload": {
+        "text": "mapped route payload"
+      }
+    },
+    {
+      "id": "fallback-route-job",
+      "name": "fallback-route-job",
+      "enabled": true,
+      "agentId": "missing-role",
+      "schedule": {
+        "kind": "cron",
+        "expr": "0 9 * * *",
+        "tz": "UTC"
+      },
+      "payload": {
+        "text": "fallback route payload"
+      }
+    }
+  ]
+}
+EOF
+CRON_MAPPED_ROUTE_OUTPUT="$("$REPO_ROOT/agent-bridge" cron enqueue mapped-route-job --jobs-file "$CRON_ROUTE_JOBS_FILE" --slot 2026-04-05 --dry-run)"
+assert_contains "$CRON_MAPPED_ROUTE_OUTPUT" "target: $AUTO_START_AGENT"
+assert_contains "$CRON_MAPPED_ROUTE_OUTPUT" "delivery_mode: mapped"
+CRON_FALLBACK_ROUTE_OUTPUT="$("$REPO_ROOT/agent-bridge" cron enqueue fallback-route-job --jobs-file "$CRON_ROUTE_JOBS_FILE" --slot 2026-04-05 --dry-run)"
+assert_contains "$CRON_FALLBACK_ROUTE_OUTPUT" "target: $SMOKE_AGENT"
+assert_contains "$CRON_FALLBACK_ROUTE_OUTPUT" "delivery_mode: fallback"
 
 log "checkpointing cron sync progress only through the successful prefix"
 SCHEDULER_JOBS_FILE="$TMP_ROOT/scheduler-jobs.json"

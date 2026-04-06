@@ -69,9 +69,12 @@ BRIDGE_AGENT_SESSION["codex-developer"]="codex-developer"
 #   agent-bridge setup discord tester
 #   agent-bridge setup agent tester
 
-# Optional: map OpenClaw cron agent ids to bridge agents for cron enqueue.
-# BRIDGE_OPENCLAW_AGENT_TARGET["legacy-agent"]="tester"
-# BRIDGE_OPENCLAW_AGENT_TARGET["legacy-ops"]="developer"
+# Optional: map source cron agent ids to bridge agents for cron enqueue.
+# Prefer BRIDGE_CRON_AGENT_TARGET; BRIDGE_OPENCLAW_AGENT_TARGET remains as a
+# compatibility alias for older local configs.
+# BRIDGE_CRON_AGENT_TARGET["legacy-agent"]="tester"
+# BRIDGE_CRON_AGENT_TARGET["legacy-ops"]="developer"
+# BRIDGE_CRON_FALLBACK_AGENT="developer"
 
 # Optional: enable the bridge-owned recurring scheduler on machines
 # that should actively enqueue recurring jobs. Keep this off for fresh installs
