@@ -896,6 +896,127 @@ CRON_IMPORTED_SYNC_OUTPUT="$("$REPO_ROOT/agent-bridge" cron sync --dry-run --sin
 assert_contains "$CRON_IMPORTED_SYNC_OUTPUT" "native: status=dry_run"
 assert_contains "$CRON_IMPORTED_SYNC_OUTPUT" "due=1"
 
+log "checkpointing cron sync progress only through the successful prefix"
+SCHEDULER_JOBS_FILE="$TMP_ROOT/scheduler-jobs.json"
+SCHEDULER_STATE_FILE="$TMP_ROOT/scheduler-state.json"
+SCHEDULER_ENQUEUE_LOG="$TMP_ROOT/scheduler-enqueue.log"
+SCHEDULER_FAIL_MARK="$TMP_ROOT/scheduler-job-b.failed"
+SCHEDULER_BRIDGE_CRON="$TMP_ROOT/fake-bridge-cron.sh"
+cat >"$SCHEDULER_JOBS_FILE" <<EOF
+{
+  "jobs": [
+    {
+      "id": "job-a",
+      "name": "job-a",
+      "enabled": true,
+      "agentId": "$SMOKE_AGENT",
+      "schedule": {
+        "kind": "cron",
+        "expr": "0 9 * * *",
+        "tz": "UTC"
+      }
+    },
+    {
+      "id": "job-b",
+      "name": "job-b",
+      "enabled": true,
+      "agentId": "$SMOKE_AGENT",
+      "schedule": {
+        "kind": "cron",
+        "expr": "0 9 * * *",
+        "tz": "UTC"
+      }
+    },
+    {
+      "id": "job-c",
+      "name": "job-c",
+      "enabled": true,
+      "agentId": "$SMOKE_AGENT",
+      "schedule": {
+        "kind": "cron",
+        "expr": "0 9 * * *",
+        "tz": "UTC"
+      }
+    }
+  ]
+}
+EOF
+cat >"$SCHEDULER_BRIDGE_CRON" <<EOF
+#!/usr/bin/env bash
+set -euo pipefail
+
+command="\${1:-}"
+shift || true
+[[ "\$command" == "enqueue" ]] || exit 64
+
+job_id="\${1:-}"
+printf '%s\n' "\$job_id" >>"$SCHEDULER_ENQUEUE_LOG"
+
+if [[ "\$job_id" == "job-b" && ! -f "$SCHEDULER_FAIL_MARK" ]]; then
+  : >"$SCHEDULER_FAIL_MARK"
+  printf 'simulated failure for %s\n' "\$job_id" >&2
+  exit 1
+fi
+
+printf 'created task #1\n'
+EOF
+chmod +x "$SCHEDULER_BRIDGE_CRON"
+
+set +e
+SCHEDULER_FIRST_OUTPUT="$(
+  python3 "$REPO_ROOT/bridge-cron-scheduler.py" sync \
+    --jobs-file "$SCHEDULER_JOBS_FILE" \
+    --state-file "$SCHEDULER_STATE_FILE" \
+    --bridge-cron "$SCHEDULER_BRIDGE_CRON" \
+    --repo-root "$TMP_ROOT" \
+    --since '2026-04-05T08:59:00+00:00' \
+    --now '2026-04-05T09:00:00+00:00' 2>&1
+)"
+SCHEDULER_FIRST_CODE=$?
+set -e
+[[ $SCHEDULER_FIRST_CODE -eq 1 ]] || die "expected first scheduler run to fail once"
+assert_contains "$SCHEDULER_FIRST_OUTPUT" "errors: 1"
+[[ "$(paste -sd ' ' "$SCHEDULER_ENQUEUE_LOG")" == "job-a job-b" ]] || die "expected scheduler to stop after first enqueue failure"
+python3 - <<'PY' "$SCHEDULER_STATE_FILE"
+import json
+import sys
+
+payload = json.load(open(sys.argv[1], "r", encoding="utf-8"))
+assert payload["last_sync_key"]["job_id"] == "job-a", payload
+PY
+
+SCHEDULER_SECOND_OUTPUT="$(
+  python3 "$REPO_ROOT/bridge-cron-scheduler.py" sync \
+    --jobs-file "$SCHEDULER_JOBS_FILE" \
+    --state-file "$SCHEDULER_STATE_FILE" \
+    --bridge-cron "$SCHEDULER_BRIDGE_CRON" \
+    --repo-root "$TMP_ROOT" \
+    --now '2026-04-05T09:00:00+00:00' 2>&1
+)"
+assert_contains "$SCHEDULER_SECOND_OUTPUT" "errors: 0"
+[[ "$(paste -sd ' ' "$SCHEDULER_ENQUEUE_LOG")" == "job-a job-b job-b job-c" ]] || die "expected scheduler retry to resume from the failed same-timestamp sibling"
+python3 - <<'PY' "$SCHEDULER_STATE_FILE"
+import json
+import sys
+from datetime import datetime, timezone
+
+payload = json.load(open(sys.argv[1], "r", encoding="utf-8"))
+cursor = datetime.fromisoformat(payload["last_sync_at"]).astimezone(timezone.utc)
+assert cursor.isoformat(timespec="seconds").startswith("2026-04-05T09:00:00"), payload
+assert "last_sync_key" not in payload, payload
+PY
+
+SCHEDULER_THIRD_OUTPUT="$(
+  python3 "$REPO_ROOT/bridge-cron-scheduler.py" sync \
+    --jobs-file "$SCHEDULER_JOBS_FILE" \
+    --state-file "$SCHEDULER_STATE_FILE" \
+    --bridge-cron "$SCHEDULER_BRIDGE_CRON" \
+    --repo-root "$TMP_ROOT" \
+    --now '2026-04-05T09:00:00+00:00' 2>&1
+)"
+assert_contains "$SCHEDULER_THIRD_OUTPUT" "errors: 0"
+[[ "$(paste -sd ' ' "$SCHEDULER_ENQUEUE_LOG")" == "job-a job-b job-b job-c" ]] || die "expected completed scheduler sync to avoid replaying the finished bucket"
+
 log "syncing bridge-local runtime roots from legacy source"
 RUNTIME_SYNC_OUTPUT="$(BRIDGE_OPENCLAW_HOME="$LEGACY_ROOT" BRIDGE_RUNTIME_ROOT="$BRIDGE_HOME/runtime" "$REPO_ROOT/agent-bridge" migrate runtime sync)"
 assert_contains "$RUNTIME_SYNC_OUTPUT" "item[scripts]"

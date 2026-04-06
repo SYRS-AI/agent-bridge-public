@@ -128,6 +128,8 @@ def load_state(path: Path) -> dict[str, Any]:
 def select_cursor(state: dict[str, Any], now_dt: datetime, bootstrap_seconds: int) -> datetime:
     cursor = parse_iso(state.get("last_sync_at"))
     if cursor is not None:
+        if isinstance(state.get("last_sync_key"), dict):
+            cursor -= timedelta(milliseconds=1)
         if cursor > now_dt:
             return now_dt
         return cursor
@@ -359,85 +361,145 @@ def enumerate_due_runs(
     return due_runs, dict(counters)
 
 
-def enqueue_due_runs(args: argparse.Namespace, due_runs: list[DueRun]) -> tuple[list[dict[str, Any]], int]:
-    results: list[dict[str, Any]] = []
-    failures = 0
+def due_run_sort_key(run: DueRun) -> tuple[datetime, str, str, str, str]:
+    return (
+        run.occurrence_at,
+        run.openclaw_agent,
+        run.job_name,
+        run.slot,
+        run.job_id,
+    )
+
+
+def state_sort_key(state: dict[str, Any]) -> tuple[datetime, str, str, str, str] | None:
+    cursor_dt = parse_iso(state.get("last_sync_at"))
+    cursor_key = state.get("last_sync_key")
+    if cursor_dt is None or not isinstance(cursor_key, dict):
+        return None
+    return (
+        cursor_dt,
+        str(cursor_key.get("agent") or ""),
+        str(cursor_key.get("job_name") or ""),
+        str(cursor_key.get("slot") or ""),
+        str(cursor_key.get("job_id") or ""),
+    )
+
+
+def filter_due_runs_from_state(due_runs: list[DueRun], state: dict[str, Any]) -> list[DueRun]:
+    checkpoint = state_sort_key(state)
+    if checkpoint is None:
+        return due_runs
+    return [run for run in due_runs if due_run_sort_key(run) > checkpoint]
+
+
+def state_key_for_run(run: DueRun) -> dict[str, str]:
+    return {
+        "agent": run.openclaw_agent,
+        "job_name": run.job_name,
+        "slot": run.slot,
+        "job_id": run.job_id,
+    }
+
+
+def summarize_results(results: list[dict[str, Any]], counters: dict[str, int]) -> dict[str, int]:
+    return {
+        "due_occurrences": counters.get("due_occurrences", 0),
+        "created": sum(1 for item in results if item["status"] == STATUS_CREATED),
+        "already_enqueued": sum(1 for item in results if item["status"] == STATUS_ALREADY),
+        "errors": sum(1 for item in results if item["status"] == STATUS_ERROR),
+    }
+
+
+def build_state_payload(
+    *,
+    cursor_dt: datetime,
+    cursor_key: dict[str, str] | None,
+    bootstrap_lookback: int,
+    max_occurrences_per_job: int,
+    counters: dict[str, int],
+    results: list[dict[str, Any]],
+) -> dict[str, Any]:
+    payload: dict[str, Any] = {
+        "last_sync_at": cursor_dt.isoformat(timespec="milliseconds"),
+        "updated_at": now_iso(),
+        "bootstrap_lookback_seconds": bootstrap_lookback,
+        "max_occurrences_per_job": max_occurrences_per_job,
+        "last_run_summary": summarize_results(results, counters),
+    }
+    if cursor_key is not None:
+        payload["last_sync_key"] = cursor_key
+    return payload
+
+
+def enqueue_due_run(args: argparse.Namespace, run: DueRun) -> dict[str, Any]:
     bash_bin = os.environ.get("BRIDGE_BASH_BIN") or os.environ.get("BASH") or "bash"
-
-    for run in due_runs:
-        command = [
-            bash_bin,
-            args.bridge_cron,
-            "enqueue",
+    command = [
+        bash_bin,
+        args.bridge_cron,
+        "enqueue",
+    ]
+    if args.enqueue_jobs_file:
+        command.extend(["--jobs-file", args.enqueue_jobs_file])
+    command.extend(
+        [
+            run.job_id,
+            "--slot",
+            run.slot,
         ]
-        if args.enqueue_jobs_file:
-            command.extend(["--jobs-file", args.enqueue_jobs_file])
-        command.extend(
-            [
-                run.job_id,
-                "--slot",
-                run.slot,
-            ]
-        )
-        if args.dry_run:
-            command.append("--dry-run")
+    )
+    if args.dry_run:
+        command.append("--dry-run")
 
-        completed = subprocess.run(
-            command,
-            cwd=args.repo_root,
-            text=True,
-            capture_output=True,
-            check=False,
-        )
-        stdout_text = completed.stdout.strip()
-        stderr_text = completed.stderr.strip()
-        status = STATUS_ERROR
-        task_id = None
-        run_id = None
-        request_file = None
-        manifest = None
+    completed = subprocess.run(
+        command,
+        cwd=args.repo_root,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    stdout_text = completed.stdout.strip()
+    stderr_text = completed.stderr.strip()
+    status = STATUS_ERROR
+    task_id = None
+    run_id = None
+    request_file = None
+    manifest = None
 
-        for raw_line in stdout_text.splitlines():
-            line = raw_line.strip()
-            if line == "status: dry_run":
-                status = "dry_run"
-            elif line == "status: already_enqueued":
-                status = STATUS_ALREADY
-            elif line.startswith("run_id: "):
-                run_id = line.split(": ", 1)[1]
-            elif line.startswith("request_file: "):
-                request_file = line.split(": ", 1)[1]
-            elif line.startswith("manifest: "):
-                manifest = line.split(": ", 1)[1]
-            elif line.startswith("created task #"):
-                status = STATUS_CREATED
-                match = re.search(r"created task #(\d+)", line)
-                if match:
-                    task_id = int(match.group(1))
+    for raw_line in stdout_text.splitlines():
+        line = raw_line.strip()
+        if line == "status: dry_run":
+            status = "dry_run"
+        elif line == "status: already_enqueued":
+            status = STATUS_ALREADY
+        elif line.startswith("run_id: "):
+            run_id = line.split(": ", 1)[1]
+        elif line.startswith("request_file: "):
+            request_file = line.split(": ", 1)[1]
+        elif line.startswith("manifest: "):
+            manifest = line.split(": ", 1)[1]
+        elif line.startswith("created task #"):
+            status = STATUS_CREATED
+            match = re.search(r"created task #(\d+)", line)
+            if match:
+                task_id = int(match.group(1))
 
-        if completed.returncode != 0:
-            failures += 1
-
-        results.append(
-            {
-                "job_id": run.job_id,
-                "job_name": run.job_name,
-                "family": run.family,
-                "agent": run.openclaw_agent,
-                "schedule_kind": run.schedule_kind,
-                "slot": run.slot,
-                "occurrence_at": run.occurrence_at.isoformat(timespec="seconds"),
-                "status": status,
-                "task_id": task_id,
-                "run_id": run_id,
-                "request_file": request_file,
-                "manifest": manifest,
-                "exit_code": completed.returncode,
-                "stdout": stdout_text,
-                "stderr": stderr_text,
-            }
-        )
-    return results, failures
+    return {
+        "job_id": run.job_id,
+        "job_name": run.job_name,
+        "family": run.family,
+        "agent": run.openclaw_agent,
+        "schedule_kind": run.schedule_kind,
+        "slot": run.slot,
+        "occurrence_at": run.occurrence_at.isoformat(timespec="seconds"),
+        "status": status,
+        "task_id": task_id,
+        "run_id": run_id,
+        "request_file": request_file,
+        "manifest": manifest,
+        "exit_code": completed.returncode,
+        "stdout": stdout_text,
+        "stderr": stderr_text,
+    }
 
 
 def print_human_summary(
@@ -488,7 +550,35 @@ def cmd_sync(args: argparse.Namespace) -> int:
 
     jobs = load_jobs(jobs_file)
     due_runs, counters = enumerate_due_runs(jobs, start_dt, now_dt, args.max_occurrences_per_job)
-    results, failures = enqueue_due_runs(args, due_runs)
+    due_runs = filter_due_runs_from_state(due_runs, state)
+    counters["due_occurrences"] = len(due_runs)
+
+    results: list[dict[str, Any]] = []
+    failures = 0
+    last_safe_run: DueRun | None = None
+
+    for run in due_runs:
+        result = enqueue_due_run(args, run)
+        results.append(result)
+        if result["exit_code"] != 0:
+            failures += 1
+            # Keep progress only through the successful prefix. If one enqueue fails,
+            # later due runs must wait for the next sync or they can advance the cursor
+            # past the failed occurrence and drop work.
+            break
+        if not args.dry_run:
+            last_safe_run = run
+            write_json(
+                state_file,
+                build_state_payload(
+                    cursor_dt=run.occurrence_at,
+                    cursor_key=state_key_for_run(run),
+                    bootstrap_lookback=args.bootstrap_lookback,
+                    max_occurrences_per_job=args.max_occurrences_per_job,
+                    counters=counters,
+                    results=results,
+                ),
+            )
 
     if args.json:
         status_value = "dry_run" if args.dry_run else ("error" if failures else "ok")
@@ -515,17 +605,26 @@ def cmd_sync(args: argparse.Namespace) -> int:
     if not args.dry_run and failures == 0:
         write_json(
             state_file,
-            {
-                "last_sync_at": now_dt.isoformat(timespec="seconds"),
-                "updated_at": now_iso(),
-                "bootstrap_lookback_seconds": args.bootstrap_lookback,
-                "max_occurrences_per_job": args.max_occurrences_per_job,
-                "last_run_summary": {
-                    "due_occurrences": counters.get("due_occurrences", 0),
-                    "created": sum(1 for item in results if item["status"] == STATUS_CREATED),
-                    "already_enqueued": sum(1 for item in results if item["status"] == STATUS_ALREADY),
-                },
-            },
+            build_state_payload(
+                cursor_dt=now_dt,
+                cursor_key=None,
+                bootstrap_lookback=args.bootstrap_lookback,
+                max_occurrences_per_job=args.max_occurrences_per_job,
+                counters=counters,
+                results=results,
+            ),
+        )
+    elif not args.dry_run and failures > 0 and last_safe_run is not None:
+        write_json(
+            state_file,
+            build_state_payload(
+                cursor_dt=last_safe_run.occurrence_at,
+                cursor_key=state_key_for_run(last_safe_run),
+                bootstrap_lookback=args.bootstrap_lookback,
+                max_occurrences_per_job=args.max_occurrences_per_job,
+                counters=counters,
+                results=results,
+            ),
         )
 
     return 1 if failures else 0
