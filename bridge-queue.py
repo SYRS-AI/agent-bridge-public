@@ -571,6 +571,48 @@ def cmd_done(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_cancel(args: argparse.Namespace) -> int:
+    actor = args.actor or os.environ.get("USER", "unknown")
+    note_path = normalize_path(args.note_file)
+    current_ts = now_ts()
+
+    with closing(connect()) as conn, conn:
+        task = require_task(conn, args.task_id)
+        if task["status"] == "cancelled":
+            print(f"task #{args.task_id} already cancelled")
+            return 0
+        if task["status"] == "done":
+            raise SystemExit(f"task #{args.task_id} is already closed (status=done)")
+
+        conn.execute(
+            """
+            UPDATE tasks
+            SET status = 'cancelled',
+                claimed_by = NULL,
+                claimed_ts = NULL,
+                lease_until_ts = NULL,
+                updated_ts = ?,
+                closed_ts = ?
+            WHERE id = ?
+            """,
+            (current_ts, current_ts, args.task_id),
+        )
+        emit_event(
+            conn,
+            args.task_id,
+            event_type="cancelled",
+            actor=actor,
+            created_ts=current_ts,
+            note_text=args.note,
+            note_path=note_path,
+            from_agent=task["claimed_by"] or task["assigned_to"],
+            to_agent=task["assigned_to"],
+        )
+
+    print(f"cancelled task #{args.task_id} as {actor}")
+    return 0
+
+
 def cmd_update(args: argparse.Namespace) -> int:
     actor = args.actor or os.environ.get("USER", "unknown")
     note_path = normalize_path(args.body_file)
@@ -1162,6 +1204,14 @@ def build_parser() -> argparse.ArgumentParser:
     note_group.add_argument("--note")
     note_group.add_argument("--note-file")
     done_parser.set_defaults(handler=cmd_done)
+
+    cancel_parser = subparsers.add_parser("cancel")
+    cancel_parser.add_argument("task_id", type=int)
+    cancel_parser.add_argument("--actor")
+    cancel_group = cancel_parser.add_mutually_exclusive_group()
+    cancel_group.add_argument("--note")
+    cancel_group.add_argument("--note-file")
+    cancel_parser.set_defaults(handler=cmd_cancel)
 
     update_parser = subparsers.add_parser("update")
     update_parser.add_argument("task_id", type=int)

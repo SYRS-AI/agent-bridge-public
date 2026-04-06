@@ -36,6 +36,7 @@ Usage:
   $CLI_NAME show <task-id>
   $CLI_NAME claim <task-id> [--agent <agent>] [--lease <seconds>]
   $CLI_NAME done <task-id> [--agent <agent>] [--note <text> | --note-file <path>]
+  $CLI_NAME cancel <task-id> [--actor <name>] [--note <text> | --note-file <path>]
   $CLI_NAME update <task-id> [--status queued|claimed|blocked] [--priority ...] [--note ...]
   $CLI_NAME handoff <task-id> --to <agent> [--from <agent>] [--note <text> | --note-file <path>]
   $CLI_NAME summary [agent...]
@@ -374,7 +375,7 @@ if [[ $# -gt 0 ]]; then
           ;;
       esac
       ;;
-    inbox|show|claim|done|update|handoff|summary|create)
+    inbox|show|claim|done|cancel|update|handoff|summary|create)
       exec "$BRIDGE_BASH_BIN" "$SCRIPT_DIR/bridge-task.sh" "$@"
       ;;
   esac

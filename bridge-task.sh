@@ -16,6 +16,7 @@ Usage:
   bash $SCRIPT_DIR/bridge-task.sh show <task-id>
   bash $SCRIPT_DIR/bridge-task.sh claim <task-id> [--agent <agent>] [--lease <seconds>]
   bash $SCRIPT_DIR/bridge-task.sh done <task-id> [--agent <agent>] [--note <text> | --note-file <path>]
+  bash $SCRIPT_DIR/bridge-task.sh cancel <task-id> [--actor <name>] [--note <text> | --note-file <path>]
   bash $SCRIPT_DIR/bridge-task.sh update <task-id> [--status queued|claimed|blocked] [--priority ...] [--title ...] [--note ...]
   bash $SCRIPT_DIR/bridge-task.sh handoff <task-id> --to <agent> [--from <agent>] [--note <text> | --note-file <path>]
   bash $SCRIPT_DIR/bridge-task.sh summary [agent...]
@@ -313,6 +314,58 @@ cmd_update() {
   bridge_queue_cli update "$task_id" --actor "$actor" "$@"
 }
 
+cmd_cancel() {
+  local task_id=""
+  local actor=""
+  local note=""
+  local note_file=""
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --actor)
+        [[ $# -lt 2 ]] && bridge_die "--actor 뒤에 이름을 지정하세요."
+        actor="$2"
+        shift 2
+        ;;
+      --note)
+        [[ $# -lt 2 ]] && bridge_die "--note 뒤에 텍스트를 지정하세요."
+        note="$2"
+        shift 2
+        ;;
+      --note-file)
+        [[ $# -lt 2 ]] && bridge_die "--note-file 뒤에 파일 경로를 지정하세요."
+        note_file="$2"
+        shift 2
+        ;;
+      -h|--help)
+        usage
+        exit 0
+        ;;
+      -*)
+        bridge_die "알 수 없는 옵션: $1"
+        ;;
+      *)
+        if [[ -n "$task_id" ]]; then
+          bridge_die "task id는 하나만 지정할 수 있습니다."
+        fi
+        task_id="$1"
+        shift
+        ;;
+    esac
+  done
+
+  [[ -z "$task_id" ]] && bridge_die "task id가 필요합니다."
+  actor="$(infer_actor_if_possible "$actor")"
+  args=("cancel" "$task_id" --actor "$actor")
+  if [[ -n "$note" ]]; then
+    args+=(--note "$note")
+  fi
+  if [[ -n "$note_file" ]]; then
+    args+=(--note-file "$note_file")
+  fi
+  bridge_queue_cli "${args[@]}"
+}
+
 cmd_handoff() {
   local task_id=""
   local target=""
@@ -408,6 +461,9 @@ case "$COMMAND" in
     ;;
   done)
     cmd_done "$@"
+    ;;
+  cancel)
+    cmd_cancel "$@"
     ;;
   handoff)
     cmd_handoff "$@"

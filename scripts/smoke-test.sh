@@ -451,6 +451,17 @@ assert_contains "$REQUESTER_SHOW_OUTPUT" "assigned_to: $REQUESTER_AGENT"
 assert_contains "$REQUESTER_SHOW_OUTPUT" "original_task: #2"
 assert_contains "$REQUESTER_SHOW_OUTPUT" "completed_by: $SMOKE_AGENT"
 
+log "cancelling an orphan task without a roster entry"
+ORPHAN_TASK_ID=""
+ORPHAN_CREATE_OUTPUT="$(BRIDGE_TASK_DB="$BRIDGE_TASK_DB" python3 "$REPO_ROOT/bridge-queue.py" create --to tester --title "orphan cleanup" --from smoke --priority high --body "cleanup me" --format shell)"
+assert_contains "$ORPHAN_CREATE_OUTPUT" "TASK_ID="
+ORPHAN_TASK_ID="$(printf '%s\n' "$ORPHAN_CREATE_OUTPUT" | sed -n 's/^TASK_ID=//p' | head -n1)"
+[[ -n "$ORPHAN_TASK_ID" ]] || die "expected orphan task id"
+CANCEL_OUTPUT="$(bash "$REPO_ROOT/bridge-task.sh" cancel "$ORPHAN_TASK_ID" --actor smoke --note "cleanup stale test task")"
+assert_contains "$CANCEL_OUTPUT" "cancelled task #$ORPHAN_TASK_ID as smoke"
+ORPHAN_SHOW_OUTPUT="$(BRIDGE_TASK_DB="$BRIDGE_TASK_DB" python3 "$REPO_ROOT/bridge-queue.py" show "$ORPHAN_TASK_ID")"
+assert_contains "$ORPHAN_SHOW_OUTPUT" "status: cancelled"
+
 SUMMARY_OUTPUT="$("$REPO_ROOT/agb" summary "$SMOKE_AGENT")"
 assert_contains "$SUMMARY_OUTPUT" "$SMOKE_AGENT"
 
