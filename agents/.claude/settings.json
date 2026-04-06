@@ -1,0 +1,29 @@
+{
+  "autoMemoryEnabled": true,
+  "autoDreamEnabled": true,
+  "hooks": {
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/opt/homebrew/bin/bash /Users/soonseokoh/.agent-bridge/hooks/mark-idle.sh",
+            "timeout": 3,
+            "additionalContext": true
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/opt/homebrew/bin/bash /Users/soonseokoh/.agent-bridge/hooks/clear-idle.sh",
+            "timeout": 3
+          }
+        ]
+      }
+    ]
+  }
+}
