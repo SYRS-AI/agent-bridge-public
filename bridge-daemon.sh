@@ -21,6 +21,26 @@ daemon_log_event() {
   printf '[%s] %s\n' "$timestamp" "$message" >>"$BRIDGE_DAEMON_CRASH_LOG"
 }
 
+bridge_dashboard_post_if_changed() {
+  local summary_output="$1"
+  local summary_file
+
+  [[ -n "$BRIDGE_DASHBOARD_WEBHOOK_URL" ]] || return 0
+  [[ -n "$summary_output" ]] || return 0
+
+  summary_file="$(mktemp)"
+  printf '%s\n' "$summary_output" >"$summary_file"
+
+  bridge_require_python
+  python3 "$SCRIPT_DIR/bridge-dashboard.py" \
+    --summary-tsv "$summary_file" \
+    --state-file "$BRIDGE_DASHBOARD_STATE_FILE" \
+    --webhook-url "$BRIDGE_DASHBOARD_WEBHOOK_URL" \
+    >/dev/null 2>&1 || true
+
+  rm -f "$summary_file"
+}
+
 nudge_agent_session() {
   local agent="$1"
   local _session="$2"
@@ -421,6 +441,8 @@ cmd_sync_cycle() {
   if [[ "$changed" == "0" ]]; then
     "$BRIDGE_BASH_BIN" "$SCRIPT_DIR/bridge-sync.sh" >/dev/null 2>&1 || true
   fi
+
+  bridge_dashboard_post_if_changed "$summary_output" || true
 }
 
 cmd_start() {
