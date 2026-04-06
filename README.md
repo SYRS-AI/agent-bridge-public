@@ -320,6 +320,8 @@ Bridge-native jobs live at `~/.agent-bridge/cron/jobs.json`. `cron import` is th
 
 The status dashboard also includes a lightweight health check for active sessions. It classifies them as `ok`, `warn`, or `crit` from recorded session activity age. Inactive on-demand roles are not treated as stale. Defaults are `BRIDGE_HEALTH_WARN_SECONDS=3600` and `BRIDGE_HEALTH_CRITICAL_SECONDS=14400`, and you can override them in `agent-roster.local.sh`.
 
+For static roles, an explicit `BRIDGE_AGENT_IDLE_TIMEOUT["agent"]="0"` means "always on": the daemon will not auto-stop that role, and it will restart the role automatically if its tmux session disappears.
+
 ### Optional: search legacy OpenClaw memory
 
 If you are migrating a legacy OpenClaw install and want read-only retrieval over

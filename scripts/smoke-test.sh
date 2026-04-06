@@ -76,6 +76,8 @@ SMOKE_AGENT="smoke-agent-$$"
 REQUESTER_AGENT="requester-agent-$$"
 AUTO_START_AGENT="auto-start-agent-$$"
 AUTO_START_SESSION="auto-start-session-$$"
+ALWAYS_ON_AGENT="always-on-agent-$$"
+ALWAYS_ON_SESSION="always-on-session-$$"
 STATIC_AGENT="static-role-$$"
 STATIC_SESSION="static-session-$$"
 WORKTREE_AGENT="worker-reuse-$$"
@@ -96,6 +98,7 @@ cleanup() {
   tmux kill-session -t "$SESSION_NAME" >/dev/null 2>&1 || true
   tmux kill-session -t "$REQUESTER_SESSION" >/dev/null 2>&1 || true
   tmux kill-session -t "$AUTO_START_SESSION" >/dev/null 2>&1 || true
+  tmux kill-session -t "$ALWAYS_ON_SESSION" >/dev/null 2>&1 || true
   tmux kill-session -t "$STATIC_SESSION" >/dev/null 2>&1 || true
   tmux kill-session -t "$CLAUDE_STATIC_SESSION" >/dev/null 2>&1 || true
   tmux kill-session -t "$WORKTREE_AGENT" >/dev/null 2>&1 || true
@@ -136,29 +139,36 @@ cat >"$BRIDGE_ROSTER_LOCAL_FILE" <<EOF
 bridge_add_agent_id_if_missing "$SMOKE_AGENT"
 bridge_add_agent_id_if_missing "$REQUESTER_AGENT"
 bridge_add_agent_id_if_missing "$AUTO_START_AGENT"
+bridge_add_agent_id_if_missing "$ALWAYS_ON_AGENT"
 bridge_add_agent_id_if_missing "claude-static"
 BRIDGE_ADMIN_AGENT_ID="$SMOKE_AGENT"
 BRIDGE_AGENT_DESC["$SMOKE_AGENT"]="Smoke test role"
 BRIDGE_AGENT_DESC["$REQUESTER_AGENT"]="Requester role"
 BRIDGE_AGENT_DESC["$AUTO_START_AGENT"]="Auto-start role"
+BRIDGE_AGENT_DESC["$ALWAYS_ON_AGENT"]="Always-on role"
 BRIDGE_AGENT_DESC["claude-static"]="Claude static role"
 BRIDGE_AGENT_ENGINE["$SMOKE_AGENT"]="codex"
 BRIDGE_AGENT_ENGINE["$REQUESTER_AGENT"]="codex"
 BRIDGE_AGENT_ENGINE["$AUTO_START_AGENT"]="codex"
+BRIDGE_AGENT_ENGINE["$ALWAYS_ON_AGENT"]="codex"
 BRIDGE_AGENT_ENGINE["claude-static"]="claude"
 BRIDGE_AGENT_SESSION["$SMOKE_AGENT"]="$SESSION_NAME"
 BRIDGE_AGENT_SESSION["$REQUESTER_AGENT"]="$REQUESTER_SESSION"
 BRIDGE_AGENT_SESSION["$AUTO_START_AGENT"]="$AUTO_START_SESSION"
+BRIDGE_AGENT_SESSION["$ALWAYS_ON_AGENT"]="$ALWAYS_ON_SESSION"
 BRIDGE_AGENT_SESSION["claude-static"]="claude-static-$SESSION_NAME"
 BRIDGE_AGENT_WORKDIR["$SMOKE_AGENT"]="$WORKDIR"
 BRIDGE_AGENT_WORKDIR["$REQUESTER_AGENT"]="$REQUESTER_WORKDIR"
 BRIDGE_AGENT_WORKDIR["$AUTO_START_AGENT"]="$AUTO_START_WORKDIR"
+BRIDGE_AGENT_WORKDIR["$ALWAYS_ON_AGENT"]="$AUTO_START_WORKDIR"
 BRIDGE_AGENT_WORKDIR["claude-static"]="$CLAUDE_STATIC_WORKDIR"
 BRIDGE_AGENT_DISCORD_CHANNEL_ID["$SMOKE_AGENT"]="123456789012345678"
 BRIDGE_AGENT_LAUNCH_CMD["$SMOKE_AGENT"]='python3 -c "import time; print(\"smoke-agent ready\", flush=True); time.sleep(30)"'
 BRIDGE_AGENT_LAUNCH_CMD["$REQUESTER_AGENT"]='python3 -c "import time; print(\"requester-agent ready\", flush=True); time.sleep(30)"'
 BRIDGE_AGENT_LAUNCH_CMD["$AUTO_START_AGENT"]='python3 -c "import time; print(\"auto-start ready\", flush=True); time.sleep(30)"'
+BRIDGE_AGENT_LAUNCH_CMD["$ALWAYS_ON_AGENT"]='python3 -c "import time; print(\"always-on ready\", flush=True); time.sleep(30)"'
 BRIDGE_AGENT_LAUNCH_CMD["claude-static"]='DISCORD_STATE_DIR=REPLACE_CLAUDE_DISCORD claude -c --dangerously-skip-permissions --channels plugin:discord@claude-plugins-official'
+BRIDGE_AGENT_IDLE_TIMEOUT["$ALWAYS_ON_AGENT"]="0"
 EOF
 
 python3 - "$BRIDGE_ROSTER_LOCAL_FILE" "$CLAUDE_STATIC_WORKDIR/.discord" <<'PY'
@@ -432,6 +442,12 @@ assert_contains "$AUTO_START_OUTPUT" "created task #"
 bash "$REPO_ROOT/bridge-daemon.sh" sync >/dev/null
 sleep 1
 tmux has-session -t "$AUTO_START_SESSION" >/dev/null 2>&1 || die "auto-start role did not start with timeout=0"
+
+log "ensuring explicit timeout=0 role is restarted even without queue"
+tmux has-session -t "$ALWAYS_ON_SESSION" >/dev/null 2>&1 && tmux kill-session -t "$ALWAYS_ON_SESSION" >/dev/null 2>&1 || true
+bash "$REPO_ROOT/bridge-daemon.sh" sync >/dev/null
+sleep 1
+tmux has-session -t "$ALWAYS_ON_SESSION" >/dev/null 2>&1 || die "always-on role did not restart without queue"
 
 log "running guided Discord setup"
 SETUP_DISCORD_OUTPUT="$("$REPO_ROOT/agent-bridge" setup discord "$SMOKE_AGENT" --openclaw-account smoke --openclaw-config "$TMP_ROOT/openclaw.json" --api-base-url "$FAKE_DISCORD_API_BASE" --yes)"

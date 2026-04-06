@@ -292,6 +292,7 @@ process_on_demand_agents() {
   local _engine
   local _workdir
   local timeout
+  local always_on=0
   local changed=1
   local live_summary=""
   local live_agent=""
@@ -302,9 +303,20 @@ process_on_demand_agents() {
   while IFS=$'\t' read -r agent queued claimed blocked active idle _last_seen _last_nudge session _engine _workdir; do
     [[ -z "$agent" ]] && continue
     [[ "$(bridge_agent_source "$agent")" == "static" ]] || continue
+    always_on=0
+    if bridge_agent_is_always_on "$agent"; then
+      always_on=1
+    fi
 
     if [[ "$active" == "0" ]]; then
-      if [[ "$queued" =~ ^[0-9]+$ ]] && (( queued > 0 )) && ! bridge_agent_is_active "$agent"; then
+      if ((( always_on == 1 ))) && ! bridge_agent_is_active "$agent"; then
+        if "$BRIDGE_BASH_BIN" "$SCRIPT_DIR/bridge-start.sh" "$agent" >/dev/null 2>&1; then
+          echo "[info] ensured always-on ${agent}"
+          changed=0
+        else
+          bridge_warn "always-on auto-start failed: ${agent}"
+        fi
+      elif [[ "$queued" =~ ^[0-9]+$ ]] && (( queued > 0 )) && ! bridge_agent_is_active "$agent"; then
         if "$BRIDGE_BASH_BIN" "$SCRIPT_DIR/bridge-start.sh" "$agent" >/dev/null 2>&1; then
           session="$(bridge_agent_session "$agent")"
           timeout="$(bridge_agent_idle_timeout "$agent")"

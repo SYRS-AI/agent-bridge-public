@@ -597,6 +597,21 @@ bridge_agent_idle_timeout() {
   printf '%s' "${BRIDGE_AGENT_IDLE_TIMEOUT[$agent]-0}"
 }
 
+bridge_agent_idle_timeout_configured() {
+  local agent="$1"
+  [[ -v "BRIDGE_AGENT_IDLE_TIMEOUT[$agent]" ]]
+}
+
+bridge_agent_is_always_on() {
+  local agent="$1"
+  local timeout
+
+  bridge_agent_idle_timeout_configured "$agent" || return 1
+  timeout="$(bridge_agent_idle_timeout "$agent")"
+  [[ "$timeout" =~ ^[0-9]+$ ]] || return 1
+  (( timeout == 0 ))
+}
+
 bridge_list_actions() {
   local agent="$1"
   local key
