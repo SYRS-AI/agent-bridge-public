@@ -81,7 +81,8 @@ def read_roster(path: str) -> list[dict[str, str]]:
         for row in reader:
             if row.get("agent"):
                 rows.append(row)
-    rows.sort(key=lambda row: row["agent"])
+    # Preserve BRIDGE_AGENT_IDS order from the roster snapshot so that
+    # active agent index numbers match agb kill/attach numbering.
     return rows
 
 
