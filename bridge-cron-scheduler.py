@@ -296,12 +296,36 @@ def enumerate_due_runs(
         if not job_enabled(job):
             counters["disabled"] += 1
             continue
+
+        schedule = job.get("schedule") or {}
+        kind = schedule.get("kind")
+
+        # Handle one-shot "at" jobs — fire if at time is within window
+        if kind == "at":
+            at_str = schedule.get("at", "")
+            at_dt = parse_iso(at_str)
+            if at_dt is None:
+                counters["unsupported"] += 1
+                continue
+            if at_dt < start_dt or at_dt > end_dt:
+                counters["non_recurring"] += 1
+                continue
+            counters["eligible"] += 1
+            family = classify_family(job.get("name", ""))
+            due_runs.append(DueRun(
+                job_id=job["id"],
+                job_name=job.get("name", job["id"]),
+                agent=job.get("agentId", ""),
+                family=family,
+                slot=format_slot(at_dt),
+                occurrence_at=at_dt,
+            ))
+            continue
+
         if not job_is_recurring(job):
             counters["non_recurring"] += 1
             continue
 
-        schedule = job.get("schedule") or {}
-        kind = schedule.get("kind")
         if kind == "cron":
             occurrences = enumerate_cron_occurrences(job, start_dt, end_dt)
         elif kind == "every":
