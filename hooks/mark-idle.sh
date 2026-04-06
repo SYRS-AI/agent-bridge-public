@@ -38,11 +38,7 @@ if [[ -n "$open_task_shell" ]]; then
   source /dev/stdin <<<"$open_task_shell"
 fi
 
-printf '[Agent Bridge] queued tasks waiting (%s)\n' "$queued"
-printf 'agb inbox %s\n' "$AGENT_ID"
+printf '[Agent Bridge] %s queued tasks waiting. Run ~/.agent-bridge/agb inbox %s NOW and process them.\n' "$queued" "$AGENT_ID"
 if [[ -n "$TASK_ID" && -n "$TASK_TITLE" ]]; then
   printf 'next: #%s [%s] %s\n' "$TASK_ID" "${TASK_PRIORITY:-normal}" "$TASK_TITLE"
-fi
-if (( claimed > 0 || blocked > 0 )); then
-  printf 'claimed=%s blocked=%s\n' "$claimed" "$blocked"
 fi

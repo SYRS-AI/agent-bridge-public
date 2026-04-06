@@ -1,37 +1,43 @@
 ---
 name: agent-bridge-runtime
-description: Use PROACTIVELY in bridge-managed Claude agent homes to handle Agent Bridge queue work correctly, especially when a nudge or stop-hook mentions `agb inbox`, `next: #...`, or queued tasks.
+description: "CRITICAL: When you see '[Agent Bridge]' in any message or context, you MUST immediately run agb inbox and process tasks. This is not optional."
 ---
 
-Use this skill whenever work is running inside a bridge-managed Claude home under `~/.agent-bridge/agents/`.
+## When This Skill Triggers
 
-## Queue Truth
+- You receive a message starting with `[Agent Bridge]`
+- Stop hook additionalContext mentions `inbox`, `queued tasks`, or `agb inbox`
+- Any context includes "queued tasks waiting", "inbox", or task references like `next: #<id>`
 
-- The live queue source of truth is `~/.agent-bridge/state/tasks.db`.
-- Do not inspect repo snapshots such as `~/agent-bridge/state/tasks.db`.
-- Do not infer queue emptiness from notes, memory files, or prior conversation.
-- When a bridge nudge or stop-hook says `queued tasks waiting`, treat that as authoritative until `agb inbox` proves otherwise.
+## Required Actions (Mandatory)
 
-## Required Queue Flow
+**When triggered, immediately execute the following. Do NOT just acknowledge with "got it" or "understood".**
 
-1. Run `~/.agent-bridge/agb inbox <agent>`.
-2. If the inbox shows any queued task, do not say “없음” or “다 처리됨”.
-3. Use `~/.agent-bridge/agb show <task-id>` for the specific task you are about to handle.
-4. Claim with `~/.agent-bridge/agb claim <task-id> --agent <agent>` before working.
-5. Finish with `~/.agent-bridge/agb done <task-id> --agent <agent> --note "..."`
+1. Run `~/.agent-bridge/agb inbox <your-agent-name>`
+2. If queued tasks exist, run `~/.agent-bridge/agb show <task-id>` for the first one
+3. Claim it: `~/.agent-bridge/agb claim <task-id> --agent <your-agent-name>`
+4. Do the work described in the task
+5. Complete it: `~/.agent-bridge/agb done <task-id> --agent <your-agent-name> --note "summary"`
 
-## Guardrails
+## Prohibited
 
-- Do not use `bridge-task.sh list`, `agent-bridge task list`, ad hoc sqlite queries, or filesystem searches as the primary queue check.
-- Prefer `agb inbox|show|claim|done` over every legacy queue path.
-- If a bridge message includes `next: #<id> [priority] <title>`, check that task first.
-- If Discord already delivered the human message into the live Claude session, still close the corresponding wake task from the queue.
+- Responding to `[Agent Bridge]` with just "acknowledged" or "noted" without running inbox — FORBIDDEN
+- Skipping inbox check — FORBIDDEN
+- Assuming inbox is empty without running the command — FORBIDDEN
+- Using `bridge-task.sh`, sqlite queries, or filesystem searches instead of `agb` CLI — FORBIDDEN
 
-## Examples
+## Queue Source of Truth
+
+- Live queue: `~/.agent-bridge/state/tasks.db`
+- Never read `~/agent-bridge/state/tasks.db` (repo copy)
+- Never infer queue state from memory or prior conversation
+
+## Example
 
 ```bash
-~/.agent-bridge/agb inbox syrs-satomi
-~/.agent-bridge/agb show 68
-~/.agent-bridge/agb claim 68 --agent syrs-satomi
-~/.agent-bridge/agb done 68 --agent syrs-satomi --note "확인 및 응답 완료"
+~/.agent-bridge/agb inbox newsbot
+~/.agent-bridge/agb show 604
+~/.agent-bridge/agb claim 604 --agent newsbot
+# ... do the work ...
+~/.agent-bridge/agb done 604 --agent newsbot --note "trend feed delivered"
 ```

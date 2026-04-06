@@ -37,7 +37,7 @@ nudge_agent_session() {
   local task_priority=""
 
   title="queued tasks waiting (${queued})"
-  message="agb inbox ${agent}"
+  message="You have pending tasks. Run ~/.agent-bridge/agb inbox ${agent} NOW and process them."
   open_task_shell="$(bridge_queue_cli find-open --agent "$agent" --format shell 2>/dev/null || true)"
   if [[ -n "$open_task_shell" ]]; then
     # shellcheck disable=SC1091
