@@ -1,6 +1,6 @@
 ---
 name: agent-bridge-runtime
-description: "CRITICAL: When you see '[Agent Bridge]' in any message or context, you MUST immediately run agb inbox and process tasks. This is not optional."
+description: "CRITICAL: When you see '[Agent Bridge]' in any message or context, you MUST use the Bash tool and run the exact `agb inbox` command immediately. This is not optional."
 ---
 
 ## When This Skill Triggers
@@ -11,13 +11,15 @@ description: "CRITICAL: When you see '[Agent Bridge]' in any message or context,
 
 ## Required Actions (Mandatory)
 
-**When triggered, immediately execute the following. Do NOT just acknowledge with "got it" or "understood".**
+**When triggered, immediately execute the following. Do NOT just acknowledge with "got it", "understood", or any conversational reply. Use the Bash tool first.**
 
-1. Run `~/.agent-bridge/agb inbox <your-agent-name>`
+1. Use the Bash tool and run exactly `~/.agent-bridge/agb inbox <your-agent-name>`
 2. If queued tasks exist, run `~/.agent-bridge/agb show <task-id>` for the first one
 3. Claim it: `~/.agent-bridge/agb claim <task-id> --agent <your-agent-name>`
 4. Do the work described in the task
 5. Complete it: `~/.agent-bridge/agb done <task-id> --agent <your-agent-name> --note "summary"`
+
+If the nudge message contains `Run exactly: ...`, execute that command before any analysis or reply.
 
 ## Cron Followup Tasks
 
@@ -31,7 +33,7 @@ When you receive a `[cron-followup]` task:
 
 ## Prohibited
 
-- Responding to `[Agent Bridge]` with just "acknowledged" or "noted" without running inbox — FORBIDDEN
+- Responding to `[Agent Bridge]` with just "acknowledged", "noted", or "Cooking..." without running inbox — FORBIDDEN
 - Closing a cron-followup without posting to your channel — FORBIDDEN
 - Skipping inbox check — FORBIDDEN
 - Assuming inbox is empty without running the command — FORBIDDEN

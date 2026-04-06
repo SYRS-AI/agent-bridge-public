@@ -90,6 +90,28 @@ bridge_notification_text() {
   printf '%s' "$header"
 }
 
+bridge_queue_attention_title() {
+  local queued="$1"
+  printf '%s' "ACTION REQUIRED — queued tasks (${queued})"
+}
+
+bridge_queue_attention_message() {
+  local agent="$1"
+  local queued="$2"
+  local task_id="${3:-}"
+  local task_priority="${4:-normal}"
+  local task_title="${5:-}"
+
+  printf '[Agent Bridge] %s pending task(s) for %s.\n' "$queued" "$agent"
+  if [[ -n "$task_id" && -n "$task_title" ]]; then
+    printf 'Highest priority: Task #%s [%s] %s\n' "$task_id" "$task_priority" "$task_title"
+  fi
+  printf 'ACTION REQUIRED: Use your Bash tool now. Do not acknowledge or reply conversationally first.\n'
+  printf 'Run exactly: ~/.agent-bridge/agb inbox %s\n' "$agent"
+  printf 'If tasks are listed, show and claim the first one immediately.\n'
+  printf 'Queue DB is source of truth.\n'
+}
+
 bridge_dispatch_notification() {
   local agent="$1"
   local title="$2"

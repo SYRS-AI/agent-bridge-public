@@ -40,10 +40,4 @@ if [[ -n "$open_task_shell" ]]; then
   source /dev/stdin <<<"$open_task_shell"
 fi
 
-printf '[Agent Bridge] %s pending task(s) for %s.\n' "$queued" "$AGENT_ID"
-
-if [[ -n "$TASK_ID" && -n "$TASK_TITLE" ]]; then
-  printf 'Highest priority: Task #%s [%s] %s\n' "$TASK_ID" "${TASK_PRIORITY:-normal}" "$TASK_TITLE"
-fi
-
-printf 'Process all pending tasks now: ~/.agent-bridge/agb inbox %s\n' "$AGENT_ID"
+bridge_queue_attention_message "$AGENT_ID" "$queued" "${TASK_ID:-}" "${TASK_PRIORITY:-normal}" "${TASK_TITLE:-}"

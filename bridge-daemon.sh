@@ -56,7 +56,7 @@ nudge_agent_session() {
   local task_title=""
   local task_priority=""
 
-  title="queued tasks waiting (${queued})"
+  title="$(bridge_queue_attention_title "$queued")"
   open_task_shell="$(bridge_queue_cli find-open --agent "$agent" --format shell 2>/dev/null || true)"
   if [[ -n "$open_task_shell" ]]; then
     # shellcheck disable=SC1091
@@ -68,14 +68,7 @@ nudge_agent_session() {
     task_priority="${TASK_PRIORITY:-normal}"
   fi
 
-  # Show highest-priority task summary + direct agent to process all via inbox
-  message="[Agent Bridge] ${queued} pending task(s) for ${agent}."
-  if [[ -n "$task_id" && -n "$task_title" ]]; then
-    message+=$'\n'
-    message+="Highest priority: Task #${task_id} [${task_priority}] ${task_title}"
-  fi
-  message+=$'\n'
-  message+="Process all pending tasks now: ~/.agent-bridge/agb inbox ${agent}"
+  message="$(bridge_queue_attention_message "$agent" "$queued" "$task_id" "$task_priority" "$task_title")"
   if ! bridge_dispatch_notification "$agent" "$title" "$message" "" "normal"; then
     status=$?
     if [[ "$status" == "2" ]]; then
