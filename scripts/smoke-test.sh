@@ -907,6 +907,35 @@ CRON_IMPORTED_SYNC_OUTPUT="$("$REPO_ROOT/agent-bridge" cron sync --dry-run --sin
 assert_contains "$CRON_IMPORTED_SYNC_OUTPUT" "native: status=dry_run"
 assert_contains "$CRON_IMPORTED_SYNC_OUTPUT" "due=1"
 
+log "skipping one-shot native jobs during recurring sync"
+python3 - <<PY
+import json, os
+path = os.path.join(os.environ["BRIDGE_HOME"], "cron", "jobs.json")
+payload = json.load(open(path, "r", encoding="utf-8"))
+payload["jobs"].append({
+    "id": "native-at-smoke",
+    "agentId": "${SMOKE_AGENT}",
+    "name": "native-at-smoke",
+    "enabled": True,
+    "createdAtMs": 1743840000000,
+    "updatedAtMs": 1743840000000,
+    "schedule": {
+        "kind": "at",
+        "at": "2026-04-05T08:30:00+00:00",
+    },
+    "payload": {
+        "kind": "agentTurn",
+        "message": "one-shot smoke",
+    },
+})
+with open(path, "w", encoding="utf-8") as fh:
+    json.dump(payload, fh, ensure_ascii=False, indent=2)
+    fh.write("\n")
+PY
+CRON_IMPORTED_SKIP_AT_OUTPUT="$("$REPO_ROOT/agent-bridge" cron sync --dry-run --since '2026-04-05T08:59:00+00:00' --now '2026-04-05T09:00:00+00:00')"
+assert_contains "$CRON_IMPORTED_SKIP_AT_OUTPUT" "native: status=dry_run"
+assert_contains "$CRON_IMPORTED_SKIP_AT_OUTPUT" "due=1"
+
 log "checkpointing cron sync progress only through the successful prefix"
 SCHEDULER_JOBS_FILE="$TMP_ROOT/scheduler-jobs.json"
 SCHEDULER_STATE_FILE="$TMP_ROOT/scheduler-state.json"
