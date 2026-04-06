@@ -1016,7 +1016,7 @@ SCHEDULER_FIRST_CODE=$?
 set -e
 [[ $SCHEDULER_FIRST_CODE -eq 1 ]] || die "expected first scheduler run to fail once"
 assert_contains "$SCHEDULER_FIRST_OUTPUT" "errors: 1"
-[[ "$(paste -sd ' ' "$SCHEDULER_ENQUEUE_LOG")" == "job-a job-b" ]] || die "expected scheduler to stop after first enqueue failure"
+[[ "$(paste -sd ' ' "$SCHEDULER_ENQUEUE_LOG")" == "job-a job-b job-c" ]] || die "expected scheduler to continue after one enqueue failure"
 python3 - <<'PY' "$SCHEDULER_STATE_FILE"
 import json
 import sys
@@ -1034,7 +1034,7 @@ SCHEDULER_SECOND_OUTPUT="$(
     --now '2026-04-05T09:00:00+00:00' 2>&1
 )"
 assert_contains "$SCHEDULER_SECOND_OUTPUT" "errors: 0"
-[[ "$(paste -sd ' ' "$SCHEDULER_ENQUEUE_LOG")" == "job-a job-b job-b job-c" ]] || die "expected scheduler retry to resume from the failed same-timestamp sibling"
+[[ "$(paste -sd ' ' "$SCHEDULER_ENQUEUE_LOG")" == "job-a job-b job-c job-b job-c" ]] || die "expected scheduler retry to resume from the failed same-timestamp sibling while replaying later work"
 python3 - <<'PY' "$SCHEDULER_STATE_FILE"
 import json
 import sys
@@ -1055,7 +1055,7 @@ SCHEDULER_THIRD_OUTPUT="$(
     --now '2026-04-05T09:00:00+00:00' 2>&1
 )"
 assert_contains "$SCHEDULER_THIRD_OUTPUT" "errors: 0"
-[[ "$(paste -sd ' ' "$SCHEDULER_ENQUEUE_LOG")" == "job-a job-b job-b job-c" ]] || die "expected completed scheduler sync to avoid replaying the finished bucket"
+[[ "$(paste -sd ' ' "$SCHEDULER_ENQUEUE_LOG")" == "job-a job-b job-c job-b job-c" ]] || die "expected completed scheduler sync to avoid replaying the finished bucket"
 
 log "syncing bridge-local runtime roots from legacy source"
 RUNTIME_SYNC_OUTPUT="$(BRIDGE_OPENCLAW_HOME="$LEGACY_ROOT" BRIDGE_RUNTIME_ROOT="$BRIDGE_HOME/runtime" "$REPO_ROOT/agent-bridge" migrate runtime sync)"

@@ -537,17 +537,16 @@ def cmd_sync(args: argparse.Namespace) -> int:
     results: list[dict[str, Any]] = []
     failures = 0
     last_safe_run: DueRun | None = None
+    saw_failure = False
 
     for run in due_runs:
         result = enqueue_due_run(args, run)
         results.append(result)
         if result["exit_code"] != 0:
             failures += 1
-            # Keep progress only through the successful prefix. If one enqueue fails,
-            # later due runs must wait for the next sync or they can advance the cursor
-            # past the failed occurrence and drop work.
-            break
-        if not args.dry_run:
+            saw_failure = True
+            continue
+        if not args.dry_run and not saw_failure:
             last_safe_run = run
             write_json(
                 state_file,
