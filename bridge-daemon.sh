@@ -286,6 +286,16 @@ cmd_run_cron_worker() {
     followup_priority="high"
   fi
 
+  # Always create followup if cron job has alwaysFollowup flag or has meaningful results
+  # This ensures parent agents see and report cron results even when needs_human_followup=false
+  if [[ "$CRON_NEEDS_HUMAN_FOLLOWUP" != "1" ]]; then
+    local always_followup=""
+    always_followup="$(bridge_cron_job_always_followup "$CRON_JOB_ID" 2>/dev/null || true)"
+    if [[ "$always_followup" == "1" ]]; then
+      CRON_NEEDS_HUMAN_FOLLOWUP="1"
+    fi
+  fi
+
   if [[ "$CRON_NEEDS_HUMAN_FOLLOWUP" == "1" ]]; then
     followup_body_file="$(bridge_cron_dispatch_followup_file_by_id "$run_id")"
     bridge_cron_write_followup_body "$run_id" "$followup_body_file"

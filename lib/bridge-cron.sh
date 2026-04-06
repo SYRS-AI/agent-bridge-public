@@ -623,3 +623,38 @@ if error_message:
 Path(status_file).write_text(json.dumps(payload, ensure_ascii=True, indent=2) + "\n", encoding="utf-8")
 PY
 }
+
+bridge_cron_job_always_followup() {
+  local job_id="$1"
+
+  bridge_require_python
+  python3 - "$job_id" "$BRIDGE_NATIVE_CRON_JOBS_FILE" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+job_id = sys.argv[1]
+jobs_file = Path(sys.argv[2]).expanduser()
+
+if not jobs_file.exists():
+    print("0")
+    raise SystemExit(0)
+
+try:
+    data = json.loads(jobs_file.read_text(encoding="utf-8"))
+except Exception:
+    print("0")
+    raise SystemExit(0)
+
+for job in data.get("jobs", []):
+    if job.get("id") == job_id:
+        metadata = job.get("metadata") or {}
+        if metadata.get("alwaysFollowup") or metadata.get("always_followup"):
+            print("1")
+        else:
+            print("0")
+        raise SystemExit(0)
+
+print("0")
+PY
+}
