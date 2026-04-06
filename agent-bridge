@@ -16,6 +16,7 @@ Usage:
   $CLI_NAME list
   $CLI_NAME admin [--replace] [--continue|--no-continue] [--no-attach] [--no-project-skill]
   $CLI_NAME kill <number|all>
+  $CLI_NAME attach [number|name]
   $CLI_NAME urgent <agent> "<message>" [--wait <seconds>]
   $CLI_NAME task <create|inbox|show|claim|done|update|handoff|summary> ...
   $CLI_NAME profile <status|diff|deploy> ...
@@ -71,6 +72,9 @@ Examples:
   $CLI_NAME list
   $CLI_NAME kill 1
   $CLI_NAME kill all
+  $CLI_NAME attach
+  $CLI_NAME attach 1
+  $CLI_NAME attach reviewer
   $CLI_NAME worktree list
   $CLI_NAME cron inventory --family memory-daily --limit 10
   $CLI_NAME cron import --dry-run
@@ -302,8 +306,19 @@ if [[ $# -gt 0 ]]; then
       exit 0
       ;;
     attach)
-      if [[ $# -ne 2 ]]; then
-        bridge_die "Usage: $CLI_NAME attach <number|name>"
+      if [[ $# -gt 2 ]]; then
+        bridge_die "Usage: $CLI_NAME attach [number|name]"
+      fi
+      if [[ $# -eq 1 ]]; then
+        if ! is_tty; then
+          bridge_die "Usage: $CLI_NAME attach <number|name>"
+        fi
+        echo "Active sessions:" >&2
+        bridge_list_active_agents_numbered >&2
+        printf 'Attach to: ' >&2
+        read -r attach_choice
+        [[ -n "$attach_choice" ]] || bridge_die "attach target is required"
+        set -- "$1" "$attach_choice"
       fi
       if [[ "$2" =~ ^[0-9]+$ ]]; then
         agent="$(bridge_active_agent_id_by_index "$2")" || bridge_die "활성 에이전트 번호가 올바르지 않습니다: $2"
