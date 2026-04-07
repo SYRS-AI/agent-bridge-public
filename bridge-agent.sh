@@ -814,7 +814,7 @@ run_stop() {
   if ! bridge_tmux_session_exists "$session"; then
     bridge_die "에이전트 '$agent' 세션이 존재하지 않습니다."
   fi
-  bridge_kill_agent_session "$agent"
+  bridge_manual_stop_agent_session "$agent"
   bridge_refresh_runtime_state
   printf 'stopped: %s\n' "$agent"
 }

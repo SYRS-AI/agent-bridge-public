@@ -30,6 +30,19 @@ assert_not_contains() {
   [[ "$haystack" != *"$needle"* ]] || die "expected output to not contain: $needle"
 }
 
+kill_stale_smoke_tmux_sessions() {
+  local session=""
+
+  while IFS= read -r session; do
+    [[ -n "$session" ]] || continue
+    case "$session" in
+      bridge-smoke-*|bridge-requester-*|auto-start-session-*|always-on-session-*|static-session-*|claude-static-bridge-smoke-*|worker-reuse-*|late-dynamic-agent-*|created-session-*|bootstrap-session-*|bootstrap-wrapper-session-*|broken-channel-*|codex-cli-session-*)
+        tmux kill-session -t "$session" >/dev/null 2>&1 || true
+        ;;
+    esac
+  done < <(tmux list-sessions -F '#{session_name}' 2>/dev/null || true)
+}
+
 require_cmd bash
 require_cmd tmux
 require_cmd python3
@@ -143,6 +156,7 @@ fi
 cleanup() {
   local status=$?
   bash "$REPO_ROOT/bridge-daemon.sh" stop >/dev/null 2>&1 || true
+  kill_stale_smoke_tmux_sessions
   tmux kill-session -t "$SESSION_NAME" >/dev/null 2>&1 || true
   tmux kill-session -t "$REQUESTER_SESSION" >/dev/null 2>&1 || true
   tmux kill-session -t "$AUTO_START_SESSION" >/dev/null 2>&1 || true
@@ -169,6 +183,8 @@ cleanup() {
 }
 trap cleanup EXIT
 
+kill_stale_smoke_tmux_sessions
+
 mkdir -p "$BRIDGE_HOME" "$BRIDGE_STATE_DIR" "$BRIDGE_LOG_DIR" "$BRIDGE_SHARED_DIR" "$WORKDIR" "$REQUESTER_WORKDIR" "$AUTO_START_WORKDIR" "$BROKEN_CHANNEL_WORKDIR" "$LATE_DYNAMIC_WORKDIR"
 mkdir -p "$HOOK_WORKDIR/.claude"
 mkdir -p "$MCP_WORKDIR"
@@ -184,6 +200,13 @@ git -C "$PROJECT_ROOT" config user.name "Smoke Test"
 echo "smoke" >"$PROJECT_ROOT/README.md"
 git -C "$PROJECT_ROOT" add README.md
 git -C "$PROJECT_ROOT" commit -qm "init"
+
+log "cleaning stale smoke tmux sessions by prefix"
+tmux new-session -d -s "bootstrap-session-stale-smoke" "sleep 30"
+tmux new-session -d -s "codex-cli-session-stale-smoke" "sleep 30"
+kill_stale_smoke_tmux_sessions
+tmux has-session -t "bootstrap-session-stale-smoke" >/dev/null 2>&1 && die "stale bootstrap session survived smoke cleanup helper"
+tmux has-session -t "codex-cli-session-stale-smoke" >/dev/null 2>&1 && die "stale codex session survived smoke cleanup helper"
 
 cat >"$FAKE_BIN/codex" <<'EOF'
 #!/usr/bin/env bash
@@ -674,6 +697,16 @@ tmux has-session -t "$ALWAYS_ON_SESSION" >/dev/null 2>&1 && tmux kill-session -t
 bash "$REPO_ROOT/bridge-daemon.sh" sync >/dev/null
 sleep 1
 tmux has-session -t "$ALWAYS_ON_SESSION" >/dev/null 2>&1 || die "always-on role did not restart without queue"
+
+log "keeping a manually killed always-on role down until explicit restart"
+"$REPO_ROOT/agent-bridge" kill "$ALWAYS_ON_AGENT" >/dev/null
+sleep 2
+bash "$REPO_ROOT/bridge-daemon.sh" sync >/dev/null
+sleep 1
+tmux has-session -t "$ALWAYS_ON_SESSION" >/dev/null 2>&1 && die "always-on role respawned after manual kill"
+"$REPO_ROOT/agent-bridge" agent start "$ALWAYS_ON_AGENT" >/dev/null
+sleep 1
+tmux has-session -t "$ALWAYS_ON_SESSION" >/dev/null 2>&1 || die "always-on role did not restart after explicit start"
 
 log "running guided Discord setup"
 SETUP_DISCORD_OUTPUT="$("$REPO_ROOT/agent-bridge" setup discord "$SMOKE_AGENT" --channel-account smoke --runtime-config "$TMP_ROOT/openclaw.json" --api-base-url "$FAKE_DISCORD_API_BASE" --yes)"

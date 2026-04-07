@@ -322,7 +322,7 @@ if [[ $# -gt 0 ]]; then
         bridge_kill_active_agent_by_index "$2"
       else
         if bridge_agent_is_active "$2"; then
-          bridge_kill_agent_session "$2"
+          bridge_manual_stop_agent_session "$2"
           bridge_refresh_runtime_state
         else
           bridge_die "에이전트 '$2'가 활성 상태가 아닙니다."

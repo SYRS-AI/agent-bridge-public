@@ -82,6 +82,7 @@ if [[ -z "$AGENT" ]]; then
 fi
 
 bridge_require_agent "$AGENT"
+bridge_agent_clear_manual_stop "$AGENT"
 
 SESSION="$(bridge_agent_session "$AGENT")"
 WORK_DIR="$(bridge_agent_workdir "$AGENT")"

@@ -654,6 +654,11 @@ bridge_agent_idle_since_file() {
   printf '%s/idle-since' "$(bridge_agent_idle_marker_dir "$agent")"
 }
 
+bridge_agent_manual_stop_file() {
+  local agent="$1"
+  printf '%s/manual-stop' "$(bridge_agent_idle_marker_dir "$agent")"
+}
+
 bridge_agent_idle_since_epoch() {
   local agent="$1"
   local file
@@ -671,6 +676,17 @@ bridge_agent_idle_marker_exists() {
   [[ -f "$(bridge_agent_idle_since_file "$agent")" ]]
 }
 
+bridge_agent_manual_stop_active() {
+  local agent="$1"
+  local file
+  local value
+
+  file="$(bridge_agent_manual_stop_file "$agent")"
+  [[ -f "$file" ]] || return 1
+  value="$(<"$file")"
+  [[ "$value" =~ ^[0-9]+$ ]]
+}
+
 bridge_agent_mark_idle_now() {
   local agent="$1"
   local dir
@@ -682,12 +698,34 @@ bridge_agent_mark_idle_now() {
   printf '%s\n' "$(date +%s)" >"$file"
 }
 
+bridge_agent_mark_manual_stop() {
+  local agent="$1"
+  local dir
+  local file
+
+  dir="$(bridge_agent_idle_marker_dir "$agent")"
+  file="$(bridge_agent_manual_stop_file "$agent")"
+  mkdir -p "$dir"
+  printf '%s\n' "$(date +%s)" >"$file"
+}
+
 bridge_agent_clear_idle_marker() {
   local agent="$1"
   local file
   local dir
 
   file="$(bridge_agent_idle_since_file "$agent")"
+  dir="$(bridge_agent_idle_marker_dir "$agent")"
+  rm -f "$file"
+  rmdir "$dir" >/dev/null 2>&1 || true
+}
+
+bridge_agent_clear_manual_stop() {
+  local agent="$1"
+  local file
+  local dir
+
+  file="$(bridge_agent_manual_stop_file "$agent")"
   dir="$(bridge_agent_idle_marker_dir "$agent")"
   rm -f "$file"
   rmdir "$dir" >/dev/null 2>&1 || true

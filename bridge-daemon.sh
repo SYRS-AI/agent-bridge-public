@@ -459,6 +459,9 @@ process_on_demand_agents() {
     [[ -z "$agent" ]] && continue
     bridge_agent_exists "$agent" || continue
     [[ "$(bridge_agent_source "$agent")" == "static" ]] || continue
+    if bridge_agent_manual_stop_active "$agent"; then
+      continue
+    fi
     always_on=0
     if bridge_agent_is_always_on "$agent"; then
       always_on=1

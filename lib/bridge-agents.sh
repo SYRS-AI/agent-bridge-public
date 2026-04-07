@@ -1018,6 +1018,7 @@ bridge_refresh_runtime_state() {
 bridge_kill_agent_session() {
   local agent="$1"
   local session
+  local attempt
 
   session="$(bridge_agent_session "$agent")"
   if [[ -z "$session" ]]; then
@@ -1031,8 +1032,39 @@ bridge_kill_agent_session() {
   fi
 
   tmux kill-session -t "$session"
+  for attempt in {1..10}; do
+    if ! bridge_tmux_session_exists "$session"; then
+      break
+    fi
+    sleep 0.1
+  done
+  if bridge_tmux_session_exists "$session"; then
+    bridge_warn "tmux 세션이 종료되지 않았습니다: $agent/$session"
+    return 1
+  fi
   bridge_agent_clear_idle_marker "$agent"
   bridge_info "[info] killed ${agent}/${session}"
+}
+
+bridge_manual_stop_agent_session() {
+  local agent="$1"
+  local source
+
+  source="$(bridge_agent_source "$agent")"
+  if [[ "$source" == "static" ]]; then
+    bridge_agent_mark_manual_stop "$agent"
+  fi
+
+  if ! bridge_kill_agent_session "$agent"; then
+    if [[ "$source" == "static" ]]; then
+      bridge_agent_clear_manual_stop "$agent"
+    fi
+    return 1
+  fi
+
+  if [[ "$source" == "static" ]]; then
+    bridge_info "[info] manual stop armed for ${agent}; use 'agent-bridge agent start ${agent}' to resume"
+  fi
 }
 
 bridge_kill_active_agent_by_index() {
@@ -1043,7 +1075,7 @@ bridge_kill_active_agent_by_index() {
     bridge_die "활성 에이전트 번호가 올바르지 않습니다: $index"
   fi
 
-  bridge_kill_agent_session "$agent"
+  bridge_manual_stop_agent_session "$agent"
   bridge_refresh_runtime_state
 }
 
@@ -1058,7 +1090,7 @@ bridge_kill_all_active_agents() {
   fi
 
   for agent in "${agents[@]}"; do
-    bridge_kill_agent_session "$agent" || true
+    bridge_manual_stop_agent_session "$agent" || true
   done
 
   bridge_refresh_runtime_state
