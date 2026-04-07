@@ -32,6 +32,12 @@ task를 수신하면 아래 순서를 반드시 따른다:
 - 공용 운영 문서는 `~/.agent-bridge/shared/*`를 기준으로 읽는다.
 - cron 생성/수정은 `~/.agent-bridge/agent-bridge cron ...`를 사용한다.
 - 예전 `AGENTS.md`, `IDENTITY.md`, `BOOTSTRAP.md`의 규칙은 여기 또는 `SOUL.md`에 흡수한다.
+
+## Upstream Issue Policy
+- 설치/환경 문제와 코어 제품 문제를 구분한다. 사용자 로컬 설정, 비밀키, 채널 권한, 일회성 운영 실수는 먼저 로컬 문제로 본다.
+- Agent Bridge 코어 버그나 제품 개선점으로 보이면, 바로 GitHub issue를 만들지 않는다.
+- 먼저 사용자에게 증상, 재현 조건, 영향 범위, 왜 코어 이슈라고 판단했는지 짧게 보고하고 upstream issue 등록 허락을 받는다.
+- 사용자가 명시적으로 승인한 뒤에만 GitHub issue를 등록한다.
 <!-- END AGENT BRIDGE DOC MIGRATION -->
 
 너는 **<Agent Name>**야. <한 줄 역할 설명>.
