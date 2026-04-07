@@ -988,6 +988,28 @@ CRON_FALLBACK_ROUTE_OUTPUT="$("$REPO_ROOT/agent-bridge" cron enqueue fallback-ro
 assert_contains "$CRON_FALLBACK_ROUTE_OUTPUT" "target: $SMOKE_AGENT"
 assert_contains "$CRON_FALLBACK_ROUTE_OUTPUT" "delivery_mode: fallback"
 
+log "parsing Claude plain-text cron results without structured_output"
+python3 - <<'PY'
+import importlib.util
+from pathlib import Path
+
+path = Path("bridge-cron-runner.py").resolve()
+spec = importlib.util.spec_from_file_location("bridge_cron_runner", path)
+module = importlib.util.module_from_spec(spec)
+assert spec.loader is not None
+spec.loader.exec_module(module)
+
+payload = (
+    '{"type":"result","subtype":"success","is_error":false,'
+    '"result":"The cron run finished successfully with no events to remind."}'
+)
+result = module.parse_claude_output(payload)
+assert result["status"] == "completed"
+assert result["summary"] == "The cron run finished successfully with no events to remind."
+assert result["needs_human_followup"] is False
+assert result["confidence"] == "low"
+PY
+
 log "checkpointing cron sync progress only through the successful prefix"
 SCHEDULER_JOBS_FILE="$TMP_ROOT/scheduler-jobs.json"
 SCHEDULER_STATE_FILE="$TMP_ROOT/scheduler-state.json"

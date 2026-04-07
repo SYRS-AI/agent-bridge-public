@@ -273,9 +273,35 @@ def parse_claude_output(stdout_text: str) -> dict[str, Any]:
         raise ValueError("claude output was not a JSON object")
 
     structured = payload.get("structured_output")
-    if not isinstance(structured, dict):
-        raise ValueError("claude output did not contain structured_output")
-    return validate_result(structured)
+    if isinstance(structured, dict):
+        return validate_result(structured)
+
+    result_text = payload.get("result")
+    if isinstance(result_text, str):
+        result_text = result_text.strip()
+        if result_text:
+            try:
+                parsed_result = json.loads(result_text)
+            except json.JSONDecodeError:
+                parsed_result = None
+            if isinstance(parsed_result, dict):
+                return validate_result(parsed_result)
+
+            if payload.get("subtype") == "success" and not payload.get("is_error", False):
+                return validate_result(
+                    {
+                        "status": "completed",
+                        "summary": result_text,
+                        "findings": [],
+                        "actions_taken": ["Claude returned plain-text result instead of structured_output"],
+                        "needs_human_followup": False,
+                        "recommended_next_steps": [],
+                        "artifacts": [],
+                        "confidence": "low",
+                    }
+                )
+
+    raise ValueError("claude output did not contain structured_output")
 
 
 def write_status(
