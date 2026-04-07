@@ -241,6 +241,7 @@ Then run the guided setup:
 ./agent-bridge setup discord tester
 ./agent-bridge setup agent tester
 ./agent-bridge agent create reviewer --engine claude
+./agent-bridge agent start reviewer --dry-run
 ./agent-bridge setup admin tester
 ```
 

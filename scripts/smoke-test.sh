@@ -560,6 +560,10 @@ assert_contains "$(cat "$BRIDGE_ROSTER_LOCAL_FILE")" "BRIDGE_AGENT_ENGINE[\"$CRE
 CREATED_START_DRY_RUN="$("$REPO_ROOT/bridge-start.sh" "$CREATED_AGENT" --dry-run)"
 assert_contains "$CREATED_START_DRY_RUN" "session=$CREATED_SESSION"
 assert_contains "$CREATED_START_DRY_RUN" "bridge-run.sh $CREATED_AGENT"
+CREATED_AGENT_START_OUTPUT="$("$REPO_ROOT/agent-bridge" agent start "$CREATED_AGENT" --dry-run)"
+assert_contains "$CREATED_AGENT_START_OUTPUT" "session=$CREATED_SESSION"
+CREATED_AGENT_RESTART_OUTPUT="$("$REPO_ROOT/agent-bridge" agent restart "$CREATED_AGENT" --dry-run)"
+assert_contains "$CREATED_AGENT_RESTART_OUTPUT" "session=$CREATED_SESSION"
 
 log "ensuring static Claude launch command is bridge-controlled"
 CLAUDE_LAUNCH_NO_CONTINUE="$("$BASH4_BIN" -c '

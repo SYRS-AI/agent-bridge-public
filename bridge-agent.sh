@@ -12,6 +12,10 @@ usage() {
   cat <<EOF
 Usage:
   $(basename "$0") create <agent> [options]
+  $(basename "$0") start <agent> [--attach] [--replace] [--continue|--no-continue] [--dry-run]
+  $(basename "$0") stop <agent>
+  $(basename "$0") restart <agent> [--attach] [--continue|--no-continue] [--dry-run]
+  $(basename "$0") attach <agent>
 
 Options:
   --engine claude|codex        Agent runtime engine (default: claude)
@@ -36,6 +40,10 @@ Examples:
   $(basename "$0") create reviewer --engine claude
   $(basename "$0") create coder --engine codex --session codex-main --always-on
   $(basename "$0") create ops --engine claude --discord-channel 123456789012345678 --json
+  $(basename "$0") start reviewer --dry-run
+  $(basename "$0") restart reviewer --attach
+  $(basename "$0") stop reviewer
+  $(basename "$0") attach reviewer
 EOF
 }
 
@@ -488,12 +496,100 @@ run_create() {
   fi
 }
 
+run_start() {
+  local agent="${1:-}"
+  shift || true
+  [[ -n "$agent" ]] || bridge_die "Usage: $(basename "$0") start <agent> [...]"
+  bridge_require_agent "$agent"
+  exec "$BRIDGE_BASH_BIN" "$SCRIPT_DIR/bridge-start.sh" "$agent" "$@"
+}
+
+run_stop() {
+  local agent="${1:-}"
+  local session=""
+
+  shift || true
+  [[ -n "$agent" ]] || bridge_die "Usage: $(basename "$0") stop <agent>"
+  [[ $# -eq 0 ]] || bridge_die "지원하지 않는 agent stop 옵션입니다: $1"
+  bridge_require_agent "$agent"
+  session="$(bridge_agent_session "$agent")"
+  [[ -n "$session" ]] || bridge_die "세션 이름이 없습니다: $agent"
+  if ! bridge_tmux_session_exists "$session"; then
+    bridge_die "에이전트 '$agent' 세션이 존재하지 않습니다."
+  fi
+  bridge_kill_agent_session "$agent"
+  bridge_refresh_runtime_state
+  printf 'stopped: %s\n' "$agent"
+}
+
+run_restart() {
+  local agent="${1:-}"
+  local session=""
+  local start_args=()
+  local attach_mode=0
+
+  shift || true
+  [[ -n "$agent" ]] || bridge_die "Usage: $(basename "$0") restart <agent> [...]"
+  bridge_require_agent "$agent"
+  session="$(bridge_agent_session "$agent")"
+  [[ -n "$session" ]] || bridge_die "세션 이름이 없습니다: $agent"
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --attach)
+        attach_mode=1
+        start_args+=("$1")
+        shift
+        ;;
+      --continue|--no-continue|--dry-run)
+        start_args+=("$1")
+        shift
+        ;;
+      *)
+        bridge_die "지원하지 않는 agent restart 옵션입니다: $1"
+        ;;
+    esac
+  done
+
+  if [[ ! " ${start_args[*]} " =~ [[:space:]]--attach[[:space:]] ]] && [[ $attach_mode -eq 0 ]]; then
+    :
+  fi
+
+  if bridge_tmux_session_exists "$session"; then
+    bridge_kill_agent_session "$agent"
+    bridge_refresh_runtime_state
+  fi
+  exec "$BRIDGE_BASH_BIN" "$SCRIPT_DIR/bridge-start.sh" "$agent" --replace "${start_args[@]}"
+}
+
+run_attach() {
+  local agent="${1:-}"
+
+  shift || true
+  [[ -n "$agent" ]] || bridge_die "Usage: $(basename "$0") attach <agent>"
+  [[ $# -eq 0 ]] || bridge_die "지원하지 않는 agent attach 옵션입니다: $1"
+  bridge_require_agent "$agent"
+  exec "$BRIDGE_BASH_BIN" "$SCRIPT_DIR/agent-bridge" attach "$agent"
+}
+
 subcommand="${1:-}"
 shift || true
 
 case "$subcommand" in
   create)
     run_create "$@"
+    ;;
+  start)
+    run_start "$@"
+    ;;
+  stop)
+    run_stop "$@"
+    ;;
+  restart)
+    run_restart "$@"
+    ;;
+  attach)
+    run_attach "$@"
     ;;
   ""|-h|--help|help)
     usage
