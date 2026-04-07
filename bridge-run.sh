@@ -92,6 +92,8 @@ if [[ $DRY_RUN -eq 1 ]]; then
   echo "loop=$(bridge_agent_loop "$AGENT")"
   echo "continue=$(bridge_agent_continue "$AGENT")"
   echo "session_id=$(bridge_agent_session_id "$AGENT")"
+  echo "channels=$(bridge_agent_channels_csv "$AGENT")"
+  echo "channel_status=$(bridge_agent_channel_status "$AGENT")"
   echo "launch=$LAUNCH_CMD"
   exit 0
 fi

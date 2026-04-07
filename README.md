@@ -232,6 +232,7 @@ If an agent should read and reply in Discord, set its primary channel metadata
 in `agent-roster.local.sh` first:
 
 ```bash
+BRIDGE_AGENT_CHANNELS["tester"]="plugin:discord"
 BRIDGE_AGENT_DISCORD_CHANNEL_ID["tester"]="<channel-id>"
 ```
 
@@ -524,7 +525,10 @@ Run:
 ```
 
 Make sure the intended channel ID is present in `<workdir>/.discord/access.json`
-under `groups`, then restart the agent session if it was already running.
+under `groups`, then restart the agent session if it was already running. If the
+agent should always launch with Discord or Telegram attached, declare that in
+`BRIDGE_AGENT_CHANNELS["<agent>"]` instead of relying on a hand-written raw
+`--channels ...` launch command.
 
 ### The daemon is not running
 

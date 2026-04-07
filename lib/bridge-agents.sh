@@ -417,9 +417,137 @@ bridge_agent_launch_cmd_raw() {
   printf '%s' "${BRIDGE_AGENT_LAUNCH_CMD[$agent]-}"
 }
 
+bridge_normalize_channels_csv() {
+  local raw="${1:-}"
+
+  bridge_require_python
+  python3 - "$raw" <<'PY'
+import sys
+
+raw = sys.argv[1]
+values = []
+seen = set()
+for chunk in str(raw).replace("\n", ",").split(","):
+    item = chunk.strip()
+    if not item or item in seen:
+        continue
+    seen.add(item)
+    values.append(item)
+print(",".join(values))
+PY
+}
+
+bridge_extract_channels_from_command() {
+  local command="${1:-}"
+
+  bridge_require_python
+  python3 - "$command" <<'PY'
+import shlex
+import sys
+
+command = sys.argv[1]
+try:
+    args = shlex.split(command)
+except Exception:
+    print("")
+    raise SystemExit(0)
+
+values = []
+seen = set()
+i = 0
+while i < len(args):
+    token = args[i]
+    value = None
+    if token == "--channels" and i + 1 < len(args):
+        value = args[i + 1]
+        i += 2
+    elif token.startswith("--channels="):
+        value = token.split("=", 1)[1]
+        i += 1
+    else:
+        i += 1
+    if value is None:
+        continue
+    for chunk in str(value).split(","):
+        item = chunk.strip()
+        if not item or item in seen:
+            continue
+        seen.add(item)
+        values.append(item)
+
+print(",".join(values))
+PY
+}
+
+bridge_channel_csv_contains() {
+  local csv="${1:-}"
+  local needle="${2:-}"
+
+  [[ -n "$csv" && -n "$needle" ]] || return 1
+
+  bridge_require_python
+  python3 - "$csv" "$needle" <<'PY'
+import sys
+
+values = [item.strip() for item in sys.argv[1].split(",") if item.strip()]
+needle = sys.argv[2]
+for value in values:
+    if value == needle or value.startswith(f"{needle}@"):
+        raise SystemExit(0)
+raise SystemExit(1)
+PY
+}
+
+bridge_channel_csv_is_subset() {
+  local required_csv="${1:-}"
+  local actual_csv="${2:-}"
+
+  bridge_require_python
+  python3 - "$required_csv" "$actual_csv" <<'PY'
+import sys
+
+def parse(raw: str) -> list[str]:
+    return [item.strip() for item in raw.split(",") if item.strip()]
+
+required = parse(sys.argv[1])
+actual = parse(sys.argv[2])
+
+for need in required:
+    matched = False
+    for have in actual:
+        if have == need or have.startswith(f"{need}@") or need.startswith(f"{have}@"):
+            matched = True
+            break
+    if not matched:
+        raise SystemExit(1)
+
+raise SystemExit(0)
+PY
+}
+
+bridge_agent_channels_csv() {
+  local agent="$1"
+  local explicit=""
+  local inferred=""
+
+  explicit="${BRIDGE_AGENT_CHANNELS[$agent]-}"
+  if [[ -n "$explicit" ]]; then
+    bridge_normalize_channels_csv "$explicit"
+    return 0
+  fi
+
+  inferred="$(bridge_extract_channels_from_command "$(bridge_agent_launch_cmd_raw "$agent")")"
+  if [[ -n "$inferred" ]]; then
+    printf '%s' "$inferred"
+    return 0
+  fi
+
+  printf '%s' ""
+}
+
 bridge_agent_uses_discord_plugin() {
   local agent="$1"
-  [[ "$(bridge_agent_launch_cmd_raw "$agent")" == *"plugin:discord"* ]]
+  bridge_channel_csv_contains "$(bridge_agent_channels_csv "$agent")" "plugin:discord"
 }
 
 bridge_agent_discord_channel_from_access() {
@@ -471,6 +599,55 @@ bridge_agent_discord_channel_id() {
   fi
 
   printf '%s' ""
+}
+
+bridge_agent_channel_status_reason() {
+  local agent="$1"
+  local required=""
+  local effective=""
+  local discord_dir=""
+
+  required="$(bridge_agent_channels_csv "$agent")"
+  if [[ -z "$required" ]]; then
+    printf '%s' ""
+    return 0
+  fi
+
+  effective="$(bridge_extract_channels_from_command "$(bridge_agent_launch_cmd "$agent")")"
+  if ! bridge_channel_csv_is_subset "$required" "$effective"; then
+    printf 'launch command missing required --channels (%s)' "$required"
+    return 0
+  fi
+
+  if bridge_channel_csv_contains "$required" "plugin:discord"; then
+    discord_dir="$(bridge_agent_discord_state_dir "$agent")"
+    if [[ ! -f "$discord_dir/.env" || ! -f "$discord_dir/access.json" ]]; then
+      printf 'missing Discord runtime files under %s (.env and access.json required)' "$discord_dir"
+      return 0
+    fi
+  fi
+
+  printf '%s' ""
+}
+
+bridge_agent_channel_status() {
+  local agent="$1"
+  local required=""
+  local reason=""
+
+  required="$(bridge_agent_channels_csv "$agent")"
+  if [[ -z "$required" ]]; then
+    printf '%s' "-"
+    return 0
+  fi
+
+  reason="$(bridge_agent_channel_status_reason "$agent")"
+  if [[ -n "$reason" ]]; then
+    printf '%s' "miss"
+    return 0
+  fi
+
+  printf '%s' "ok"
 }
 
 bridge_agent_notify_kind() {

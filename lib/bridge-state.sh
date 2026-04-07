@@ -117,6 +117,86 @@ print(f"{env_prefix}{quoted}" if env_prefix else quoted)
 PY
 }
 
+bridge_claude_launch_with_channels() {
+  local agent="$1"
+  local original="$2"
+  local required=""
+
+  required="$(bridge_agent_channels_csv "$agent")"
+  if [[ -z "$required" ]]; then
+    printf '%s' "$original"
+    return 0
+  fi
+
+  bridge_require_python
+  python3 - "$original" "$required" <<'PY'
+import re
+import shlex
+import sys
+
+original, required_csv = sys.argv[1:]
+
+def normalize(raw: str):
+    values = []
+    seen = set()
+    for chunk in raw.split(","):
+        item = chunk.strip()
+        if not item or item in seen:
+            continue
+        seen.add(item)
+        values.append(item)
+    return values
+
+required = normalize(required_csv)
+if not required:
+    print(original)
+    raise SystemExit(0)
+
+match = re.match(r"^(?P<prefix>.*?)(?P<command>claude(?:\s|$).*)$", original)
+if not match:
+    print(original)
+    raise SystemExit(0)
+
+env_prefix = match.group("prefix")
+args = shlex.split(match.group("command"))
+if not args or args[0] != "claude":
+    print(original)
+    raise SystemExit(0)
+
+rest = args[1:]
+existing = []
+filtered = []
+i = 0
+while i < len(rest):
+    token = rest[i]
+    if token == "--channels" and i + 1 < len(rest):
+        existing.extend(normalize(rest[i + 1]))
+        i += 2
+        continue
+    if token.startswith("--channels="):
+        existing.extend(normalize(token.split("=", 1)[1]))
+        i += 1
+        continue
+    filtered.append(token)
+    i += 1
+
+merged = []
+seen = set()
+for item in [*existing, *required]:
+    if item in seen:
+        continue
+    seen.add(item)
+    merged.append(item)
+
+rebuilt = ["claude", *filtered]
+if merged:
+    rebuilt.extend(["--channels", ",".join(merged)])
+
+quoted = " ".join(shlex.quote(token) for token in rebuilt)
+print(f"{env_prefix}{quoted}" if env_prefix else quoted)
+PY
+}
+
 bridge_build_static_claude_launch_cmd() {
   local agent="$1"
   local fallback=""
@@ -189,6 +269,8 @@ bridge_agent_launch_cmd() {
     if launch_cmd="$(bridge_build_resume_launch_cmd "$agent")"; then
       if [[ "$(bridge_agent_engine "$agent")" == "codex" ]]; then
         launch_cmd="$(bridge_codex_launch_with_hooks "$launch_cmd")"
+      elif [[ "$(bridge_agent_engine "$agent")" == "claude" ]]; then
+        launch_cmd="$(bridge_claude_launch_with_channels "$agent" "$launch_cmd")"
       fi
       launch_cmd="$(bridge_claude_launch_with_webhook "$agent" "$launch_cmd")"
       printf '%s' "$launch_cmd"
@@ -197,6 +279,8 @@ bridge_agent_launch_cmd() {
     launch_cmd="$(bridge_build_dynamic_launch_cmd "$agent")"
     if [[ "$(bridge_agent_engine "$agent")" == "codex" ]]; then
       launch_cmd="$(bridge_codex_launch_with_hooks "$launch_cmd")"
+    elif [[ "$(bridge_agent_engine "$agent")" == "claude" ]]; then
+      launch_cmd="$(bridge_claude_launch_with_channels "$agent" "$launch_cmd")"
     fi
     launch_cmd="$(bridge_claude_launch_with_webhook "$agent" "$launch_cmd")"
     printf '%s' "$launch_cmd"
@@ -205,6 +289,7 @@ bridge_agent_launch_cmd() {
 
   fallback="${BRIDGE_AGENT_LAUNCH_CMD[$agent]-}"
   if [[ "$(bridge_agent_engine "$agent")" == "claude" ]] && launch_cmd="$(bridge_build_static_claude_launch_cmd "$agent")"; then
+    launch_cmd="$(bridge_claude_launch_with_channels "$agent" "$launch_cmd")"
     launch_cmd="$(bridge_claude_launch_with_webhook "$agent" "$launch_cmd")"
     printf '%s' "$launch_cmd"
     return 0
@@ -212,6 +297,8 @@ bridge_agent_launch_cmd() {
   if launch_cmd="$(bridge_build_resume_launch_cmd "$agent")"; then
     if [[ "$(bridge_agent_engine "$agent")" == "codex" ]]; then
       launch_cmd="$(bridge_codex_launch_with_hooks "$launch_cmd")"
+    elif [[ "$(bridge_agent_engine "$agent")" == "claude" ]]; then
+      launch_cmd="$(bridge_claude_launch_with_channels "$agent" "$launch_cmd")"
     fi
     launch_cmd="$(bridge_claude_launch_with_webhook "$agent" "$launch_cmd")"
     printf '%s' "$launch_cmd"
@@ -220,6 +307,8 @@ bridge_agent_launch_cmd() {
 
   if [[ "$(bridge_agent_engine "$agent")" == "codex" ]]; then
     fallback="$(bridge_codex_launch_with_hooks "$fallback")"
+  elif [[ "$(bridge_agent_engine "$agent")" == "claude" ]]; then
+    fallback="$(bridge_claude_launch_with_channels "$agent" "$fallback")"
   fi
   launch_cmd="$(bridge_claude_launch_with_webhook "$agent" "$fallback")"
   printf '%s' "$launch_cmd"
@@ -844,14 +933,16 @@ bridge_write_roster_status_snapshot() {
   local agent
   local active
   local wake
+  local channels
   local session
   local activity_state
 
   {
-    echo -e "agent\tengine\tsession\tworkdir\tsource\tactive\twake\tactivity_state"
+    echo -e "agent\tengine\tsession\tworkdir\tsource\tactive\twake\tchannels\tactivity_state"
     for agent in "${BRIDGE_AGENT_IDS[@]}"; do
       active=0
       wake="-"
+      channels="$(bridge_agent_channel_status "$agent")"
       activity_state="stopped"
       session="$(bridge_agent_session "$agent")"
       if bridge_agent_is_active "$agent"; then
@@ -864,7 +955,7 @@ bridge_write_roster_status_snapshot() {
         fi
       fi
 
-      echo -e "${agent}\t$(bridge_agent_engine "$agent")\t${session}\t$(bridge_agent_workdir "$agent")\t$(bridge_agent_source "$agent")\t${active}\t${wake}\t${activity_state}"
+      echo -e "${agent}\t$(bridge_agent_engine "$agent")\t${session}\t$(bridge_agent_workdir "$agent")\t$(bridge_agent_source "$agent")\t${active}\t${wake}\t${channels}\t${activity_state}"
     done
   } >"$file"
 }

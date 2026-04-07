@@ -211,6 +211,9 @@ run_agent() {
   local roster_channel=""
   local access_channel=""
   local access_channels=()
+  local required_channels=""
+  local channel_status=""
+  local channel_reason=""
   local start_output=""
 
   shift || true
@@ -247,6 +250,9 @@ run_agent() {
   workdir="$(bridge_agent_workdir "$agent")"
   profile_target="$(bridge_resolve_profile_target "$agent" || true)"
   wake_status="$(bridge_agent_wake_status "$agent")"
+  required_channels="$(bridge_agent_channels_csv "$agent")"
+  channel_status="$(bridge_agent_channel_status "$agent")"
+  channel_reason="$(bridge_agent_channel_status_reason "$agent")"
   roster_channel="$(bridge_agent_discord_channel_id "$agent")"
   access_channel="$(bridge_setup_primary_access_channel "$(bridge_agent_discord_state_dir "$agent")" || true)"
   mapfile -t access_channels < <(bridge_setup_access_channels "$(bridge_agent_discord_state_dir "$agent")" || true)
@@ -267,12 +273,18 @@ run_agent() {
   printf 'session: %s\n' "$session"
   printf 'workdir: %s\n' "$workdir"
   printf 'discord_dir: %s\n' "$(bridge_agent_discord_state_dir "$agent")"
+  if [[ -n "$required_channels" ]]; then
+    printf 'required_channels: %s\n' "$required_channels"
+  else
+    printf 'required_channels: (unset)\n'
+  fi
   if [[ -n "$roster_channel" ]]; then
     printf 'roster_discord_channel: %s\n' "$roster_channel"
   else
     printf 'roster_discord_channel: (unset)\n'
   fi
   printf 'wake_channel: %s\n' "$wake_status"
+  printf 'channel_status: %s\n' "$channel_status"
 
   if [[ "$engine" == "claude" ]]; then
     echo
@@ -412,6 +424,9 @@ run_agent() {
   fi
   if [[ "$engine" == "claude" && "$wake_status" == "miss" ]]; then
     warnings+=("Claude role has no session metadata for idle wake. Verify BRIDGE_AGENT_SESSION is set and restart the session after deploy.")
+  fi
+  if [[ -n "$channel_reason" ]]; then
+    warnings+=("Channel health check failed: $channel_reason")
   fi
 
   if [[ ${#warnings[@]} -gt 0 ]]; then

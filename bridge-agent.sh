@@ -26,6 +26,7 @@ Options:
   --display-name <text>        scaffold display name (default: <agent>)
   --role <text>                scaffold role summary
   --launch-cmd <cmd>           explicit launch command
+  --channels <csv>             required Claude channels metadata
   --discord-channel <id>       primary Discord channel metadata
   --notify-kind <kind>         out-of-band notify transport metadata
   --notify-target <target>     notify target metadata
@@ -39,7 +40,7 @@ Options:
 Examples:
   $(basename "$0") create reviewer --engine claude
   $(basename "$0") create coder --engine codex --session codex-main --always-on
-  $(basename "$0") create ops --engine claude --discord-channel 123456789012345678 --json
+  $(basename "$0") create ops --engine claude --channels plugin:discord --discord-channel 123456789012345678 --json
   $(basename "$0") start reviewer --dry-run
   $(basename "$0") restart reviewer --attach
   $(basename "$0") stop reviewer
@@ -157,13 +158,14 @@ bridge_write_role_block() {
   local workdir="$5"
   local profile_home="$6"
   local launch_cmd="$7"
-  local discord_channel="$8"
-  local notify_kind="$9"
-  local notify_target="${10}"
-  local notify_account="${11}"
-  local loop_mode="${12}"
-  local continue_mode="${13}"
-  local always_on="${14}"
+  local channels="$8"
+  local discord_channel="$9"
+  local notify_kind="${10}"
+  local notify_target="${11}"
+  local notify_account="${12}"
+  local loop_mode="${13}"
+  local continue_mode="${14}"
+  local always_on="${15}"
 
   bridge_agent_manage_python \
     "$BRIDGE_ROSTER_LOCAL_FILE" \
@@ -174,6 +176,7 @@ bridge_write_role_block() {
     "$workdir" \
     "$profile_home" \
     "$launch_cmd" \
+    "$channels" \
     "$discord_channel" \
     "$notify_kind" \
     "$notify_target" \
@@ -194,6 +197,7 @@ import sys
     workdir,
     profile_home,
     launch_cmd,
+    channels,
     discord_channel,
     notify_kind,
     notify_target,
@@ -228,6 +232,8 @@ lines = [
 ]
 if profile_home:
     lines.append(f'BRIDGE_AGENT_PROFILE_HOME["{agent}"]={sq(profile_home)}')
+if channels:
+    lines.append(f'BRIDGE_AGENT_CHANNELS["{agent}"]={sq(channels)}')
 if discord_channel:
     lines.append(f'BRIDGE_AGENT_DISCORD_CHANNEL_ID["{agent}"]={sq(discord_channel)}')
 if notify_kind:
@@ -266,14 +272,15 @@ emit_create_json() {
   local workdir="$4"
   local profile_home="$5"
   local launch_cmd="$6"
-  local roster_file="$7"
-  local dry_run="$8"
+  local channels="$7"
+  local roster_file="$8"
+  local dry_run="$9"
 
-  bridge_agent_manage_python "$agent" "$engine" "$session" "$workdir" "$profile_home" "$launch_cmd" "$roster_file" "$dry_run" <<'PY'
+  bridge_agent_manage_python "$agent" "$engine" "$session" "$workdir" "$profile_home" "$launch_cmd" "$channels" "$roster_file" "$dry_run" <<'PY'
 import json
 import sys
 
-agent, engine, session, workdir, profile_home, launch_cmd, roster_file, dry_run = sys.argv[1:]
+agent, engine, session, workdir, profile_home, launch_cmd, channels, roster_file, dry_run = sys.argv[1:]
 payload = {
     "agent": agent,
     "engine": engine,
@@ -281,6 +288,7 @@ payload = {
     "workdir": workdir,
     "profile_home": profile_home,
     "launch_cmd": launch_cmd,
+    "channels": channels,
     "roster_file": roster_file,
     "dry_run": dry_run == "1",
     "next_steps": [
@@ -303,6 +311,7 @@ run_create() {
   local display_name=""
   local role_text=""
   local launch_cmd=""
+  local channels=""
   local discord_channel=""
   local notify_kind=""
   local notify_target=""
@@ -362,6 +371,11 @@ run_create() {
       --launch-cmd)
         [[ $# -ge 2 ]] || bridge_die "옵션 값이 필요합니다: $1"
         launch_cmd="$2"
+        shift 2
+        ;;
+      --channels)
+        [[ $# -ge 2 ]] || bridge_die "옵션 값이 필요합니다: $1"
+        channels="$2"
         shift 2
         ;;
       --discord-channel)
@@ -427,6 +441,7 @@ run_create() {
   display_name="${display_name:-$agent}"
   role_text="${role_text:-Long-lived agent role}"
   launch_cmd="${launch_cmd:-$(bridge_agent_default_launch_cmd "$engine")}"
+  channels="$(bridge_normalize_channels_csv "$channels")"
 
   default_home="$(bridge_expand_user_path "$default_home")"
   if [[ -z "$profile_home" && "$workdir" != "$default_home" ]]; then
@@ -456,6 +471,7 @@ run_create() {
       "$workdir" \
       "$profile_home" \
       "$launch_cmd" \
+      "$channels" \
       "$discord_channel" \
       "$notify_kind" \
       "$notify_target" \
@@ -468,7 +484,7 @@ run_create() {
   fi
 
   if [[ $json_mode -eq 1 ]]; then
-    emit_create_json "$agent" "$engine" "$session" "$workdir" "$profile_home" "$launch_cmd" "$BRIDGE_ROSTER_LOCAL_FILE" "$dry_run"
+    emit_create_json "$agent" "$engine" "$session" "$workdir" "$profile_home" "$launch_cmd" "$channels" "$BRIDGE_ROSTER_LOCAL_FILE" "$dry_run"
     exit 0
   fi
 
@@ -480,6 +496,9 @@ run_create() {
     printf 'profile_home: %s\n' "$profile_home"
   fi
   printf 'launch_cmd: %s\n' "$launch_cmd"
+  if [[ -n "$channels" ]]; then
+    printf 'channels: %s\n' "$channels"
+  fi
   printf 'roster_file: %s\n' "$BRIDGE_ROSTER_LOCAL_FILE"
   if [[ $always_on -eq 1 ]]; then
     echo "always_on: yes"

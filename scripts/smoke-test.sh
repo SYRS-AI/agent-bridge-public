@@ -189,13 +189,14 @@ BRIDGE_AGENT_WORKDIR["$ALWAYS_ON_AGENT"]="$AUTO_START_WORKDIR"
 BRIDGE_AGENT_WORKDIR["$CODEX_CLI_AGENT"]="$WORKDIR"
 BRIDGE_AGENT_WORKDIR["claude-static"]="$CLAUDE_STATIC_WORKDIR"
 BRIDGE_AGENT_DISCORD_CHANNEL_ID["$SMOKE_AGENT"]="123456789012345678"
+BRIDGE_AGENT_CHANNELS["claude-static"]="plugin:discord@claude-plugins-official"
 BRIDGE_CRON_AGENT_TARGET["legacy-ops"]="$AUTO_START_AGENT"
 BRIDGE_AGENT_LAUNCH_CMD["$SMOKE_AGENT"]='python3 -c "import time; print(\"smoke-agent ready\", flush=True); time.sleep(30)"'
 BRIDGE_AGENT_LAUNCH_CMD["$REQUESTER_AGENT"]='python3 -c "import time; print(\"requester-agent ready\", flush=True); time.sleep(30)"'
 BRIDGE_AGENT_LAUNCH_CMD["$AUTO_START_AGENT"]='python3 -c "import time; print(\"auto-start ready\", flush=True); time.sleep(30)"'
 BRIDGE_AGENT_LAUNCH_CMD["$ALWAYS_ON_AGENT"]='python3 -c "import time; print(\"always-on ready\", flush=True); time.sleep(30)"'
 BRIDGE_AGENT_LAUNCH_CMD["$CODEX_CLI_AGENT"]='codex'
-BRIDGE_AGENT_LAUNCH_CMD["claude-static"]='DISCORD_STATE_DIR=REPLACE_CLAUDE_DISCORD claude -c --dangerously-skip-permissions --channels plugin:discord@claude-plugins-official'
+BRIDGE_AGENT_LAUNCH_CMD["claude-static"]='DISCORD_STATE_DIR=REPLACE_CLAUDE_DISCORD claude -c --dangerously-skip-permissions'
 BRIDGE_AGENT_IDLE_TIMEOUT["$ALWAYS_ON_AGENT"]="0"
 EOF
 
@@ -207,6 +208,20 @@ path = Path(sys.argv[1])
 text = path.read_text(encoding="utf-8")
 path.write_text(text.replace("REPLACE_CLAUDE_DISCORD", sys.argv[2]), encoding="utf-8")
 PY
+
+mkdir -p "$CLAUDE_STATIC_WORKDIR/.discord"
+cat >"$CLAUDE_STATIC_WORKDIR/.discord/.env" <<'EOF'
+DISCORD_BOT_TOKEN=smoke-token
+EOF
+cat >"$CLAUDE_STATIC_WORKDIR/.discord/access.json" <<'EOF'
+{
+  "groups": {
+    "123456789012345678": {
+      "requireMention": false
+    }
+  }
+}
+EOF
 
 echo "temporary smoke note" >"$BRIDGE_SHARED_DIR/note.md"
 echo "# Smoke CLAUDE" >"$WORKDIR/CLAUDE.md"
@@ -580,12 +595,15 @@ log "creating a new static agent from the public template"
 CREATE_DRY_RUN_OUTPUT="$("$REPO_ROOT/agent-bridge" agent create "$CREATED_AGENT" --engine claude --session "$CREATED_SESSION" --always-on --dry-run)"
 assert_contains "$CREATE_DRY_RUN_OUTPUT" "agent: $CREATED_AGENT"
 assert_contains "$CREATE_DRY_RUN_OUTPUT" "dry_run: yes"
-CREATE_JSON_OUTPUT="$("$REPO_ROOT/agent-bridge" agent create "$CREATED_AGENT" --engine claude --session "$CREATED_SESSION" --dry-run --json)"
+CREATE_JSON_OUTPUT="$("$REPO_ROOT/agent-bridge" agent create "$CREATED_AGENT" --engine claude --session "$CREATED_SESSION" --channels plugin:telegram --dry-run --json)"
 assert_contains "$CREATE_JSON_OUTPUT" "\"agent\": \"$CREATED_AGENT\""
-CREATE_OUTPUT="$("$REPO_ROOT/agent-bridge" agent create "$CREATED_AGENT" --engine claude --session "$CREATED_SESSION" --role "Smoke created role")"
+assert_contains "$CREATE_JSON_OUTPUT" "\"channels\": \"plugin:telegram\""
+CREATE_OUTPUT="$("$REPO_ROOT/agent-bridge" agent create "$CREATED_AGENT" --engine claude --session "$CREATED_SESSION" --role "Smoke created role" --channels plugin:telegram)"
 assert_contains "$CREATE_OUTPUT" "create: ok"
 assert_contains "$CREATE_OUTPUT" "start_dry_run: ok"
 assert_contains "$(cat "$BRIDGE_ROSTER_LOCAL_FILE")" "BRIDGE_AGENT_ENGINE[\"$CREATED_AGENT\"]=claude"
+assert_contains "$(cat "$BRIDGE_ROSTER_LOCAL_FILE")" "BRIDGE_AGENT_CHANNELS[\"$CREATED_AGENT\"]="
+assert_contains "$(cat "$BRIDGE_ROSTER_LOCAL_FILE")" "plugin:telegram"
 [[ -f "$BRIDGE_AGENT_HOME_ROOT/$CREATED_AGENT/CLAUDE.md" ]] || die "agent create did not scaffold CLAUDE.md"
 [[ -f "$BRIDGE_AGENT_HOME_ROOT/$CREATED_AGENT/SOUL.md" ]] || die "agent create did not scaffold SOUL.md"
 [[ -f "$BRIDGE_AGENT_HOME_ROOT/$CREATED_AGENT/TOOLS.md" ]] || die "agent create did not scaffold TOOLS.md"
@@ -594,6 +612,8 @@ assert_contains "$(cat "$BRIDGE_ROSTER_LOCAL_FILE")" "BRIDGE_AGENT_ENGINE[\"$CRE
 [[ -L "$BRIDGE_AGENT_HOME_ROOT/$CREATED_AGENT/.claude/skills/agent-bridge-runtime" ]] || die "agent create did not link runtime skill"
 CREATED_START_DRY_RUN="$("$REPO_ROOT/bridge-start.sh" "$CREATED_AGENT" --dry-run)"
 assert_contains "$CREATED_START_DRY_RUN" "session=$CREATED_SESSION"
+assert_contains "$CREATED_START_DRY_RUN" "channels=plugin:telegram"
+assert_contains "$CREATED_START_DRY_RUN" "channel_status=ok"
 assert_contains "$CREATED_START_DRY_RUN" "bridge-run.sh $CREATED_AGENT"
 CREATED_AGENT_START_OUTPUT="$("$REPO_ROOT/agent-bridge" agent start "$CREATED_AGENT" --dry-run)"
 assert_contains "$CREATED_AGENT_START_OUTPUT" "session=$CREATED_SESSION"
@@ -623,6 +643,12 @@ assert_contains "$CLAUDE_LAUNCH_CONTINUE" "DISCORD_STATE_DIR=$CLAUDE_STATIC_WORK
 assert_contains "$CLAUDE_LAUNCH_CONTINUE" "claude --dangerously-skip-permissions --name claude-static --channels plugin:discord@claude-plugins-official"
 [[ "$CLAUDE_LAUNCH_CONTINUE" != *" --continue "* ]] || die "static Claude launch without session_id should start fresh, not use --continue"
 [[ "$CLAUDE_LAUNCH_CONTINUE" != *"'DISCORD_STATE_DIR="* ]] || die "static Claude env prefix should not be shell-quoted on continue"
+CLAUDE_CHANNEL_STATUS="$("$BASH4_BIN" -c '
+  source "'"$REPO_ROOT"'/bridge-lib.sh"
+  bridge_load_roster
+  printf "%s" "$(bridge_agent_channel_status "claude-static")"
+')"
+[[ "$CLAUDE_CHANNEL_STATUS" == "ok" ]] || die "expected claude-static channel status to be ok"
 
 STATIC_HISTORY_CONTINUE="$("$BASH4_BIN" -c '
   source "'"$REPO_ROOT"'/bridge-lib.sh"

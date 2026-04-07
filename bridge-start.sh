@@ -106,6 +106,8 @@ if [[ $DRY_RUN -eq 1 ]]; then
   echo "session=$SESSION"
   echo "workdir=$WORK_DIR"
   echo "continue=$EFFECTIVE_CONTINUE_MODE"
+  echo "channels=$(bridge_agent_channels_csv "$AGENT")"
+  echo "channel_status=$(bridge_agent_channel_status "$AGENT")"
   echo "tmux_command=$SESSION_CMD"
   exit 0
 fi

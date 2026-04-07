@@ -250,6 +250,7 @@ def render_dashboard(args: argparse.Namespace) -> str:
     health_warn_count = 0
     health_critical_count = 0
     wake_missing_count = sum(1 for row in roster if row.get("wake") == "miss")
+    channel_missing_count = sum(1 for row in roster if row.get("channels") == "miss")
     zombie_count = sum(1 for metric in metrics.values() if int(metric.get("zombie", 0) or 0) == 1)
 
     for row in roster:
@@ -284,7 +285,7 @@ def render_dashboard(args: argparse.Namespace) -> str:
     lines.append(
         f"updated {iso_now()} | daemon {'running' if daemon_running else 'stopped'} pid={daemon_pid} | "
         f"active {full_active_count}/{full_total_agents} | shown {visible_agents} | "
-        f"health warn={health_warn_count} crit={health_critical_count} | wake miss={wake_missing_count} | zombie={zombie_count} | db {queue_db}"
+        f"health warn={health_warn_count} crit={health_critical_count} | wake miss={wake_missing_count} | channel miss={channel_missing_count} | zombie={zombie_count} | db {queue_db}"
     )
     lines.append("")
     lines.append(
@@ -298,7 +299,7 @@ def render_dashboard(args: argparse.Namespace) -> str:
     )
     lines.append("")
     lines.append("Agents")
-    lines.append("  #  agent           eng     on  state    q   c   b   idle  stale wake   nudge  load        session        workdir")
+    lines.append("  #  agent           eng     on  state    q   c   b   idle  stale wake chan  nudge  load        session        workdir")
 
     active_index = 0
     for row in roster:
@@ -317,6 +318,7 @@ def render_dashboard(args: argparse.Namespace) -> str:
         last_nudge_ts = metric.get("last_nudge_ts")
         zombie = int(metric.get("zombie", 0) or 0)
         activity_state = row.get("activity_state") or ("stopped" if not active else "working")
+        channel_state = row.get("channels") or "-"
         stale = classify_stale(
             active,
             int(activity_ts) if activity_ts else None,
@@ -333,6 +335,7 @@ def render_dashboard(args: argparse.Namespace) -> str:
             f"{fmt_idle(int(activity_ts) if activity_ts else None):>4}  "
             f"{stale:>5} "
             f"{wake_state:>6} "
+            f"{channel_state:>4} "
             f"{fmt_age(int(last_nudge_ts) if last_nudge_ts else None):>5}  "
             f"{load_bar:<12}  "
             f"{(row.get('session') or '-')[:12]:<12}  {short_path(row.get('workdir', ''))}"
