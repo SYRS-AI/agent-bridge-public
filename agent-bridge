@@ -15,6 +15,7 @@ Usage:
   $CLI_NAME status [--watch] [--refresh <seconds>] [--open-limit <count>] [--all-agents]
   $CLI_NAME list
   $CLI_NAME admin [--replace] [--continue|--no-continue] [--no-attach] [--no-project-skill]
+  $CLI_NAME agent <create> ...
   $CLI_NAME kill <number|all>
   $CLI_NAME attach [number|name]
   $CLI_NAME urgent <agent> "<message>" [--wait <seconds>]
@@ -44,6 +45,7 @@ Usage:
   $CLI_NAME profile status [agent|--all]
   $CLI_NAME profile diff <agent>
   $CLI_NAME profile deploy <agent> [--dry-run] [--force]
+  $CLI_NAME agent create <agent> [--engine claude|codex] [--session <name>] [--workdir <path>] [--always-on] [--dry-run] [--json]
   $CLI_NAME setup discord <agent> [--channel <id>]... [--openclaw-account <account>]
   $CLI_NAME setup agent <agent> [--skip-discord] [--test-start]
   $CLI_NAME discord status
@@ -73,6 +75,7 @@ Examples:
   $CLI_NAME list
   $CLI_NAME kill 1
   $CLI_NAME kill all
+  $CLI_NAME agent create reviewer --engine claude
   $CLI_NAME attach
   $CLI_NAME attach 1
   $CLI_NAME attach reviewer
@@ -347,6 +350,10 @@ if [[ $# -gt 0 ]]; then
     setup)
       shift
       exec "$BRIDGE_BASH_BIN" "$SCRIPT_DIR/bridge-setup.sh" "$@"
+      ;;
+    agent)
+      shift
+      exec "$BRIDGE_BASH_BIN" "$SCRIPT_DIR/bridge-agent.sh" "$@"
       ;;
     cron)
       shift

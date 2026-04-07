@@ -240,6 +240,7 @@ Then run the guided setup:
 ```bash
 ./agent-bridge setup discord tester
 ./agent-bridge setup agent tester
+./agent-bridge agent create reviewer --engine claude
 ./agent-bridge setup admin tester
 ```
 

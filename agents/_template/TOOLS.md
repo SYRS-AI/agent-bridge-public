@@ -1,0 +1,14 @@
+# Tools
+
+이 홈에서 일반적으로 사용하는 bridge-native 도구:
+
+- `~/.agent-bridge/agent-bridge status`
+- `~/.agent-bridge/agb inbox <agent>`
+- `~/.agent-bridge/agb show <task-id>`
+- `~/.agent-bridge/agb claim <task-id> --agent <agent>`
+- `~/.agent-bridge/agb done <task-id> --agent <agent> --note "..."`
+- `~/.agent-bridge/agent-bridge task create --to <agent> ...`
+- `~/.agent-bridge/agent-bridge urgent <agent> "..."`
+- `~/.agent-bridge/agent-bridge cron ...`
+
+채널 응답은 연결된 Claude/Codex 세션 안에서 처리한다. queue와 roster 상태는 `~/.agent-bridge` live runtime 기준으로 본다.
