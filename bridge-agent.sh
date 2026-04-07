@@ -12,6 +12,8 @@ usage() {
   cat <<EOF
 Usage:
   $(basename "$0") create <agent> [options]
+  $(basename "$0") list [--json]
+  $(basename "$0") show <agent> [--json]
   $(basename "$0") start <agent> [--attach] [--replace] [--continue|--no-continue] [--dry-run]
   $(basename "$0") stop <agent>
   $(basename "$0") restart <agent> [--attach] [--continue|--no-continue] [--dry-run]
@@ -41,6 +43,8 @@ Examples:
   $(basename "$0") create reviewer --engine claude
   $(basename "$0") create coder --engine codex --session codex-main --always-on
   $(basename "$0") create ops --engine claude --channels plugin:discord --discord-channel 123456789012345678 --json
+  $(basename "$0") list --json
+  $(basename "$0") show reviewer --json
   $(basename "$0") start reviewer --dry-run
   $(basename "$0") restart reviewer --attach
   $(basename "$0") stop reviewer
@@ -299,6 +303,280 @@ payload = {
 }
 print(json.dumps(payload, ensure_ascii=False, indent=2))
 PY
+}
+
+bridge_agent_queue_maps() {
+  local -n queued_ref="$1"
+  local -n claimed_ref="$2"
+  local -n blocked_ref="$3"
+  local summary_output=""
+  local agent_name=""
+  local queued=""
+  local claimed=""
+  local blocked=""
+
+  if ! summary_output="$(bridge_queue_cli summary --format tsv 2>/dev/null || true)"; then
+    return 0
+  fi
+
+  while IFS=$'\t' read -r agent_name queued claimed blocked _active _idle _last_seen _last_nudge _session _engine _workdir; do
+    [[ -n "$agent_name" ]] || continue
+    queued_ref["$agent_name"]="${queued:-0}"
+    claimed_ref["$agent_name"]="${claimed:-0}"
+    blocked_ref["$agent_name"]="${blocked:-0}"
+  done <<<"$summary_output"
+}
+
+bridge_agent_activity_state() {
+  local agent="$1"
+  local session=""
+
+  if ! bridge_agent_is_active "$agent"; then
+    printf '%s' "stopped"
+    return 0
+  fi
+
+  session="$(bridge_agent_session "$agent")"
+  if bridge_tmux_session_has_prompt "$session" "$(bridge_agent_engine "$agent")"; then
+    printf '%s' "idle"
+    return 0
+  fi
+
+  printf '%s' "working"
+}
+
+bridge_agent_actions_csv() {
+  local agent="$1"
+  local actions=""
+
+  actions="$(bridge_list_actions "$agent" | paste -sd ',' -)"
+  printf '%s' "${actions:--}"
+}
+
+bridge_agent_records_tsv() {
+  local selected_agent="${1:-}"
+  local agent=""
+  local active=""
+  local profile_home=""
+  local profile_source=""
+  local always_on=""
+  local admin=""
+  local -A queued_counts=()
+  local -A claimed_counts=()
+  local -A blocked_counts=()
+
+  bridge_agent_queue_maps queued_counts claimed_counts blocked_counts
+  echo -e "agent\tdescription\tengine\tsource\tsession\tsession_id\tworkdir\tprofile_home\tprofile_source\tactive\tactivity_state\tloop\tcontinue\talways_on\tidle_timeout\twake_status\tnotify_status\tchannel_status\tchannels\tnotify_kind\tnotify_target\tnotify_account\tdiscord_channel_id\tqueue_queued\tqueue_claimed\tqueue_blocked\tactions\tadmin"
+
+  for agent in "${BRIDGE_AGENT_IDS[@]}"; do
+    if [[ -n "$selected_agent" && "$agent" != "$selected_agent" ]]; then
+      continue
+    fi
+
+    active="no"
+    if bridge_agent_is_active "$agent"; then
+      active="yes"
+    fi
+
+    profile_home="$(bridge_agent_profile_home "$agent")"
+    if [[ -z "$profile_home" ]]; then
+      profile_home="$(bridge_resolve_profile_target "$agent" 2>/dev/null || true)"
+    fi
+
+    profile_source="no"
+    if bridge_profile_has_source "$agent"; then
+      profile_source="yes"
+    fi
+
+    always_on="no"
+    if bridge_agent_is_always_on "$agent"; then
+      always_on="yes"
+    fi
+
+    admin="no"
+    if [[ "$agent" == "$(bridge_admin_agent_id)" ]]; then
+      admin="yes"
+    fi
+
+    echo -e "${agent}\t$(bridge_agent_desc "$agent")\t$(bridge_agent_engine "$agent")\t$(bridge_agent_source "$agent")\t$(bridge_agent_session "$agent")\t$(bridge_agent_session_id "$agent")\t$(bridge_agent_workdir "$agent")\t${profile_home}\t${profile_source}\t${active}\t$(bridge_agent_activity_state "$agent")\t$(bridge_agent_loop "$agent")\t$(bridge_agent_continue "$agent")\t${always_on}\t$(bridge_agent_idle_timeout "$agent")\t$(bridge_agent_wake_status "$agent")\t$(bridge_agent_notify_status "$agent")\t$(bridge_agent_channel_status "$agent")\t$(bridge_agent_channels_csv "$agent")\t$(bridge_agent_notify_kind "$agent")\t$(bridge_agent_notify_target "$agent")\t$(bridge_agent_notify_account "$agent")\t$(bridge_agent_discord_channel_id "$agent")\t${queued_counts[$agent]-0}\t${claimed_counts[$agent]-0}\t${blocked_counts[$agent]-0}\t$(bridge_agent_actions_csv "$agent")\t${admin}"
+  done
+}
+
+emit_agent_records_json() {
+  local mode="$1"
+  local tsv="$2"
+
+  bridge_agent_manage_python "$mode" "$tsv" <<'PY'
+import csv
+import io
+import json
+import sys
+
+mode = sys.argv[1]
+rows = list(csv.DictReader(io.StringIO(sys.argv[2]), delimiter="\t"))
+bool_fields = {"active", "profile_source", "always_on", "admin"}
+int_fields = {"loop", "continue", "idle_timeout", "queue_queued", "queue_claimed", "queue_blocked"}
+
+def convert_value(key: str, value: str):
+    if key in bool_fields:
+        return value == "yes"
+    if key in int_fields:
+        try:
+            return int(value)
+        except Exception:
+            return 0
+    return value
+
+def convert_row(row: dict) -> dict:
+    converted = {key: convert_value(key, value) for key, value in row.items()}
+    return {
+        "agent": converted["agent"],
+        "description": converted["description"],
+        "engine": converted["engine"],
+        "source": converted["source"],
+        "session": converted["session"],
+        "session_id": converted["session_id"],
+        "workdir": converted["workdir"],
+        "profile": {
+            "home": converted["profile_home"],
+            "source_present": converted["profile_source"],
+        },
+        "active": converted["active"],
+        "activity_state": converted["activity_state"],
+        "loop": converted["loop"],
+        "continue": converted["continue"],
+        "always_on": converted["always_on"],
+        "idle_timeout": converted["idle_timeout"],
+        "wake_status": converted["wake_status"],
+        "notify": {
+            "status": converted["notify_status"],
+            "kind": converted["notify_kind"],
+            "target": converted["notify_target"],
+            "account": converted["notify_account"],
+        },
+        "channels": {
+            "status": converted["channel_status"],
+            "required": converted["channels"],
+            "discord_channel_id": converted["discord_channel_id"],
+        },
+        "queue": {
+            "queued": converted["queue_queued"],
+            "claimed": converted["queue_claimed"],
+            "blocked": converted["queue_blocked"],
+        },
+        "actions": [] if converted["actions"] in ("", "-") else converted["actions"].split(","),
+        "admin": converted["admin"],
+    }
+
+payload = [convert_row(row) for row in rows]
+if mode == "show":
+    if len(payload) != 1:
+        raise SystemExit("expected exactly one agent record")
+    print(json.dumps(payload[0], ensure_ascii=False, indent=2))
+else:
+    print(json.dumps(payload, ensure_ascii=False, indent=2))
+PY
+}
+
+run_list() {
+  local json_mode=0
+  local output=""
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --json)
+        json_mode=1
+        shift
+        ;;
+      *)
+        bridge_die "지원하지 않는 agent list 옵션입니다: $1"
+        ;;
+    esac
+  done
+
+  output="$(bridge_agent_records_tsv)"
+  if [[ $json_mode -eq 1 ]]; then
+    emit_agent_records_json list "$output"
+    return 0
+  fi
+
+  printf 'agent | eng | src | active | state | q/c/b | wake | notify | chan | session | workdir\n'
+  while IFS=$'\t' read -r agent _description engine source session _session_id workdir _profile_home _profile_source active activity_state _loop _continue always_on _idle_timeout wake_status notify_status channel_status _channels _notify_kind _notify_target _notify_account _discord_channel_id queue_queued queue_claimed queue_blocked _actions admin; do
+    [[ "$agent" == "agent" ]] && continue
+    printf '%s%s | %s | %s | %s | %s | %s/%s/%s | %s | %s | %s | %s | %s\n' \
+      "$agent" \
+      "$([[ "$admin" == "yes" ]] && printf ' [admin]' || true)" \
+      "$engine" \
+      "$source" \
+      "$active" \
+      "$activity_state" \
+      "$queue_queued" \
+      "$queue_claimed" \
+      "$queue_blocked" \
+      "$wake_status" \
+      "$notify_status" \
+      "$channel_status" \
+      "$session" \
+      "$workdir"
+  done <<<"$output"
+}
+
+run_show() {
+  local agent="${1:-}"
+  local json_mode=0
+  local output=""
+
+  shift || true
+  [[ -n "$agent" ]] || bridge_die "Usage: $(basename "$0") show <agent> [--json]"
+  bridge_require_agent "$agent"
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --json)
+        json_mode=1
+        shift
+        ;;
+      *)
+        bridge_die "지원하지 않는 agent show 옵션입니다: $1"
+        ;;
+    esac
+  done
+
+  output="$(bridge_agent_records_tsv "$agent")"
+  if [[ $json_mode -eq 1 ]]; then
+    emit_agent_records_json show "$output"
+    return 0
+  fi
+
+  while IFS=$'\t' read -r row_agent description engine source session session_id workdir profile_home profile_source active activity_state loop_mode continue_mode always_on idle_timeout wake_status notify_status channel_status channels notify_kind notify_target notify_account discord_channel_id queue_queued queue_claimed queue_blocked actions admin; do
+    [[ "$row_agent" == "agent" ]] && continue
+    printf 'agent: %s\n' "$row_agent"
+    printf 'description: %s\n' "$description"
+    printf 'engine: %s\n' "$engine"
+    printf 'source: %s\n' "$source"
+    printf 'admin: %s\n' "$admin"
+    printf 'session: %s\n' "$session"
+    printf 'session_id: %s\n' "${session_id:--}"
+    printf 'workdir: %s\n' "$workdir"
+    printf 'profile_home: %s\n' "${profile_home:--}"
+    printf 'profile_source: %s\n' "$profile_source"
+    printf 'active: %s\n' "$active"
+    printf 'activity_state: %s\n' "$activity_state"
+    printf 'loop: %s\n' "$loop_mode"
+    printf 'continue: %s\n' "$continue_mode"
+    printf 'always_on: %s\n' "$always_on"
+    printf 'idle_timeout: %s\n' "$idle_timeout"
+    printf 'wake_status: %s\n' "$wake_status"
+    printf 'notify_status: %s\n' "$notify_status"
+    printf 'notify_kind: %s\n' "${notify_kind:--}"
+    printf 'notify_target: %s\n' "${notify_target:--}"
+    printf 'notify_account: %s\n' "${notify_account:--}"
+    printf 'channel_status: %s\n' "$channel_status"
+    printf 'channels: %s\n' "${channels:--}"
+    printf 'discord_channel_id: %s\n' "${discord_channel_id:--}"
+    printf 'queue: queued=%s claimed=%s blocked=%s\n' "$queue_queued" "$queue_claimed" "$queue_blocked"
+    printf 'actions: %s\n' "$actions"
+  done <<<"$output"
 }
 
 run_create() {
@@ -597,6 +875,12 @@ shift || true
 case "$subcommand" in
   create)
     run_create "$@"
+    ;;
+  list)
+    run_list "$@"
+    ;;
+  show)
+    run_show "$@"
     ;;
   start)
     run_start "$@"

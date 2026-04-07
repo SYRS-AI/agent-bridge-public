@@ -612,6 +612,30 @@ assert_contains "$(cat "$BRIDGE_ROSTER_LOCAL_FILE")" "plugin:telegram"
 [[ -f "$BRIDGE_AGENT_HOME_ROOT/$CREATED_AGENT/SKILLS.md" ]] || die "agent create did not scaffold SKILLS.md"
 [[ -f "$BRIDGE_AGENT_HOME_ROOT/$CREATED_AGENT/MEMORY.md" ]] || die "agent create did not scaffold MEMORY.md"
 [[ -L "$BRIDGE_AGENT_HOME_ROOT/$CREATED_AGENT/.claude/skills/agent-bridge-runtime" ]] || die "agent create did not link runtime skill"
+CREATE_LIST_JSON="$("$REPO_ROOT/agent-bridge" agent list --json)"
+CREATE_SHOW_JSON="$("$REPO_ROOT/agent-bridge" agent show "$CREATED_AGENT" --json)"
+python3 - "$CREATE_LIST_JSON" "$CREATE_SHOW_JSON" "$CREATED_AGENT" "$SMOKE_AGENT" <<'PY'
+import json
+import sys
+
+list_payload = json.loads(sys.argv[1])
+show_payload = json.loads(sys.argv[2])
+created_agent = sys.argv[3]
+admin_agent = sys.argv[4]
+
+assert isinstance(list_payload, list) and list_payload, "agent list json should be a non-empty array"
+created = next((row for row in list_payload if row["agent"] == created_agent), None)
+assert created is not None, "created agent missing from list json"
+assert created["engine"] == "claude"
+assert created["channels"]["required"] == "plugin:telegram"
+assert created["queue"]["queued"] == 0
+assert any(row["agent"] == admin_agent and row["admin"] for row in list_payload), "admin agent missing admin=true"
+
+assert show_payload["agent"] == created_agent
+assert show_payload["profile"]["source_present"] is True
+assert show_payload["activity_state"] == "stopped"
+assert show_payload["notify"]["status"] == "miss"
+PY
 CREATED_START_DRY_RUN="$("$REPO_ROOT/bridge-start.sh" "$CREATED_AGENT" --dry-run)"
 assert_contains "$CREATED_START_DRY_RUN" "session=$CREATED_SESSION"
 assert_contains "$CREATED_START_DRY_RUN" "channels=plugin:telegram"
