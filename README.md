@@ -11,6 +11,103 @@ This repository is designed for trusted local projects. It assumes you are inten
 
 If you hand this repository URL to another Claude or Codex agent, the expected bootstrap is simple: read `README.md`, complete the steps in **Install**, then use **Quick Start** from the target working directory.
 
+## 빠른 설치 가이드 (한국어)
+
+새 컴퓨터에서 처음 시작할 때는 아래 순서만 따르면 됩니다.
+
+### 1. 필수 도구 설치
+
+macOS:
+
+```bash
+brew install bash tmux python shellcheck git
+```
+
+Linux (Ubuntu 예시):
+
+```bash
+sudo apt update
+sudo apt install -y bash tmux python3 python3-venv shellcheck git
+```
+
+그리고 Claude Code 또는 Codex CLI 중 최소 하나를 설치해 둡니다.
+
+### 2. 레포 클론
+
+```bash
+git clone https://github.com/SYRS-AI/agent-bridge.git ~/agent-bridge
+cd ~/agent-bridge
+```
+
+### 3. 로컬 roster 파일 만들기
+
+```bash
+cp agent-roster.local.example.sh agent-roster.local.sh
+```
+
+최소한 아래 값들은 사용자 환경에 맞게 넣어야 합니다.
+
+- 관리자 에이전트 id
+- 사용할 engine (`claude` 또는 `codex`)
+- tmux session 이름
+- workdir 경로
+- 필요하면 Discord/Telegram 채널 metadata
+
+### 4. 관리자 에이전트 한 명 부트스트랩
+
+가장 쉬운 시작 방법은 `init`입니다.
+
+예시: Telegram 기반 관리자 에이전트 생성
+
+```bash
+./agent-bridge init \
+  --admin manager \
+  --engine claude \
+  --session manager \
+  --channels plugin:telegram \
+  --allow-from <telegram-user-id> \
+  --default-chat <telegram-chat-id>
+```
+
+먼저 계획만 보고 싶으면:
+
+```bash
+./agent-bridge init --admin manager --engine claude --dry-run --json
+```
+
+### 5. 기본 점검
+
+```bash
+./scripts/smoke-test.sh
+./agent-bridge status
+bash bridge-daemon.sh ensure
+```
+
+macOS에서 백그라운드 daemon까지 붙이려면:
+
+```bash
+./scripts/install-daemon-launchagent.sh --apply --load
+```
+
+### 6. 이후 운영 방식
+
+초기 관리자 에이전트가 올라오면, 그다음부터는 사용자가 복잡한 CLI를 직접 외울 필요 없이 관리자 에이전트와 대화하면서 아래 작업을 처리하는 방향을 권장합니다.
+
+- 새 에이전트 생성
+- 에이전트 시작/중지/재시작/붙기
+- Discord/Telegram 연결
+- cron 등록 및 점검
+- task handoff / urgent / queue 확인
+
+즉, 클린 설치의 목표 상태는:
+
+1. 레포 clone
+2. `agent-bridge init`
+3. 관리자 에이전트 기동
+4. 이후에는 관리자 에이전트 중심 운영
+
+아래의 영어 Install/Quick Start 섹션은 같은 내용을 더 자세히 설명합니다.
+
 Companion docs for maintainers:
 
 - [`ARCHITECTURE.md`](./ARCHITECTURE.md)
