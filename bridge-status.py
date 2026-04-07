@@ -299,7 +299,7 @@ def render_dashboard(args: argparse.Namespace) -> str:
     )
     lines.append("")
     lines.append("Agents")
-    lines.append("  #  agent           eng     on  state    q   c   b   idle  stale wake chan  nudge  load        session        workdir")
+    lines.append("  #  agent           eng     src     loop on  state    q   c   b   idle  stale wake chan  nudge  load        session        workdir")
 
     active_index = 0
     for row in roster:
@@ -329,6 +329,8 @@ def render_dashboard(args: argparse.Namespace) -> str:
         wake_state = "zmb" if zombie else (row.get("wake") or "-")
         lines.append(
             f"{idx_label}  {agent:<15} {row['engine']:<7} "
+            f"{(row.get('source') or '-')[:7]:<7} "
+            f"{str(row.get('loop') or '-')[:4]:<4} "
             f"{'yes' if active else 'no ':<3} "
             f"{activity_state:<7} "
             f"{queued:>2}  {claimed:>2}  {blocked:>2}  "

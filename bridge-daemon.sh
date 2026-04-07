@@ -457,6 +457,7 @@ process_on_demand_agents() {
 
   while IFS=$'\t' read -r agent queued claimed blocked active idle _last_seen _last_nudge session _engine _workdir; do
     [[ -z "$agent" ]] && continue
+    bridge_agent_exists "$agent" || continue
     [[ "$(bridge_agent_source "$agent")" == "static" ]] || continue
     always_on=0
     if bridge_agent_is_always_on "$agent"; then
@@ -536,10 +537,15 @@ cmd_sync_cycle() {
   local cron_sync_timeout="${BRIDGE_CRON_SYNC_TIMEOUT:-30}"
   local timeout_bin=""
 
+  # The daemon is long-lived, so dynamic agents created after startup will not
+  # exist in memory unless we reload the roster each cycle.
+  bridge_load_roster
+
   # Discord relay runs FIRST — lowest-latency path for DM wake
   bridge_discord_relay_step || true
 
   "$BRIDGE_BASH_BIN" "$SCRIPT_DIR/bridge-sync.sh" >/dev/null 2>&1 || true
+  bridge_load_roster
   bridge_reconcile_idle_markers || true
   recover_claude_bootstrap_blockers || true
   process_channel_health || true

@@ -1005,15 +1005,17 @@ bridge_write_roster_status_snapshot() {
   local channels
   local session
   local activity_state
+  local loop_mode
 
   {
-    echo -e "agent\tengine\tsession\tworkdir\tsource\tactive\twake\tchannels\tactivity_state"
+    echo -e "agent\tengine\tsession\tworkdir\tsource\tloop\tactive\twake\tchannels\tactivity_state"
     for agent in "${BRIDGE_AGENT_IDS[@]}"; do
       active=0
       wake="-"
       channels="$(bridge_agent_channel_status "$agent")"
       activity_state="stopped"
       session="$(bridge_agent_session "$agent")"
+      loop_mode="$(bridge_agent_loop "$agent")"
       if bridge_agent_is_active "$agent"; then
         active=1
         wake="$(bridge_agent_wake_status "$agent")"
@@ -1024,7 +1026,7 @@ bridge_write_roster_status_snapshot() {
         fi
       fi
 
-      echo -e "${agent}\t$(bridge_agent_engine "$agent")\t${session}\t$(bridge_agent_workdir "$agent")\t$(bridge_agent_source "$agent")\t${active}\t${wake}\t${channels}\t${activity_state}"
+      echo -e "${agent}\t$(bridge_agent_engine "$agent")\t${session}\t$(bridge_agent_workdir "$agent")\t$(bridge_agent_source "$agent")\t${loop_mode}\t${active}\t${wake}\t${channels}\t${activity_state}"
     done
   } >"$file"
 }

@@ -9,7 +9,7 @@ source "$SCRIPT_DIR/bridge-lib.sh"
 bridge_load_roster
 
 usage() {
-  echo "Usage: bash $SCRIPT_DIR/bridge-start.sh <agent> [--replace] [--attach] [--continue|--no-continue] [--dry-run]"
+  echo "Usage: bash $SCRIPT_DIR/bridge-start.sh <agent> [--replace] [--attach] [--continue|--no-continue] [--dry-run] [--skip-project-skill]"
   echo "       bash $SCRIPT_DIR/bridge-start.sh --list"
   echo ""
   echo "등록된 에이전트:"
@@ -22,6 +22,7 @@ ATTACH=0
 DRY_RUN=0
 CONTINUE_EXPLICIT=0
 CONTINUE_MODE=1
+INSTALL_PROJECT_SKILL=1
 AGENT=""
 
 while [[ $# -gt 0 ]]; do
@@ -40,6 +41,10 @@ while [[ $# -gt 0 ]]; do
       ;;
     --dry-run)
       DRY_RUN=1
+      shift
+      ;;
+    --skip-project-skill)
+      INSTALL_PROJECT_SKILL=0
       shift
       ;;
     --continue)
@@ -134,7 +139,9 @@ if tmux has-session -t "$SESSION" 2>/dev/null; then
 fi
 
 if [[ "$ENGINE" == "claude" ]]; then
-  bridge_bootstrap_project_skill "$ENGINE" "$WORK_DIR" || true
+  if [[ $INSTALL_PROJECT_SKILL -eq 1 ]]; then
+    bridge_bootstrap_project_skill "$ENGINE" "$WORK_DIR" || true
+  fi
   bridge_bootstrap_claude_shared_skills "$WORK_DIR" || true
   if ! bridge_ensure_claude_project_trust "$WORK_DIR" >/dev/null 2>&1; then
     bridge_warn "Claude project trust seed failed: $WORK_DIR"
@@ -149,7 +156,9 @@ if [[ "$ENGINE" == "claude" ]]; then
     bridge_warn "Claude backlog webhook channel cleanup skipped: $WORK_DIR"
   fi
 elif [[ "$ENGINE" == "codex" ]]; then
-  bridge_bootstrap_project_skill "$ENGINE" "$WORK_DIR" || true
+  if [[ $INSTALL_PROJECT_SKILL -eq 1 ]]; then
+    bridge_bootstrap_project_skill "$ENGINE" "$WORK_DIR" || true
+  fi
   if ! bridge_ensure_codex_hooks >/dev/null; then
     bridge_die "Codex hook 설정에 실패했습니다: $WORK_DIR"
   fi

@@ -247,13 +247,7 @@ prompt_static_candidate() {
 
 start_static_agent() {
   local agent="$1"
-  local static_workdir
   local start_args=()
-
-  static_workdir="$(bridge_agent_workdir "$agent")"
-  if [[ $INSTALL_PROJECT_SKILL -eq 1 ]]; then
-    bridge_bootstrap_project_skill "$(bridge_agent_engine "$agent")" "$static_workdir" || true
-  fi
 
   "$BRIDGE_BASH_BIN" "$SCRIPT_DIR/bridge-daemon.sh" ensure >/dev/null
 
@@ -269,6 +263,9 @@ start_static_agent() {
   fi
   if [[ $ATTACH_MODE -eq 1 ]]; then
     start_args+=(--attach)
+  fi
+  if [[ $INSTALL_PROJECT_SKILL -eq 0 ]]; then
+    start_args+=(--skip-project-skill)
   fi
 
   exec "$BRIDGE_BASH_BIN" "$SCRIPT_DIR/bridge-start.sh" "$agent" "${start_args[@]}"
@@ -580,10 +577,6 @@ ACTIVE_FILE="$(bridge_dynamic_agent_file_for "$NAME")"
 HISTORY_FILE="$(bridge_history_file_for "$ENGINE" "$NAME" "$WORKDIR")"
 SESSION_ID=""
 
-if [[ $INSTALL_PROJECT_SKILL -eq 1 ]]; then
-  bridge_bootstrap_project_skill "$ENGINE" "$WORKDIR" || true
-fi
-
 if [[ -f "$ACTIVE_FILE" ]]; then
   bridge_load_roster
   if bridge_agent_is_active "$NAME" && [[ $REPLACE_MODE -eq 0 ]]; then
@@ -646,6 +639,9 @@ if [[ $REPLACE_MODE -eq 1 ]]; then
 fi
 if [[ $ATTACH_MODE -eq 1 ]]; then
   START_ARGS+=(--attach)
+fi
+if [[ $INSTALL_PROJECT_SKILL -eq 0 ]]; then
+  START_ARGS+=(--skip-project-skill)
 fi
 
 exec "$BRIDGE_BASH_BIN" "$SCRIPT_DIR/bridge-start.sh" "$NAME" "${START_ARGS[@]}"

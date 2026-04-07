@@ -100,6 +100,8 @@ STATIC_AGENT="static-role-$$"
 STATIC_SESSION="static-session-$$"
 CODEX_CLI_AGENT="codex-cli-agent-$$"
 CODEX_CLI_SESSION="codex-cli-session-$$"
+LATE_DYNAMIC_AGENT="late-dynamic-agent-$$"
+LATE_DYNAMIC_SESSION="late-dynamic-session-$$"
 WORKTREE_AGENT="worker-reuse-$$"
 CREATED_AGENT="created-agent-$$"
 CREATED_SESSION="created-session-$$"
@@ -113,6 +115,7 @@ WORKDIR="$TMP_ROOT/workdir"
 REQUESTER_WORKDIR="$TMP_ROOT/requester-workdir"
 AUTO_START_WORKDIR="$TMP_ROOT/auto-start-workdir"
 BROKEN_CHANNEL_WORKDIR="$TMP_ROOT/broken-channel-workdir"
+LATE_DYNAMIC_WORKDIR="$TMP_ROOT/late-dynamic-workdir"
 PROJECT_ROOT="$TMP_ROOT/git-project"
 HOOK_WORKDIR="$TMP_ROOT/claude-hook-workdir"
 MCP_WORKDIR="$TMP_ROOT/claude-mcp-workdir"
@@ -147,6 +150,7 @@ cleanup() {
   tmux kill-session -t "$STATIC_SESSION" >/dev/null 2>&1 || true
   tmux kill-session -t "$CLAUDE_STATIC_SESSION" >/dev/null 2>&1 || true
   tmux kill-session -t "$WORKTREE_AGENT" >/dev/null 2>&1 || true
+  tmux kill-session -t "$LATE_DYNAMIC_SESSION" >/dev/null 2>&1 || true
   if [[ -n "$FAKE_DISCORD_PID" ]]; then
     kill "$FAKE_DISCORD_PID" >/dev/null 2>&1 || true
     wait "$FAKE_DISCORD_PID" >/dev/null 2>&1 || true
@@ -165,7 +169,7 @@ cleanup() {
 }
 trap cleanup EXIT
 
-mkdir -p "$BRIDGE_HOME" "$BRIDGE_STATE_DIR" "$BRIDGE_LOG_DIR" "$BRIDGE_SHARED_DIR" "$WORKDIR" "$REQUESTER_WORKDIR" "$AUTO_START_WORKDIR" "$BROKEN_CHANNEL_WORKDIR"
+mkdir -p "$BRIDGE_HOME" "$BRIDGE_STATE_DIR" "$BRIDGE_LOG_DIR" "$BRIDGE_SHARED_DIR" "$WORKDIR" "$REQUESTER_WORKDIR" "$AUTO_START_WORKDIR" "$BROKEN_CHANNEL_WORKDIR" "$LATE_DYNAMIC_WORKDIR"
 mkdir -p "$HOOK_WORKDIR/.claude"
 mkdir -p "$MCP_WORKDIR"
 mkdir -p "$CLAUDE_STATIC_WORKDIR"
@@ -188,6 +192,7 @@ cat <<'JSON'
 JSON
 EOF
 chmod +x "$FAKE_BIN/codex"
+cp "$FAKE_BIN/codex" "$TMP_ROOT/codex-cron-fake"
 
 cat >"$BRIDGE_ROSTER_LOCAL_FILE" <<EOF
 #!/usr/bin/env bash
@@ -740,6 +745,54 @@ CODEX_READY_OUTPUT="$("$BASH4_BIN" -lc '
 assert_contains "$CODEX_READY_OUTPUT" "$CODEX_CLI_AGENT"
 python3 "$REPO_ROOT/bridge-queue.py" done "$CODEX_READY_TASK_ID" --agent "$CODEX_CLI_AGENT" --note "codex ready smoke cleanup" >/dev/null
 tmux kill-session -t "$CODEX_CLI_SESSION" >/dev/null 2>&1 || true
+
+log "reloading dynamic agents inside a long-lived daemon cycle"
+cat >"$FAKE_BIN/codex" <<'EOF'
+#!/usr/bin/env bash
+printf '› ready\n'
+sleep 30
+EOF
+chmod +x "$FAKE_BIN/codex"
+LATE_DYNAMIC_OUTPUT="$("$BASH4_BIN" -lc '
+  set -euo pipefail
+  tmp_daemon="'"$TMP_ROOT"'/daemon-source.sh"
+  {
+    printf "%s\n" "set -euo pipefail"
+    printf "SCRIPT_DIR=%q\n" "'"$REPO_ROOT"'"
+    printf "%s\n" "source \"\$SCRIPT_DIR/bridge-lib.sh\""
+    printf "%s\n" "bridge_load_roster"
+    printf "%s\n" "bridge_dashboard_post_if_changed() { :; }"
+    sed -n '"'"'/^nudge_agent_session()/,/^CMD="${1:-}"/p'"'"' "'"$REPO_ROOT"'/bridge-daemon.sh" | sed '"'"'$d'"'"'
+  } >"$tmp_daemon"
+  source "$tmp_daemon"
+  "'"$REPO_ROOT"'/agent-bridge" --codex --name "'"$LATE_DYNAMIC_AGENT"'" --workdir "'"$LATE_DYNAMIC_WORKDIR"'" --no-attach >/dev/null
+  python3 "'"$REPO_ROOT"'/bridge-queue.py" create --to "'"$LATE_DYNAMIC_AGENT"'" --title "late dynamic pickup" --body "pickup" --from "'"$REQUESTER_AGENT"'" >/dev/null
+  sleep 1
+  cmd_sync_cycle >/dev/null
+  python3 "'"$REPO_ROOT"'/bridge-queue.py" summary --agent "'"$LATE_DYNAMIC_AGENT"'" --format tsv
+  python3 - <<'"'"'PY'"'"'
+import os
+import sqlite3
+
+db = os.environ["BRIDGE_TASK_DB"]
+agent = "'"$LATE_DYNAMIC_AGENT"'"
+with sqlite3.connect(db) as conn:
+    row = conn.execute(
+        "SELECT COALESCE(active, 0), COALESCE(last_nudge_ts, 0) FROM agent_state WHERE agent = ?",
+        (agent,),
+    ).fetchone()
+if row is None:
+    print("NUDGE_TS=0")
+else:
+    print(f"NUDGE_TS={int(row[1] or 0) if int(row[0] or 0) == 1 else 0}")
+PY
+')"
+LATE_DYNAMIC_SUMMARY="$(printf '%s\n' "$LATE_DYNAMIC_OUTPUT" | sed -n '1p')"
+LATE_DYNAMIC_NUDGE_TS="$(printf '%s\n' "$LATE_DYNAMIC_OUTPUT" | sed -n 's/^NUDGE_TS=//p' | tail -n1)"
+[[ "$LATE_DYNAMIC_NUDGE_TS" =~ ^[1-9][0-9]*$ ]] || die "late dynamic agent never received a daemon nudge"
+printf '%s\n' "$LATE_DYNAMIC_SUMMARY" | awk -F'\t' 'NR==1 { exit !($5 == 1 && $9 != "") }' || die "late dynamic agent was not marked active in queue summary"
+cp "$TMP_ROOT/codex-cron-fake" "$FAKE_BIN/codex"
+chmod +x "$FAKE_BIN/codex"
 
 log "requeueing stale claimed tasks from inactive agents"
 INACTIVE_CLAIM_TASK_OUTPUT="$(python3 "$REPO_ROOT/bridge-queue.py" create --to inactive-agent --title "inactive claim smoke" --body "orphan" --from "$REQUESTER_AGENT")"
