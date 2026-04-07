@@ -60,7 +60,20 @@ def load_jobs(path: Path) -> list[dict[str, Any]]:
     jobs = raw.get("jobs") if isinstance(raw, dict) else raw
     if not isinstance(jobs, list):
         raise ValueError("jobs.json must contain a top-level list or {jobs:[...]}")
+    for job in jobs:
+        if isinstance(job, dict):
+            normalize_job_agent_fields(job)
     return jobs
+
+
+def normalize_job_agent_fields(job: dict[str, Any]) -> dict[str, Any]:
+    agent_id = str(job.get("agentId") or "").strip()
+    agent = str(job.get("agent") or "").strip()
+    if agent_id and not agent:
+        job["agent"] = agent_id
+    elif agent and not agent_id:
+        job["agentId"] = agent
+    return job
 
 
 def parse_epoch_ms(value: Any) -> datetime | None:

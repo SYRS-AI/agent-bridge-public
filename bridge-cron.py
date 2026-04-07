@@ -28,6 +28,9 @@ def load_jobs_payload(path):
     jobs = raw.get("jobs") if isinstance(raw, dict) else raw
     if not isinstance(jobs, list):
         raise ValueError("jobs.json must contain a top-level list or {jobs:[...]}")
+    for job in jobs:
+        if isinstance(job, dict):
+            normalize_job_agent_fields(job)
     return raw, jobs
 
 
@@ -45,6 +48,18 @@ def load_native_jobs_payload(path):
             "jobs": [],
         }, []
     return load_jobs_payload(jobs_path)
+
+
+def normalize_job_agent_fields(job):
+    agent_id = str(job.get("agentId") or "").strip()
+    agent = str(job.get("agent") or "").strip()
+
+    if agent_id and not agent:
+        job["agent"] = agent_id
+    elif agent and not agent_id:
+        job["agentId"] = agent
+
+    return job
 
 
 def now_epoch_ms():
@@ -613,6 +628,12 @@ def backup_path_for(jobs_path):
 
 
 def atomic_write_jobs(jobs_path, raw_payload):
+    if isinstance(raw_payload, dict):
+        jobs = raw_payload.get("jobs")
+        if isinstance(jobs, list):
+            for job in jobs:
+                if isinstance(job, dict):
+                    normalize_job_agent_fields(job)
     suffix = f".{jobs_path.name}.tmp"
     with tempfile.NamedTemporaryFile("w", encoding="utf-8", dir=jobs_path.parent, delete=False, suffix=suffix) as fh:
         json.dump(raw_payload, fh, ensure_ascii=False, indent=2)

@@ -904,6 +904,14 @@ CRON_IMPORT_OUTPUT="$("$REPO_ROOT/agent-bridge" cron import --source-jobs-file "
 assert_contains "$CRON_IMPORT_OUTPUT" "\"status\": \"imported\""
 CRON_IMPORTED_SHOW_OUTPUT="$("$REPO_ROOT/agent-bridge" cron show morning-briefing-smoke)"
 assert_contains "$CRON_IMPORTED_SHOW_OUTPUT" "morning-briefing-smoke"
+python3 - <<PY
+import json, os
+path = os.path.join(os.environ["BRIDGE_HOME"], "cron", "jobs.json")
+payload = json.load(open(path, "r", encoding="utf-8"))
+job = next(item for item in payload["jobs"] if item["name"] == "morning-briefing-smoke")
+assert job["agentId"] == "${SMOKE_AGENT}"
+assert job["agent"] == job["agentId"]
+PY
 CRON_IMPORTED_SYNC_OUTPUT="$("$REPO_ROOT/agent-bridge" cron sync --dry-run --since '2026-04-05T08:59:00+00:00' --now '2026-04-05T09:00:00+00:00')"
 assert_contains "$CRON_IMPORTED_SYNC_OUTPUT" "native: status=dry_run"
 assert_contains "$CRON_IMPORTED_SYNC_OUTPUT" "due=1"
