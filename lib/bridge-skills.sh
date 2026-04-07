@@ -87,6 +87,129 @@ bridge_is_managed_markdown() {
   grep -Fq "$BRIDGE_MANAGED_MARKER" "$file"
 }
 
+bridge_project_claude_file() {
+  local workdir="$1"
+  printf '%s/CLAUDE.md' "$workdir"
+}
+
+bridge_project_claude_marker_start() {
+  printf '%s' "<!-- BEGIN AGENT BRIDGE PROJECT GUIDANCE -->"
+}
+
+bridge_project_claude_marker_end() {
+  printf '%s' "<!-- END AGENT BRIDGE PROJECT GUIDANCE -->"
+}
+
+bridge_render_project_claude_guidance() {
+  local bridge_home="$1"
+
+  cat <<EOF
+$(bridge_project_claude_marker_start)
+<!-- ${BRIDGE_MANAGED_MARKER} -->
+## Agent Bridge
+- When a task involves bridge coordination, use the \`agent-bridge\` skill before improvising commands.
+- Do not guess bridge commands. Use \`${bridge_home}/agb --help\`, \`${bridge_home}/agent-bridge --help\`, or the local bridge skill reference.
+- Your sender id is your current bridge agent id. Prefer \`\$BRIDGE_AGENT_ID\`; if it is missing, verify the agent from \`${bridge_home}/state/active-roster.md\`.
+- When you create or hand off work, set \`--from "\$BRIDGE_AGENT_ID"\` when running outside a bridge-managed wrapper.
+- Queue state is source of truth. Use \`${bridge_home}/agb inbox|show|claim|done\` instead of direct sqlite access.
+- Do not invent subcommands such as \`agb send\`. If you are unsure, check the bridge skill or CLI help first.
+$(bridge_project_claude_marker_end)
+EOF
+}
+
+bridge_project_claude_guidance_present() {
+  local workdir="$1"
+  local claude_file=""
+
+  if [[ "$(bridge_path_is_within_root "$workdir" "$BRIDGE_AGENT_HOME_ROOT")" == "1" ]]; then
+    return 0
+  fi
+  claude_file="$(bridge_project_claude_file "$workdir")"
+  [[ -f "$claude_file" ]] || return 1
+  grep -Fq "$(bridge_project_claude_marker_start)" "$claude_file"
+}
+
+bridge_project_claude_guidance_needed() {
+  local workdir="$1"
+  local claude_file=""
+
+  if [[ "$(bridge_path_is_within_root "$workdir" "$BRIDGE_AGENT_HOME_ROOT")" == "1" ]]; then
+    return 1
+  fi
+  claude_file="$(bridge_project_claude_file "$workdir")"
+  [[ -f "$claude_file" ]] || return 1
+  ! bridge_project_claude_guidance_present "$workdir"
+}
+
+bridge_ensure_project_claude_guidance() {
+  local workdir="$1"
+  local claude_file=""
+
+  if [[ "$(bridge_path_is_within_root "$workdir" "$BRIDGE_AGENT_HOME_ROOT")" == "1" ]]; then
+    return 0
+  fi
+  claude_file="$(bridge_project_claude_file "$workdir")"
+  [[ -f "$claude_file" ]] || return 0
+
+  bridge_require_python
+  python3 - "$claude_file" "$BRIDGE_HOME" "$(bridge_project_claude_marker_start)" "$(bridge_project_claude_marker_end)" "$BRIDGE_MANAGED_MARKER" <<'PY'
+from pathlib import Path
+import re
+import sys
+
+claude_file = Path(sys.argv[1])
+bridge_home = sys.argv[2]
+marker_start = sys.argv[3]
+marker_end = sys.argv[4]
+managed_marker = sys.argv[5]
+
+original = claude_file.read_text(encoding="utf-8")
+block = f"""{marker_start}
+<!-- {managed_marker} -->
+## Agent Bridge
+- When a task involves bridge coordination, use the `agent-bridge` skill before improvising commands.
+- Do not guess bridge commands. Use `{bridge_home}/agb --help`, `{bridge_home}/agent-bridge --help`, or the local bridge skill reference.
+- Your sender id is your current bridge agent id. Prefer `$BRIDGE_AGENT_ID`; if it is missing, verify the agent from `{bridge_home}/state/active-roster.md`.
+- When you create or hand off work, set `--from "$BRIDGE_AGENT_ID"` when running outside a bridge-managed wrapper.
+- Queue state is source of truth. Use `{bridge_home}/agb inbox|show|claim|done` instead of direct sqlite access.
+- Do not invent subcommands such as `agb send`. If you are unsure, check the bridge skill or CLI help first.
+{marker_end}"""
+
+pattern = re.compile(rf"{re.escape(marker_start)}.*?{re.escape(marker_end)}\n*", re.S)
+normalized = re.sub(pattern, "", original).rstrip()
+
+if normalized.startswith("# "):
+    first, rest = normalized.split("\n", 1) if "\n" in normalized else (normalized, "")
+    updated = f"{first}\n\n{block}\n\n{rest.lstrip()}"
+else:
+    updated = f"{block}\n\n{normalized}\n" if normalized else f"{block}\n"
+
+if updated != original:
+    claude_file.write_text(updated, encoding="utf-8")
+    print("updated")
+else:
+    print("unchanged")
+PY
+}
+
+bridge_project_skill_file_for() {
+  local engine="$1"
+  local workdir="$2"
+  local skill_dir=""
+
+  skill_dir="$(bridge_project_skill_dir_for "$engine" "$workdir")" || return 1
+  printf '%s/SKILL.md' "$skill_dir"
+}
+
+bridge_project_skill_bootstrap_needed() {
+  local engine="$1"
+  local workdir="$2"
+  local skill_file=""
+
+  skill_file="$(bridge_project_skill_file_for "$engine" "$workdir")" || return 1
+  [[ -f "$skill_file" ]] && bridge_is_managed_markdown "$skill_file"
+}
+
 bridge_render_project_bridge_reference() {
   local bridge_home="$1"
 

@@ -90,33 +90,8 @@ DEFAULT_WORK_DIR="$(bridge_agent_default_home "$AGENT")"
 ENGINE="$(bridge_agent_engine "$AGENT")"
 RUNNER="$SCRIPT_DIR/bridge-run.sh"
 ENV_PREFIX="$(bridge_export_env_prefix)"
-SESSION_CMD="$(bridge_join_quoted "$BRIDGE_BASH_BIN" "$RUNNER" "$AGENT")"
 EFFECTIVE_CONTINUE_MODE="$(bridge_agent_continue "$AGENT")"
-if [[ $CONTINUE_EXPLICIT -eq 1 ]]; then
-  EFFECTIVE_CONTINUE_MODE="$CONTINUE_MODE"
-  if [[ "$CONTINUE_MODE" == "1" ]]; then
-    SESSION_CMD+=" --continue"
-  else
-    SESSION_CMD+=" --no-continue"
-  fi
-fi
-if [[ "$(bridge_agent_loop "$AGENT")" != "1" ]]; then
-  SESSION_CMD+=" --once"
-fi
-if [[ -n "$ENV_PREFIX" ]]; then
-  SESSION_CMD="${ENV_PREFIX} ${SESSION_CMD}"
-fi
-
-if [[ $DRY_RUN -eq 1 ]]; then
-  echo "agent=$AGENT"
-  echo "session=$SESSION"
-  echo "workdir=$WORK_DIR"
-  echo "continue=$EFFECTIVE_CONTINUE_MODE"
-  echo "channels=$(bridge_agent_channels_csv "$AGENT")"
-  echo "channel_status=$(bridge_agent_channel_status "$AGENT")"
-  echo "tmux_command=$SESSION_CMD"
-  exit 0
-fi
+FORCE_FRESH_SESSION=0
 
 if [[ ! -d "$WORK_DIR" ]]; then
   if [[ "$WORK_DIR" == "$DEFAULT_WORK_DIR" ]]; then
@@ -140,8 +115,25 @@ if tmux has-session -t "$SESSION" 2>/dev/null; then
 fi
 
 if [[ "$ENGINE" == "claude" ]]; then
+  if bridge_project_claude_guidance_needed "$WORK_DIR"; then
+    FORCE_FRESH_SESSION=1
+  fi
   if [[ $INSTALL_PROJECT_SKILL -eq 1 ]]; then
-    bridge_bootstrap_project_skill "$ENGINE" "$WORK_DIR" || true
+    bridge_ensure_project_claude_guidance "$WORK_DIR" >/dev/null 2>&1 || true
+  fi
+  if ! bridge_project_skill_bootstrap_needed "$ENGINE" "$WORK_DIR"; then
+    FORCE_FRESH_SESSION=1
+  fi
+  if ! bridge_claude_stop_hook_status "$WORK_DIR" >/dev/null 2>&1; then
+    FORCE_FRESH_SESSION=1
+  fi
+  if ! bridge_claude_prompt_hook_status "$WORK_DIR" >/dev/null 2>&1; then
+    FORCE_FRESH_SESSION=1
+  fi
+  if [[ $INSTALL_PROJECT_SKILL -eq 1 ]]; then
+    if ! bridge_bootstrap_project_skill "$ENGINE" "$WORK_DIR"; then
+      bridge_warn "Claude bridge skill bootstrap skipped or conflicted: $WORK_DIR"
+    fi
   fi
   bridge_bootstrap_claude_shared_skills "$WORK_DIR" || true
   if ! bridge_ensure_claude_project_trust "$WORK_DIR" >/dev/null 2>&1; then
@@ -157,12 +149,50 @@ if [[ "$ENGINE" == "claude" ]]; then
     bridge_warn "Claude backlog webhook channel cleanup skipped: $WORK_DIR"
   fi
 elif [[ "$ENGINE" == "codex" ]]; then
+  if ! bridge_project_skill_bootstrap_needed "$ENGINE" "$WORK_DIR"; then
+    FORCE_FRESH_SESSION=1
+  fi
   if [[ $INSTALL_PROJECT_SKILL -eq 1 ]]; then
-    bridge_bootstrap_project_skill "$ENGINE" "$WORK_DIR" || true
+    if ! bridge_bootstrap_project_skill "$ENGINE" "$WORK_DIR"; then
+      bridge_warn "Codex bridge skill bootstrap skipped or conflicted: $WORK_DIR"
+    fi
   fi
   if ! bridge_ensure_codex_hooks >/dev/null; then
     bridge_die "Codex hook 설정에 실패했습니다: $WORK_DIR"
   fi
+fi
+
+if [[ $FORCE_FRESH_SESSION -eq 1 ]]; then
+  if [[ $CONTINUE_EXPLICIT -eq 1 && "$CONTINUE_MODE" == "1" ]]; then
+    bridge_warn "Bridge project setup changed or was missing. Forcing a fresh session so CLAUDE.md, skills, and hooks are loaded."
+  fi
+  EFFECTIVE_CONTINUE_MODE=0
+elif [[ $CONTINUE_EXPLICIT -eq 1 ]]; then
+  EFFECTIVE_CONTINUE_MODE="$CONTINUE_MODE"
+fi
+
+SESSION_CMD="$(bridge_join_quoted "$BRIDGE_BASH_BIN" "$RUNNER" "$AGENT")"
+if [[ "$EFFECTIVE_CONTINUE_MODE" == "1" ]]; then
+  SESSION_CMD+=" --continue"
+else
+  SESSION_CMD+=" --no-continue"
+fi
+if [[ "$(bridge_agent_loop "$AGENT")" != "1" ]]; then
+  SESSION_CMD+=" --once"
+fi
+if [[ -n "$ENV_PREFIX" ]]; then
+  SESSION_CMD="${ENV_PREFIX} ${SESSION_CMD}"
+fi
+
+if [[ $DRY_RUN -eq 1 ]]; then
+  echo "agent=$AGENT"
+  echo "session=$SESSION"
+  echo "workdir=$WORK_DIR"
+  echo "continue=$EFFECTIVE_CONTINUE_MODE"
+  echo "channels=$(bridge_agent_channels_csv "$AGENT")"
+  echo "channel_status=$(bridge_agent_channel_status "$AGENT")"
+  echo "tmux_command=$SESSION_CMD"
+  exit 0
 fi
 
 bridge_agent_clear_idle_marker "$AGENT"

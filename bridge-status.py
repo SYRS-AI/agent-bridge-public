@@ -65,13 +65,16 @@ def classify_stale(active: bool, activity_ts: int | None, warn_seconds: int, cri
     return "ok"
 
 
-def short_path(path: str, max_parts: int = 2) -> str:
+def short_path(path: str) -> str:
     if not path:
         return "-"
-    parts = [part for part in Path(path).parts if part not in ("/", "")]
-    if len(parts) <= max_parts:
-        return "/".join(parts) or path
-    return ".../" + "/".join(parts[-max_parts:])
+    expanded = str(Path(path).expanduser())
+    home = str(Path.home())
+    if expanded == home:
+        return "~"
+    if expanded.startswith(home + os.sep):
+        return "~" + expanded[len(home):]
+    return expanded
 
 
 def read_roster(path: str) -> list[dict[str, str]]:

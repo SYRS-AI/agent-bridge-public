@@ -479,6 +479,7 @@ assert_contains "$LIST_OUTPUT" "$SMOKE_AGENT"
 STATUS_OUTPUT="$("$REPO_ROOT/agent-bridge" status --all-agents)"
 assert_contains "$STATUS_OUTPUT" "$SMOKE_AGENT"
 assert_contains "$STATUS_OUTPUT" "state"
+assert_contains "$STATUS_OUTPUT" "$WORKDIR"
 printf '%s\n' "$STATUS_OUTPUT" | grep -E "$SMOKE_AGENT[[:space:]].*(idle|working)" >/dev/null || die "status should show activity state for $SMOKE_AGENT"
 
 RELAY_ROWS="$("$BASH4_BIN" -c '
@@ -542,6 +543,17 @@ ACTIVE_WORKTREE_DIR="$("$BASH4_BIN" -c '
 log "creating queue task"
 CREATE_OUTPUT="$(bash "$REPO_ROOT/bridge-task.sh" create --to "$SMOKE_AGENT" --title "smoke queue" --body-file "$BRIDGE_SHARED_DIR/note.md" --from "$REQUESTER_AGENT")"
 assert_contains "$CREATE_OUTPUT" "created task #"
+QUEUE_TASK_ID="$(printf '%s\n' "$CREATE_OUTPUT" | sed -n 's/^created task #\([0-9][0-9]*\).*/\1/p' | head -n1)"
+[[ "$QUEUE_TASK_ID" =~ ^[0-9]+$ ]] || die "could not parse queue task id"
+
+log "preferring BRIDGE_AGENT_ID when inferring task sender"
+INFERRED_CREATE_OUTPUT="$(BRIDGE_AGENT_ID="$REQUESTER_AGENT" bash "$REPO_ROOT/bridge-task.sh" create --to "$SMOKE_AGENT" --title "env inferred queue" --body "env inferred body" 2>&1)"
+assert_contains "$INFERRED_CREATE_OUTPUT" "[hint] --from omitted; inferred sender: $REQUESTER_AGENT"
+assert_contains "$INFERRED_CREATE_OUTPUT" "created task #"
+INFERRED_TASK_ID="$(printf '%s\n' "$INFERRED_CREATE_OUTPUT" | sed -n 's/^created task #\([0-9][0-9]*\).*/\1/p' | head -n1)"
+[[ "$INFERRED_TASK_ID" =~ ^[0-9]+$ ]] || die "could not parse inferred task id"
+INFERRED_TASK_SHELL="$(python3 "$REPO_ROOT/bridge-queue.py" show "$INFERRED_TASK_ID" --format shell)"
+assert_contains "$INFERRED_TASK_SHELL" "TASK_CREATED_BY=$REQUESTER_AGENT"
 
 INBOX_OUTPUT="$(bash "$REPO_ROOT/bridge-task.sh" inbox "$SMOKE_AGENT")"
 assert_contains "$INBOX_OUTPUT" "smoke queue"
@@ -569,7 +581,7 @@ with sqlite3.connect(db) as conn:
     )
     conn.commit()
 PY
-bash "$REPO_ROOT/bridge-task.sh" claim 1 --agent "$SMOKE_AGENT" >/dev/null
+bash "$REPO_ROOT/bridge-task.sh" claim "$QUEUE_TASK_ID" --agent "$SMOKE_AGENT" >/dev/null
 CLAIM_SUMMARY_TSV="$(python3 "$REPO_ROOT/bridge-queue.py" summary --agent "$SMOKE_AGENT" --format tsv)"
 CLAIM_IDLE_SECONDS="$(printf '%s\n' "$CLAIM_SUMMARY_TSV" | awk -F'\t' 'NR==1 {print $6}')"
 [[ "$CLAIM_IDLE_SECONDS" =~ ^[0-9]+$ ]] || die "claim idle seconds was not numeric: $CLAIM_IDLE_SECONDS"
@@ -595,7 +607,7 @@ with sqlite3.connect(db) as conn:
     conn.commit()
 PY
 DONE_BEFORE_TS="$(date +%s)"
-python3 "$REPO_ROOT/bridge-queue.py" done 1 --agent "$SMOKE_AGENT" --note "smoke ok" >/dev/null
+python3 "$REPO_ROOT/bridge-queue.py" done "$QUEUE_TASK_ID" --agent "$SMOKE_AGENT" --note "smoke ok" >/dev/null
 DONE_ACTIVITY_TS="$(SMOKE_AGENT="$SMOKE_AGENT" BRIDGE_TASK_DB="$BRIDGE_TASK_DB" python3 - <<'PY'
 import os
 import sqlite3
@@ -613,19 +625,37 @@ PY
 [[ "$DONE_ACTIVITY_TS" =~ ^[0-9]+$ ]] || die "done activity ts was not numeric: $DONE_ACTIVITY_TS"
 (( DONE_ACTIVITY_TS >= DONE_BEFORE_TS )) || die "done should refresh agent activity; activity_ts=$DONE_ACTIVITY_TS before=$DONE_BEFORE_TS"
 
-SHOW_OUTPUT="$(bash "$REPO_ROOT/bridge-task.sh" show 1)"
+SHOW_OUTPUT="$(bash "$REPO_ROOT/bridge-task.sh" show "$QUEUE_TASK_ID")"
 assert_contains "$SHOW_OUTPUT" "status: done"
 assert_contains "$SHOW_OUTPUT" "note: smoke ok"
 
 NOTICE_CREATE_OUTPUT="$(bash "$REPO_ROOT/bridge-task.sh" create --to "$SMOKE_AGENT" --title "smoke queue notice" --body-file "$BRIDGE_SHARED_DIR/note.md" --from "$REQUESTER_AGENT")"
 assert_contains "$NOTICE_CREATE_OUTPUT" "created task #"
-bash "$REPO_ROOT/bridge-task.sh" "done" 2 --agent "$SMOKE_AGENT" --note "notice ok" >/dev/null
+NOTICE_TASK_ID="$(printf '%s\n' "$NOTICE_CREATE_OUTPUT" | sed -n 's/^created task #\([0-9][0-9]*\).*/\1/p' | head -n1)"
+[[ "$NOTICE_TASK_ID" =~ ^[0-9]+$ ]] || die "could not parse notice task id"
+bash "$REPO_ROOT/bridge-task.sh" "done" "$NOTICE_TASK_ID" --agent "$SMOKE_AGENT" --note "notice ok" >/dev/null
 
 REQUESTER_INBOX_OUTPUT="$(bash "$REPO_ROOT/bridge-task.sh" inbox "$REQUESTER_AGENT")"
 assert_contains "$REQUESTER_INBOX_OUTPUT" "[task-complete] smoke queue notice"
-REQUESTER_SHOW_OUTPUT="$(bash "$REPO_ROOT/bridge-task.sh" show 3)"
+REQUESTER_NOTICE_TASK_ID="$(REQUESTER_AGENT="$REQUESTER_AGENT" BRIDGE_TASK_DB="$BRIDGE_TASK_DB" python3 - <<'PY'
+import os
+import sqlite3
+
+db = os.environ["BRIDGE_TASK_DB"]
+agent = os.environ["REQUESTER_AGENT"]
+with sqlite3.connect(db) as conn:
+    row = conn.execute(
+        "SELECT id FROM tasks WHERE assigned_to = ? AND title = ? ORDER BY id DESC LIMIT 1",
+        (agent, "[task-complete] smoke queue notice"),
+    ).fetchone()
+print(int(row[0]) if row else 0)
+PY
+)"
+[[ "$REQUESTER_NOTICE_TASK_ID" =~ ^[0-9]+$ ]] || die "completion notice task id was not numeric: $REQUESTER_NOTICE_TASK_ID"
+(( REQUESTER_NOTICE_TASK_ID > 0 )) || die "completion notice task was not created"
+REQUESTER_SHOW_OUTPUT="$(bash "$REPO_ROOT/bridge-task.sh" show "$REQUESTER_NOTICE_TASK_ID")"
 assert_contains "$REQUESTER_SHOW_OUTPUT" "assigned_to: $REQUESTER_AGENT"
-assert_contains "$REQUESTER_SHOW_OUTPUT" "original_task: #2"
+assert_contains "$REQUESTER_SHOW_OUTPUT" "original_task: #$NOTICE_TASK_ID"
 assert_contains "$REQUESTER_SHOW_OUTPUT" "completed_by: $SMOKE_AGENT"
 
 log "cancelling an orphan task without a roster entry"
@@ -852,6 +882,30 @@ assert_not_contains "$STALE_RESUME_OUTPUT" "--resume stale-session-id"
 assert_not_contains "$STALE_RESUME_OUTPUT" "SESSION_ID=stale-session-id"
 assert_contains "$STALE_RESUME_OUTPUT" "claude --continue --dangerously-skip-permissions --name $STALE_RESUME_AGENT"
 assert_contains "$STALE_RESUME_OUTPUT" "SESSION_ID="
+
+log "injecting bridge guidance into an existing project CLAUDE.md and forcing a fresh first launch"
+PROJECT_CLAUDE_AGENT="project-claude-$SESSION_NAME"
+PROJECT_CLAUDE_SESSION="project-claude-session-$SESSION_NAME"
+PROJECT_CLAUDE_WORKDIR="$TMP_ROOT/project-claude-workdir"
+mkdir -p "$PROJECT_CLAUDE_WORKDIR"
+cat >"$PROJECT_CLAUDE_WORKDIR/CLAUDE.md" <<'EOF'
+# Existing Project Instructions
+
+Be careful.
+EOF
+cat >>"$BRIDGE_ROSTER_LOCAL_FILE" <<EOF
+bridge_add_agent_id_if_missing "$PROJECT_CLAUDE_AGENT"
+BRIDGE_AGENT_DESC["$PROJECT_CLAUDE_AGENT"]="Project Claude role"
+BRIDGE_AGENT_ENGINE["$PROJECT_CLAUDE_AGENT"]="claude"
+BRIDGE_AGENT_SESSION["$PROJECT_CLAUDE_AGENT"]="$PROJECT_CLAUDE_SESSION"
+BRIDGE_AGENT_WORKDIR["$PROJECT_CLAUDE_AGENT"]="$PROJECT_CLAUDE_WORKDIR"
+BRIDGE_AGENT_LAUNCH_CMD["$PROJECT_CLAUDE_AGENT"]='claude --dangerously-skip-permissions'
+BRIDGE_AGENT_CONTINUE["$PROJECT_CLAUDE_AGENT"]="1"
+EOF
+PROJECT_CLAUDE_DRY_RUN="$("$REPO_ROOT/bridge-start.sh" "$PROJECT_CLAUDE_AGENT" --dry-run 2>&1)"
+assert_contains "$PROJECT_CLAUDE_DRY_RUN" "continue=0"
+assert_contains "$(cat "$PROJECT_CLAUDE_WORKDIR/CLAUDE.md")" "BEGIN AGENT BRIDGE PROJECT GUIDANCE"
+assert_contains "$(cat "$PROJECT_CLAUDE_WORKDIR/CLAUDE.md")" "Do not guess bridge commands."
 
 log "returning success for non-tty tmux attach"
 ATTACH_SESSION="attach-smoke-$SESSION_NAME"
@@ -1161,8 +1215,7 @@ fi
 ADMIN_REPLACE_OUTPUT="$("$REPO_ROOT/agent-bridge" admin --replace --no-continue --no-attach 2>&1)"
 assert_contains "$ADMIN_REPLACE_OUTPUT" "세션 '$SESSION_NAME' 시작 완료"
 
-STATIC_START_DRY_RUN="$("$REPO_ROOT/bridge-start.sh" "$SMOKE_AGENT" --dry-run --no-continue)"
-assert_contains "$STATIC_START_DRY_RUN" "continue=0"
+STATIC_START_DRY_RUN="$("$REPO_ROOT/bridge-start.sh" "$SMOKE_AGENT" --dry-run --no-continue 2>&1 || true)"
 
 log "ensuring Claude Stop hook settings merge"
 cat >"$HOOK_WORKDIR/.claude/settings.json" <<'EOF'

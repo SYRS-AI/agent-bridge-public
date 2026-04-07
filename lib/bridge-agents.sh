@@ -217,6 +217,11 @@ bridge_infer_current_agent() {
   local agent
   local match=""
 
+  if [[ -n "${BRIDGE_AGENT_ID:-}" ]] && bridge_agent_exists "$BRIDGE_AGENT_ID"; then
+    printf '%s' "$BRIDGE_AGENT_ID"
+    return 0
+  fi
+
   if [[ -n "${TMUX:-}" ]]; then
     session="$(tmux display-message -p '#S' 2>/dev/null || true)"
     if [[ -n "$session" ]] && bridge_agent_exists "$session"; then

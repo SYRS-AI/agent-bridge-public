@@ -737,6 +737,9 @@ run_create() {
       fi
     fi
     bridge_scaffold_agent_home "$agent" "$workdir" "$display_name" "$role_text" "$engine"
+    if [[ "$engine" == "claude" ]]; then
+      bridge_ensure_project_claude_guidance "$workdir" >/dev/null 2>&1 || true
+    fi
     bridge_bootstrap_project_skill "$engine" "$workdir" >/dev/null 2>&1 || true
     if [[ "$engine" == "claude" ]]; then
       bridge_bootstrap_claude_shared_skills "$workdir" >/dev/null 2>&1 || true

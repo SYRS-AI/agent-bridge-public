@@ -62,7 +62,8 @@ bridge_daemon_note_autostart_failure() {
     # shellcheck source=/dev/null
     source "$file"
   fi
-  [[ "${AUTO_START_FAIL_COUNT:-0}" =~ ^[0-9]+$ ]] || AUTO_START_FAIL_COUNT=0
+  AUTO_START_FAIL_COUNT="${AUTO_START_FAIL_COUNT:-0}"
+  [[ "$AUTO_START_FAIL_COUNT" =~ ^[0-9]+$ ]] || AUTO_START_FAIL_COUNT=0
   fail_count=$(( AUTO_START_FAIL_COUNT + 1 ))
   now="$(date +%s)"
   if (( fail_count >= 10 )); then

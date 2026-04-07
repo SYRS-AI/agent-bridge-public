@@ -39,6 +39,16 @@ infer_actor_if_possible() {
   printf '%s' "${USER:-unknown}"
 }
 
+emit_inferred_actor_hint() {
+  local explicit_actor="${1:-}"
+  local inferred_actor="${2:-}"
+
+  [[ -z "$explicit_actor" ]] || return 0
+  [[ -n "$inferred_actor" ]] || return 0
+
+  echo "[hint] --from omitted; inferred sender: ${inferred_actor}. Use --from <agent> to override." >&2
+}
+
 notify_task_requester() {
   local task_id="$1"
   local actor="$2"
@@ -98,6 +108,7 @@ cmd_create() {
   local target=""
   local title=""
   local actor=""
+  local explicit_actor=""
   local priority="normal"
   local body=""
   local body_file=""
@@ -147,7 +158,9 @@ cmd_create() {
   [[ -z "$target" ]] && bridge_die "--to는 필수입니다."
   [[ -z "$title" ]] && bridge_die "--title은 필수입니다."
   bridge_require_agent "$target"
+  explicit_actor="$actor"
   actor="$(infer_actor_if_possible "$actor")"
+  emit_inferred_actor_hint "$explicit_actor" "$actor"
 
   args=(create --to "$target" --title "$title" --from "$actor" --priority "$priority")
   if [[ -n "$body" ]]; then
