@@ -26,7 +26,9 @@ def save_json(path: Path, payload: Any) -> None:
     with tmp.open("w", encoding="utf-8") as handle:
         json.dump(payload, handle, ensure_ascii=False, indent=2)
         handle.write("\n")
+    os.chmod(tmp, 0o600)
     tmp.replace(path)
+    os.chmod(path, 0o600)
 
 
 def stop_hook_command(bridge_home: Path, bash_bin: str) -> str:

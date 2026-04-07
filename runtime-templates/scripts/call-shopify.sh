@@ -6,9 +6,10 @@ BRIDGE_HOME="${BRIDGE_HOME:-$HOME/.agent-bridge}"
 AGENT_BRIDGE="$BRIDGE_HOME/agent-bridge"
 NOTIFY_PY="$BRIDGE_HOME/bridge-notify.py"
 CONFIG_JSON="$BRIDGE_HOME/runtime/bridge-config.json"
-AGENT_ID="syrs-shopify"
-AGENT_NAME="syrs-shopify"
-AGENT_HOME="$BRIDGE_HOME/agents/shopify"
+AGENT_ID="${BRIDGE_RUNTIME_AGENT_ID:-shopify}"
+AGENT_NAME="${BRIDGE_RUNTIME_AGENT_NAME:-$AGENT_ID}"
+AGENT_HOME="${BRIDGE_RUNTIME_AGENT_HOME:-$BRIDGE_HOME/agents/$AGENT_ID}"
+FAILURE_TARGET="${BRIDGE_RUNTIME_FAILURE_TARGET:-${BRIDGE_ADMIN_AGENT_ID:-}}"
 CLAUDE_BIN="${BRIDGE_CLAUDE_BIN:-$(command -v claude 2>/dev/null || printf '%s' "$HOME/.local/bin/claude")}"
 STATUS_FILE="$AGENT_HOME/.status"
 LOG_DIR="$AGENT_HOME/logs"
@@ -73,8 +74,12 @@ send_failure_task() {
     printf 'time=%s\n' "$(TZ=Asia/Seoul date +"%Y-%m-%d %H:%M:%S %Z")"
     printf 'log=%s\n' "$LOG_FILE"
   } >"$note_file"
+  [[ -n "$FAILURE_TARGET" ]] || {
+    rm -f "$note_file"
+    return 0
+  }
   "$AGENT_BRIDGE" task create \
-    --to main \
+    --to "$FAILURE_TARGET" \
     --from "$AGENT_ID" \
     --priority urgent \
     --title "[${AGENT_ID}] CLI call failed" \

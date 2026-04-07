@@ -214,7 +214,7 @@ export PATH="$FAKE_BIN:$PATH"
 mkdir -p "$PROJECT_ROOT"
 PROJECT_ROOT="$(cd "$PROJECT_ROOT" && pwd -P)"
 git -C "$PROJECT_ROOT" init -q
-git -C "$PROJECT_ROOT" config user.email smoke@example.com
+git -C "$PROJECT_ROOT" config user.email smoke-test
 git -C "$PROJECT_ROOT" config user.name "Smoke Test"
 echo "smoke" >"$PROJECT_ROOT/README.md"
 git -C "$PROJECT_ROOT" add README.md

@@ -14,6 +14,7 @@ from pathlib import Path
 
 
 HOME = Path.home()
+HOME_RE = re.escape(str(HOME))
 TEXT_EXTENSIONS = {
     ".md",
     ".txt",
@@ -556,17 +557,17 @@ def rewrite_workspace_variants(text: str) -> tuple[str, Counter]:
     patterns = [
         (
             "agents",
-            re.compile(r"(?:/Users/soonseokoh|\$HOME|~)?/\.openclaw/workspace-([A-Za-z0-9._{}-]+)"),
+            re.compile(rf"(?:{HOME_RE}|\$HOME|~)?/\.openclaw/workspace-([A-Za-z0-9._{{}}-]+)"),
             r"~/.agent-bridge/agents/\1",
         ),
         (
             "agents",
-            re.compile(r"(?:/Users/soonseokoh|\$HOME|~)?/\.openclaw/(\{\{?[A-Za-z0-9_]+\}?\})"),
+            re.compile(rf"(?:{HOME_RE}|\$HOME|~)?/\.openclaw/(\{{\{{?[A-Za-z0-9_]+\}}?\}})"),
             r"~/.agent-bridge/agents/\1",
         ),
         (
             "main_home",
-            re.compile(r"(?:/Users/soonseokoh|\$HOME|~)?/\.openclaw/workspace\b"),
+            re.compile(rf"(?:{HOME_RE}|\$HOME|~)?/\.openclaw/workspace\b"),
             "~/.agent-bridge/agents/main",
         ),
     ]

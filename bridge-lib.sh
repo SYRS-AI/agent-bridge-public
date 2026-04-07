@@ -13,6 +13,9 @@ if (( ${BASH_VERSINFO[0]:-0} < 4 )); then
   exit 1
 fi
 
+# Keep bridge-owned runtime files private by default.
+umask 077
+
 BRIDGE_SCRIPT_DIR="$(cd -P "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 if [[ -z "${BRIDGE_HOME:-}" ]]; then
   BRIDGE_HOME="$HOME/.agent-bridge"

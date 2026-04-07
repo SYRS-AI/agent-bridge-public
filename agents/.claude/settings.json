@@ -7,7 +7,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "/opt/homebrew/bin/bash /Users/soonseokoh/.agent-bridge/hooks/mark-idle.sh",
+            "command": "bash ~/.agent-bridge/hooks/mark-idle.sh",
             "timeout": 3,
             "additionalContext": true
           }
@@ -19,7 +19,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "/opt/homebrew/bin/bash /Users/soonseokoh/.agent-bridge/hooks/clear-idle.sh",
+            "command": "bash ~/.agent-bridge/hooks/clear-idle.sh",
             "timeout": 3
           }
         ]

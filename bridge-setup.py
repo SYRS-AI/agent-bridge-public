@@ -33,14 +33,18 @@ def save_json(path: Path, payload: Any) -> None:
     with tmp.open("w", encoding="utf-8") as handle:
         json.dump(payload, handle, ensure_ascii=False, indent=2)
         handle.write("\n")
+    os.chmod(tmp, 0o600)
     tmp.replace(path)
+    os.chmod(path, 0o600)
 
 
 def save_text(path: Path, text: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix(path.suffix + ".tmp")
     tmp.write_text(text, encoding="utf-8")
+    os.chmod(tmp, 0o600)
     tmp.replace(path)
+    os.chmod(path, 0o600)
 
 
 def load_dotenv(path: Path) -> dict[str, str]:

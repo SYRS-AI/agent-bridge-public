@@ -9,6 +9,7 @@ ERR_LOG="$LOG_DIR/gateway.err.log"
 STATE_FILE="$LOG_DIR/cron-failure-monitor-state.txt"
 COOLDOWN_FILE="$LOG_DIR/cron-failure-cooldown.txt"
 COOLDOWN_SECONDS=600
+FAILURE_TARGET="${BRIDGE_CRON_FAILURE_TARGET:-${BRIDGE_ADMIN_AGENT_ID:-}}"
 
 mkdir -p "$LOG_DIR"
 [[ -f "$ERR_LOG" ]] || exit 0
@@ -68,6 +69,7 @@ if [[ -f "$COOLDOWN_FILE" ]]; then
 fi
 
 if [[ "$FAIL_COUNT" -gt 0 ]]; then
+  [[ -n "$FAILURE_TARGET" ]] || exit 0
   BODY_FILE="$(mktemp)"
   {
     printf 'Recurring cron failures detected: %s\n' "$FAIL_COUNT"
@@ -75,7 +77,7 @@ if [[ "$FAIL_COUNT" -gt 0 ]]; then
     printf '\nInspect: %s\n' "$ERR_LOG"
   } >"$BODY_FILE"
   "$AGENT_BRIDGE" task create \
-    --to huchu \
+    --to "$FAILURE_TARGET" \
     --from bridge \
     --priority high \
     --title "[cron-failure] recurring failures detected" \

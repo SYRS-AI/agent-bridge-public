@@ -15,6 +15,8 @@ from pathlib import Path
 MANAGED_START = "<!-- BEGIN AGENT BRIDGE DOC MIGRATION -->"
 MANAGED_END = "<!-- END AGENT BRIDGE DOC MIGRATION -->"
 TODAY = datetime.now().strftime("%Y-%m-%d")
+HOME_DIR = str(Path.home())
+HOME_DIR_RE = re.escape(HOME_DIR)
 
 REMOVABLE_DOCS = ("AGENTS.md", "IDENTITY.md", "BOOTSTRAP.md")
 SHARED_SOURCE_FILES = ("ROSTER.md", "SYRS-CONTEXT.md", "SYRS-RULES.md", "SYRS-USER.md")
@@ -27,9 +29,9 @@ LEGACY_PATTERNS = (
     "sessions_history",
     "openclaw cron add",
     "~/agent-bridge/state/tasks.db",
-    "/Users/soonseokoh/agent-bridge/state/tasks.db",
+    f"{HOME_DIR}/agent-bridge/state/tasks.db",
     "~/.openclaw/",
-    "/Users/soonseokoh/.openclaw/",
+    f"{HOME_DIR}/.openclaw/",
 )
 
 
@@ -268,40 +270,40 @@ def rewrite_shared_legacy_text(name: str, bridge_home: Path, text: str) -> str:
     replacements = {
         "~/.openclaw/credentials/": f"{runtime_root}/credentials/",
         "$HOME/.openclaw/credentials/": f"{runtime_root}/credentials/",
-        "/Users/soonseokoh/.openclaw/credentials/": f"{runtime_root}/credentials/",
+        f"{HOME_DIR}/.openclaw/credentials/": f"{runtime_root}/credentials/",
         "~/.openclaw/secrets/": f"{runtime_root}/secrets/",
         "$HOME/.openclaw/secrets/": f"{runtime_root}/secrets/",
-        "/Users/soonseokoh/.openclaw/secrets/": f"{runtime_root}/secrets/",
-        "~/.openclaw/openclaw.json": f"{runtime_root}/openclaw.json",
-        "$HOME/.openclaw/openclaw.json": f"{runtime_root}/openclaw.json",
-        "/Users/soonseokoh/.openclaw/openclaw.json": f"{runtime_root}/openclaw.json",
+        f"{HOME_DIR}/.openclaw/secrets/": f"{runtime_root}/secrets/",
+        "~/.openclaw/openclaw.json": f"{runtime_root}/bridge-config.json",
+        "$HOME/.openclaw/openclaw.json": f"{runtime_root}/bridge-config.json",
+        f"{HOME_DIR}/.openclaw/openclaw.json": f"{runtime_root}/bridge-config.json",
         "~/.openclaw/scripts/": f"{runtime_root}/scripts/",
         "$HOME/.openclaw/scripts/": f"{runtime_root}/scripts/",
-        "/Users/soonseokoh/.openclaw/scripts/": f"{runtime_root}/scripts/",
+        f"{HOME_DIR}/.openclaw/scripts/": f"{runtime_root}/scripts/",
         "~/.openclaw/skills/": f"{runtime_root}/skills/",
         "$HOME/.openclaw/skills/": f"{runtime_root}/skills/",
-        "/Users/soonseokoh/.openclaw/skills/": f"{runtime_root}/skills/",
+        f"{HOME_DIR}/.openclaw/skills/": f"{runtime_root}/skills/",
         "~/.openclaw/data/": f"{runtime_root}/data/",
         "$HOME/.openclaw/data/": f"{runtime_root}/data/",
-        "/Users/soonseokoh/.openclaw/data/": f"{runtime_root}/data/",
+        f"{HOME_DIR}/.openclaw/data/": f"{runtime_root}/data/",
         "~/.openclaw/assets/": f"{runtime_root}/assets/",
         "$HOME/.openclaw/assets/": f"{runtime_root}/assets/",
-        "/Users/soonseokoh/.openclaw/assets/": f"{runtime_root}/assets/",
+        f"{HOME_DIR}/.openclaw/assets/": f"{runtime_root}/assets/",
         "~/.openclaw/extensions/": f"{runtime_root}/extensions/",
         "$HOME/.openclaw/extensions/": f"{runtime_root}/extensions/",
-        "/Users/soonseokoh/.openclaw/extensions/": f"{runtime_root}/extensions/",
+        f"{HOME_DIR}/.openclaw/extensions/": f"{runtime_root}/extensions/",
         "~/.openclaw/shared/a2a-files/": "~/.agent-bridge/shared/a2a-files/",
         "$HOME/.openclaw/shared/a2a-files/": "~/.agent-bridge/shared/a2a-files/",
-        "/Users/soonseokoh/.openclaw/shared/a2a-files/": "~/.agent-bridge/shared/a2a-files/",
-        "bash ~/.openclaw/scripts/codex-review.sh review main": "agent-bridge task create --to patch --title \"[REVIEW] 변경 검토\" --body \"변경 내용과 검토 포인트를 함께 전달\"",
-        "bash ~/.openclaw/scripts/codex-review.sh plan /path/to/plan.md": "agent-bridge task create --to patch --title \"[PLAN-REVIEW] 계획 검토\" --body-file /path/to/plan.md",
-        "bash ~/.openclaw/scripts/codex-review.sh review [base] [instructions]": "agent-bridge task create --to patch --title \"[REVIEW] 변경 검토\" --body \"base와 검토 포인트를 함께 전달\"",
-        "bash ~/.openclaw/scripts/codex-review.sh plan <file>": "agent-bridge task create --to patch --title \"[PLAN-REVIEW] 계획 검토\" --body-file <file>",
-        "bash ~/.openclaw/scripts/codex-review.sh challenge [focus]": "agent-bridge task create --to patch --title \"[CHALLENGE] 적대적 분석\" --body \"focus를 함께 전달\"",
-        "bash ~/.openclaw/scripts/codex-review.sh consult \"<prompt>\"": "agent-bridge task create --to patch --title \"[CONSULT]\" --body \"<prompt>\"",
+        f"{HOME_DIR}/.openclaw/shared/a2a-files/": "~/.agent-bridge/shared/a2a-files/",
+        "bash ~/.openclaw/scripts/codex-review.sh review main": "agent-bridge task create --to <review-agent> --title \"[REVIEW] 변경 검토\" --body \"변경 내용과 검토 포인트를 함께 전달\"",
+        "bash ~/.openclaw/scripts/codex-review.sh plan /path/to/plan.md": "agent-bridge task create --to <review-agent> --title \"[PLAN-REVIEW] 계획 검토\" --body-file /path/to/plan.md",
+        "bash ~/.openclaw/scripts/codex-review.sh review [base] [instructions]": "agent-bridge task create --to <review-agent> --title \"[REVIEW] 변경 검토\" --body \"base와 검토 포인트를 함께 전달\"",
+        "bash ~/.openclaw/scripts/codex-review.sh plan <file>": "agent-bridge task create --to <review-agent> --title \"[PLAN-REVIEW] 계획 검토\" --body-file <file>",
+        "bash ~/.openclaw/scripts/codex-review.sh challenge [focus]": "agent-bridge task create --to <review-agent> --title \"[CHALLENGE] 적대적 분석\" --body \"focus를 함께 전달\"",
+        "bash ~/.openclaw/scripts/codex-review.sh consult \"<prompt>\"": "agent-bridge task create --to <review-agent> --title \"[CONSULT]\" --body \"<prompt>\"",
         "python3 ~/.openclaw/skills/task-log/scripts/task-log.py": f"python3 {runtime_root}/skills/task-log/scripts/task-log.py",
-        "Discord #patch 채널 웹훅": "`agent-bridge task create --to patch` 또는 `agent-bridge urgent patch`",
-        "localhost:8787/hooks/patch-trigger": "`agent-bridge urgent patch`",
+        "Discord #patch 채널 웹훅": "`agent-bridge task create --to <admin-agent>` 또는 `agent-bridge urgent <admin-agent>`",
+        "localhost:8787/hooks/patch-trigger": "`agent-bridge urgent <admin-agent>`",
     }
     for old, new in replacements.items():
         text = text.replace(old, new)
@@ -313,7 +315,7 @@ def rewrite_shared_legacy_text(name: str, bridge_home: Path, text: str) -> str:
         text = text.replace("sessions_history", "bridge task/MEMORY context")
         text = text.replace("sessions_send", "agent-bridge task create")
         text = text.replace("openclaw message send", "연결된 Claude 세션 응답")
-        text = text.replace("패치는 OpenClaw 에이전트가 아님", "패치는 Agent Bridge 관리자 역할")
+        text = text.replace("패치는 OpenClaw 에이전트가 아님", "관리자 에이전트는 Agent Bridge 역할")
 
     return text
 
@@ -324,57 +326,40 @@ def rewrite_agent_runtime_text(agent_dir: Path, text: str) -> str:
     replacements = {
         "~/.openclaw/credentials/": f"{runtime_root}/credentials/",
         "$HOME/.openclaw/credentials/": f"{runtime_root}/credentials/",
-        "/Users/soonseokoh/.openclaw/credentials/": f"{runtime_root}/credentials/",
+        f"{HOME_DIR}/.openclaw/credentials/": f"{runtime_root}/credentials/",
         "~/.openclaw/secrets/": f"{runtime_root}/secrets/",
         "$HOME/.openclaw/secrets/": f"{runtime_root}/secrets/",
-        "/Users/soonseokoh/.openclaw/secrets/": f"{runtime_root}/secrets/",
-        "~/.openclaw/openclaw.json": f"{runtime_root}/openclaw.json",
-        "$HOME/.openclaw/openclaw.json": f"{runtime_root}/openclaw.json",
-        "/Users/soonseokoh/.openclaw/openclaw.json": f"{runtime_root}/openclaw.json",
+        f"{HOME_DIR}/.openclaw/secrets/": f"{runtime_root}/secrets/",
+        "~/.openclaw/openclaw.json": f"{runtime_root}/bridge-config.json",
+        "$HOME/.openclaw/openclaw.json": f"{runtime_root}/bridge-config.json",
+        f"{HOME_DIR}/.openclaw/openclaw.json": f"{runtime_root}/bridge-config.json",
         "~/.openclaw/scripts/": f"{runtime_root}/scripts/",
         "$HOME/.openclaw/scripts/": f"{runtime_root}/scripts/",
-        "/Users/soonseokoh/.openclaw/scripts/": f"{runtime_root}/scripts/",
+        f"{HOME_DIR}/.openclaw/scripts/": f"{runtime_root}/scripts/",
         "~/.openclaw/skills/": f"{runtime_root}/skills/",
         "$HOME/.openclaw/skills/": f"{runtime_root}/skills/",
-        "/Users/soonseokoh/.openclaw/skills/": f"{runtime_root}/skills/",
+        f"{HOME_DIR}/.openclaw/skills/": f"{runtime_root}/skills/",
         "~/.openclaw/data/": f"{runtime_root}/data/",
         "$HOME/.openclaw/data/": f"{runtime_root}/data/",
-        "/Users/soonseokoh/.openclaw/data/": f"{runtime_root}/data/",
+        f"{HOME_DIR}/.openclaw/data/": f"{runtime_root}/data/",
         "~/.openclaw/assets/": f"{runtime_root}/assets/",
         "$HOME/.openclaw/assets/": f"{runtime_root}/assets/",
-        "/Users/soonseokoh/.openclaw/assets/": f"{runtime_root}/assets/",
+        f"{HOME_DIR}/.openclaw/assets/": f"{runtime_root}/assets/",
         "~/.openclaw/extensions/": f"{runtime_root}/extensions/",
         "$HOME/.openclaw/extensions/": f"{runtime_root}/extensions/",
-        "/Users/soonseokoh/.openclaw/extensions/": f"{runtime_root}/extensions/",
+        f"{HOME_DIR}/.openclaw/extensions/": f"{runtime_root}/extensions/",
         "~/.openclaw/memory/": f"{runtime_root}/memory/",
         "$HOME/.openclaw/memory/": f"{runtime_root}/memory/",
-        "/Users/soonseokoh/.openclaw/memory/": f"{runtime_root}/memory/",
+        f"{HOME_DIR}/.openclaw/memory/": f"{runtime_root}/memory/",
         "sessions_send": "agent-bridge task create",
         "sessions_spawn": "bridge disposable child",
         "sessions_history": "bridge task/MEMORY context",
         "openclaw message send": "연결된 Claude 세션 응답",
-        "localhost:8787/hooks/patch-trigger": "`agent-bridge urgent patch`",
-        "Discord #patch 채널 웹훅": "`agent-bridge task create --to patch` 또는 `agent-bridge urgent patch`",
+        "localhost:8787/hooks/patch-trigger": "`agent-bridge urgent <admin-agent>`",
+        "Discord #patch 채널 웹훅": "`agent-bridge task create --to <admin-agent>` 또는 `agent-bridge urgent <admin-agent>`",
     }
     for old, new in replacements.items():
         text = text.replace(old, new)
-
-    if agent_dir.name == "patch":
-        text = text.replace("~/.openclaw/patch/", "~/.agent-bridge/agents/patch/")
-        text = text.replace("/Users/soonseokoh/.openclaw/patch/", "~/.agent-bridge/agents/patch/")
-        text = text.replace("~/.agent-bridge/agents/patches/", "~/.agent-bridge/runtime/patches/")
-        text = text.replace(
-            "- **⚠️ `agent-bridge task create`로 patch 호출 불가** — allow 리스트에서 제거됨, 에러 발생함",
-            "- patch 호출은 `agent-bridge task create --to patch` 또는 `agent-bridge urgent patch \"...\"`를 사용한다.",
-        )
-        text = text.replace(
-            "- **⚠️ 기존 `curl `agent-bridge urgent patch``는 사용 금지** — 코드는 남아있지만(롤백용) 에이전트는 Discord webhook만 사용",
-            "- **⚠️ 기존 localhost patch trigger는 사용 금지** — 지금은 `agent-bridge task create --to patch` 또는 `agent-bridge urgent patch \"...\"`만 사용한다.",
-        )
-        text = text.replace(
-            "- LaunchAgent logs: `~/.openclaw/logs/gateway.log`, `gateway.err.log`",
-            "- Bridge logs: `~/.agent-bridge/logs/`",
-        )
 
     return text
 
@@ -435,27 +420,27 @@ def sync_shared_docs(bridge_home: Path, source_shared: Path, dry_run: bool) -> l
 
 def normalize_legacy_paths(text: str) -> str:
     replacements = {
-        "/Users/soonseokoh/agent-bridge/state/tasks.db": "~/.agent-bridge/state/tasks.db",
+        f"{HOME_DIR}/agent-bridge/state/tasks.db": "~/.agent-bridge/state/tasks.db",
         "~/agent-bridge/state/tasks.db": "~/.agent-bridge/state/tasks.db",
-        "/Users/soonseokoh/agent-bridge/shared/": "~/.agent-bridge/shared/",
+        f"{HOME_DIR}/agent-bridge/shared/": "~/.agent-bridge/shared/",
         "~/agent-bridge/shared/": "~/.agent-bridge/shared/",
-        "/Users/soonseokoh/.openclaw/shared/": "~/.agent-bridge/shared/",
+        f"{HOME_DIR}/.openclaw/shared/": "~/.agent-bridge/shared/",
         "~/.openclaw/shared/": "~/.agent-bridge/shared/",
         "$HOME/.openclaw/shared/": "~/.agent-bridge/shared/",
-        "/Users/soonseokoh/.openclaw/assets/": "~/.agent-bridge/runtime/assets/",
+        f"{HOME_DIR}/.openclaw/assets/": "~/.agent-bridge/runtime/assets/",
         "~/.openclaw/assets/": "~/.agent-bridge/runtime/assets/",
         "$HOME/.openclaw/assets/": "~/.agent-bridge/runtime/assets/",
-        "/Users/soonseokoh/.openclaw/extensions/": "~/.agent-bridge/runtime/extensions/",
+        f"{HOME_DIR}/.openclaw/extensions/": "~/.agent-bridge/runtime/extensions/",
         "~/.openclaw/extensions/": "~/.agent-bridge/runtime/extensions/",
         "$HOME/.openclaw/extensions/": "~/.agent-bridge/runtime/extensions/",
-        "/Users/soonseokoh/.openclaw/vault/": "~/.agent-bridge/runtime/vault/",
+        f"{HOME_DIR}/.openclaw/vault/": "~/.agent-bridge/runtime/vault/",
         "~/.openclaw/vault/": "~/.agent-bridge/runtime/vault/",
         "$HOME/.openclaw/vault/": "~/.agent-bridge/runtime/vault/",
-        "/Users/soonseokoh/.openclaw/agents/": "~/.agent-bridge/agents/",
+        f"{HOME_DIR}/.openclaw/agents/": "~/.agent-bridge/agents/",
         "~/.openclaw/agents/": "~/.agent-bridge/agents/",
         "$HOME/.openclaw/agents/": "~/.agent-bridge/agents/",
-        "/Users/soonseokoh/.openclaw/patch/": "~/.agent-bridge/agents/patch/",
-        "/Users/soonseokoh/.openclaw/patch": "~/.agent-bridge/agents/patch",
+        f"{HOME_DIR}/.openclaw/patch/": "~/.agent-bridge/agents/patch/",
+        f"{HOME_DIR}/.openclaw/patch": "~/.agent-bridge/agents/patch",
         "~/.openclaw/patch/": "~/.agent-bridge/agents/patch/",
         "~/.openclaw/patch": "~/.agent-bridge/agents/patch",
         "$HOME/.openclaw/patch/": "~/.agent-bridge/agents/patch/",
@@ -464,12 +449,12 @@ def normalize_legacy_paths(text: str) -> str:
     for old, new in replacements.items():
         text = text.replace(old, new)
     text = re.sub(
-        r"(?:~|/Users/soonseokoh)/\.openclaw/workspace-([A-Za-z0-9._-]+)",
+        rf"(?:~|{HOME_DIR_RE})/\.openclaw/workspace-([A-Za-z0-9._-]+)",
         r"~/.agent-bridge/agents/\1",
         text,
     )
     text = re.sub(
-        r"(?:~|/Users/soonseokoh)/\.openclaw/workspace\b",
+        rf"(?:~|{HOME_DIR_RE})/\.openclaw/workspace\b",
         "~/.agent-bridge/agents/main",
         text,
     )
@@ -559,12 +544,12 @@ COMMON_CLAUDE_REPLACEMENTS = {
     '- **Telegram** – respond through Claude Code `--channels plugin:telegram@claude-plugins-official`. The plugin mimics the old `openclaw message send` behavior; you do not run that CLI anymore. If a job needs a Telegram nudge, craft the message inside Claude Code and let the plugin deliver it.': '- **Telegram** – respond through Claude Code `--channels plugin:telegram@claude-plugins-official`. If a job needs a Telegram nudge, craft it in the live session and let the plugin deliver it.',
     '- **Bridge queue** – when another agent asks you to do something, create a durable task rather than replying via `sessions_send`. Always include the full context so the queue consumer does not have to open the old gateway stacks.': '- **Bridge queue** – when another agent asks you to do something, create a durable task with enough context for the receiver to work from the queue alone.',
     '- 기존 `sessions_send` 기반 위임은 `agent-bridge task create --to <agent>`로 번역한다. durable delegation은 Bridge queue가 기본이다.': '- durable delegation은 `agent-bridge task create --to <agent>`를 사용한다. 긴급 인터럽트만 `agent-bridge urgent <agent> "..."`를 쓴다.',
-    '- `openclaw message send`는 Claude Code CLI에서 직접 쓰지 않는다. Discord-connected `huchu` 세션이 채널과 DM의 전달 경로다.': '- Discord 보고와 DM escalation은 연결된 `huchu` 세션 안에서 직접 처리한다.',
+    '- `openclaw message send`는 Claude Code CLI에서 직접 쓰지 않는다. Discord-connected coordinator session이 채널과 DM의 전달 경로다.': '- Discord 보고와 DM escalation은 연결된 coordinator 세션 안에서 직접 처리한다.',
     '- 예전 `sessions_send(timeoutSeconds=0)`의 의미는 "즉시 fan-out 후 나중에 수집"이었다. Bridge에서도 같은 프로젝트의 child task는 가능하면 한 burst로 만든다.': '- fan-out semantics는 유지한다: 같은 프로젝트의 child task는 가능하면 한 burst로 만들고, 결과는 수집 후 한 번만 보고한다.',
     '- Old `sessions_send` mail routing becomes `agent-bridge task create --to <agent>` with a full `[MAIL]`, `[SEND-MAIL]`, or `[REPLY-MAIL]` style payload.': '- 메일 라우팅과 회신 handoff는 `agent-bridge task create --to <agent>`로 보낸다. payload에는 `[MAIL]`, `[SEND-MAIL]`, `[REPLY-MAIL]` 맥락을 그대로 담는다.',
     '- Do not use `openclaw message send` directly. In Claude Code, a Discord-connected `mailbot` session is the channel surface.': '- 사람에게 보이는 Discord 상태 공유는 연결된 `mailbot` 세션 안에서 직접 처리한다.',
-    '- Old `sessions_send` reporting becomes `agent-bridge task create --to huchu`.': '- 정기 보고와 handoff는 `agent-bridge task create --to huchu`를 사용한다.',
-    '- Old `sessions_send` reports become `agent-bridge task create --to huchu`.': '- 정기 보고와 handoff는 `agent-bridge task create --to huchu`를 사용한다.',
+    '- Old `sessions_send` reporting becomes `agent-bridge task create --to <coordinator-agent>`.': '- 정기 보고와 handoff는 `agent-bridge task create --to <coordinator-agent>`를 사용한다.',
+    '- Old `sessions_send` reports become `agent-bridge task create --to <coordinator-agent>`.': '- 정기 보고와 handoff는 `agent-bridge task create --to <coordinator-agent>`를 사용한다.',
     '- Old `sessions_send` reporting becomes `agent-bridge task create --to <agent>`.': '- 정기 보고와 handoff는 `agent-bridge task create --to <agent>`를 사용한다.',
     '- Old `sessions_send` reports become `agent-bridge task create --to <agent>`.': '- 정기 보고와 handoff는 `agent-bridge task create --to <agent>`를 사용한다.',
     '- Old `sessions_send` becomes `agent-bridge task create --to <agent>`.': '- durable delegation은 `agent-bridge task create --to <agent>`를 사용한다.',
@@ -590,107 +575,6 @@ def replace_section_range(text: str, start_heading: str, end_heading: str, repla
 def rewrite_claude_legacy_text(agent_dir: Path, text: str) -> str:
     for old, new in COMMON_CLAUDE_REPLACEMENTS.items():
         text = text.replace(old, new)
-
-    if agent_dir.name == "patch":
-        text = replace_section_range(
-            text,
-            "## 환경 (맥미니 이전 완료 2026-02-18)",
-            "## 메모리 관리",
-            """## 환경
-- **호스트**: Mac mini (macOS, ARM64, 8GB RAM)
-- **홈**: `~/.agent-bridge/agents/patch/`
-- **Bridge Home**: `~/.agent-bridge/`
-- **관리자 실행**: `agb admin`
-- 시스템 변경과 배포는 Agent Bridge 기준으로 수행한다. 남아 있는 OpenClaw 자산은 compatibility 대상으로만 본다.
-
-## 호출 방식
-- **션 직접**: `agb admin` 또는 patch 홈에서 Claude 실행
-- **다른 에이전트**: `agent-bridge task create --to patch` 또는 `agent-bridge urgent patch "..."`로 요청
-- **사람-facing surface**: 연결된 `patch` 세션과 #patch 채널
-- 세션은 유지형이다. 점검/수리 요청은 bridge queue 기준으로 pull한다.
-
-## 리포트 / A2A 전송 방법
-- 다른 에이전트에게는 `agent-bridge task create --to <agent>`로 전달한다.
-- 진짜 인터럽트만 `agent-bridge urgent <agent> "..."`를 사용한다.
-- 장문 결과는 `~/.agent-bridge/shared/`에 저장하고 경로만 전달한다.
-- 직접 gateway webhook, `a2a-send.sh`, legacy send CLI를 호출하지 않는다.""",
-        )
-        text = replace_section(
-            text,
-            "## OpenClaw 스킬 (Claude Code에서도 사용 가능)",
-            """## Skills & Integrations
-- patch 전용 local skill은 `skills/`에 있다. 현재 포함된 문서형 스킬은 `skills/new-agent-checklist.md`, `skills/personal-agent-checklist.md`다.
-- 공용 bridge skill/참조는 `~/.agent-bridge/shared/SKILLS.md`, `~/.agent-bridge/shared/TOOLS.md`를 본다.
-- 예전 외부 skill 경로는 compatibility inventory로만 취급한다. 실제 실행 전 존재 여부와 현재 유효성을 검증하고, 장기적으로는 bridge-local replacement로 옮긴다.
-- 외부 credential/script 경로를 다시 쓰게 되면 그 사실을 리포트에 명시해서 migration debt로 남긴다.""",
-        )
-        text = text.replace("- **경로**: `/Users/soonseokoh/.openclaw/`", "- **경로**: `~/.agent-bridge/`")
-        text = text.replace("- ⚠️ 에이전트가 패치를 호출할 때: Discord webhook만 사용. `sessions_send(patch)` 불가 (allow에서 제거됨)", "- 에이전트가 패치를 호출할 때는 `agent-bridge task create --to patch` 또는 `agent-bridge urgent patch \"...\"`를 사용한다.")
-        text = text.replace("- 직접 gateway webhook, `a2a-send.sh`, `openclaw message send`를 호출하지 않는다.", "- 직접 gateway webhook, `a2a-send.sh`, legacy send CLI를 호출하지 않는다.")
-        text = text.replace("- 예전 `~/.openclaw/skills/...` 경로는 compatibility inventory로만 취급한다. 실제 실행 전 존재 여부와 현재 유효성을 검증하고, 장기적으로는 bridge-local replacement로 옮긴다.", "- 예전 외부 skill 경로는 compatibility inventory로만 취급한다. 실제 실행 전 존재 여부와 현재 유효성을 검증하고, 장기적으로는 bridge-local replacement로 옮긴다.")
-        text = text.replace("- `~/.openclaw/credentials`, `~/.openclaw/scripts` 같은 경로를 다시 쓰게 되면 그 사실을 리포트에 명시해서 migration debt로 남긴다.", "- 외부 credential/script 경로를 다시 쓰게 되면 그 사실을 리포트에 명시해서 migration debt로 남긴다.")
-
-    if agent_dir.name == "shopify":
-        text = replace_section_range(
-            text,
-            "## 환경",
-            "## 메모리 관리",
-            """## 환경
-- **호스트**: Mac mini (macOS, ARM64, 8GB RAM)
-- **홈**: `~/.agent-bridge/agents/shopify/`
-- **공유 역할**: `shopify`, `shopify-codex`, `syrs-shopify`가 이 홈을 공유한다.
-- 현재 canonical runtime은 Agent Bridge다. 예전 wrapper, session poller, LaunchAgent bridge 설명은 레거시 참고 정보다.
-
-## 호출 방식
-- 사람/다른 에이전트의 durable 요청은 `agent-bridge task create --to shopify` 또는 `--to syrs-shopify`로 받는다.
-- 진짜 인터럽트만 `agent-bridge urgent ...`를 사용한다.
-- 사람에게 보이는 Discord 업데이트는 연결된 `shopify` 또는 `syrs-shopify` 세션 안에서 직접 처리한다.
-- `call-shopify.sh`, old A2A bridge poller, gateway wrapper를 기본 경로로 보지 않는다.
-
-## Bridge Roles
-- `shopify` = Claude 역할
-- `shopify-codex` = Codex 보조 역할
-- `syrs-shopify` = Discord-connected Claude 역할
-- 세 역할은 같은 memory/home을 공유하지만, durable handoff는 모두 bridge queue를 기준으로 한다.""",
-        )
-        text = replace_section_range(
-            text,
-            "## 도구",
-            "## Rules",
-            """## Tools & Integrations
-- Shopify theme/code work는 이 홈과 연결된 저장소에서 직접 수행한다. legacy wrapper 스크립트를 기본 경로로 보지 않는다.
-- 패치에게 요청할 때는 `agent-bridge task create --to patch` 또는 `agent-bridge urgent patch "..."`를 사용한다.
-- Shopify API / theme CLI / credential helper가 아직 bridge 밖 레거시 위치에 남아 있을 수 있다. 그 경우 실행 전 실제 경로를 검증하고, dependency를 리포트에 남긴다.
-- `skills/`와 `~/.agent-bridge/shared/SKILLS.md`를 현재 skill registry로 사용한다.
-
-## Credentials
-- 비밀 파일은 tracked repo 밖에서 관리한다.
-- 아직 특정 credential이 bridge 밖 레거시 위치에만 남아 있다면 migration debt로 보고하고, 장기적으로 bridge 기준 secret mount로 옮긴다.
-
-## Reporting
-- 사람에게 보이는 Discord 보고는 연결된 `shopify` 또는 `syrs-shopify` 세션 안에서 직접 처리한다.
-- queue/A2A 호출 결과는 bridge task와 live session 상태로 이어진다. 별도 gateway send CLI를 호출하지 않는다.""",
-        )
-        text = text.replace(
-            "- **소속**: OpenClaw 에이전트 시스템 (에이전트 ID: `syrs-shopify`)",
-            "- **소속**: Agent Bridge 런타임 (에이전트 ID: `syrs-shopify`)",
-        )
-        text = text.replace(
-            "## Reporting\n작업 완료 후 Discord #shopify 채널에 보고:\n```bash\nopenclaw message send --channel discord --account shopify \\\n  --target 1476851892876345374 --message \"🛒 작업 완료: ...\"\n```\n> **참고:** A2A/크론으로 호출된 경우 래퍼 스크립트가 자동 전달하므로 직접 보고 불필요.\n> 션 직접 대화 시에만 위 명령어로 Discord에 수동 보고.\n",
-            "## Reporting\n- 작업 완료 후 사람-facing 보고는 연결된 `shopify` 또는 `syrs-shopify` 세션 안에서 직접 처리한다.\n- bridge queue가 태스크 상태를 보존하므로 별도 send CLI를 호출하지 않는다.\n- 결과, 영향, 다음 액션을 한 메시지로 정리해서 남긴다.\n",
-        )
-        text = text.replace(
-            "- **쇼피 (syrs-shopify):** 이 프로젝트의 OpenClaw 에이전트",
-            "- **쇼피 (syrs-shopify):** 이 프로젝트의 Agent Bridge 역할",
-        )
-        text = text.replace(
-            "- Shopify API / theme CLI / credential helper가 아직 legacy path에 남아 있을 수 있다. 그 경우 실행 전 실제 경로를 검증하고, dependency를 리포트에 남긴다.",
-            "- Shopify API / theme CLI / credential helper가 아직 bridge 밖 레거시 위치에 남아 있을 수 있다. 그 경우 실행 전 실제 경로를 검증하고, dependency를 리포트에 남긴다.",
-        )
-        text = text.replace(
-            "- 아직 특정 credential이 `~/.openclaw/credentials/`에만 남아 있다면 migration debt로 보고하고, 장기적으로 bridge 기준 secret mount로 옮긴다.",
-            "- 아직 특정 credential이 bridge 밖 레거시 위치에만 남아 있다면 migration debt로 보고하고, 장기적으로 bridge 기준 secret mount로 옮긴다.",
-        )
 
     return text
 

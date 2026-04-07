@@ -18,12 +18,34 @@ sys.path.insert(0, str(RUNTIME_ROOT / "scripts"))
 from creds import load_creds
 from gws_helper import gws_api
 
-ACCOUNTS = {
-    "션_회사": "sean@syrs.kr",
-    "묘_회사": "myo@syrs.kr",
-    "ai": "ai@syrs.jp",
-    "션_개인": "seanssoh@gmail.com",
-}
+DEFAULT_GMAIL_ACCOUNTS_FILE = RUNTIME_ROOT / "credentials" / "gmail-accounts.json"
+
+
+def load_accounts():
+    raw_json = os.environ.get("BRIDGE_GMAIL_ACCOUNTS_JSON", "").strip()
+    if raw_json:
+        payload = json.loads(raw_json)
+    else:
+        config_path = Path(
+            os.environ.get("BRIDGE_GMAIL_ACCOUNTS_FILE", str(DEFAULT_GMAIL_ACCOUNTS_FILE))
+        ).expanduser()
+        if not config_path.exists():
+            return {}
+        payload = json.loads(config_path.read_text(encoding="utf-8"))
+
+    if isinstance(payload, dict) and isinstance(payload.get("accounts"), dict):
+        payload = payload["accounts"]
+    if not isinstance(payload, dict):
+        raise RuntimeError("gmail account config must be a JSON object")
+
+    return {
+        str(name): str(address).strip()
+        for name, address in payload.items()
+        if str(name).strip() and str(address).strip()
+    }
+
+
+ACCOUNTS = load_accounts()
 
 
 def get_db():
@@ -151,6 +173,9 @@ def fetch_and_sync(account_name, gws_email, agent_id="main", hours=2):
 def main():
     hours = int(sys.argv[1]) if len(sys.argv) > 1 else 2
     agent_id = sys.argv[2] if len(sys.argv) > 2 else "main"
+    if not ACCOUNTS:
+        print("NO_CONFIGURED_ACCOUNTS")
+        return
     rows = []
     for account_name, gws_email in ACCOUNTS.items():
         rows.extend(fetch_and_sync(account_name, gws_email, agent_id=agent_id, hours=hours))

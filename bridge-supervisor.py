@@ -33,7 +33,7 @@ LOG_FILE = BRIDGE_HOME / "logs" / "supervisor.jsonl"
 POLL_INTERVAL = int(os.environ.get("BRIDGE_SUPERVISOR_POLL_SECONDS", "300"))
 MODEL = os.environ.get("BRIDGE_SUPERVISOR_MODEL", "claude-haiku-4-5-20251001")
 ADMIN_AGENT = os.environ.get("BRIDGE_ADMIN_AGENT_ID", "patch")
-HUMAN_RELAY_AGENT = os.environ.get("BRIDGE_SUPERVISOR_HUMAN_RELAY", "jjujju")
+HUMAN_RELAY_AGENT = os.environ.get("BRIDGE_SUPERVISOR_HUMAN_RELAY", ADMIN_AGENT)
 CONFIDENCE_THRESHOLD = float(os.environ.get("BRIDGE_SUPERVISOR_CONFIDENCE", "0.8"))
 LOG_ONLY = os.environ.get("BRIDGE_SUPERVISOR_LOG_ONLY", "1") == "1"
 

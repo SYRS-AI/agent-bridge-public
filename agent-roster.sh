@@ -8,7 +8,7 @@
 # - Optional actions are defined in BRIDGE_AGENT_ACTION using "<agent>:<action>".
 # - Prefer creating machine-specific roles in agent-roster.local.sh.
 
-BRIDGE_HOME="${BRIDGE_HOME:-$HOME/agent-bridge}"
+BRIDGE_HOME="${BRIDGE_HOME:-$HOME/.agent-bridge}"
 BRIDGE_LOG_DIR="${BRIDGE_LOG_DIR:-$BRIDGE_HOME/logs}"
 BRIDGE_SHARED_DIR="${BRIDGE_SHARED_DIR:-$BRIDGE_HOME/shared}"
 BRIDGE_MAX_MESSAGE_LEN="${BRIDGE_MAX_MESSAGE_LEN:-500}"

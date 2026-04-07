@@ -7,6 +7,7 @@ Gmail Pub/Sub 웹훅 수신 시:
 """
 from __future__ import annotations
 
+import json
 import os
 import subprocess
 import sys
@@ -27,12 +28,37 @@ sys.path.insert(0, str(RUNTIME_ROOT / "scripts"))
 from creds import load_creds
 from gws_helper import gws_api
 
-ACCOUNTS = {
-    "션_회사": "sean@syrs.kr",
-    "묘_회사": "myo@syrs.kr",
-    "ai": "ai@syrs.jp",
-    "션_개인": "seanssoh@gmail.com",
-}
+DEFAULT_GMAIL_ACCOUNTS_FILE = RUNTIME_ROOT / "credentials" / "gmail-accounts.json"
+
+
+def load_accounts() -> dict[str, str]:
+    raw_json = os.environ.get("BRIDGE_GMAIL_ACCOUNTS_JSON", "").strip()
+    if raw_json:
+        try:
+            payload = json.loads(raw_json)
+        except json.JSONDecodeError as exc:
+            raise RuntimeError("BRIDGE_GMAIL_ACCOUNTS_JSON must be valid JSON") from exc
+    else:
+        config_path = Path(
+            os.environ.get("BRIDGE_GMAIL_ACCOUNTS_FILE", str(DEFAULT_GMAIL_ACCOUNTS_FILE))
+        ).expanduser()
+        if not config_path.exists():
+            return {}
+        payload = json.loads(config_path.read_text(encoding="utf-8"))
+
+    if isinstance(payload, dict) and isinstance(payload.get("accounts"), dict):
+        payload = payload["accounts"]
+    if not isinstance(payload, dict):
+        raise RuntimeError("gmail account config must be a JSON object")
+
+    return {
+        str(name): str(address).strip()
+        for name, address in payload.items()
+        if str(name).strip() and str(address).strip()
+    }
+
+
+ACCOUNTS = load_accounts()
 
 TRIAGE_TITLE = "[MAIL] Gmail webhook triage"
 
@@ -243,6 +269,9 @@ def queue_mailbot_triage(new_emails):
 
 def main():
     log("Email webhook handler started")
+    if not ACCOUNTS:
+        log("No configured Gmail accounts; skipping webhook sync.")
+        return
     conn = get_supabase_db()
     all_new = []
     try:

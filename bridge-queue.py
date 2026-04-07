@@ -32,7 +32,7 @@ def isoformat_ts(value: int | None) -> str:
 
 
 def get_db_path() -> Path:
-    bridge_home = Path(os.environ.get("BRIDGE_HOME", str(Path.home() / "agent-bridge")))
+    bridge_home = Path(os.environ.get("BRIDGE_HOME", str(Path.home() / ".agent-bridge")))
     state_dir = Path(os.environ.get("BRIDGE_STATE_DIR", str(bridge_home / "state")))
     db_path = Path(os.environ.get("BRIDGE_TASK_DB", str(state_dir / "tasks.db")))
     db_path.parent.mkdir(parents=True, exist_ok=True)

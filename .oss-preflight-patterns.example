@@ -1,0 +1,7 @@
+# Optional local-only patterns for `scripts/oss-preflight.sh`
+# Copy to `.oss-preflight-patterns` and add one regex per line.
+#
+# Examples:
+# workspace-yourteam-
+# your-private-agent-name
+# yourname@example\.com

@@ -5,6 +5,19 @@ migration/
 __pycache__/
 *.pyc
 .DS_Store
+.env*
+*.key
+*.pem
+*.p12
+*.secret
+*.sqlite
+*.db
+*.bak*
+credentials.json
+service-account*.json
+node_modules/
+backups/
+.oss-preflight-patterns
 agent-roster.local.sh
 agents/*/.claude/
 # Shared agent settings (symlink target) is tracked
