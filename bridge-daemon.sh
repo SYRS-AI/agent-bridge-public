@@ -255,13 +255,24 @@ start_cron_worker() {
 
   log_file="$(bridge_cron_worker_log_file "$task_id")"
   mkdir -p "$(dirname "$log_file")"
+  bridge_require_python
+  python3 - "$BRIDGE_BASH_BIN" "$SCRIPT_DIR/bridge-daemon.sh" "$task_id" "$log_file" <<'PY' >/dev/null
+import os
+import subprocess
+import sys
 
-  if [[ "$(uname -s)" != "Darwin" ]] && command -v setsid >/dev/null 2>&1; then
-    setsid "$BRIDGE_BASH_BIN" "$SCRIPT_DIR/bridge-daemon.sh" run-cron-worker "$task_id" </dev/null >>"$log_file" 2>&1 &
-  else
-    nohup "$BRIDGE_BASH_BIN" "$SCRIPT_DIR/bridge-daemon.sh" run-cron-worker "$task_id" </dev/null >>"$log_file" 2>&1 &
-    disown || true
-  fi
+bash_bin, daemon_script, task_id, log_file = sys.argv[1:]
+
+with open(os.devnull, "rb") as stdin_handle, open(log_file, "ab", buffering=0) as log_handle:
+    subprocess.Popen(
+        [bash_bin, daemon_script, "run-cron-worker", task_id],
+        stdin=stdin_handle,
+        stdout=log_handle,
+        stderr=log_handle,
+        start_new_session=True,
+        close_fds=True,
+    )
+PY
 }
 
 start_cron_dispatch_workers() {

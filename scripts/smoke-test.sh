@@ -706,6 +706,45 @@ assert_contains "$CODEX_READY_OUTPUT" "$CODEX_CLI_AGENT"
 python3 "$REPO_ROOT/bridge-queue.py" done "$CODEX_READY_TASK_ID" --agent "$CODEX_CLI_AGENT" --note "codex ready smoke cleanup" >/dev/null
 tmux kill-session -t "$CODEX_CLI_SESSION" >/dev/null 2>&1 || true
 
+log "requeueing stale claimed tasks from inactive agents"
+INACTIVE_CLAIM_TASK_OUTPUT="$(python3 "$REPO_ROOT/bridge-queue.py" create --to inactive-agent --title "inactive claim smoke" --body "orphan" --from "$REQUESTER_AGENT")"
+assert_contains "$INACTIVE_CLAIM_TASK_OUTPUT" "created task #"
+INACTIVE_CLAIM_TASK_ID="$(printf '%s\n' "$INACTIVE_CLAIM_TASK_OUTPUT" | sed -n 's/^created task #\([0-9][0-9]*\).*/\1/p' | head -n1)"
+[[ -n "$INACTIVE_CLAIM_TASK_ID" ]] || die "expected inactive claim task id"
+python3 "$REPO_ROOT/bridge-queue.py" claim "$INACTIVE_CLAIM_TASK_ID" --agent inactive-agent --lease-seconds 60 >/dev/null
+python3 - "$BRIDGE_TASK_DB" "$INACTIVE_CLAIM_TASK_ID" <<'PY'
+import sqlite3
+import sys
+
+db_path, task_id = sys.argv[1:]
+with sqlite3.connect(db_path) as conn:
+    conn.execute(
+        "UPDATE tasks SET claimed_ts = claimed_ts - 3600, updated_ts = updated_ts - 3600 WHERE id = ?",
+        (int(task_id),),
+    )
+    conn.commit()
+PY
+INACTIVE_REQUEUE_OUTPUT="$("$BASH4_BIN" -lc '
+  source "'"$REPO_ROOT"'/bridge-lib.sh"
+  bridge_load_roster
+  snapshot_file="$(mktemp)"
+  ready_file="$(mktemp)"
+  trap "rm -f \"$snapshot_file\" \"$ready_file\"" EXIT
+  bridge_write_agent_snapshot "$snapshot_file"
+  : >"$ready_file"
+  python3 "'"$REPO_ROOT"'/bridge-queue.py" daemon-step \
+    --snapshot "$snapshot_file" \
+    --lease-seconds "$BRIDGE_TASK_LEASE_SECONDS" \
+    --heartbeat-window "$BRIDGE_TASK_HEARTBEAT_WINDOW_SECONDS" \
+    --idle-threshold "${BRIDGE_IDLE_THRESHOLD_SECONDS:-300}" \
+    --max-claim-age 900 \
+    --nudge-cooldown "$BRIDGE_TASK_NUDGE_COOLDOWN_SECONDS" \
+    --zombie-threshold "${BRIDGE_ZOMBIE_NUDGE_THRESHOLD:-10}" \
+    --ready-agents-file "$ready_file"
+')"
+INACTIVE_REQUEUE_STATUS="$(python3 "$REPO_ROOT/bridge-queue.py" show "$INACTIVE_CLAIM_TASK_ID")"
+assert_contains "$INACTIVE_REQUEUE_STATUS" "status: queued"
+
 log "creating a new static agent from the public template"
 CREATE_DRY_RUN_OUTPUT="$("$REPO_ROOT/agent-bridge" agent create "$CREATED_AGENT" --engine claude --session "$CREATED_SESSION" --always-on --dry-run)"
 assert_contains "$CREATE_DRY_RUN_OUTPUT" "agent: $CREATED_AGENT"

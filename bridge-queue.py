@@ -868,9 +868,12 @@ def cmd_daemon_step(args: argparse.Namespace) -> int:
         # --- Compute idle agents (used by both cron dedup and stale requeue) ---
         max_claim_age = int(getattr(args, "max_claim_age", 900))
         idle_agents = set()
+        active_agents = set()
         for row in snapshot_rows:
             active = 1 if str(row.get("active", "0")) == "1" else 0
             activity_ts = int(row.get("session_activity_ts") or 0)
+            if active:
+                active_agents.add(str(row["agent"]))
             if active and activity_ts and current_ts - activity_ts >= idle_threshold:
                 idle_agents.add(str(row["agent"]))
 
@@ -938,7 +941,12 @@ def cmd_daemon_step(args: argparse.Namespace) -> int:
         ).fetchall()
         for row in stale_claimed:
             agent_name = str(row["claimed_by"])
-            if agent_name not in idle_agents:
+            note_text = ""
+            if agent_name not in active_agents:
+                note_text = f"claimed for >{max_claim_age}s by inactive agent"
+            elif agent_name in idle_agents:
+                note_text = f"claimed for >{max_claim_age}s by idle agent"
+            else:
                 continue
             conn.execute(
                 """
@@ -958,7 +966,7 @@ def cmd_daemon_step(args: argparse.Namespace) -> int:
                 event_type="stale_claim_requeued",
                 actor="daemon",
                 created_ts=current_ts,
-                note_text=f"claimed for >{max_claim_age}s by idle agent",
+                note_text=note_text,
                 from_agent=agent_name,
             )
 
