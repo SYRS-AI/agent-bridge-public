@@ -459,6 +459,8 @@ def qualify(item: str) -> str:
     if not item.startswith("plugin:") or "@" in item:
         return item
     plugin_name = item.split(":", 1)[1].strip()
+    if plugin_name in {"telegram", "discord"}:
+        return f"plugin:{plugin_name}@claude-plugins-official"
     matches = plugin_index.get(plugin_name, [])
     if len(matches) == 1:
         return f"plugin:{matches[0]}"

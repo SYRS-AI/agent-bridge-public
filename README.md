@@ -31,16 +31,30 @@ If you hand this repository URL to another Claude or Codex agent, the preferred 
 Install Agent Bridge from https://github.com/SYRS-AI/agent-bridge.
 
 Read the README and use the AI-native bootstrap flow.
+Before you run any bridge script, detect the OS and verify prerequisites.
+
+On macOS:
+- if Homebrew is missing, install it first
+- install or upgrade bash, tmux, python3, git, and shellcheck with Homebrew
+- make sure Homebrew's bin directory is first in PATH
+- do not continue until `bash --version` reports Bash 4 or newer
+
+On Linux:
+- install bash, tmux, python3, git, and shellcheck with the system package manager if needed
+
 Create one long-lived admin role for me.
-Do the shell integration, bridge bootstrap, and daemon setup.
+Do the shell integration, bridge bootstrap, and daemon setup, including the macOS LaunchAgent when supported.
 Stop when the final handoff is: close this session and run `agb admin`.
 
-Do not ask me to type bridge commands manually unless you need account IDs, tokens, or channel/user IDs.
+If Telegram or Discord credentials are missing, explain exactly how to get them in beginner-friendly steps, then continue the install.
+Do not ask me to type bridge commands manually unless you need a token, a user/channel/chat ID, login approval, or a 2FA step.
 ```
 
-설치 에이전트는 내부적으로 보통 아래 흐름을 수행하면 됩니다.
+설치 에이전트는 내부적으로 아래 순서를 강하게 지키는 게 좋습니다.
 
-1. 필수 도구 확인: `bash`, `tmux`, `python3`, `git`, 그리고 `claude` 또는 `codex`
+1. OS 감지
+2. 필수 도구 확인: `bash`, `tmux`, `python3`, `git`, 그리고 `claude` 또는 `codex`
+3. macOS면 Homebrew Bash가 실제 기본 `bash`로 잡히는지 확인
 2. 레포 clone
 3. `./agent-bridge bootstrap ...`
 4. shell integration 반영
@@ -52,6 +66,58 @@ When a channel plugin is already configured in Claude Code, bootstrap can reuse
 the plugin token from `~/.claude/channels/<kind>/.env`. Otherwise, pass
 `--channel-account <name>` or let the installer run interactively and paste the
 token when prompted.
+
+### macOS 클린 설치에서 특히 중요한 점
+
+- macOS 기본 `/bin/bash` 는 `3.2`라서 그대로는 안 됩니다.
+- Agent Bridge는 associative array를 쓰기 때문에 Bash `4+`가 필요합니다.
+- 설치 에이전트는 반드시:
+  1. `brew install bash tmux python shellcheck git`
+  2. `export PATH="$(brew --prefix)/bin:$PATH"`
+  3. `bash --version`
+  순서로 확인하고, `bash`가 실제로 Homebrew Bash를 가리키는지 확인한 뒤에 bootstrap을 진행해야 합니다.
+
+이 단계가 빠지면 "설치는 된 것 같은데 `agb admin`에서 갑자기 깨짐" 같은 증상이 나기 쉽습니다.
+
+### 채널 자격 증명이 없을 때 설치 에이전트가 안내해야 할 내용
+
+#### Telegram
+
+가장 쉬운 경로는 Claude Code Telegram plugin이 이미 연결돼 있는 경우입니다. 그러면 bootstrap이 `~/.claude/channels/telegram/.env`를 재사용할 수 있습니다.
+
+처음부터 만드는 경우에는 설치 에이전트가 아래 단계를 설명해야 합니다.
+
+1. Telegram에서 `@BotFather`를 연다.
+2. `/newbot` 을 보내고 봇 이름과 username을 만든다.
+3. BotFather가 돌려준 bot token을 복사한다.
+4. 그 봇에게 직접 메시지를 한 번 보낸다.
+5. 브라우저에서 아래 URL을 열어 JSON을 확인한다.
+
+```text
+https://api.telegram.org/bot<YOUR_BOT_TOKEN>/getUpdates
+```
+
+6. 응답 JSON에서 아래 두 값을 찾는다.
+   - `message.from.id` → `--allow-from`
+   - `message.chat.id` → `--default-chat`
+
+초보자에게는 "토큰은 BotFather가 주고, user/chat ID는 `getUpdates` JSON에서 복사한다"라고 설명하는 게 가장 단순합니다.
+
+#### Discord
+
+가장 쉬운 경로는 Claude Code Discord plugin이 이미 연결돼 있는 경우입니다. 그러면 bootstrap이 기존 channel runtime을 재사용할 수 있습니다.
+
+처음부터 만드는 경우에는 설치 에이전트가 아래 단계를 설명해야 합니다.
+
+1. <https://discord.com/developers/applications> 에서 `New Application`
+2. `Bot` 탭에서 봇을 만든다.
+3. `Reset Token` 또는 token 표시 버튼을 눌러 bot token을 복사한다.
+4. 필요하면 `Message Content Intent`를 켠다.
+5. `OAuth2 -> URL Generator`에서 bot invite URL을 만들고 서버에 초대한다.
+6. Discord 앱에서 `User Settings -> Advanced -> Developer Mode`를 켠다.
+7. 원하는 채널을 우클릭해서 `Copy Channel ID`
+
+초보자에게는 "bot token은 Discord Developer Portal, channel ID는 Developer Mode 켠 뒤 채널 우클릭"이라고 설명하면 됩니다.
 
 ### 핵심 명령
 
@@ -87,7 +153,7 @@ For Claude plugin-backed channels, the explicit form is safest:
 - `plugin:telegram@claude-plugins-official`
 - `plugin:discord@claude-plugins-official`
 
-The bridge will try to auto-qualify a bare value like `plugin:telegram` when it can resolve the installed plugin id from `~/.claude/plugins/installed_plugins.json`.
+The bridge will auto-qualify `plugin:telegram` and `plugin:discord` to the official Claude plugin marketplace ids, and it will also try to resolve other bare plugin names from `~/.claude/plugins/installed_plugins.json`.
 
 Companion docs for maintainers:
 
