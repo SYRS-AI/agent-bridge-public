@@ -101,9 +101,11 @@ CODEX_CLI_SESSION="codex-cli-session-$$"
 WORKTREE_AGENT="worker-reuse-$$"
 CREATED_AGENT="created-agent-$$"
 CREATED_SESSION="created-session-$$"
+BROKEN_CHANNEL_AGENT="broken-channel-$$"
 WORKDIR="$TMP_ROOT/workdir"
 REQUESTER_WORKDIR="$TMP_ROOT/requester-workdir"
 AUTO_START_WORKDIR="$TMP_ROOT/auto-start-workdir"
+BROKEN_CHANNEL_WORKDIR="$TMP_ROOT/broken-channel-workdir"
 PROJECT_ROOT="$TMP_ROOT/git-project"
 HOOK_WORKDIR="$TMP_ROOT/claude-hook-workdir"
 MCP_WORKDIR="$TMP_ROOT/claude-mcp-workdir"
@@ -131,7 +133,7 @@ cleanup() {
 }
 trap cleanup EXIT
 
-mkdir -p "$BRIDGE_HOME" "$BRIDGE_STATE_DIR" "$BRIDGE_LOG_DIR" "$BRIDGE_SHARED_DIR" "$WORKDIR" "$REQUESTER_WORKDIR" "$AUTO_START_WORKDIR"
+mkdir -p "$BRIDGE_HOME" "$BRIDGE_STATE_DIR" "$BRIDGE_LOG_DIR" "$BRIDGE_SHARED_DIR" "$WORKDIR" "$REQUESTER_WORKDIR" "$AUTO_START_WORKDIR" "$BROKEN_CHANNEL_WORKDIR"
 mkdir -p "$HOOK_WORKDIR/.claude"
 mkdir -p "$MCP_WORKDIR"
 mkdir -p "$CLAUDE_STATIC_WORKDIR"
@@ -1331,5 +1333,26 @@ done
 
 assert_contains "$SHOW_CRON_OUTPUT" "status: done"
 [[ -f "$RUN_DIR/result.json" ]] || die "cron worker did not write result artifact"
+
+log "reporting channel health misses to the admin role"
+cat >>"$BRIDGE_ROSTER_LOCAL_FILE" <<EOF
+
+bridge_add_agent_id_if_missing "$BROKEN_CHANNEL_AGENT"
+BRIDGE_AGENT_DESC["$BROKEN_CHANNEL_AGENT"]="Broken channel role"
+BRIDGE_AGENT_ENGINE["$BROKEN_CHANNEL_AGENT"]="claude"
+BRIDGE_AGENT_SESSION["$BROKEN_CHANNEL_AGENT"]="broken-channel-$SESSION_NAME"
+BRIDGE_AGENT_WORKDIR["$BROKEN_CHANNEL_AGENT"]="$BROKEN_CHANNEL_WORKDIR"
+BRIDGE_AGENT_LAUNCH_CMD["$BROKEN_CHANNEL_AGENT"]='claude --dangerously-skip-permissions'
+BRIDGE_AGENT_CHANNELS["$BROKEN_CHANNEL_AGENT"]="plugin:discord"
+EOF
+
+bash "$REPO_ROOT/bridge-daemon.sh" sync >/dev/null
+CHANNEL_HEALTH_INBOX="$(bash "$REPO_ROOT/bridge-task.sh" inbox "$SMOKE_AGENT" --all)"
+assert_contains "$CHANNEL_HEALTH_INBOX" "[channel-health] $BROKEN_CHANNEL_AGENT (miss)"
+CHANNEL_HEALTH_OPEN_ID="$(python3 "$REPO_ROOT/bridge-queue.py" find-open --agent "$SMOKE_AGENT" --title-prefix "[channel-health] $BROKEN_CHANNEL_AGENT " 2>/dev/null || true)"
+[[ "$CHANNEL_HEALTH_OPEN_ID" =~ ^[0-9]+$ ]] || die "expected channel-health task for $BROKEN_CHANNEL_AGENT"
+bash "$REPO_ROOT/bridge-daemon.sh" sync >/dev/null
+CHANNEL_HEALTH_OPEN_ID_AGAIN="$(python3 "$REPO_ROOT/bridge-queue.py" find-open --agent "$SMOKE_AGENT" --title-prefix "[channel-health] $BROKEN_CHANNEL_AGENT " 2>/dev/null || true)"
+[[ "$CHANNEL_HEALTH_OPEN_ID_AGAIN" == "$CHANNEL_HEALTH_OPEN_ID" ]] || die "channel-health alert should be deduped"
 
 log "smoke test passed"

@@ -104,6 +104,128 @@ recover_claude_bootstrap_blockers() {
   done
 }
 
+bridge_channel_health_state_file() {
+  local agent="$1"
+  printf '%s/channel-health/%s.env' "$BRIDGE_STATE_DIR" "$agent"
+}
+
+bridge_channel_health_body_file() {
+  local agent="$1"
+  printf '%s/channel-health/%s.md' "$BRIDGE_SHARED_DIR" "$agent"
+}
+
+bridge_write_channel_health_body() {
+  local agent="$1"
+  local file="$2"
+  local required_channels=""
+  local reason=""
+  local session=""
+  local workdir=""
+
+  required_channels="$(bridge_agent_channels_csv "$agent")"
+  reason="$(bridge_agent_channel_status_reason "$agent")"
+  session="$(bridge_agent_session "$agent")"
+  workdir="$(bridge_agent_workdir "$agent")"
+
+  mkdir -p "$(dirname "$file")"
+  cat >"$file" <<EOF
+# Channel Health Alert
+
+- agent: ${agent}
+- engine: $(bridge_agent_engine "$agent")
+- session: ${session:--}
+- workdir: ${workdir:--}
+- required_channels: ${required_channels:-(unset)}
+- detected_at: $(bridge_now_iso)
+
+## Reason
+
+${reason:-unknown channel health mismatch}
+
+## Suggested next steps
+
+1. Run \`agent-bridge setup agent ${agent}\`
+2. Inspect \`agent-bridge status --all-agents\`
+3. Restart the agent with \`bash bridge-start.sh ${agent} --replace\` after fixing the channel config
+EOF
+}
+
+bridge_clear_channel_health_state() {
+  local agent="$1"
+  rm -f "$(bridge_channel_health_state_file "$agent")"
+}
+
+bridge_report_channel_health_miss() {
+  local agent="$1"
+  local admin_agent="${BRIDGE_ADMIN_AGENT_ID:-}"
+  local status=""
+  local reason=""
+  local key=""
+  local now_ts=""
+  local state_file=""
+  local body_file=""
+  local title=""
+  local title_prefix=""
+  local existing_id=""
+  local create_output=""
+  local last_key=""
+  local last_report_ts=0
+
+  [[ -n "$admin_agent" ]] || return 0
+  bridge_agent_exists "$admin_agent" || return 0
+  [[ "$admin_agent" != "$agent" ]] || return 0
+
+  status="$(bridge_agent_channel_status "$agent")"
+  if [[ "$status" != "miss" ]]; then
+    bridge_clear_channel_health_state "$agent"
+    return 0
+  fi
+
+  reason="$(bridge_agent_channel_status_reason "$agent")"
+  [[ -n "$reason" ]] || reason="unknown channel health mismatch"
+  key="$(bridge_sha1 "${agent}|${reason}|$(bridge_agent_channels_csv "$agent")")"
+  now_ts="$(date +%s)"
+  state_file="$(bridge_channel_health_state_file "$agent")"
+  body_file="$(bridge_channel_health_body_file "$agent")"
+  title="[channel-health] ${agent} (miss)"
+  title_prefix="[channel-health] ${agent} "
+
+  if [[ -f "$state_file" ]]; then
+    # shellcheck source=/dev/null
+    source "$state_file"
+    last_key="${LAST_KEY:-}"
+    last_report_ts="${LAST_REPORT_TS:-0}"
+  fi
+
+  bridge_write_channel_health_body "$agent" "$body_file"
+  existing_id="$(bridge_queue_cli find-open --agent "$admin_agent" --title-prefix "$title_prefix" 2>/dev/null || true)"
+  if [[ "$existing_id" =~ ^[0-9]+$ ]]; then
+    bridge_queue_cli update "$existing_id" --actor "daemon" --title "$title" --priority urgent --body-file "$body_file" >/dev/null 2>&1 || true
+  elif [[ "$key" != "$last_key" || $(( now_ts - last_report_ts )) -ge ${BRIDGE_CHANNEL_HEALTH_REPORT_COOLDOWN_SECONDS:-1800} ]]; then
+    create_output="$(bridge_queue_cli create --to "$admin_agent" --title "$title" --from daemon --priority urgent --body-file "$body_file" 2>/dev/null || true)"
+    if [[ "$create_output" =~ created\ task\ \#([0-9]+) ]]; then
+      echo "[info] reported channel-health miss for ${agent} -> ${admin_agent} (#${BASH_REMATCH[1]})"
+    fi
+  else
+    return 0
+  fi
+
+  mkdir -p "$(dirname "$state_file")"
+  cat >"$state_file" <<EOF
+LAST_KEY=$(printf '%q' "$key")
+LAST_REPORT_TS=$(printf '%q' "$now_ts")
+EOF
+}
+
+process_channel_health() {
+  local agent
+
+  for agent in "${BRIDGE_AGENT_IDS[@]}"; do
+    [[ -z "$agent" ]] && continue
+    bridge_report_channel_health_miss "$agent" || true
+  done
+}
+
 cron_worker_running_count() {
   local worker_dir
   local pid_file
@@ -409,6 +531,7 @@ cmd_sync_cycle() {
   "$BRIDGE_BASH_BIN" "$SCRIPT_DIR/bridge-sync.sh" >/dev/null 2>&1 || true
   bridge_reconcile_idle_markers || true
   recover_claude_bootstrap_blockers || true
+  process_channel_health || true
 
   snapshot_file="$(mktemp)"
   ready_agents_file="$(mktemp)"
