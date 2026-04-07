@@ -50,7 +50,13 @@ payload = {
     "admin_saved": admin_saved == "1",
     "dry_run": dry_run == "1",
     "warnings": json.loads(warnings_json),
-    "next_command": "agent-bridge admin" if admin_saved == "1" else "",
+    "next_command": "agb admin" if admin_saved == "1" else "",
+    "handoff_steps": [
+        "Close the temporary installer session.",
+        "Open a fresh shell if needed so shell integration is loaded.",
+        "Run `agb admin`.",
+        "Let the admin role guide the rest of the onboarding.",
+    ] if admin_saved == "1" else [],
 }
 print(json.dumps(payload, ensure_ascii=False, indent=2))
 PY
@@ -379,5 +385,10 @@ for warning in "${WARNINGS[@]}"; do
   printf 'warning: %s\n' "$warning"
 done
 if [[ $admin_saved -eq 1 ]]; then
-  echo "next_command: agent-bridge admin"
+  echo "next_command: agb admin"
+  echo "handoff:"
+  echo "1. Close the temporary installer session."
+  echo "2. Open a fresh shell if this terminal has not reloaded your shell rc yet."
+  echo "3. Run: agb admin"
+  echo "4. Let the admin role guide the rest of the onboarding."
 fi

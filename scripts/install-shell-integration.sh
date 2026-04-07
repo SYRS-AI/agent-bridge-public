@@ -10,7 +10,7 @@ RCFILE=""
 
 usage() {
   cat <<EOF
-Usage: $0 [--shell zsh] [--rcfile <path>] [--apply]
+Usage: $0 [--shell zsh|bash] [--rcfile <path>] [--apply]
 
 Without --apply, prints the snippet to add to your shell rc file.
 With --apply, appends a managed block to the rc file if it is not already present.
@@ -50,6 +50,12 @@ case "$TARGET_SHELL" in
     SNIPPET="source \"$REPO_ROOT/shell/agent-bridge.zsh\""
     START_MARKER="# >>> agent-bridge zsh >>>"
     END_MARKER="# <<< agent-bridge zsh <<<"
+    ;;
+  bash)
+    [[ -n "$RCFILE" ]] || RCFILE="$HOME/.bashrc"
+    SNIPPET="source \"$REPO_ROOT/shell/agent-bridge.bash\""
+    START_MARKER="# >>> agent-bridge bash >>>"
+    END_MARKER="# <<< agent-bridge bash <<<"
     ;;
   *)
     echo "[error] unsupported shell: $TARGET_SHELL" >&2

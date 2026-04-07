@@ -103,6 +103,9 @@ CREATED_AGENT="created-agent-$$"
 CREATED_SESSION="created-session-$$"
 INIT_AGENT="bootstrap-admin-$$"
 INIT_SESSION="bootstrap-session-$$"
+BOOTSTRAP_AGENT="bootstrap-wrapper-$$"
+BOOTSTRAP_SESSION="bootstrap-wrapper-session-$$"
+BOOTSTRAP_RCFILE="$TMP_ROOT/bootstrap-shell.rc"
 BROKEN_CHANNEL_AGENT="broken-channel-$$"
 WORKDIR="$TMP_ROOT/workdir"
 REQUESTER_WORKDIR="$TMP_ROOT/requester-workdir"
@@ -839,12 +842,58 @@ assert_contains "$INIT_OUTPUT" "admin_agent: $INIT_AGENT"
 assert_contains "$INIT_OUTPUT" "channel_setup: ok"
 assert_contains "$INIT_OUTPUT" "preflight: ok"
 assert_contains "$INIT_OUTPUT" "admin_saved: yes"
-assert_contains "$INIT_OUTPUT" "next_command: agent-bridge admin"
+assert_contains "$INIT_OUTPUT" "next_command: agb admin"
 [[ -f "$BRIDGE_AGENT_HOME_ROOT/$INIT_AGENT/.telegram/.env" ]] || die "init did not create telegram env"
 [[ -f "$BRIDGE_AGENT_HOME_ROOT/$INIT_AGENT/.telegram/access.json" ]] || die "init did not create telegram access"
 assert_contains "$(cat "$BRIDGE_ROSTER_LOCAL_FILE")" "BRIDGE_ADMIN_AGENT_ID=\"$INIT_AGENT\""
 INIT_SHOW_JSON="$("$REPO_ROOT/agent-bridge" agent show "$INIT_AGENT" --json)"
 python3 - "$INIT_SHOW_JSON" "$INIT_AGENT" <<'PY'
+import json
+import sys
+
+payload = json.loads(sys.argv[1])
+agent = sys.argv[2]
+assert payload["agent"] == agent
+assert payload["engine"] == "claude"
+assert payload["channels"]["required"] == "plugin:telegram"
+PY
+
+log "bootstrapping a manager role with bootstrap"
+BOOTSTRAP_DRY_RUN_JSON="$("$REPO_ROOT/agent-bridge" bootstrap --admin "$BOOTSTRAP_AGENT" --engine claude --session "$BOOTSTRAP_SESSION" --channels plugin:telegram --allow-from 123456789 --default-chat 123456789 --channel-account smoke --runtime-config "$TMP_ROOT/openclaw.json" --api-base-url "$FAKE_TELEGRAM_API_BASE" --rcfile "$BOOTSTRAP_RCFILE" --skip-daemon --skip-launchagent --dry-run --json 2>&1)" || die "bootstrap dry-run failed: $BOOTSTRAP_DRY_RUN_JSON"
+python3 - "$BOOTSTRAP_DRY_RUN_JSON" "$BOOTSTRAP_AGENT" "$BOOTSTRAP_SESSION" "$BOOTSTRAP_RCFILE" <<'PY'
+import json
+import sys
+
+payload = json.loads(sys.argv[1])
+agent = sys.argv[2]
+session = sys.argv[3]
+rcfile = sys.argv[4]
+
+assert payload["mode"] == "bootstrap"
+assert payload["shell_integration"]["status"] == "planned"
+assert payload["shell_integration"]["shell"] == "zsh"
+assert payload["shell_integration"]["rcfile"] == rcfile
+assert payload["daemon"]["status"] == "skipped"
+assert payload["launchagent"]["status"] == "skipped"
+assert payload["next_command"] == "agb admin"
+assert payload["init"]["admin"] == agent
+assert payload["init"]["session"] == session
+assert payload["init"]["dry_run"] is True
+assert payload["handoff_steps"], "bootstrap handoff steps should not be empty"
+assert any("agb admin" in step for step in payload["handoff_steps"])
+PY
+BOOTSTRAP_OUTPUT="$("$REPO_ROOT/agent-bridge" bootstrap --admin "$BOOTSTRAP_AGENT" --engine claude --session "$BOOTSTRAP_SESSION" --channels plugin:telegram --allow-from 123456789 --default-chat 123456789 --channel-account smoke --runtime-config "$TMP_ROOT/openclaw.json" --api-base-url "$FAKE_TELEGRAM_API_BASE" --rcfile "$BOOTSTRAP_RCFILE" --skip-daemon --skip-launchagent 2>&1)" || die "bootstrap actual failed: $BOOTSTRAP_OUTPUT"
+assert_contains "$BOOTSTRAP_OUTPUT" "== Agent Bridge bootstrap =="
+assert_contains "$BOOTSTRAP_OUTPUT" "admin_agent: $BOOTSTRAP_AGENT"
+assert_contains "$BOOTSTRAP_OUTPUT" "shell_integration: applied"
+assert_contains "$BOOTSTRAP_OUTPUT" "daemon: skipped"
+assert_contains "$BOOTSTRAP_OUTPUT" "launchagent: skipped"
+assert_contains "$BOOTSTRAP_OUTPUT" "3. Run: agb admin"
+[[ -f "$BOOTSTRAP_RCFILE" ]] || die "bootstrap did not create shell rc file"
+assert_contains "$(cat "$BOOTSTRAP_RCFILE")" "source \"$REPO_ROOT/shell/agent-bridge.zsh\""
+assert_contains "$(cat "$BRIDGE_ROSTER_LOCAL_FILE")" "BRIDGE_ADMIN_AGENT_ID=\"$BOOTSTRAP_AGENT\""
+BOOTSTRAP_SHOW_JSON="$("$REPO_ROOT/agent-bridge" agent show "$BOOTSTRAP_AGENT" --json)"
+python3 - "$BOOTSTRAP_SHOW_JSON" "$BOOTSTRAP_AGENT" <<'PY'
 import json
 import sys
 
@@ -920,7 +969,7 @@ assert_contains "$CLAUDE_STALE_RESUME_FALLBACK" "claude --dangerously-skip-permi
 log "configuring admin role and launching it"
 SETUP_ADMIN_OUTPUT="$("$REPO_ROOT/agent-bridge" setup admin "$SMOKE_AGENT")"
 assert_contains "$SETUP_ADMIN_OUTPUT" "admin_agent: $SMOKE_AGENT"
-assert_contains "$SETUP_ADMIN_OUTPUT" "next_command: agent-bridge admin"
+assert_contains "$SETUP_ADMIN_OUTPUT" "next_command: agb admin"
 assert_contains "$(cat "$BRIDGE_ROSTER_LOCAL_FILE")" "BRIDGE_ADMIN_AGENT_ID=\"$SMOKE_AGENT\""
 
 ADMIN_OUTPUT="$("$REPO_ROOT/agent-bridge" admin --no-attach 2>&1)"

@@ -9,61 +9,55 @@ The primary CLI is `agent-bridge`. A bundled shorthand wrapper, `agb`, calls the
 
 This repository is designed for trusted local projects. It assumes you are intentionally granting Claude Code or Codex access to the directory where you launch them.
 
-If you hand this repository URL to another Claude or Codex agent, the expected bootstrap is simple: read `README.md`, complete the steps in **Install**, then use **Quick Start** from the target working directory.
+If you hand this repository URL to another Claude or Codex agent, the preferred bootstrap is now AI-native: the helper agent installs the bridge, bootstraps one long-lived admin role, and then hands control to that admin role.
 
-## 빠른 설치 가이드 (한국어)
+## AI-Native Install (한국어)
 
-새 컴퓨터에서 처음 시작할 때는 아래 순서만 따르면 됩니다.
+원하는 최종 상태는 이겁니다.
 
-### 1. 필수 도구 설치
+1. 사용자는 Claude Code만 설치한다.
+2. Claude Code에게 이 레포를 설치하라고 시킨다.
+3. 설치가 끝나면 Claude Code를 종료한다.
+4. 사용자는 `agb admin`만 실행한다.
+5. 이후부터는 관리자 에이전트가 나머지 온보딩과 운영을 안내한다.
 
-macOS:
+즉 사용자가 `agent-roster.local.sh`, `setup discord`, `daemon ensure`, `cron create` 같은 세부 명령을 외우는 흐름이 아니라, 관리자 에이전트 중심 운영으로 바로 넘어가는 설치를 기준으로 한다.
 
-```bash
-brew install bash tmux python shellcheck git
+### 추천 사용법
+
+새 컴퓨터에서 Claude Code를 아무 폴더에서나 열고, 아래처럼 말하면 됩니다.
+
+```text
+Install Agent Bridge from https://github.com/SYRS-AI/agent-bridge.
+
+Read the README and use the AI-native bootstrap flow.
+Create one long-lived admin role for me.
+Do the shell integration, bridge bootstrap, and daemon setup.
+Stop when the final handoff is: close this session and run `agb admin`.
+
+Do not ask me to type bridge commands manually unless you need account IDs, tokens, or channel/user IDs.
 ```
 
-Linux (Ubuntu 예시):
+설치 에이전트는 내부적으로 보통 아래 흐름을 수행하면 됩니다.
+
+1. 필수 도구 확인: `bash`, `tmux`, `python3`, `git`, 그리고 `claude` 또는 `codex`
+2. 레포 clone
+3. `./agent-bridge bootstrap ...`
+4. shell integration 반영
+5. 관리자 역할 생성 + 채널 설정 + preflight
+6. daemon ensure
+7. 마지막 handoff 안내: `agb admin`
+
+### 핵심 명령
+
+사람이 직접 브리지를 설치할 때도, `init`보다 `bootstrap`을 우선 권장합니다.
+
+예시:
 
 ```bash
-sudo apt update
-sudo apt install -y bash tmux python3 python3-venv shellcheck git
-```
-
-그리고 Claude Code 또는 Codex CLI 중 최소 하나를 설치해 둡니다.
-
-### 2. 레포 클론
-
-```bash
-git clone https://github.com/SYRS-AI/agent-bridge.git ~/agent-bridge
-cd ~/agent-bridge
-```
-
-### 3. 로컬 roster 파일 만들기
-
-```bash
-cp agent-roster.local.example.sh agent-roster.local.sh
-```
-
-최소한 아래 값들은 사용자 환경에 맞게 넣어야 합니다.
-
-- 관리자 에이전트 id
-- 사용할 engine (`claude` 또는 `codex`)
-- tmux session 이름
-- workdir 경로
-- 필요하면 Discord/Telegram 채널 metadata
-
-### 4. 관리자 에이전트 한 명 부트스트랩
-
-가장 쉬운 시작 방법은 `init`입니다.
-
-예시: Telegram 기반 관리자 에이전트 생성
-
-```bash
-./agent-bridge init \
+./agent-bridge bootstrap \
   --admin manager \
   --engine claude \
-  --session manager \
   --channels plugin:telegram \
   --allow-from <telegram-user-id> \
   --default-chat <telegram-chat-id>
@@ -72,41 +66,16 @@ cp agent-roster.local.example.sh agent-roster.local.sh
 먼저 계획만 보고 싶으면:
 
 ```bash
-./agent-bridge init --admin manager --engine claude --dry-run --json
+./agent-bridge bootstrap --admin manager --engine claude --dry-run --json
 ```
 
-### 5. 기본 점검
+bootstrap이 끝나면 handoff는 이것 하나입니다.
 
 ```bash
-./scripts/smoke-test.sh
-./agent-bridge status
-bash bridge-daemon.sh ensure
+agb admin
 ```
 
-macOS에서 백그라운드 daemon까지 붙이려면:
-
-```bash
-./scripts/install-daemon-launchagent.sh --apply --load
-```
-
-### 6. 이후 운영 방식
-
-초기 관리자 에이전트가 올라오면, 그다음부터는 사용자가 복잡한 CLI를 직접 외울 필요 없이 관리자 에이전트와 대화하면서 아래 작업을 처리하는 방향을 권장합니다.
-
-- 새 에이전트 생성
-- 에이전트 시작/중지/재시작/붙기
-- Discord/Telegram 연결
-- cron 등록 및 점검
-- task handoff / urgent / queue 확인
-
-즉, 클린 설치의 목표 상태는:
-
-1. 레포 clone
-2. `agent-bridge init`
-3. 관리자 에이전트 기동
-4. 이후에는 관리자 에이전트 중심 운영
-
-아래의 영어 Install/Quick Start 섹션은 같은 내용을 더 자세히 설명합니다.
+만약 현재 터미널이 shell integration을 아직 reload하지 않았다면, 새 shell을 열거나 `exec zsh` / `exec bash` 한 번만 한 뒤 `agb admin`을 실행하면 됩니다.
 
 Companion docs for maintainers:
 
@@ -322,13 +291,13 @@ They are currently disabled in the runtime path because
 or OSS onboarding. If Claude later supports safe custom channels without that
 prompt, the bridge can switch back to channel-based wake.
 
-### Bootstrap a manager/admin role
+### Manual bootstrap (advanced)
 
-On a fresh install, start with one manager role and let that role operate the
-rest of the bridge:
+If you are not using the AI-native installer flow above, use `bootstrap`
+instead of wiring shell integration, `init`, and daemon setup by hand.
 
 ```bash
-./agent-bridge init \
+./agent-bridge bootstrap \
   --admin manager \
   --engine claude \
   --session manager \
@@ -339,11 +308,13 @@ rest of the bridge:
 
 The bootstrap flow can:
 
+- install shell integration for `zsh` or `bash`
 - create the static role if it does not exist yet
 - scaffold the agent home from the public template
 - run channel setup for Discord and/or Telegram
 - save the chosen role as `BRIDGE_ADMIN_AGENT_ID`
 - run the same `setup agent` preflight used by later manager operations
+- hand off to the admin role with `agb admin`
 
 Use `--dry-run --json` first if you want to inspect the planned changes without
 writing files.
@@ -367,6 +338,12 @@ Then run the guided setup:
 ./agent-bridge agent create reviewer --engine claude
 ./agent-bridge agent start reviewer --dry-run
 ./agent-bridge setup admin tester
+```
+
+After `setup admin`, the expected handoff command is:
+
+```bash
+agb admin
 ```
 
 `setup discord` writes the runtime Discord files into the agent workdir:

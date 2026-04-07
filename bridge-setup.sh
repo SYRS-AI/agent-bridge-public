@@ -598,7 +598,7 @@ run_admin() {
   printf 'workdir: %s\n' "$(bridge_agent_workdir "$agent")"
   bridge_setup_write_local_scalar "BRIDGE_ADMIN_AGENT_ID" "$agent"
   printf 'saved_in: %s\n' "$BRIDGE_ROSTER_LOCAL_FILE"
-  echo "next_command: agent-bridge admin"
+  echo "next_command: agb admin"
 }
 
 subcommand="${1:-}"
