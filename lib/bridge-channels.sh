@@ -265,12 +265,27 @@ PY
 bridge_write_idle_ready_agents() {
   local file="$1"
   local agent=""
+  local session=""
+  local engine=""
 
   : >"$file"
   for agent in "${BRIDGE_AGENT_IDS[@]}"; do
-    [[ "$(bridge_agent_engine "$agent")" == "claude" ]] || continue
     bridge_agent_is_active "$agent" || continue
-    bridge_agent_idle_marker_exists "$agent" || continue
+    engine="$(bridge_agent_engine "$agent")"
+    session="$(bridge_agent_session "$agent")"
+
+    case "$engine" in
+      claude)
+        bridge_agent_idle_marker_exists "$agent" || continue
+        ;;
+      codex)
+        bridge_tmux_session_has_prompt "$session" "$engine" || continue
+        ;;
+      *)
+        continue
+        ;;
+    esac
+
     printf '%s\n' "$agent" >>"$file"
   done
 }

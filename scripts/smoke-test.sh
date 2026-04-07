@@ -593,6 +593,35 @@ CODEX_STOP_ACTIVE_OUTPUT="$(printf '%s' '{"stop_hook_active": true}' | BRIDGE_AG
 assert_contains "$CODEX_STOP_ACTIVE_OUTPUT" "{}"
 python3 "$REPO_ROOT/bridge-queue.py" done "$CODEX_STOP_TASK_ID" --agent "$SMOKE_AGENT" --note "codex hook smoke cleanup" >/dev/null
 
+log "nudging prompt-ready Codex sessions without waiting for idle threshold"
+tmux kill-session -t "$CODEX_CLI_SESSION" >/dev/null 2>&1 || true
+tmux new-session -d -s "$CODEX_CLI_SESSION" "$BASH4_BIN -lc 'printf \"› ready\\n\"; sleep 30'"
+bash "$REPO_ROOT/bridge-sync.sh" >/dev/null
+CODEX_READY_TASK_OUTPUT="$(python3 "$REPO_ROOT/bridge-queue.py" create --to "$CODEX_CLI_AGENT" --title "codex ready pickup" --body "pickup" --from "$REQUESTER_AGENT")"
+assert_contains "$CODEX_READY_TASK_OUTPUT" "created task #"
+CODEX_READY_TASK_ID="$(printf '%s\n' "$CODEX_READY_TASK_OUTPUT" | sed -n 's/^created task #\([0-9][0-9]*\).*/\1/p' | head -n1)"
+[[ -n "$CODEX_READY_TASK_ID" ]] || die "expected codex ready task id"
+CODEX_READY_OUTPUT="$("$BASH4_BIN" -lc '
+  source "'"$REPO_ROOT"'/bridge-lib.sh"
+  bridge_load_roster
+  snapshot_file="$(mktemp)"
+  ready_file="$(mktemp)"
+  trap "rm -f \"$snapshot_file\" \"$ready_file\"" EXIT
+  bridge_write_agent_snapshot "$snapshot_file"
+  bridge_write_idle_ready_agents "$ready_file"
+  python3 "'"$REPO_ROOT"'/bridge-queue.py" daemon-step \
+    --snapshot "$snapshot_file" \
+    --lease-seconds "$BRIDGE_TASK_LEASE_SECONDS" \
+    --heartbeat-window "$BRIDGE_TASK_HEARTBEAT_WINDOW_SECONDS" \
+    --idle-threshold 9999 \
+    --nudge-cooldown "$BRIDGE_TASK_NUDGE_COOLDOWN_SECONDS" \
+    --zombie-threshold "${BRIDGE_ZOMBIE_NUDGE_THRESHOLD:-10}" \
+    --ready-agents-file "$ready_file"
+')"
+assert_contains "$CODEX_READY_OUTPUT" "$CODEX_CLI_AGENT"
+python3 "$REPO_ROOT/bridge-queue.py" done "$CODEX_READY_TASK_ID" --agent "$CODEX_CLI_AGENT" --note "codex ready smoke cleanup" >/dev/null
+tmux kill-session -t "$CODEX_CLI_SESSION" >/dev/null 2>&1 || true
+
 log "creating a new static agent from the public template"
 CREATE_DRY_RUN_OUTPUT="$("$REPO_ROOT/agent-bridge" agent create "$CREATED_AGENT" --engine claude --session "$CREATED_SESSION" --always-on --dry-run)"
 assert_contains "$CREATE_DRY_RUN_OUTPUT" "agent: $CREATED_AGENT"
