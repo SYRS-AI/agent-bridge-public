@@ -226,6 +226,32 @@ They are currently disabled in the runtime path because
 or OSS onboarding. If Claude later supports safe custom channels without that
 prompt, the bridge can switch back to channel-based wake.
 
+### Bootstrap a manager/admin role
+
+On a fresh install, start with one manager role and let that role operate the
+rest of the bridge:
+
+```bash
+./agent-bridge init \
+  --admin manager \
+  --engine claude \
+  --session manager \
+  --channels plugin:telegram \
+  --allow-from <telegram-user-id> \
+  --default-chat <telegram-chat-id>
+```
+
+The bootstrap flow can:
+
+- create the static role if it does not exist yet
+- scaffold the agent home from the public template
+- run channel setup for Discord and/or Telegram
+- save the chosen role as `BRIDGE_ADMIN_AGENT_ID`
+- run the same `setup agent` preflight used by later manager operations
+
+Use `--dry-run --json` first if you want to inspect the planned changes without
+writing files.
+
 ### Onboard a Discord-backed agent
 
 If an agent should read and reply in Discord, set its primary channel metadata

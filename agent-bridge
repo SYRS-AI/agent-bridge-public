@@ -15,6 +15,7 @@ Usage:
   $CLI_NAME status [--watch] [--refresh <seconds>] [--open-limit <count>] [--all-agents]
   $CLI_NAME list
   $CLI_NAME admin [--replace] [--continue|--no-continue] [--no-attach] [--no-project-skill]
+  $CLI_NAME init [--admin <agent>] [--engine claude|codex] [--session <name>] [--channels <csv>] [--dry-run] [--json]
   $CLI_NAME agent <create|list|show|start|stop|restart|attach> ...
   $CLI_NAME kill <number|all>
   $CLI_NAME attach [number|name]
@@ -79,6 +80,7 @@ Examples:
   $CLI_NAME status
   $CLI_NAME status --watch
   $CLI_NAME admin
+  $CLI_NAME init --admin manager --engine claude --channels plugin:telegram
   $CLI_NAME list
   $CLI_NAME kill 1
   $CLI_NAME kill all
@@ -290,6 +292,10 @@ if [[ $# -gt 0 ]]; then
       done
 
       exec "$BRIDGE_BASH_BIN" "$SCRIPT_DIR/agent-bridge" "--$ADMIN_ENGINE" --name "$ADMIN_AGENT" --workdir "$ADMIN_WORKDIR" --loop "$@"
+      ;;
+    init)
+      shift
+      exec "$BRIDGE_BASH_BIN" "$SCRIPT_DIR/bridge-init.sh" "$@"
       ;;
     list)
       if [[ $# -ne 1 ]]; then

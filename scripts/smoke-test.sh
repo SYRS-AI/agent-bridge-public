@@ -101,6 +101,8 @@ CODEX_CLI_SESSION="codex-cli-session-$$"
 WORKTREE_AGENT="worker-reuse-$$"
 CREATED_AGENT="created-agent-$$"
 CREATED_SESSION="created-session-$$"
+INIT_AGENT="bootstrap-admin-$$"
+INIT_SESSION="bootstrap-session-$$"
 BROKEN_CHANNEL_AGENT="broken-channel-$$"
 WORKDIR="$TMP_ROOT/workdir"
 REQUESTER_WORKDIR="$TMP_ROOT/requester-workdir"
@@ -118,8 +120,19 @@ FAKE_TELEGRAM_PORT_FILE="$TMP_ROOT/fake-telegram.port"
 FAKE_TELEGRAM_REQUESTS="$TMP_ROOT/fake-telegram-requests.jsonl"
 FAKE_TELEGRAM_PID=""
 CODEX_HOOKS_FILE="$TMP_ROOT/codex-home/.codex/hooks.json"
+LIVE_ROSTER_FILE="$HOME/.agent-bridge/agent-roster.local.sh"
+LIVE_ROSTER_BACKUP="$TMP_ROOT/live-agent-roster.local.sh.bak"
+LIVE_ROSTER_PRESENT=0
+
+if [[ -f "$LIVE_ROSTER_FILE" ]]; then
+  cp "$LIVE_ROSTER_FILE" "$LIVE_ROSTER_BACKUP"
+  LIVE_ROSTER_PRESENT=1
+fi
+
+[[ "$BRIDGE_ROSTER_LOCAL_FILE" != "$LIVE_ROSTER_FILE" ]] || die "smoke roster must not target the live roster"
 
 cleanup() {
+  local status=$?
   bash "$REPO_ROOT/bridge-daemon.sh" stop >/dev/null 2>&1 || true
   tmux kill-session -t "$SESSION_NAME" >/dev/null 2>&1 || true
   tmux kill-session -t "$REQUESTER_SESSION" >/dev/null 2>&1 || true
@@ -136,7 +149,13 @@ cleanup() {
     kill "$FAKE_TELEGRAM_PID" >/dev/null 2>&1 || true
     wait "$FAKE_TELEGRAM_PID" >/dev/null 2>&1 || true
   fi
+  if [[ "$LIVE_ROSTER_PRESENT" == "1" ]] && ! cmp -s "$LIVE_ROSTER_BACKUP" "$LIVE_ROSTER_FILE"; then
+    cp "$LIVE_ROSTER_BACKUP" "$LIVE_ROSTER_FILE"
+    printf '[smoke][error] live roster changed during smoke; restored backup: %s\n' "$LIVE_ROSTER_FILE" >&2
+    status=1
+  fi
   rm -rf "$TMP_ROOT"
+  exit "$status"
 }
 trap cleanup EXIT
 
@@ -758,6 +777,44 @@ CREATED_AGENT_START_OUTPUT="$("$REPO_ROOT/agent-bridge" agent start "$CREATED_AG
 assert_contains "$CREATED_AGENT_START_OUTPUT" "session=$CREATED_SESSION"
 CREATED_AGENT_RESTART_OUTPUT="$("$REPO_ROOT/agent-bridge" agent restart "$CREATED_AGENT" --dry-run)"
 assert_contains "$CREATED_AGENT_RESTART_OUTPUT" "session=$CREATED_SESSION"
+
+log "bootstrapping a manager role with init"
+INIT_DRY_RUN_JSON="$("$REPO_ROOT/agent-bridge" init --admin "$INIT_AGENT" --engine claude --session "$INIT_SESSION" --channels plugin:telegram --dry-run --json 2>&1)" || die "init dry-run failed: $INIT_DRY_RUN_JSON"
+python3 - "$INIT_DRY_RUN_JSON" "$INIT_AGENT" "$INIT_SESSION" <<'PY'
+import json
+import sys
+
+payload = json.loads(sys.argv[1])
+agent = sys.argv[2]
+session = sys.argv[3]
+
+assert payload["admin"] == agent
+assert payload["session"] == session
+assert payload["dry_run"] is True
+assert payload["created"] is True
+assert payload["preflight"] == "dry-run"
+assert payload["warnings"] == []
+PY
+INIT_OUTPUT="$("$REPO_ROOT/agent-bridge" init --admin "$INIT_AGENT" --engine claude --session "$INIT_SESSION" --channels plugin:telegram --allow-from 123456789 --default-chat 123456789 --openclaw-account smoke --openclaw-config "$TMP_ROOT/openclaw.json" --api-base-url "$FAKE_TELEGRAM_API_BASE" 2>&1)" || die "init actual failed: $INIT_OUTPUT"
+assert_contains "$INIT_OUTPUT" "admin_agent: $INIT_AGENT"
+assert_contains "$INIT_OUTPUT" "channel_setup: ok"
+assert_contains "$INIT_OUTPUT" "preflight: ok"
+assert_contains "$INIT_OUTPUT" "admin_saved: yes"
+assert_contains "$INIT_OUTPUT" "next_command: agent-bridge admin"
+[[ -f "$BRIDGE_AGENT_HOME_ROOT/$INIT_AGENT/.telegram/.env" ]] || die "init did not create telegram env"
+[[ -f "$BRIDGE_AGENT_HOME_ROOT/$INIT_AGENT/.telegram/access.json" ]] || die "init did not create telegram access"
+assert_contains "$(cat "$BRIDGE_ROSTER_LOCAL_FILE")" "BRIDGE_ADMIN_AGENT_ID=\"$INIT_AGENT\""
+INIT_SHOW_JSON="$("$REPO_ROOT/agent-bridge" agent show "$INIT_AGENT" --json)"
+python3 - "$INIT_SHOW_JSON" "$INIT_AGENT" <<'PY'
+import json
+import sys
+
+payload = json.loads(sys.argv[1])
+agent = sys.argv[2]
+assert payload["agent"] == agent
+assert payload["engine"] == "claude"
+assert payload["channels"]["required"] == "plugin:telegram"
+PY
 
 log "ensuring static Claude launch command is bridge-controlled"
 CLAUDE_LAUNCH_NO_CONTINUE="$("$BASH4_BIN" -c '
