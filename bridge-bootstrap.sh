@@ -24,7 +24,7 @@ Bootstrap options:
 Everything else is forwarded to \`agent-bridge init\`.
 
 Examples:
-  $(basename "$0") --admin manager --engine claude --channels plugin:telegram --allow-from 123456789 --default-chat 123456789
+  $(basename "$0") --admin manager --engine claude --channels plugin:telegram@claude-plugins-official --allow-from 123456789 --default-chat 123456789
   $(basename "$0") --admin manager --engine claude --dry-run --json
 EOF
 }

@@ -82,6 +82,8 @@ export BRIDGE_RUNTIME_MEMORY_DIR="$BRIDGE_RUNTIME_ROOT/memory"
 export BRIDGE_RUNTIME_CREDENTIALS_DIR="$BRIDGE_RUNTIME_ROOT/credentials"
 export BRIDGE_RUNTIME_SECRETS_DIR="$BRIDGE_RUNTIME_ROOT/secrets"
 export BRIDGE_RUNTIME_CONFIG_FILE="$BRIDGE_RUNTIME_ROOT/bridge-config.json"
+export BRIDGE_CLAUDE_INSTALLED_PLUGINS_FILE="$TMP_ROOT/installed_plugins.json"
+export BRIDGE_CLAUDE_CHANNELS_HOME="$TMP_ROOT/claude-channels"
 export BRIDGE_WEBHOOK_PORT_RANGE_START=9301
 export BRIDGE_WEBHOOK_PORT_RANGE_END=9399
 
@@ -122,6 +124,7 @@ FAKE_DISCORD_PID=""
 FAKE_TELEGRAM_PORT_FILE="$TMP_ROOT/fake-telegram.port"
 FAKE_TELEGRAM_REQUESTS="$TMP_ROOT/fake-telegram-requests.jsonl"
 FAKE_TELEGRAM_PID=""
+TOKENFILE_ENV="$TMP_ROOT/tokenfile-telegram.env"
 CODEX_HOOKS_FILE="$TMP_ROOT/codex-home/.codex/hooks.json"
 LIVE_ROSTER_FILE="$HOME/.agent-bridge/agent-roster.local.sh"
 LIVE_ROSTER_BACKUP="$TMP_ROOT/live-agent-roster.local.sh.bak"
@@ -276,6 +279,35 @@ cat >"$TMP_ROOT/openclaw.json" <<'EOF'
     }
   }
 }
+EOF
+
+cat >"$BRIDGE_CLAUDE_INSTALLED_PLUGINS_FILE" <<'EOF'
+{
+  "version": 1,
+  "plugins": {
+    "telegram@claude-plugins-official": [
+      {
+        "scope": "user",
+        "installPath": "/tmp/telegram",
+        "version": "1.0.0"
+      }
+    ],
+    "discord@claude-plugins-official": [
+      {
+        "scope": "user",
+        "installPath": "/tmp/discord",
+        "version": "1.0.0"
+      }
+    ]
+  }
+}
+EOF
+mkdir -p "$BRIDGE_CLAUDE_CHANNELS_HOME/telegram" "$BRIDGE_CLAUDE_CHANNELS_HOME/discord"
+cat >"$BRIDGE_CLAUDE_CHANNELS_HOME/telegram/.env" <<'EOF'
+TELEGRAM_BOT_TOKEN=plugin-telegram-token
+EOF
+cat >"$BRIDGE_CLAUDE_CHANNELS_HOME/discord/.env" <<'EOF'
+DISCORD_BOT_TOKEN=plugin-discord-token
 EOF
 
 log "starting fake Discord API"
@@ -754,13 +786,13 @@ assert_contains "$CREATE_DRY_RUN_OUTPUT" "agent: $CREATED_AGENT"
 assert_contains "$CREATE_DRY_RUN_OUTPUT" "dry_run: yes"
 CREATE_JSON_OUTPUT="$("$REPO_ROOT/agent-bridge" agent create "$CREATED_AGENT" --engine claude --session "$CREATED_SESSION" --channels plugin:telegram --dry-run --json)"
 assert_contains "$CREATE_JSON_OUTPUT" "\"agent\": \"$CREATED_AGENT\""
-assert_contains "$CREATE_JSON_OUTPUT" "\"channels\": \"plugin:telegram\""
+assert_contains "$CREATE_JSON_OUTPUT" "\"channels\": \"plugin:telegram@claude-plugins-official\""
 CREATE_OUTPUT="$("$REPO_ROOT/agent-bridge" agent create "$CREATED_AGENT" --engine claude --session "$CREATED_SESSION" --role "Smoke created role" --channels plugin:telegram)"
 assert_contains "$CREATE_OUTPUT" "create: ok"
 assert_contains "$CREATE_OUTPUT" "start_dry_run: ok"
 assert_contains "$(cat "$BRIDGE_ROSTER_LOCAL_FILE")" "BRIDGE_AGENT_ENGINE[\"$CREATED_AGENT\"]=claude"
 assert_contains "$(cat "$BRIDGE_ROSTER_LOCAL_FILE")" "BRIDGE_AGENT_CHANNELS[\"$CREATED_AGENT\"]="
-assert_contains "$(cat "$BRIDGE_ROSTER_LOCAL_FILE")" "plugin:telegram"
+assert_contains "$(cat "$BRIDGE_ROSTER_LOCAL_FILE")" "plugin:telegram@claude-plugins-official"
 [[ -f "$BRIDGE_AGENT_HOME_ROOT/$CREATED_AGENT/CLAUDE.md" ]] || die "agent create did not scaffold CLAUDE.md"
 [[ -f "$BRIDGE_AGENT_HOME_ROOT/$CREATED_AGENT/SOUL.md" ]] || die "agent create did not scaffold SOUL.md"
 [[ -f "$BRIDGE_AGENT_HOME_ROOT/$CREATED_AGENT/TOOLS.md" ]] || die "agent create did not scaffold TOOLS.md"
@@ -794,7 +826,7 @@ assert isinstance(list_payload, list) and list_payload, "agent list json should 
 created = next((row for row in list_payload if row["agent"] == created_agent), None)
 assert created is not None, "created agent missing from list json"
 assert created["engine"] == "claude"
-assert created["channels"]["required"] == "plugin:telegram"
+assert created["channels"]["required"] == "plugin:telegram@claude-plugins-official"
 assert created["queue"]["queued"] == 0
 assert any(row["agent"] == admin_agent and row["admin"] for row in list_payload), "admin agent missing admin=true"
 
@@ -805,7 +837,7 @@ assert show_payload["notify"]["status"] == "miss"
 PY
 CREATED_START_DRY_RUN="$("$REPO_ROOT/bridge-start.sh" "$CREATED_AGENT" --dry-run)"
 assert_contains "$CREATED_START_DRY_RUN" "session=$CREATED_SESSION"
-assert_contains "$CREATED_START_DRY_RUN" "channels=plugin:telegram"
+assert_contains "$CREATED_START_DRY_RUN" "channels=plugin:telegram@claude-plugins-official"
 assert_contains "$CREATED_START_DRY_RUN" "channel_status=ok"
 assert_contains "$CREATED_START_DRY_RUN" "bridge-run.sh $CREATED_AGENT"
 CREATED_AGENT_LAUNCH="$("$BASH4_BIN" -c '
@@ -814,7 +846,7 @@ CREATED_AGENT_LAUNCH="$("$BASH4_BIN" -c '
   bridge_agent_launch_cmd "'"$CREATED_AGENT"'"
 ')"
 assert_contains "$CREATED_AGENT_LAUNCH" "TELEGRAM_STATE_DIR=$BRIDGE_AGENT_HOME_ROOT/$CREATED_AGENT/.telegram"
-assert_contains "$CREATED_AGENT_LAUNCH" "claude --dangerously-skip-permissions --name $CREATED_AGENT --channels plugin:telegram"
+assert_contains "$CREATED_AGENT_LAUNCH" "claude --dangerously-skip-permissions --name $CREATED_AGENT --channels plugin:telegram@claude-plugins-official"
 CREATED_AGENT_START_OUTPUT="$("$REPO_ROOT/agent-bridge" agent start "$CREATED_AGENT" --dry-run)"
 assert_contains "$CREATED_AGENT_START_OUTPUT" "session=$CREATED_SESSION"
 CREATED_AGENT_RESTART_OUTPUT="$("$REPO_ROOT/agent-bridge" agent restart "$CREATED_AGENT" --dry-run)"
@@ -855,7 +887,7 @@ payload = json.loads(sys.argv[1])
 agent = sys.argv[2]
 assert payload["agent"] == agent
 assert payload["engine"] == "claude"
-assert payload["channels"]["required"] == "plugin:telegram"
+assert payload["channels"]["required"] == "plugin:telegram@claude-plugins-official"
 PY
 
 log "bootstrapping a manager role with bootstrap"
@@ -901,8 +933,36 @@ payload = json.loads(sys.argv[1])
 agent = sys.argv[2]
 assert payload["agent"] == agent
 assert payload["engine"] == "claude"
-assert payload["channels"]["required"] == "plugin:telegram"
+assert payload["channels"]["required"] == "plugin:telegram@claude-plugins-official"
 PY
+
+log "surfacing bootstrap failure output and parsing tokenFile dotenv values"
+cat >"$TOKENFILE_ENV" <<'EOF'
+TELEGRAM_BOT_TOKEN=dotenv-telegram-token
+EOF
+python3 - "$TMP_ROOT/openclaw.json" "$TOKENFILE_ENV" <<'PY'
+from pathlib import Path
+import json
+import sys
+
+path = Path(sys.argv[1])
+payload = json.loads(path.read_text(encoding="utf-8"))
+payload["channels"]["telegram"]["accounts"]["dotenv"] = {"tokenFile": sys.argv[2]}
+path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+PY
+SETUP_TELEGRAM_DOTENV_OUTPUT="$("$BASH4_BIN" "$REPO_ROOT/bridge-setup.sh" telegram "$CREATED_AGENT" --channel-account dotenv --runtime-config "$TMP_ROOT/openclaw.json" --allow-from 123456789 --default-chat 123456789 --skip-validate --skip-send-test --yes 2>&1)"
+assert_contains "$SETUP_TELEGRAM_DOTENV_OUTPUT" "token_source: channel:dotenv"
+assert_contains "$(cat "$BRIDGE_AGENT_HOME_ROOT/$CREATED_AGENT/.telegram/.env")" "TELEGRAM_BOT_TOKEN=dotenv-telegram-token"
+
+BOOTSTRAP_FAIL_HOME="$TMP_ROOT/bootstrap-fail-home"
+mkdir -p "$BOOTSTRAP_FAIL_HOME"
+BOOTSTRAP_FAIL_OUTPUT="$(HOME="$BOOTSTRAP_FAIL_HOME" BRIDGE_CLAUDE_CHANNELS_HOME="$TMP_ROOT/empty-claude-channels" "$REPO_ROOT/agent-bridge" bootstrap --admin bootstrap-fail --engine claude --session bootstrap-fail --channels plugin:telegram --allow-from 123456789 --default-chat 123456789 --rcfile "$TMP_ROOT/bootstrap-fail.rc" --skip-daemon --skip-launchagent 2>&1 || true)"
+assert_contains "$BOOTSTRAP_FAIL_OUTPUT" "error: Telegram bot token is required."
+assert_contains "$BOOTSTRAP_FAIL_OUTPUT" "telegram bootstrap failed"
+
+SETUP_TELEGRAM_HELP_OUTPUT="$("$BASH4_BIN" "$REPO_ROOT/bridge-setup.sh" telegram --help 2>&1)"
+assert_contains "$SETUP_TELEGRAM_HELP_OUTPUT" "Usage:"
+assert_contains "$SETUP_TELEGRAM_HELP_OUTPUT" "telegram <agent>"
 
 log "ensuring static Claude launch command is bridge-controlled"
 CLAUDE_LAUNCH_NO_CONTINUE="$("$BASH4_BIN" -c '

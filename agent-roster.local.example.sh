@@ -61,8 +61,8 @@ BRIDGE_AGENT_SESSION["codex-developer"]="codex-developer"
 # The channel id is still useful for Discord wake relay / metadata.
 # Optional: declare required Claude plugin channels separately from the raw
 # launch command so the bridge can validate and inject them consistently.
-# BRIDGE_AGENT_CHANNELS["tester"]="plugin:discord"
-# BRIDGE_AGENT_CHANNELS["developer"]="plugin:telegram"
+# BRIDGE_AGENT_CHANNELS["tester"]="plugin:discord@claude-plugins-official"
+# BRIDGE_AGENT_CHANNELS["developer"]="plugin:telegram@claude-plugins-official"
 #
 # Optional/backlog: dormant custom channel port. The runtime path does not use
 # this today because development channels require an interactive trust prompt.

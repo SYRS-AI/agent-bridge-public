@@ -42,7 +42,7 @@ Options:
 Examples:
   $(basename "$0") create reviewer --engine claude
   $(basename "$0") create coder --engine codex --session codex-main --always-on
-  $(basename "$0") create ops --engine claude --channels plugin:discord --discord-channel 123456789012345678 --json
+  $(basename "$0") create ops --engine claude --channels plugin:discord@claude-plugins-official --discord-channel 123456789012345678 --json
   $(basename "$0") list --json
   $(basename "$0") show reviewer --json
   $(basename "$0") start reviewer --dry-run

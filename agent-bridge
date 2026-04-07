@@ -81,8 +81,8 @@ Examples:
   $CLI_NAME status
   $CLI_NAME status --watch
   $CLI_NAME admin
-  $CLI_NAME bootstrap --admin manager --engine claude --channels plugin:telegram
-  $CLI_NAME init --admin manager --engine claude --channels plugin:telegram
+  $CLI_NAME bootstrap --admin manager --engine claude --channels plugin:telegram@claude-plugins-official
+  $CLI_NAME init --admin manager --engine claude --channels plugin:telegram@claude-plugins-official
   $CLI_NAME list
   $CLI_NAME kill 1
   $CLI_NAME kill all

@@ -48,6 +48,11 @@ Do not ask me to type bridge commands manually unless you need account IDs, toke
 6. daemon ensure
 7. 마지막 handoff 안내: `agb admin`
 
+When a channel plugin is already configured in Claude Code, bootstrap can reuse
+the plugin token from `~/.claude/channels/<kind>/.env`. Otherwise, pass
+`--channel-account <name>` or let the installer run interactively and paste the
+token when prompted.
+
 ### 핵심 명령
 
 사람이 직접 브리지를 설치할 때도, `init`보다 `bootstrap`을 우선 권장합니다.
@@ -58,7 +63,7 @@ Do not ask me to type bridge commands manually unless you need account IDs, toke
 ./agent-bridge bootstrap \
   --admin manager \
   --engine claude \
-  --channels plugin:telegram \
+  --channels plugin:telegram@claude-plugins-official \
   --allow-from <telegram-user-id> \
   --default-chat <telegram-chat-id>
 ```
@@ -76,6 +81,13 @@ agb admin
 ```
 
 만약 현재 터미널이 shell integration을 아직 reload하지 않았다면, 새 shell을 열거나 `exec zsh` / `exec bash` 한 번만 한 뒤 `agb admin`을 실행하면 됩니다.
+
+For Claude plugin-backed channels, the explicit form is safest:
+
+- `plugin:telegram@claude-plugins-official`
+- `plugin:discord@claude-plugins-official`
+
+The bridge will try to auto-qualify a bare value like `plugin:telegram` when it can resolve the installed plugin id from `~/.claude/plugins/installed_plugins.json`.
 
 Companion docs for maintainers:
 
@@ -301,7 +313,7 @@ instead of wiring shell integration, `init`, and daemon setup by hand.
   --admin manager \
   --engine claude \
   --session manager \
-  --channels plugin:telegram \
+  --channels plugin:telegram@claude-plugins-official \
   --allow-from <telegram-user-id> \
   --default-chat <telegram-chat-id>
 ```
@@ -325,7 +337,7 @@ If an agent should read and reply in Discord, set its primary channel metadata
 in `agent-roster.local.sh` first:
 
 ```bash
-BRIDGE_AGENT_CHANNELS["tester"]="plugin:discord"
+BRIDGE_AGENT_CHANNELS["tester"]="plugin:discord@claude-plugins-official"
 BRIDGE_AGENT_DISCORD_CHANNEL_ID["tester"]="<channel-id>"
 ```
 

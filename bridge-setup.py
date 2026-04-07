@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import getpass
 import json
+import os
 import re
 import sys
 from pathlib import Path
@@ -128,6 +129,31 @@ def load_channel_accounts(config_path: Path, kind: str) -> dict[str, dict[str, A
     return {str(name): cfg for name, cfg in accounts.items() if isinstance(cfg, dict)}
 
 
+def extract_token_from_text(text: str, kind: str) -> str:
+    stripped = text.strip()
+    if not stripped:
+        return ""
+
+    if kind == "telegram":
+        keys = ("TELEGRAM_BOT_TOKEN", "BOT_TOKEN", "TOKEN")
+    elif kind == "discord":
+        keys = ("DISCORD_BOT_TOKEN", "BOT_TOKEN", "TOKEN")
+    else:
+        keys = ("TOKEN",)
+
+    lines = [line.strip() for line in text.splitlines() if line.strip() and not line.strip().startswith("#")]
+    for key in keys:
+        prefix = f"{key}="
+        for line in lines:
+            if line.startswith(prefix):
+                return line.split("=", 1)[1].strip().strip("'").strip('"')
+
+    if len(lines) == 1 and "=" not in lines[0]:
+        return lines[0]
+
+    return ""
+
+
 def load_account_token(config_path: Path, kind: str, account: str) -> str:
     accounts = load_channel_accounts(config_path, kind)
     account_cfg = accounts.get(account)
@@ -140,10 +166,20 @@ def load_account_token(config_path: Path, kind: str, account: str) -> str:
     if token_file:
         token_path = Path(token_file).expanduser()
         if token_path.exists():
-            token = token_path.read_text(encoding="utf-8").strip()
+            token = extract_token_from_text(token_path.read_text(encoding="utf-8"), kind)
             if token:
                 return token
     raise SetupError(f"Configured {kind} account token is empty: {account}")
+
+
+def load_claude_plugin_channel_token(kind: str) -> str:
+    channels_home = Path(
+        os.environ.get("BRIDGE_CLAUDE_CHANNELS_HOME", str(Path.home() / ".claude" / "channels"))
+    ).expanduser()
+    env_path = channels_home / kind / ".env"
+    if not env_path.exists():
+        return ""
+    return extract_token_from_text(env_path.read_text(encoding="utf-8"), kind)
 
 
 def candidate_channel_accounts(agent: str, accounts: dict[str, dict[str, Any]]) -> list[str]:
@@ -329,70 +365,70 @@ def build_access_payload(existing: dict[str, Any], channels: list[str], allow_fr
     return payload
 
 
-def print_result(result: dict[str, Any]) -> None:
-    print(f"agent: {result['agent']}")
-    print(f"discord_dir: {result['discord_dir']}")
-    print(f"env_file: {result['env_file']}")
-    print(f"access_file: {result['access_file']}")
-    print(f"token_source: {result['token_source']}")
-    print(f"channels: {', '.join(result['channels'])}")
+def print_result(result: dict[str, Any], *, stream: Any = sys.stdout) -> None:
+    print(f"agent: {result['agent']}", file=stream)
+    print(f"discord_dir: {result['discord_dir']}", file=stream)
+    print(f"env_file: {result['env_file']}", file=stream)
+    print(f"access_file: {result['access_file']}", file=stream)
+    print(f"token_source: {result['token_source']}", file=stream)
+    print(f"channels: {', '.join(result['channels'])}", file=stream)
     if result["allow_from"]:
-        print(f"allow_from: {', '.join(result['allow_from'])}")
+        print(f"allow_from: {', '.join(result['allow_from'])}", file=stream)
     else:
-        print("allow_from: (none)")
-    print(f"require_mention: {'yes' if result['require_mention'] else 'no'}")
-    print(f"write_status: {result['write_status']}")
+        print("allow_from: (none)", file=stream)
+    print(f"require_mention: {'yes' if result['require_mention'] else 'no'}", file=stream)
+    print(f"write_status: {result['write_status']}", file=stream)
 
     validation = result.get("validation") or {}
-    print(f"validation: {validation.get('status', 'skipped')}")
+    print(f"validation: {validation.get('status', 'skipped')}", file=stream)
     if validation.get("bot"):
         bot = validation["bot"]
-        print(f"bot: {bot.get('username', '')} ({bot.get('id', '')})")
+        print(f"bot: {bot.get('username', '')} ({bot.get('id', '')})", file=stream)
     for channel in validation.get("channels") or []:
         line = f"channel {channel['id']}: read={channel.get('read', '-')}"
         send_status = channel.get("send")
         if send_status:
             line += f" send={send_status}"
-        print(line)
+        print(line, file=stream)
 
     for warning in result.get("warnings") or []:
-        print(f"warning: {warning}")
+        print(f"warning: {warning}", file=stream)
 
     if result.get("error"):
-        print(f"error: {result['error']}")
+        print(f"error: {result['error']}", file=stream)
 
 
-def print_telegram_result(result: dict[str, Any]) -> None:
-    print(f"agent: {result['agent']}")
-    print(f"telegram_dir: {result['telegram_dir']}")
-    print(f"env_file: {result['env_file']}")
-    print(f"access_file: {result['access_file']}")
-    print(f"token_source: {result['token_source']}")
+def print_telegram_result(result: dict[str, Any], *, stream: Any = sys.stdout) -> None:
+    print(f"agent: {result['agent']}", file=stream)
+    print(f"telegram_dir: {result['telegram_dir']}", file=stream)
+    print(f"env_file: {result['env_file']}", file=stream)
+    print(f"access_file: {result['access_file']}", file=stream)
+    print(f"token_source: {result['token_source']}", file=stream)
     if result["allow_from"]:
-        print(f"allow_from: {', '.join(result['allow_from'])}")
+        print(f"allow_from: {', '.join(result['allow_from'])}", file=stream)
     else:
-        print("allow_from: (none)")
+        print("allow_from: (none)", file=stream)
     if result["default_chat"]:
-        print(f"default_chat: {result['default_chat']}")
+        print(f"default_chat: {result['default_chat']}", file=stream)
     else:
-        print("default_chat: (unset)")
-    print(f"write_status: {result['write_status']}")
+        print("default_chat: (unset)", file=stream)
+    print(f"write_status: {result['write_status']}", file=stream)
 
     validation = result.get("validation") or {}
-    print(f"validation: {validation.get('status', 'skipped')}")
+    print(f"validation: {validation.get('status', 'skipped')}", file=stream)
     if validation.get("bot"):
         bot = validation["bot"]
-        print(f"bot: {bot.get('username', '')} ({bot.get('id', '')})")
+        print(f"bot: {bot.get('username', '')} ({bot.get('id', '')})", file=stream)
     if validation.get("test_chat_id"):
-        print(f"test_chat_id: {validation['test_chat_id']}")
+        print(f"test_chat_id: {validation['test_chat_id']}", file=stream)
     if validation.get("send"):
-        print(f"send: {validation['send']}")
+        print(f"send: {validation['send']}", file=stream)
 
     for warning in result.get("warnings") or []:
-        print(f"warning: {warning}")
+        print(f"warning: {warning}", file=stream)
 
     if result.get("error"):
-        print(f"error: {result['error']}")
+        print(f"error: {result['error']}", file=stream)
 
 
 def cmd_discord(args: argparse.Namespace) -> int:
@@ -428,9 +464,13 @@ def cmd_discord(args: argparse.Namespace) -> int:
         elif inspected["token"]:
             token = inspected["token"]
             token_source = "existing:.discord/.env"
-        elif interactive and accounts:
+        elif accounts:
             candidates = candidate_channel_accounts(args.agent, accounts)
-            if candidates:
+            if candidates and not interactive:
+                choice = candidates[0]
+                token = load_account_token(Path(args.runtime_config), "discord", choice)
+                token_source = f"channel:{choice}"
+            elif interactive and candidates:
                 default_account = candidates[0]
                 choice = prompt_text(
                     "Discord channel account to import (enter 'skip' to paste manually)",
@@ -439,6 +479,10 @@ def cmd_discord(args: argparse.Namespace) -> int:
                 if choice.lower() not in {"skip", "none", "manual"}:
                     token = load_account_token(Path(args.runtime_config), "discord", choice)
                     token_source = f"channel:{choice}"
+        elif not token:
+            token = load_claude_plugin_channel_token("discord")
+            if token:
+                token_source = "claude-plugin:.claude/channels/discord/.env"
 
         if not token and interactive:
             token = prompt_text("Discord bot token", secret=True)
@@ -516,7 +560,7 @@ def cmd_discord(args: argparse.Namespace) -> int:
             result["write_status"] = "skipped"
         if result["token_source"] == "":
             result["token_source"] = "(unset)"
-        print_result(result)
+        print_result(result, stream=sys.stderr)
         return 1
 
 
@@ -552,9 +596,13 @@ def cmd_telegram(args: argparse.Namespace) -> int:
         elif inspected["token"]:
             token = inspected["token"]
             token_source = "existing:.telegram/.env"
-        elif interactive and accounts:
+        elif accounts:
             candidates = candidate_channel_accounts(args.agent, accounts)
-            if candidates:
+            if candidates and not interactive:
+                choice = candidates[0]
+                token = load_account_token(Path(args.runtime_config), "telegram", choice)
+                token_source = f"channel:{choice}"
+            elif interactive and candidates:
                 default_account = candidates[0]
                 choice = prompt_text(
                     "Configured Telegram channel account to import (enter 'skip' to paste manually)",
@@ -563,6 +611,10 @@ def cmd_telegram(args: argparse.Namespace) -> int:
                 if choice.lower() not in {"skip", "none", "manual"}:
                     token = load_account_token(Path(args.runtime_config), "telegram", choice)
                     token_source = f"channel:{choice}"
+        elif not token:
+            token = load_claude_plugin_channel_token("telegram")
+            if token:
+                token_source = "claude-plugin:.claude/channels/telegram/.env"
 
         if not token and interactive:
             token = prompt_text("Telegram bot token", secret=True)
@@ -636,7 +688,7 @@ def cmd_telegram(args: argparse.Namespace) -> int:
             result["write_status"] = "skipped"
         if result["token_source"] == "":
             result["token_source"] = "(unset)"
-        print_telegram_result(result)
+        print_telegram_result(result, stream=sys.stderr)
         return 1
 
 

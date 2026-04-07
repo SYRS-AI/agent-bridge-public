@@ -429,16 +429,48 @@ bridge_agent_launch_cmd_raw() {
 
 bridge_normalize_channels_csv() {
   local raw="${1:-}"
+  local installed_plugins_file="${BRIDGE_CLAUDE_INSTALLED_PLUGINS_FILE:-$HOME/.claude/plugins/installed_plugins.json}"
 
   bridge_require_python
-  python3 - "$raw" <<'PY'
+  python3 - "$raw" "$installed_plugins_file" <<'PY'
+import json
+from pathlib import Path
 import sys
 
 raw = sys.argv[1]
+installed_plugins_file = Path(sys.argv[2]).expanduser()
+
+plugin_index = {}
+try:
+    payload = json.loads(installed_plugins_file.read_text(encoding="utf-8"))
+    plugins = payload.get("plugins") or {}
+    if isinstance(plugins, dict):
+        for plugin_id in plugins.keys():
+            if not isinstance(plugin_id, str):
+                continue
+            name = plugin_id.split("@", 1)[0].strip()
+            if not name:
+                continue
+            plugin_index.setdefault(name, []).append(plugin_id)
+except Exception:
+    plugin_index = {}
+
+def qualify(item: str) -> str:
+    if not item.startswith("plugin:") or "@" in item:
+        return item
+    plugin_name = item.split(":", 1)[1].strip()
+    matches = plugin_index.get(plugin_name, [])
+    if len(matches) == 1:
+        return f"plugin:{matches[0]}"
+    official = [match for match in matches if match.endswith("@claude-plugins-official")]
+    if len(official) == 1:
+        return f"plugin:{official[0]}"
+    return item
+
 values = []
 seen = set()
 for chunk in str(raw).replace("\n", ",").split(","):
-    item = chunk.strip()
+    item = qualify(chunk.strip())
     if not item or item in seen:
         continue
     seen.add(item)

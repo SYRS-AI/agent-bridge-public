@@ -14,7 +14,7 @@ Usage:
   $(basename "$0") [--admin <agent>] [--engine claude|codex] [--session <name>] [--workdir <path>] [--channels <csv>] [--discord-channel <id>]... [--allow-from <id>]... [--default-chat <id>] [--channel-account <account>] [--runtime-config <path>] [--api-base-url <url>] [--skip-validate] [--skip-send-test] [--skip-channel-setup] [--test-start] [--dry-run] [--json]
 
 Examples:
-  $(basename "$0") --admin patch --engine claude --channels plugin:telegram --allow-from 123456789 --default-chat 123456789 --channel-account default
+  $(basename "$0") --admin patch --engine claude --channels plugin:telegram@claude-plugins-official --allow-from 123456789 --default-chat 123456789 --channel-account default
   $(basename "$0") --admin manager --engine codex --dry-run --json
 EOF
 }
@@ -87,6 +87,17 @@ bridge_init_runtime_present() {
 bridge_init_append_warning() {
   local message="$1"
   WARNINGS+=("$message")
+}
+
+bridge_init_run_step() {
+  local label="$1"
+  shift
+  local output=""
+
+  if ! output="$("$@" 2>&1)"; then
+    [[ -n "$output" ]] && printf '%s\n' "$output" >&2
+    bridge_die "$label failed"
+  fi
 }
 
 bridge_init_warnings_json() {
@@ -310,7 +321,7 @@ if [[ $skip_channel_setup -eq 0 ]] && [[ $dry_run -eq 0 ]]; then
       [[ $skip_validate -eq 1 ]] && setup_args+=(--skip-validate)
       [[ $skip_send_test -eq 1 ]] && setup_args+=(--skip-send-test)
       setup_args+=(--yes)
-      "$BRIDGE_BASH_BIN" "$SCRIPT_DIR/bridge-setup.sh" "${setup_args[@]}" >/dev/null
+      bridge_init_run_step "discord bootstrap" "$BRIDGE_BASH_BIN" "$SCRIPT_DIR/bridge-setup.sh" "${setup_args[@]}"
     else
       channel_setup_status="partial"
       bridge_init_append_warning "Discord channel setup skipped: no existing runtime, channel ids, or --channel-account provided."
@@ -329,7 +340,7 @@ if [[ $skip_channel_setup -eq 0 ]] && [[ $dry_run -eq 0 ]]; then
       [[ $skip_validate -eq 1 ]] && setup_args+=(--skip-validate)
       [[ $skip_send_test -eq 1 ]] && setup_args+=(--skip-send-test)
       setup_args+=(--yes)
-      "$BRIDGE_BASH_BIN" "$SCRIPT_DIR/bridge-setup.sh" "${setup_args[@]}" >/dev/null
+      bridge_init_run_step "telegram bootstrap" "$BRIDGE_BASH_BIN" "$SCRIPT_DIR/bridge-setup.sh" "${setup_args[@]}"
     else
       channel_setup_status="partial"
       bridge_init_append_warning "Telegram channel setup skipped: no existing runtime, allow_from ids, or --channel-account provided."
@@ -342,9 +353,9 @@ if [[ $dry_run -eq 0 ]]; then
   if [[ $test_start -eq 1 ]]; then
     preflight_args+=(--test-start)
   fi
-  "$BRIDGE_BASH_BIN" "$SCRIPT_DIR/bridge-setup.sh" "${preflight_args[@]}" >/dev/null
+  bridge_init_run_step "agent preflight" "$BRIDGE_BASH_BIN" "$SCRIPT_DIR/bridge-setup.sh" "${preflight_args[@]}"
   preflight_status="ok"
-  "$BRIDGE_BASH_BIN" "$SCRIPT_DIR/bridge-setup.sh" admin "$admin_agent" >/dev/null
+  bridge_init_run_step "admin handoff save" "$BRIDGE_BASH_BIN" "$SCRIPT_DIR/bridge-setup.sh" admin "$admin_agent"
   admin_saved=1
 else
   preflight_status="dry-run"

@@ -26,6 +26,39 @@ Examples:
 EOF
 }
 
+setup_subcommand_usage() {
+  local subcommand="$1"
+  case "$subcommand" in
+    discord)
+      cat <<EOF
+Usage:
+  $(basename "$0") discord <agent> [--token <token>] [--channel-account <account>] [--runtime-config <path>] [--channel <id>]... [--allow-from <id>]... [--require-mention] [--skip-validate] [--skip-send-test] [--yes] [--dry-run]
+EOF
+      ;;
+    telegram)
+      cat <<EOF
+Usage:
+  $(basename "$0") telegram <agent> [--token <token>] [--channel-account <account>] [--runtime-config <path>] [--allow-from <id>]... [--default-chat <id>] [--test-chat <id>] [--skip-validate] [--skip-send-test] [--yes] [--dry-run]
+EOF
+      ;;
+    agent)
+      cat <<EOF
+Usage:
+  $(basename "$0") agent <agent> [--skip-discord] [--skip-telegram] [--test-start] [setup options...]
+EOF
+      ;;
+    admin)
+      cat <<EOF
+Usage:
+  $(basename "$0") admin <agent>
+EOF
+      ;;
+    *)
+      usage
+      ;;
+  esac
+}
+
 bridge_setup_python() {
   bridge_require_python
   python3 "$SCRIPT_DIR/bridge-setup.py" "$@"
@@ -196,6 +229,10 @@ run_discord() {
   local base_args=()
 
   shift || true
+  if [[ "$agent" == "-h" || "$agent" == "--help" || "$agent" == "help" ]]; then
+    setup_subcommand_usage "discord"
+    return 0
+  fi
   [[ -n "$agent" ]] || bridge_die "Usage: $(basename "$0") discord <agent> [...]"
   bridge_require_agent "$agent"
   runtime_config="$(bridge_compat_config_file)"
@@ -245,6 +282,10 @@ run_telegram() {
   local base_args=()
 
   shift || true
+  if [[ "$agent" == "-h" || "$agent" == "--help" || "$agent" == "help" ]]; then
+    setup_subcommand_usage "telegram"
+    return 0
+  fi
   [[ -n "$agent" ]] || bridge_die "Usage: $(basename "$0") telegram <agent> [...]"
   bridge_require_agent "$agent"
   runtime_config="$(bridge_compat_config_file)"
@@ -312,6 +353,10 @@ run_agent() {
   local telegram_allow_from=()
 
   shift || true
+  if [[ "$agent" == "-h" || "$agent" == "--help" || "$agent" == "help" ]]; then
+    setup_subcommand_usage "agent"
+    return 0
+  fi
   [[ -n "$agent" ]] || bridge_die "Usage: $(basename "$0") agent <agent> [...]"
   bridge_require_agent "$agent"
 
@@ -587,6 +632,10 @@ run_admin() {
   local agent="${1:-}"
 
   shift || true
+  if [[ "$agent" == "-h" || "$agent" == "--help" || "$agent" == "help" ]]; then
+    setup_subcommand_usage "admin"
+    return 0
+  fi
   [[ -n "$agent" ]] || bridge_die "Usage: $(basename "$0") admin <agent>"
   [[ $# -eq 0 ]] || bridge_die "지원하지 않는 setup admin 옵션입니다: $1"
 
