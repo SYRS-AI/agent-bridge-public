@@ -61,7 +61,7 @@ bridge_discord_relay_step() {
     --agent-snapshot "$snapshot_file" \
     --bridge-home "$BRIDGE_HOME" \
     --state-file "$(bridge_discord_relay_state_file)" \
-    --openclaw-config "$(bridge_compat_config_file)" \
+    --runtime-config "$(bridge_compat_config_file)" \
     --relay-account "$BRIDGE_DISCORD_RELAY_ACCOUNT" \
     --poll-limit "$BRIDGE_DISCORD_RELAY_POLL_LIMIT" \
     --cooldown-seconds "$BRIDGE_DISCORD_RELAY_COOLDOWN_SECONDS"; then

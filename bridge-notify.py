@@ -145,15 +145,17 @@ def cmd_send(args: argparse.Namespace) -> int:
         print(json.dumps(payload, ensure_ascii=False, indent=2))
         return 0
 
+    if not args.runtime_config:
+        raise SystemExit("--runtime-config is required")
     try:
         if kind == "discord":
-            account_cfg = load_account_config(Path(args.openclaw_config), kind, account)
+            account_cfg = load_account_config(Path(args.runtime_config), kind, account)
             token = load_account_token(account_cfg)
             send_discord(token, target, text)
         elif kind == "discord-webhook":
             send_discord_webhook(target, text, args.agent or "Agent Bridge")
         elif kind == "telegram":
-            account_cfg = load_account_config(Path(args.openclaw_config), kind, account)
+            account_cfg = load_account_config(Path(args.runtime_config), kind, account)
             token = load_account_token(account_cfg)
             send_telegram(token, target, text)
         else:
@@ -177,7 +179,8 @@ def build_parser() -> argparse.ArgumentParser:
     send_parser.add_argument("--kind", required=True, choices=("discord", "discord-webhook", "telegram"))
     send_parser.add_argument("--target", required=True)
     send_parser.add_argument("--account", default="default")
-    send_parser.add_argument("--openclaw-config", required=True)
+    send_parser.add_argument("--runtime-config")
+    send_parser.add_argument("--openclaw-config", dest="runtime_config", help=argparse.SUPPRESS)
     send_parser.add_argument("--title")
     send_parser.add_argument("--message")
     send_parser.add_argument("--task-id")

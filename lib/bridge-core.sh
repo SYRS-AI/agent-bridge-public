@@ -87,7 +87,7 @@ bridge_reset_roster_maps() {
   unset BRIDGE_AGENT_CONTINUE BRIDGE_AGENT_SESSION_ID BRIDGE_AGENT_HISTORY_KEY
   unset BRIDGE_AGENT_CREATED_AT BRIDGE_AGENT_UPDATED_AT BRIDGE_AGENT_IDLE_TIMEOUT
   unset BRIDGE_AGENT_NOTIFY_KIND BRIDGE_AGENT_NOTIFY_TARGET BRIDGE_AGENT_NOTIFY_ACCOUNT
-  unset BRIDGE_AGENT_WEBHOOK_PORT BRIDGE_OPENCLAW_AGENT_TARGET BRIDGE_CRON_AGENT_TARGET BRIDGE_CRON_FALLBACK_AGENT BRIDGE_AGENT_DISCORD_CHANNEL_ID BRIDGE_AGENT_CHANNELS BRIDGE_CRON_ENQUEUE_FAMILIES
+  unset BRIDGE_AGENT_WEBHOOK_PORT BRIDGE_LEGACY_AGENT_TARGET BRIDGE_OPENCLAW_AGENT_TARGET BRIDGE_CRON_AGENT_TARGET BRIDGE_CRON_FALLBACK_AGENT BRIDGE_AGENT_DISCORD_CHANNEL_ID BRIDGE_AGENT_CHANNELS BRIDGE_CRON_ENQUEUE_FAMILIES
 
   declare -g -a BRIDGE_AGENT_IDS=()
   declare -g -A BRIDGE_AGENT_DESC=()
@@ -110,6 +110,7 @@ bridge_reset_roster_maps() {
   declare -g -A BRIDGE_AGENT_NOTIFY_TARGET=()
   declare -g -A BRIDGE_AGENT_NOTIFY_ACCOUNT=()
   declare -g -A BRIDGE_AGENT_WEBHOOK_PORT=()
+  declare -g -A BRIDGE_LEGACY_AGENT_TARGET=()
   declare -g -A BRIDGE_OPENCLAW_AGENT_TARGET=()
   declare -g -A BRIDGE_CRON_AGENT_TARGET=()
   declare -g -A BRIDGE_AGENT_DISCORD_CHANNEL_ID=()
@@ -221,7 +222,7 @@ bridge_compat_config_file() {
     printf '%s' "$BRIDGE_RUNTIME_CONFIG_FILE"
     return 0
   fi
-  printf '%s/openclaw.json' "$BRIDGE_OPENCLAW_HOME"
+  printf '%s/openclaw.json' "$BRIDGE_LEGACY_HOME"
 }
 
 bridge_compat_credentials_dir() {
@@ -229,7 +230,7 @@ bridge_compat_credentials_dir() {
     printf '%s' "$BRIDGE_RUNTIME_CREDENTIALS_DIR"
     return 0
   fi
-  printf '%s/credentials' "$BRIDGE_OPENCLAW_HOME"
+  printf '%s/credentials' "$BRIDGE_LEGACY_HOME"
 }
 
 bridge_compat_secrets_dir() {
@@ -237,7 +238,7 @@ bridge_compat_secrets_dir() {
     printf '%s' "$BRIDGE_RUNTIME_SECRETS_DIR"
     return 0
   fi
-  printf '%s/secrets' "$BRIDGE_OPENCLAW_HOME"
+  printf '%s/secrets' "$BRIDGE_LEGACY_HOME"
 }
 
 bridge_path_relative_to_root() {

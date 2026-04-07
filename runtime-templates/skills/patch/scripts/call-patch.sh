@@ -5,7 +5,7 @@ set -uo pipefail
 BRIDGE_HOME="${BRIDGE_HOME:-$HOME/.agent-bridge}"
 AGENT_BRIDGE="$BRIDGE_HOME/agent-bridge"
 NOTIFY_PY="$BRIDGE_HOME/bridge-notify.py"
-CONFIG_JSON="$BRIDGE_HOME/runtime/openclaw.json"
+CONFIG_JSON="$BRIDGE_HOME/runtime/bridge-config.json"
 PATCH_HOME="$BRIDGE_HOME/agents/patch"
 CLAUDE_BIN="${BRIDGE_CLAUDE_BIN:-$(command -v claude 2>/dev/null || printf '%s' "$HOME/.local/bin/claude")}"
 STATUS_FILE="$PATCH_HOME/.status"
@@ -89,7 +89,7 @@ send_discord_result() {
     --kind discord \
     --target "$DISCORD_CHANNEL" \
     --account "$DISCORD_ACCOUNT" \
-    --openclaw-config "$CONFIG_JSON" \
+    --runtime-config "$CONFIG_JSON" \
     --title "patch CLI result" \
     --message "$report_text" >>"$LOG_FILE" 2>&1 || return 1
 }

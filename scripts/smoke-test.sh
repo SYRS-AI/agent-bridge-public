@@ -81,7 +81,7 @@ export BRIDGE_RUNTIME_SHARED_REFERENCES_DIR="$BRIDGE_RUNTIME_SHARED_DIR/referenc
 export BRIDGE_RUNTIME_MEMORY_DIR="$BRIDGE_RUNTIME_ROOT/memory"
 export BRIDGE_RUNTIME_CREDENTIALS_DIR="$BRIDGE_RUNTIME_ROOT/credentials"
 export BRIDGE_RUNTIME_SECRETS_DIR="$BRIDGE_RUNTIME_ROOT/secrets"
-export BRIDGE_RUNTIME_CONFIG_FILE="$BRIDGE_RUNTIME_ROOT/openclaw.json"
+export BRIDGE_RUNTIME_CONFIG_FILE="$BRIDGE_RUNTIME_ROOT/bridge-config.json"
 export BRIDGE_WEBHOOK_PORT_RANGE_START=9301
 export BRIDGE_WEBHOOK_PORT_RANGE_END=9399
 
@@ -636,9 +636,9 @@ sleep 1
 tmux has-session -t "$ALWAYS_ON_SESSION" >/dev/null 2>&1 || die "always-on role did not restart without queue"
 
 log "running guided Discord setup"
-SETUP_DISCORD_OUTPUT="$("$REPO_ROOT/agent-bridge" setup discord "$SMOKE_AGENT" --openclaw-account smoke --openclaw-config "$TMP_ROOT/openclaw.json" --api-base-url "$FAKE_DISCORD_API_BASE" --yes)"
+SETUP_DISCORD_OUTPUT="$("$REPO_ROOT/agent-bridge" setup discord "$SMOKE_AGENT" --channel-account smoke --runtime-config "$TMP_ROOT/openclaw.json" --api-base-url "$FAKE_DISCORD_API_BASE" --yes)"
 assert_contains "$SETUP_DISCORD_OUTPUT" "validation: ok"
-assert_contains "$SETUP_DISCORD_OUTPUT" "token_source: openclaw:smoke"
+assert_contains "$SETUP_DISCORD_OUTPUT" "token_source: channel:smoke"
 assert_contains "$SETUP_DISCORD_OUTPUT" "channel 123456789012345678: read=ok send=ok"
 [[ -f "$WORKDIR/.discord/.env" ]] || die "setup discord did not create .env"
 [[ -f "$WORKDIR/.discord/access.json" ]] || die "setup discord did not create access.json"
@@ -764,7 +764,7 @@ assert_contains "$(cat "$BRIDGE_ROSTER_LOCAL_FILE")" "plugin:telegram"
 [[ -f "$BRIDGE_AGENT_HOME_ROOT/$CREATED_AGENT/SKILLS.md" ]] || die "agent create did not scaffold SKILLS.md"
 [[ -f "$BRIDGE_AGENT_HOME_ROOT/$CREATED_AGENT/MEMORY.md" ]] || die "agent create did not scaffold MEMORY.md"
 [[ -L "$BRIDGE_AGENT_HOME_ROOT/$CREATED_AGENT/.claude/skills/agent-bridge-runtime" ]] || die "agent create did not link runtime skill"
-SETUP_TELEGRAM_OUTPUT="$("$REPO_ROOT/agent-bridge" setup telegram "$CREATED_AGENT" --openclaw-account smoke --openclaw-config "$TMP_ROOT/openclaw.json" --allow-from 123456789 --default-chat 123456789 --api-base-url "$FAKE_TELEGRAM_API_BASE" --yes)"
+SETUP_TELEGRAM_OUTPUT="$("$REPO_ROOT/agent-bridge" setup telegram "$CREATED_AGENT" --channel-account smoke --runtime-config "$TMP_ROOT/openclaw.json" --allow-from 123456789 --default-chat 123456789 --api-base-url "$FAKE_TELEGRAM_API_BASE" --yes)"
 assert_contains "$SETUP_TELEGRAM_OUTPUT" "telegram_dir: $BRIDGE_AGENT_HOME_ROOT/$CREATED_AGENT/.telegram"
 assert_contains "$SETUP_TELEGRAM_OUTPUT" "validation: ok"
 assert_contains "$SETUP_TELEGRAM_OUTPUT" "send: ok"
@@ -834,7 +834,7 @@ assert payload["created"] is True
 assert payload["preflight"] == "dry-run"
 assert payload["warnings"] == []
 PY
-INIT_OUTPUT="$("$REPO_ROOT/agent-bridge" init --admin "$INIT_AGENT" --engine claude --session "$INIT_SESSION" --channels plugin:telegram --allow-from 123456789 --default-chat 123456789 --openclaw-account smoke --openclaw-config "$TMP_ROOT/openclaw.json" --api-base-url "$FAKE_TELEGRAM_API_BASE" 2>&1)" || die "init actual failed: $INIT_OUTPUT"
+INIT_OUTPUT="$("$REPO_ROOT/agent-bridge" init --admin "$INIT_AGENT" --engine claude --session "$INIT_SESSION" --channels plugin:telegram --allow-from 123456789 --default-chat 123456789 --channel-account smoke --runtime-config "$TMP_ROOT/openclaw.json" --api-base-url "$FAKE_TELEGRAM_API_BASE" 2>&1)" || die "init actual failed: $INIT_OUTPUT"
 assert_contains "$INIT_OUTPUT" "admin_agent: $INIT_AGENT"
 assert_contains "$INIT_OUTPUT" "channel_setup: ok"
 assert_contains "$INIT_OUTPUT" "preflight: ok"
@@ -1531,10 +1531,10 @@ assert_contains "$RUNTIME_SYNC_OUTPUT" "item[scripts]"
 [[ -f "$BRIDGE_HOME/runtime/extensions/sample-ext/README.md" ]] || die "expected runtime extensions copy"
 [[ -f "$BRIDGE_HOME/runtime/credentials/example.txt" ]] || die "expected runtime credentials copy"
 [[ -f "$BRIDGE_HOME/runtime/secrets/example.token" ]] || die "expected runtime secrets copy"
-[[ -f "$BRIDGE_HOME/runtime/openclaw.json" ]] || die "expected runtime config copy"
+[[ -f "$BRIDGE_HOME/runtime/bridge-config.json" ]] || die "expected runtime config copy"
 
 RUNTIME_COMPAT_PATHS_OUTPUT="$("$BASH4_BIN" -c "source \"$REPO_ROOT/bridge-lib.sh\"; bridge_load_roster; printf '%s\n%s\n%s\n' \"\$(bridge_compat_config_file)\" \"\$(bridge_compat_credentials_dir)\" \"\$(bridge_compat_secrets_dir)\"")"
-assert_contains "$RUNTIME_COMPAT_PATHS_OUTPUT" "$BRIDGE_HOME/runtime/openclaw.json"
+assert_contains "$RUNTIME_COMPAT_PATHS_OUTPUT" "$BRIDGE_HOME/runtime/bridge-config.json"
 assert_contains "$RUNTIME_COMPAT_PATHS_OUTPUT" "$BRIDGE_HOME/runtime/credentials"
 assert_contains "$RUNTIME_COMPAT_PATHS_OUTPUT" "$BRIDGE_HOME/runtime/secrets"
 
@@ -1557,7 +1557,7 @@ grep -q "$BRIDGE_HOME/runtime/credentials" "$BRIDGE_HOME/runtime/scripts/morning
 grep -q "$BRIDGE_HOME/runtime/secrets" "$BRIDGE_HOME/runtime/scripts/morning-briefing.py" || die "expected rewritten runtime secrets path"
 grep -q "$BRIDGE_HOME/runtime/data/example.db" "$BRIDGE_HOME/runtime/scripts/morning-briefing.py" || die "expected rewritten runtime data path"
 grep -q "$BRIDGE_HOME/runtime/assets/sample/logo.txt" "$BRIDGE_HOME/runtime/scripts/morning-briefing.py" || die "expected rewritten runtime asset path"
-grep -q "$BRIDGE_HOME/runtime/extensions/sample-ext" "$BRIDGE_HOME/runtime/openclaw.json" || die "expected rewritten runtime extension installPath"
+grep -q "$BRIDGE_HOME/runtime/extensions/sample-ext" "$BRIDGE_HOME/runtime/bridge-config.json" || die "expected rewritten runtime extension installPath"
 
 log "overlaying repo-managed runtime canonical templates"
 RUNTIME_CANON_OUTPUT="$("$REPO_ROOT/agent-bridge" migrate runtime canonicalize --runtime-root "$BRIDGE_HOME/runtime")"
@@ -1592,7 +1592,7 @@ cat >"$RUN_DIR/request.json" <<EOF
   "job_id": "12345678-abcd",
   "job_name": "smoke-job",
   "family": "smoke-family",
-  "openclaw_agent": "$SMOKE_AGENT",
+  "source_agent": "$SMOKE_AGENT",
   "target_agent": "$SMOKE_AGENT",
   "target_engine": "codex",
   "target_workdir": "$WORKDIR",

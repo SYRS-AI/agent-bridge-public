@@ -197,10 +197,9 @@ Install and authenticate the CLIs you want to use:
 
 The bridge does not install those tools for you.
 
-### Optional legacy OpenClaw migration
+### Optional legacy migration
 
-Some bridge features are kept for teams migrating from an existing OpenClaw
-install:
+Some bridge features are kept for teams migrating from an older agent runtime:
 
 - cron inventory / enqueue / cleanup helpers
 - `tools/memory-manager.py`
@@ -378,7 +377,7 @@ Then run the guided setup:
 The wizard can:
 
 - reuse the existing `.discord` token
-- import a bot token from `~/.openclaw/openclaw.json` during migration
+- import a bot token from a legacy runtime config during migration
 - scaffold the allowlist for one or more channel IDs
 - validate the bot token
 - send a small write-access test message unless you pass `--skip-send-test`
@@ -391,7 +390,7 @@ The wizard can:
 The Telegram setup flow can:
 
 - reuse the existing `.telegram` token
-- import a bot token from `~/.openclaw/openclaw.json` during migration
+- import a bot token from a legacy runtime config during migration
 - scaffold the allowlist of permitted user IDs
 - set a default chat/thread target for notifications
 - validate the bot token with `getMe`
@@ -432,7 +431,7 @@ If you are migrating existing cron jobs into Agent Bridge, start with the read-o
 ./agent-bridge cron cleanup prune --dry-run
 ```
 
-`cron inventory`, `show`, `enqueue`, `errors`, and `cleanup` prefer `~/.agent-bridge/cron/jobs.json` when it exists. Before the cutover import runs, they fall back to `BRIDGE_OPENCLAW_CRON_JOBS_FILE` so you can still inspect an older source snapshot. Use `cron import` once to copy that source into the bridge-native store.
+`cron inventory`, `show`, `enqueue`, `errors`, and `cleanup` prefer `~/.agent-bridge/cron/jobs.json` when it exists. Before the cutover import runs, they fall back to `BRIDGE_SOURCE_CRON_JOBS_FILE` so you can still inspect an older source snapshot. Use `cron import` once to copy that source into the bridge-native store.
 
 `cron enqueue` now works for recurring jobs in general. It writes a materialized note under `shared/cron/`, records per-slot manifests under `state/cron/dispatch/`, and creates compact `[cron-dispatch]` queue tasks for the bridge daemon. The daemon claims those tasks, runs `agent-bridge cron run-subagent <run-id>` in a disposable child, then closes the dispatch task when the result artifact is ready.
 
@@ -440,7 +439,7 @@ Cron delivery targets are resolved against registered long-lived roles, not only
 
 For `memory-daily` the default slot is `YYYY-MM-DD`. For `monthly-highlights` it is `YYYY-MM`. Other recurring jobs default to the current minute as an ISO timestamp, so repeated enqueue calls on the same day do not collapse into one slot.
 
-`cron sync` is the bridge-owned recurring scheduler. It scans the bridge-native recurring job store, derives due occurrence slots, and enqueues each occurrence through the same disposable-child path. When `BRIDGE_CRON_SYNC_ENABLED=1`, the daemon also drains queued `[cron-dispatch]` tasks itself, so recurring jobs do not wake long-lived agent sessions unless a run explicitly needs a separate `[cron-followup]` task. The older `BRIDGE_OPENCLAW_CRON_SYNC_ENABLED` name still works as a compatibility alias.
+`cron sync` is the bridge-owned recurring scheduler. It scans the bridge-native recurring job store, derives due occurrence slots, and enqueues each occurrence through the same disposable-child path. When `BRIDGE_CRON_SYNC_ENABLED=1`, the daemon also drains queued `[cron-dispatch]` tasks itself, so recurring jobs do not wake long-lived agent sessions unless a run explicitly needs a separate `[cron-followup]` task. `BRIDGE_LEGACY_CRON_SYNC_ENABLED` and the older `BRIDGE_OPENCLAW_CRON_SYNC_ENABLED` name still work as compatibility aliases.
 
 If your daemon environment does not inherit the same `PATH` as your interactive shell, set `BRIDGE_CLAUDE_BIN` or `BRIDGE_CODEX_BIN` explicitly in `agent-roster.local.sh`. The cron runner also searches common install locations such as `~/.local/bin`, `/opt/homebrew/bin`, and `/usr/local/bin`.
 
@@ -465,9 +464,9 @@ The status dashboard also includes a lightweight health check for active session
 
 For static roles, an explicit `BRIDGE_AGENT_IDLE_TIMEOUT["agent"]="0"` means "always on": the daemon will not auto-stop that role, and it will restart the role automatically if its tmux session disappears.
 
-### Optional: search legacy OpenClaw memory
+### Optional: search legacy memory
 
-If you are migrating a legacy OpenClaw install and want read-only retrieval over
+If you are migrating a legacy install and want read-only retrieval over
 existing memory SQLite files, use the bundled helper:
 
 ```bash
@@ -475,7 +474,7 @@ python3 tools/memory-manager.py search --agent <agent-id> "recent incident summa
 ```
 
 This helper is optional. It is intended for migration and compatibility work,
-not for fresh installs that do not have OpenClaw memory state.
+not for fresh installs that do not have legacy memory state.
 
 ### Start the daemon
 
@@ -632,7 +631,7 @@ bash ./scripts/oss-preflight.sh
 - `bridge-start.sh`, `bridge-run.sh`: session startup paths
 - `bridge-task.sh`, `bridge-queue.py`: queue API and SQLite backend
 - `bridge-setup.sh`, `bridge-setup.py`: Discord/Telegram onboarding and agent preflight checks
-- `bridge-cron.sh`, `bridge-cron.py`, `bridge-cron-scheduler.py`: bridge-native cron CRUD plus legacy OpenClaw cron inventory, scheduling, queue adapters, and cleanup helpers
+- `bridge-cron.sh`, `bridge-cron.py`, `bridge-cron-scheduler.py`: bridge-native cron CRUD plus legacy cron inventory, scheduling, queue adapters, and cleanup helpers
 - `bridge-send.sh`, `bridge-action.sh`: urgent interrupts and predefined actions
 - `bridge-status.sh`, `bridge-daemon.sh`, `bridge-sync.sh`: status, background sync, and heartbeats
 - `bridge-lib.sh`: thin loader for shared shell modules

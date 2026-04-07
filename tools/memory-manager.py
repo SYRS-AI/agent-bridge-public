@@ -53,9 +53,12 @@ def runtime_memory_dir(bridge_home):
 
 
 def default_config_path(bridge_home, openclaw_root):
-    runtime_candidate = Path(bridge_home) / "runtime" / "openclaw.json"
+    runtime_candidate = Path(bridge_home) / "runtime" / "bridge-config.json"
     if runtime_candidate.exists():
         return str(runtime_candidate)
+    legacy_runtime_candidate = Path(bridge_home) / "runtime" / "openclaw.json"
+    if legacy_runtime_candidate.exists():
+        return str(legacy_runtime_candidate)
     return str(Path(openclaw_root) / "openclaw.json")
 
 

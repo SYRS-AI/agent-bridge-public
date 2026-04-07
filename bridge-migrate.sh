@@ -214,7 +214,7 @@ cmd_runtime_sync() {
   runtime_sync_one "memory" "$legacy_home/memory" "$runtime_root/memory" "$backup_root" "$dry_run"
   runtime_sync_one "credentials" "$legacy_home/credentials" "$runtime_root/credentials" "$backup_root" "$dry_run"
   runtime_sync_one "secrets" "$legacy_home/secrets" "$runtime_root/secrets" "$backup_root" "$dry_run"
-  runtime_sync_one "config" "$legacy_home/openclaw.json" "$runtime_root/openclaw.json" "$backup_root" "$dry_run"
+  runtime_sync_one "config" "$legacy_home/openclaw.json" "$runtime_root/bridge-config.json" "$backup_root" "$dry_run"
 }
 
 cmd_runtime_canonicalize() {

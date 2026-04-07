@@ -11,15 +11,15 @@ bridge_load_roster
 usage() {
   cat <<EOF
 Usage:
-  $(basename "$0") discord <agent> [--token <token>] [--openclaw-account <account>] [--openclaw-config <path>] [--channel <id>]... [--allow-from <id>]... [--require-mention] [--skip-validate] [--skip-send-test] [--yes] [--dry-run]
-  $(basename "$0") telegram <agent> [--token <token>] [--openclaw-account <account>] [--openclaw-config <path>] [--allow-from <id>]... [--default-chat <id>] [--test-chat <id>] [--skip-validate] [--skip-send-test] [--yes] [--dry-run]
+  $(basename "$0") discord <agent> [--token <token>] [--channel-account <account>] [--runtime-config <path>] [--channel <id>]... [--allow-from <id>]... [--require-mention] [--skip-validate] [--skip-send-test] [--yes] [--dry-run]
+  $(basename "$0") telegram <agent> [--token <token>] [--channel-account <account>] [--runtime-config <path>] [--allow-from <id>]... [--default-chat <id>] [--test-chat <id>] [--skip-validate] [--skip-send-test] [--yes] [--dry-run]
   $(basename "$0") agent <agent> [--skip-discord] [--skip-telegram] [--test-start] [setup options...]
   $(basename "$0") admin <agent>
 
 Examples:
   $(basename "$0") discord tester
-  $(basename "$0") discord tester --openclaw-account default --channel 123456789012345678
-  $(basename "$0") telegram tester --openclaw-account default --allow-from 123456789
+  $(basename "$0") discord tester --channel-account default --channel 123456789012345678
+  $(basename "$0") telegram tester --channel-account default --allow-from 123456789
   $(basename "$0") agent tester
   $(basename "$0") agent tester --test-start
   $(basename "$0") admin tester
@@ -191,21 +191,21 @@ run_discord() {
   local workdir=""
   local discord_dir=""
   local suggested_channel=""
-  local openclaw_config=""
+  local runtime_config=""
   local py_args=()
   local base_args=()
 
   shift || true
   [[ -n "$agent" ]] || bridge_die "Usage: $(basename "$0") discord <agent> [...]"
   bridge_require_agent "$agent"
-  openclaw_config="$(bridge_compat_config_file)"
+  runtime_config="$(bridge_compat_config_file)"
 
   while [[ $# -gt 0 ]]; do
     case "$1" in
-      --token|--openclaw-account|--openclaw-config|--channel|--allow-from|--api-base-url)
+      --token|--channel-account|--openclaw-account|--runtime-config|--openclaw-config|--channel|--allow-from|--api-base-url)
         [[ $# -ge 2 ]] || bridge_die "옵션 값이 필요합니다: $1"
-        if [[ "$1" == "--openclaw-config" ]]; then
-          openclaw_config="$2"
+        if [[ "$1" == "--runtime-config" || "$1" == "--openclaw-config" ]]; then
+          runtime_config="$2"
         fi
         py_args+=("$1" "$2")
         shift 2
@@ -227,7 +227,7 @@ run_discord() {
     discord
     --agent "$agent"
     --discord-dir "$discord_dir"
-    --openclaw-config "$openclaw_config"
+    --runtime-config "$runtime_config"
   )
   if [[ -n "$suggested_channel" ]]; then
     base_args+=(--suggested-channel "$suggested_channel")
@@ -240,21 +240,21 @@ run_telegram() {
   local agent="${1:-}"
   local workdir=""
   local telegram_dir=""
-  local openclaw_config=""
+  local runtime_config=""
   local py_args=()
   local base_args=()
 
   shift || true
   [[ -n "$agent" ]] || bridge_die "Usage: $(basename "$0") telegram <agent> [...]"
   bridge_require_agent "$agent"
-  openclaw_config="$(bridge_compat_config_file)"
+  runtime_config="$(bridge_compat_config_file)"
 
   while [[ $# -gt 0 ]]; do
     case "$1" in
-      --token|--openclaw-account|--openclaw-config|--allow-from|--default-chat|--test-chat|--api-base-url)
+      --token|--channel-account|--openclaw-account|--runtime-config|--openclaw-config|--allow-from|--default-chat|--test-chat|--api-base-url)
         [[ $# -ge 2 ]] || bridge_die "옵션 값이 필요합니다: $1"
-        if [[ "$1" == "--openclaw-config" ]]; then
-          openclaw_config="$2"
+        if [[ "$1" == "--runtime-config" || "$1" == "--openclaw-config" ]]; then
+          runtime_config="$2"
         fi
         py_args+=("$1" "$2")
         shift 2
@@ -275,7 +275,7 @@ run_telegram() {
     telegram
     --agent "$agent"
     --telegram-dir "$telegram_dir"
-    --openclaw-config "$openclaw_config"
+    --runtime-config "$runtime_config"
   )
 
   bridge_setup_python "${base_args[@]}" "${py_args[@]}"
@@ -344,7 +344,7 @@ run_agent() {
         telegram_args+=("$1" "$2")
         shift 2
         ;;
-      --token|--openclaw-account|--openclaw-config|--allow-from|--api-base-url)
+      --token|--channel-account|--openclaw-account|--runtime-config|--openclaw-config|--allow-from|--api-base-url)
         [[ $# -ge 2 ]] || bridge_die "옵션 값이 필요합니다: $1"
         discord_args+=("$1" "$2")
         telegram_args+=("$1" "$2")

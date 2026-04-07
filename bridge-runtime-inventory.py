@@ -59,7 +59,7 @@ AGENT_RUNTIME_FILES = {
 AGENT_RUNTIME_DIRS = {"references", "skills"}
 SHARED_RUNTIME_DIRS = {"references", "tools"}
 RUNTIME_SURFACE_DIRS = {"scripts", "skills", "patches", "shared", "data"}
-RUNTIME_SURFACE_FILES = {"openclaw.json"}
+RUNTIME_SURFACE_FILES = {"bridge-config.json"}
 
 
 def pretty_path(path: Path) -> str:
@@ -472,7 +472,7 @@ def runtime_prefixes(bridge_home: Path) -> dict[str, str]:
         "memory": pretty_path(runtime_root / "memory"),
         "credentials": pretty_path(runtime_root / "credentials"),
         "secrets": pretty_path(runtime_root / "secrets"),
-        "config": pretty_path(runtime_root / "openclaw.json"),
+        "config": pretty_path(runtime_root / "bridge-config.json"),
         "agents": pretty_path(bridge_home / "agents"),
         "patch_home": pretty_path(bridge_home / "agents" / "patch"),
         "main_home": pretty_path(bridge_home / "agents" / "main"),

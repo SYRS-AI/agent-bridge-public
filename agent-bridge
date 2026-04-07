@@ -53,8 +53,8 @@ Usage:
   $CLI_NAME agent stop <agent>
   $CLI_NAME agent restart <agent> [--attach] [--continue|--no-continue] [--dry-run]
   $CLI_NAME agent attach <agent>
-  $CLI_NAME setup discord <agent> [--channel <id>]... [--openclaw-account <account>]
-  $CLI_NAME setup telegram <agent> [--allow-from <id>]... [--openclaw-account <account>]
+  $CLI_NAME setup discord <agent> [--channel <id>]... [--channel-account <account>]
+  $CLI_NAME setup telegram <agent> [--allow-from <id>]... [--channel-account <account>]
   $CLI_NAME setup agent <agent> [--skip-discord] [--skip-telegram] [--test-start]
   $CLI_NAME discord status
   $CLI_NAME discord sync

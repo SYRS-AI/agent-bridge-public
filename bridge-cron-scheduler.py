@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Recurring OpenClaw cron scheduler for Agent Bridge."""
+"""Recurring cron scheduler for Agent Bridge."""
 
 from __future__ import annotations
 
@@ -42,7 +42,7 @@ class DueRun:
     job_id: str
     job_name: str
     family: str
-    openclaw_agent: str
+    source_agent: str
     schedule_kind: str
     occurrence_at: datetime
     slot: str
@@ -344,13 +344,13 @@ def enumerate_due_runs(
                     job_id=job.get("id", ""),
                     job_name=job.get("name", "<unnamed>"),
                     family=family,
-                    openclaw_agent=job.get("agentId") or job.get("agent") or "<unknown>",
+                    source_agent=job.get("agentId") or job.get("agent") or "<unknown>",
                     schedule_kind=kind,
                     occurrence_at=occurrence,
                     slot=derive_slot(family, occurrence, job),
                 )
             )
-    due_runs.sort(key=lambda item: (item.occurrence_at, item.openclaw_agent, item.job_name, item.slot))
+    due_runs.sort(key=lambda item: (item.occurrence_at, item.source_agent, item.job_name, item.slot))
     counters["due_occurrences"] = len(due_runs)
     return due_runs, dict(counters)
 
@@ -358,7 +358,7 @@ def enumerate_due_runs(
 def due_run_sort_key(run: DueRun) -> tuple[datetime, str, str, str, str]:
     return (
         run.occurrence_at,
-        run.openclaw_agent,
+        run.source_agent,
         run.job_name,
         run.slot,
         run.job_id,
@@ -388,7 +388,7 @@ def filter_due_runs_from_state(due_runs: list[DueRun], state: dict[str, Any]) ->
 
 def state_key_for_run(run: DueRun) -> dict[str, str]:
     return {
-        "agent": run.openclaw_agent,
+        "agent": run.source_agent,
         "job_name": run.job_name,
         "slot": run.slot,
         "job_id": run.job_id,
@@ -481,7 +481,7 @@ def enqueue_due_run(args: argparse.Namespace, run: DueRun) -> dict[str, Any]:
         "job_id": run.job_id,
         "job_name": run.job_name,
         "family": run.family,
-        "agent": run.openclaw_agent,
+        "agent": run.source_agent,
         "schedule_kind": run.schedule_kind,
         "slot": run.slot,
         "occurrence_at": run.occurrence_at.isoformat(timespec="seconds"),
@@ -627,7 +627,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     subparsers = parser.add_subparsers(dest="command", required=True)
 
-    sync_parser = subparsers.add_parser("sync", help="enqueue due recurring OpenClaw cron jobs")
+    sync_parser = subparsers.add_parser("sync", help="enqueue due recurring cron jobs")
     sync_parser.add_argument("--jobs-file", required=True)
     sync_parser.add_argument("--state-file", required=True)
     sync_parser.add_argument("--bridge-cron", required=True)

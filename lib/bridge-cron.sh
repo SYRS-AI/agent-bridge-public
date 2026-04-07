@@ -1,12 +1,16 @@
 #!/usr/bin/env bash
 # shellcheck shell=bash
 
-bridge_require_openclaw_cron_jobs() {
-  if [[ -f "$BRIDGE_OPENCLAW_CRON_JOBS_FILE" ]]; then
+bridge_require_legacy_cron_jobs() {
+  if [[ -f "$BRIDGE_SOURCE_CRON_JOBS_FILE" ]]; then
     return 0
   fi
 
-  bridge_die "OpenClaw cron jobs 파일이 없습니다: $BRIDGE_OPENCLAW_CRON_JOBS_FILE"
+  bridge_die "legacy cron jobs 파일이 없습니다: $BRIDGE_SOURCE_CRON_JOBS_FILE"
+}
+
+bridge_require_openclaw_cron_jobs() {
+  bridge_require_legacy_cron_jobs "$@"
 }
 
 bridge_cron_source_jobs_file() {
@@ -14,8 +18,8 @@ bridge_cron_source_jobs_file() {
     printf '%s\n' "$BRIDGE_NATIVE_CRON_JOBS_FILE"
     return 0
   fi
-  if [[ -f "$BRIDGE_OPENCLAW_CRON_JOBS_FILE" ]]; then
-    printf '%s\n' "$BRIDGE_OPENCLAW_CRON_JOBS_FILE"
+  if [[ -f "$BRIDGE_SOURCE_CRON_JOBS_FILE" ]]; then
+    printf '%s\n' "$BRIDGE_SOURCE_CRON_JOBS_FILE"
     return 0
   fi
   return 1
@@ -479,7 +483,7 @@ bridge_cron_fallback_agent() {
 
 bridge_resolve_cron_target() {
   local requested_agent="$1"
-  local explicit="${BRIDGE_CRON_AGENT_TARGET[$requested_agent]-${BRIDGE_OPENCLAW_AGENT_TARGET[$requested_agent]-}}"
+  local explicit="${BRIDGE_CRON_AGENT_TARGET[$requested_agent]-${BRIDGE_LEGACY_AGENT_TARGET[$requested_agent]-${BRIDGE_OPENCLAW_AGENT_TARGET[$requested_agent]-}}}"
   local suffix="${requested_agent##*-}"
   local candidate
   local matches=()
@@ -512,6 +516,10 @@ bridge_resolve_cron_target() {
   return 1
 }
 
+bridge_resolve_legacy_cron_target() {
+  bridge_resolve_cron_target "$@"
+}
+
 bridge_resolve_openclaw_target() {
   bridge_resolve_cron_target "$@"
 }
@@ -521,7 +529,7 @@ bridge_cron_write_manifest() {
   local job_id="$2"
   local job_name="$3"
   local family="$4"
-  local openclaw_agent="$5"
+  local source_agent="$5"
   local target="$6"
   local slot="$7"
   local task_id="$8"
@@ -544,18 +552,18 @@ bridge_cron_write_manifest() {
   mkdir -p "$(dirname "$manifest_file")"
 
   bridge_require_python
-  python3 - "$manifest_file" "$job_id" "$job_name" "$family" "$openclaw_agent" "$target" "$slot" "$task_id" "$created_at" "$body_file" "$source_file" "$run_id" "$request_file" "$payload_file" "$result_file" "$status_file" "$stdout_log" "$stderr_log" "$job_delivery_mode" "$job_delivery_channel" "$job_delivery_target" "$allow_channel_delivery" "$routing_mode" <<'PY'
+  python3 - "$manifest_file" "$job_id" "$job_name" "$family" "$source_agent" "$target" "$slot" "$task_id" "$created_at" "$body_file" "$source_file" "$run_id" "$request_file" "$payload_file" "$result_file" "$status_file" "$stdout_log" "$stderr_log" "$job_delivery_mode" "$job_delivery_channel" "$job_delivery_target" "$allow_channel_delivery" "$routing_mode" <<'PY'
 import json
 import sys
 from pathlib import Path
 
-(manifest_file, job_id, job_name, family, openclaw_agent, target, slot, task_id, created_at, body_file, source_file, run_id, request_file, payload_file, result_file, status_file, stdout_log, stderr_log, job_delivery_mode, job_delivery_channel, job_delivery_target, allow_channel_delivery, routing_mode) = sys.argv[1:]
+(manifest_file, job_id, job_name, family, source_agent, target, slot, task_id, created_at, body_file, source_file, run_id, request_file, payload_file, result_file, status_file, stdout_log, stderr_log, job_delivery_mode, job_delivery_channel, job_delivery_target, allow_channel_delivery, routing_mode) = sys.argv[1:]
 
 payload = {
     "job_id": job_id,
     "job_name": job_name,
     "family": family,
-    "openclaw_agent": openclaw_agent,
+    "source_agent": source_agent,
     "target_agent": target,
     "routing_mode": routing_mode,
     "job_delivery_mode": job_delivery_mode,
@@ -586,7 +594,7 @@ bridge_cron_write_request() {
   local job_id="$3"
   local job_name="$4"
   local family="$5"
-  local openclaw_agent="$6"
+  local source_agent="$6"
   local target="$7"
   local slot="$8"
   local task_id="$9"
@@ -613,19 +621,19 @@ bridge_cron_write_request() {
   mkdir -p "$(dirname "$request_file")"
 
   bridge_require_python
-  python3 - "$request_file" "$run_id" "$job_id" "$job_name" "$family" "$openclaw_agent" "$target" "$slot" "$task_id" "$created_at" "$body_file" "$payload_file" "$result_file" "$status_file" "$stdout_log" "$stderr_log" "$source_file" "$payload_kind" "$target_engine" "$target_workdir" "$target_channels" "$target_discord_state_dir" "$target_telegram_state_dir" "$job_delivery_mode" "$job_delivery_channel" "$job_delivery_target" "$allow_channel_delivery" "$routing_mode" <<'PY'
+  python3 - "$request_file" "$run_id" "$job_id" "$job_name" "$family" "$source_agent" "$target" "$slot" "$task_id" "$created_at" "$body_file" "$payload_file" "$result_file" "$status_file" "$stdout_log" "$stderr_log" "$source_file" "$payload_kind" "$target_engine" "$target_workdir" "$target_channels" "$target_discord_state_dir" "$target_telegram_state_dir" "$job_delivery_mode" "$job_delivery_channel" "$job_delivery_target" "$allow_channel_delivery" "$routing_mode" <<'PY'
 import json
 import sys
 from pathlib import Path
 
-(request_file, run_id, job_id, job_name, family, openclaw_agent, target, slot, task_id, created_at, body_file, payload_file, result_file, status_file, stdout_log, stderr_log, source_file, payload_kind, target_engine, target_workdir, target_channels, target_discord_state_dir, target_telegram_state_dir, job_delivery_mode, job_delivery_channel, job_delivery_target, allow_channel_delivery, routing_mode) = sys.argv[1:]
+(request_file, run_id, job_id, job_name, family, source_agent, target, slot, task_id, created_at, body_file, payload_file, result_file, status_file, stdout_log, stderr_log, source_file, payload_kind, target_engine, target_workdir, target_channels, target_discord_state_dir, target_telegram_state_dir, job_delivery_mode, job_delivery_channel, job_delivery_target, allow_channel_delivery, routing_mode) = sys.argv[1:]
 
 payload = {
     "run_id": run_id,
     "job_id": job_id,
     "job_name": job_name,
     "family": family,
-    "openclaw_agent": openclaw_agent,
+    "source_agent": source_agent,
     "target_agent": target,
     "target_engine": target_engine,
     "target_workdir": target_workdir,

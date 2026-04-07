@@ -30,7 +30,7 @@ bridge_notify_send() {
     --agent "$agent"
     --kind "$kind"
     --target "$target"
-    --openclaw-config "$(bridge_compat_config_file)"
+    --runtime-config "$(bridge_compat_config_file)"
   )
   if [[ -n "$account" ]]; then
     args+=(--account "$account")

@@ -93,7 +93,7 @@ run_show() {
 }
 
 run_import() {
-  local source_jobs_file="$BRIDGE_OPENCLAW_CRON_JOBS_FILE"
+  local source_jobs_file="$BRIDGE_SOURCE_CRON_JOBS_FILE"
   local dry_run=0
 
   while [[ $# -gt 0 ]]; do
@@ -247,7 +247,7 @@ write_materialized_payload() {
   {
     printf '# [cron] %s\n\n' "$CRON_JOB_NAME"
     printf -- '- slot: %s\n' "$slot"
-    printf -- '- openclaw_agent: %s\n' "$CRON_JOB_AGENT"
+    printf -- '- source_agent: %s\n' "$CRON_JOB_AGENT"
     printf -- '- target_agent: %s\n' "$target"
     printf -- '- delivery_mode: %s\n' "$delivery_mode"
     printf -- '- channel_delivery_mode: %s\n' "$channel_delivery_mode"
@@ -291,7 +291,7 @@ write_dispatch_body() {
     printf -- '- channel_delivery_channel: %s\n' "$channel_delivery_channel"
     printf -- '- channel_delivery_target: %s\n' "$channel_delivery_target"
     printf -- '- allow_channel_delivery: %s\n' "$allow_channel_delivery"
-    printf -- '- openclaw_agent: %s\n' "$CRON_JOB_AGENT"
+    printf -- '- source_agent: %s\n' "$CRON_JOB_AGENT"
     printf -- '- family: %s\n' "$CRON_JOB_FAMILY"
     printf -- '- payload_file: %s\n' "$payload_file"
     printf -- '- request_file: %s\n' "$request_file"
@@ -555,10 +555,10 @@ run_sync() {
   local json_output=0
   local since=""
   local now=""
-  local openclaw_state_file="$BRIDGE_CRON_STATE_DIR/openclaw-scheduler-state.json"
+  local legacy_state_file="$BRIDGE_CRON_STATE_DIR/legacy-scheduler-state.json"
   local native_state_file="$BRIDGE_CRON_STATE_DIR/native-scheduler-state.json"
   local tmp_dir=""
-  local openclaw_json=""
+  local legacy_json=""
   local native_json=""
   local status=0
 
@@ -626,12 +626,12 @@ run_sync() {
   fi
 
   bridge_require_python
-  python3 - "$openclaw_json" "$native_json" "$json_output" <<'PY'
+  python3 - "$legacy_json" "$native_json" "$json_output" <<'PY'
 import json
 import sys
 from pathlib import Path
 
-openclaw_path, native_path, json_output = sys.argv[1], sys.argv[2], sys.argv[3] == "1"
+legacy_path, native_path, json_output = sys.argv[1], sys.argv[2], sys.argv[3] == "1"
 
 def load(path_value):
     if not path_value:
@@ -642,7 +642,7 @@ def load(path_value):
     return json.loads(path.read_text(encoding="utf-8"))
 
 sources = {}
-for name, path_value in (("openclaw", openclaw_path), ("native", native_path)):
+for name, path_value in (("legacy", legacy_path), ("native", native_path)):
     payload = load(path_value)
     if payload is not None:
         sources[name] = payload

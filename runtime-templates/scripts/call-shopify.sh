@@ -5,7 +5,7 @@ set -uo pipefail
 BRIDGE_HOME="${BRIDGE_HOME:-$HOME/.agent-bridge}"
 AGENT_BRIDGE="$BRIDGE_HOME/agent-bridge"
 NOTIFY_PY="$BRIDGE_HOME/bridge-notify.py"
-CONFIG_JSON="$BRIDGE_HOME/runtime/openclaw.json"
+CONFIG_JSON="$BRIDGE_HOME/runtime/bridge-config.json"
 AGENT_ID="syrs-shopify"
 AGENT_NAME="syrs-shopify"
 AGENT_HOME="$BRIDGE_HOME/agents/shopify"
@@ -91,7 +91,7 @@ send_discord_result() {
     --kind discord \
     --target "$DISCORD_CHANNEL" \
     --account "$DISCORD_ACCOUNT" \
-    --openclaw-config "$CONFIG_JSON" \
+    --runtime-config "$CONFIG_JSON" \
     --title "$AGENT_NAME CLI result" \
     --message "$report_text" >>"$LOG_FILE" 2>&1 || return 1
 }

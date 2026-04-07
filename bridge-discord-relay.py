@@ -34,8 +34,8 @@ def save_json(path: Path, payload: Any) -> None:
     tmp.replace(path)
 
 
-def load_token(openclaw_config: Path, relay_account: str) -> str:
-    payload = load_json(openclaw_config, {})
+def load_token(runtime_config: Path, relay_account: str) -> str:
+    payload = load_json(runtime_config, {})
     token = (
         (((payload.get("channels") or {}).get("discord") or {}).get("accounts") or {})
         .get(relay_account, {})
@@ -258,7 +258,9 @@ def cmd_sync(args: argparse.Namespace) -> int:
     if not snapshot:
         return 0
 
-    token = load_token(Path(args.openclaw_config), args.relay_account)
+    if not args.runtime_config:
+        raise SystemExit("--runtime-config is required")
+    token = load_token(Path(args.runtime_config), args.relay_account)
     state_path = Path(args.state_file)
     state = load_json(state_path, {"channels": {}})
     channels = state.setdefault("channels", {})
@@ -429,7 +431,8 @@ def build_parser() -> argparse.ArgumentParser:
     sync_parser.add_argument("--agent-snapshot", required=True)
     sync_parser.add_argument("--bridge-home", required=True)
     sync_parser.add_argument("--state-file", required=True)
-    sync_parser.add_argument("--openclaw-config", required=True)
+    sync_parser.add_argument("--runtime-config")
+    sync_parser.add_argument("--openclaw-config", dest="runtime_config", help=argparse.SUPPRESS)
     sync_parser.add_argument("--relay-account", default="default")
     sync_parser.add_argument("--poll-limit", type=int, default=5)
     sync_parser.add_argument("--cooldown-seconds", type=int, default=60)

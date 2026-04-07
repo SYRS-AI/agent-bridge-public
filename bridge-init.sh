@@ -11,10 +11,10 @@ bridge_load_roster
 usage() {
   cat <<EOF
 Usage:
-  $(basename "$0") [--admin <agent>] [--engine claude|codex] [--session <name>] [--workdir <path>] [--channels <csv>] [--discord-channel <id>]... [--allow-from <id>]... [--default-chat <id>] [--openclaw-account <account>] [--openclaw-config <path>] [--api-base-url <url>] [--skip-validate] [--skip-send-test] [--skip-channel-setup] [--test-start] [--dry-run] [--json]
+  $(basename "$0") [--admin <agent>] [--engine claude|codex] [--session <name>] [--workdir <path>] [--channels <csv>] [--discord-channel <id>]... [--allow-from <id>]... [--default-chat <id>] [--channel-account <account>] [--runtime-config <path>] [--api-base-url <url>] [--skip-validate] [--skip-send-test] [--skip-channel-setup] [--test-start] [--dry-run] [--json]
 
 Examples:
-  $(basename "$0") --admin patch --engine claude --channels plugin:telegram --allow-from 123456789 --default-chat 123456789 --openclaw-account default
+  $(basename "$0") --admin patch --engine claude --channels plugin:telegram --allow-from 123456789 --default-chat 123456789 --channel-account default
   $(basename "$0") --admin manager --engine codex --dry-run --json
 EOF
 }
@@ -101,8 +101,8 @@ display_name=""
 role_text="Manager/admin role"
 description=""
 channels=""
-openclaw_account=""
-openclaw_config="$HOME/.openclaw/openclaw.json"
+channel_account=""
+runtime_config="$HOME/.agent-bridge/runtime/bridge-config.json"
 skip_channel_setup=0
 test_start=0
 dry_run=0
@@ -185,14 +185,14 @@ while [[ $# -gt 0 ]]; do
       default_chat="$2"
       shift 2
       ;;
-    --openclaw-account)
+    --channel-account|--openclaw-account)
       [[ $# -ge 2 ]] || bridge_die "옵션 값이 필요합니다: $1"
-      openclaw_account="$2"
+      channel_account="$2"
       shift 2
       ;;
-    --openclaw-config)
+    --runtime-config|--openclaw-config)
       [[ $# -ge 2 ]] || bridge_die "옵션 값이 필요합니다: $1"
-      openclaw_config="$2"
+      runtime_config="$2"
       shift 2
       ;;
     --api-base-url)
@@ -293,13 +293,13 @@ fi
 if [[ $skip_channel_setup -eq 0 ]] && [[ $dry_run -eq 0 ]]; then
   channel_setup_status="ok"
   if bridge_channel_csv_contains "$channels" "plugin:discord"; then
-    if ((${#discord_channels[@]} > 0)) || [[ -n "$openclaw_account" ]] || bridge_init_runtime_present discord "$admin_agent"; then
+    if ((${#discord_channels[@]} > 0)) || [[ -n "$channel_account" ]] || bridge_init_runtime_present discord "$admin_agent"; then
       setup_args=(discord "$admin_agent")
       for item in "${discord_channels[@]}"; do
         setup_args+=(--channel "$item")
       done
-      [[ -n "$openclaw_account" ]] && setup_args+=(--openclaw-account "$openclaw_account")
-      [[ -n "$openclaw_config" ]] && setup_args+=(--openclaw-config "$openclaw_config")
+      [[ -n "$channel_account" ]] && setup_args+=(--channel-account "$channel_account")
+      [[ -n "$runtime_config" ]] && setup_args+=(--runtime-config "$runtime_config")
       [[ -n "$api_base_url" ]] && setup_args+=(--api-base-url "$api_base_url")
       [[ $skip_validate -eq 1 ]] && setup_args+=(--skip-validate)
       [[ $skip_send_test -eq 1 ]] && setup_args+=(--skip-send-test)
@@ -307,18 +307,18 @@ if [[ $skip_channel_setup -eq 0 ]] && [[ $dry_run -eq 0 ]]; then
       "$BRIDGE_BASH_BIN" "$SCRIPT_DIR/bridge-setup.sh" "${setup_args[@]}" >/dev/null
     else
       channel_setup_status="partial"
-      bridge_init_append_warning "Discord channel setup skipped: no existing runtime, channel ids, or --openclaw-account provided."
+      bridge_init_append_warning "Discord channel setup skipped: no existing runtime, channel ids, or --channel-account provided."
     fi
   fi
   if bridge_channel_csv_contains "$channels" "plugin:telegram"; then
-    if ((${#telegram_allow_from[@]} > 0)) || [[ -n "$openclaw_account" ]] || bridge_init_runtime_present telegram "$admin_agent"; then
+    if ((${#telegram_allow_from[@]} > 0)) || [[ -n "$channel_account" ]] || bridge_init_runtime_present telegram "$admin_agent"; then
       setup_args=(telegram "$admin_agent")
       for item in "${telegram_allow_from[@]}"; do
         setup_args+=(--allow-from "$item")
       done
       [[ -n "$default_chat" ]] && setup_args+=(--default-chat "$default_chat")
-      [[ -n "$openclaw_account" ]] && setup_args+=(--openclaw-account "$openclaw_account")
-      [[ -n "$openclaw_config" ]] && setup_args+=(--openclaw-config "$openclaw_config")
+      [[ -n "$channel_account" ]] && setup_args+=(--channel-account "$channel_account")
+      [[ -n "$runtime_config" ]] && setup_args+=(--runtime-config "$runtime_config")
       [[ -n "$api_base_url" ]] && setup_args+=(--api-base-url "$api_base_url")
       [[ $skip_validate -eq 1 ]] && setup_args+=(--skip-validate)
       [[ $skip_send_test -eq 1 ]] && setup_args+=(--skip-send-test)
@@ -326,7 +326,7 @@ if [[ $skip_channel_setup -eq 0 ]] && [[ $dry_run -eq 0 ]]; then
       "$BRIDGE_BASH_BIN" "$SCRIPT_DIR/bridge-setup.sh" "${setup_args[@]}" >/dev/null
     else
       channel_setup_status="partial"
-      bridge_init_append_warning "Telegram channel setup skipped: no existing runtime, allow_from ids, or --openclaw-account provided."
+      bridge_init_append_warning "Telegram channel setup skipped: no existing runtime, allow_from ids, or --channel-account provided."
     fi
   fi
 fi

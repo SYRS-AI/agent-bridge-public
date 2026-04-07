@@ -106,7 +106,7 @@ cmd_send() {
     send
     --kind "$kind"
     --target "$target"
-    --openclaw-config "$BRIDGE_OPENCLAW_HOME/openclaw.json"
+    --runtime-config "$(bridge_compat_config_file)"
     --priority "$priority"
   )
   if [[ -n "$agent" ]]; then

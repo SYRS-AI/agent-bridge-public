@@ -146,7 +146,7 @@ def load_account_token(config_path: Path, kind: str, account: str) -> str:
     raise SetupError(f"Configured {kind} account token is empty: {account}")
 
 
-def candidate_openclaw_accounts(agent: str, accounts: dict[str, dict[str, Any]]) -> list[str]:
+def candidate_channel_accounts(agent: str, accounts: dict[str, dict[str, Any]]) -> list[str]:
     candidates = [agent]
     if "-" in agent:
         candidates.append(agent.rsplit("-", 1)[-1])
@@ -417,34 +417,34 @@ def cmd_discord(args: argparse.Namespace) -> int:
     }
 
     try:
-        accounts = load_channel_accounts(Path(args.openclaw_config), "discord") if args.openclaw_config else {}
+        accounts = load_channel_accounts(Path(args.runtime_config), "discord") if args.runtime_config else {}
         token = str(args.token or "").strip()
         token_source = ""
         if token:
             token_source = "flag"
-        elif args.openclaw_account:
-            token = load_account_token(Path(args.openclaw_config), "discord", args.openclaw_account)
-            token_source = f"openclaw:{args.openclaw_account}"
+        elif args.channel_account:
+            token = load_account_token(Path(args.runtime_config), "discord", args.channel_account)
+            token_source = f"channel:{args.channel_account}"
         elif inspected["token"]:
             token = inspected["token"]
             token_source = "existing:.discord/.env"
         elif interactive and accounts:
-            candidates = candidate_openclaw_accounts(args.agent, accounts)
+            candidates = candidate_channel_accounts(args.agent, accounts)
             if candidates:
                 default_account = candidates[0]
                 choice = prompt_text(
-                    "OpenClaw Discord account to import (enter 'skip' to paste manually)",
+                    "Discord channel account to import (enter 'skip' to paste manually)",
                     default_account,
                 )
                 if choice.lower() not in {"skip", "none", "manual"}:
-                    token = load_account_token(Path(args.openclaw_config), choice)
-                    token_source = f"openclaw:{choice}"
+                    token = load_account_token(Path(args.runtime_config), "discord", choice)
+                    token_source = f"channel:{choice}"
 
         if not token and interactive:
             token = prompt_text("Discord bot token", secret=True)
             token_source = "prompt"
         if not token:
-            raise SetupError("Discord bot token is required. Pass --token or --openclaw-account, or run in an interactive TTY.")
+            raise SetupError("Discord bot token is required. Pass --token or --channel-account, or run in an interactive TTY.")
 
         explicit_channels = normalize_id_list(args.channel or [], "channel ids")
         default_channels = explicit_channels or inspected["channels"]
@@ -541,34 +541,34 @@ def cmd_telegram(args: argparse.Namespace) -> int:
     }
 
     try:
-        accounts = load_channel_accounts(Path(args.openclaw_config), "telegram") if args.openclaw_config else {}
+        accounts = load_channel_accounts(Path(args.runtime_config), "telegram") if args.runtime_config else {}
         token = str(args.token or "").strip()
         token_source = ""
         if token:
             token_source = "flag"
-        elif args.openclaw_account:
-            token = load_account_token(Path(args.openclaw_config), "telegram", args.openclaw_account)
-            token_source = f"openclaw:{args.openclaw_account}"
+        elif args.channel_account:
+            token = load_account_token(Path(args.runtime_config), "telegram", args.channel_account)
+            token_source = f"channel:{args.channel_account}"
         elif inspected["token"]:
             token = inspected["token"]
             token_source = "existing:.telegram/.env"
         elif interactive and accounts:
-            candidates = candidate_openclaw_accounts(args.agent, accounts)
+            candidates = candidate_channel_accounts(args.agent, accounts)
             if candidates:
                 default_account = candidates[0]
                 choice = prompt_text(
-                    "Configured Telegram account to import (enter 'skip' to paste manually)",
+                    "Configured Telegram channel account to import (enter 'skip' to paste manually)",
                     default_account,
                 )
                 if choice.lower() not in {"skip", "none", "manual"}:
-                    token = load_account_token(Path(args.openclaw_config), "telegram", choice)
-                    token_source = f"openclaw:{choice}"
+                    token = load_account_token(Path(args.runtime_config), "telegram", choice)
+                    token_source = f"channel:{choice}"
 
         if not token and interactive:
             token = prompt_text("Telegram bot token", secret=True)
             token_source = "prompt"
         if not token:
-            raise SetupError("Telegram bot token is required. Pass --token or --openclaw-account, or run in an interactive TTY.")
+            raise SetupError("Telegram bot token is required. Pass --token or --channel-account, or run in an interactive TTY.")
 
         explicit_allow_from = normalize_id_list(args.allow_from or [], "allow_from")
         if interactive and not explicit_allow_from:
@@ -648,8 +648,10 @@ def build_parser() -> argparse.ArgumentParser:
     discord_parser.add_argument("--agent", required=True)
     discord_parser.add_argument("--discord-dir", required=True)
     discord_parser.add_argument("--suggested-channel", default="")
-    discord_parser.add_argument("--openclaw-config", default="")
-    discord_parser.add_argument("--openclaw-account")
+    discord_parser.add_argument("--runtime-config", default="")
+    discord_parser.add_argument("--openclaw-config", dest="runtime_config", help=argparse.SUPPRESS)
+    discord_parser.add_argument("--channel-account")
+    discord_parser.add_argument("--openclaw-account", dest="channel_account", help=argparse.SUPPRESS)
     discord_parser.add_argument("--token")
     discord_parser.add_argument("--channel", action="append", default=[])
     discord_parser.add_argument("--allow-from", action="append", default=[])
@@ -664,8 +666,10 @@ def build_parser() -> argparse.ArgumentParser:
     telegram_parser = subparsers.add_parser("telegram")
     telegram_parser.add_argument("--agent", required=True)
     telegram_parser.add_argument("--telegram-dir", required=True)
-    telegram_parser.add_argument("--openclaw-config", default="")
-    telegram_parser.add_argument("--openclaw-account")
+    telegram_parser.add_argument("--runtime-config", default="")
+    telegram_parser.add_argument("--openclaw-config", dest="runtime_config", help=argparse.SUPPRESS)
+    telegram_parser.add_argument("--channel-account")
+    telegram_parser.add_argument("--openclaw-account", dest="channel_account", help=argparse.SUPPRESS)
     telegram_parser.add_argument("--token")
     telegram_parser.add_argument("--allow-from", action="append", default=[])
     telegram_parser.add_argument("--default-chat", default="")

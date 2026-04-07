@@ -74,8 +74,9 @@ BRIDGE_AGENT_SESSION["codex-developer"]="codex-developer"
 #   agent-bridge setup agent tester
 
 # Optional: map source cron agent ids to bridge agents for cron enqueue.
-# Prefer BRIDGE_CRON_AGENT_TARGET; BRIDGE_OPENCLAW_AGENT_TARGET remains as a
-# compatibility alias for older local configs.
+# Prefer BRIDGE_CRON_AGENT_TARGET; BRIDGE_LEGACY_AGENT_TARGET remains as a
+# compatibility alias for older local configs. BRIDGE_OPENCLAW_AGENT_TARGET is
+# still accepted as a hidden legacy alias.
 # BRIDGE_CRON_AGENT_TARGET["legacy-agent"]="tester"
 # BRIDGE_CRON_AGENT_TARGET["legacy-ops"]="developer"
 # BRIDGE_CRON_FALLBACK_AGENT="developer"
