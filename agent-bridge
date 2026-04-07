@@ -21,7 +21,7 @@ Usage:
   $CLI_NAME urgent <agent> "<message>" [--wait <seconds>]
   $CLI_NAME task <create|inbox|show|claim|done|update|handoff|summary> ...
   $CLI_NAME profile <status|diff|deploy> ...
-  $CLI_NAME setup <discord|agent|admin> ...
+  $CLI_NAME setup <discord|telegram|agent|admin> ...
   $CLI_NAME cron <inventory|show|import|list|create|update|delete|enqueue|sync|run-subagent|errors|cleanup> ...
   $CLI_NAME discord <status|sync>
   $CLI_NAME migrate runtime inventory [--json] [--report <path>]
@@ -53,7 +53,8 @@ Usage:
   $CLI_NAME agent restart <agent> [--attach] [--continue|--no-continue] [--dry-run]
   $CLI_NAME agent attach <agent>
   $CLI_NAME setup discord <agent> [--channel <id>]... [--openclaw-account <account>]
-  $CLI_NAME setup agent <agent> [--skip-discord] [--test-start]
+  $CLI_NAME setup telegram <agent> [--allow-from <id>]... [--openclaw-account <account>]
+  $CLI_NAME setup agent <agent> [--skip-discord] [--skip-telegram] [--test-start]
   $CLI_NAME discord status
   $CLI_NAME discord sync
   $CLI_NAME cron inventory [--mode recurring|one-shot|all] [--family <family>] [--limit <count>]
@@ -100,6 +101,7 @@ Examples:
   $CLI_NAME cron errors report --limit 20
   $CLI_NAME cron cleanup report
   $CLI_NAME setup discord tester
+  $CLI_NAME setup telegram tester --allow-from 123456789
   $CLI_NAME setup agent tester
   $CLI_NAME migrate runtime inventory
   $CLI_NAME migrate runtime sync --dry-run

@@ -240,6 +240,7 @@ Then run the guided setup:
 
 ```bash
 ./agent-bridge setup discord tester
+./agent-bridge setup telegram tester --allow-from <telegram-user-id>
 ./agent-bridge setup agent tester
 ./agent-bridge agent create reviewer --engine claude
 ./agent-bridge agent start reviewer --dry-run
@@ -257,6 +258,20 @@ The wizard can:
 - import a bot token from `~/.openclaw/openclaw.json` during migration
 - scaffold the allowlist for one or more channel IDs
 - validate the bot token
+- send a small write-access test message unless you pass `--skip-send-test`
+
+`setup telegram` writes the runtime Telegram files into the agent workdir:
+
+- `<workdir>/.telegram/.env`
+- `<workdir>/.telegram/access.json`
+
+The Telegram setup flow can:
+
+- reuse the existing `.telegram` token
+- import a bot token from `~/.openclaw/openclaw.json` during migration
+- scaffold the allowlist of permitted user IDs
+- set a default chat/thread target for notifications
+- validate the bot token with `getMe`
 - send a small write-access test message unless you pass `--skip-send-test`
 
 For broader preflight, `setup agent` also checks:
@@ -470,6 +485,7 @@ That creates an isolated git worktree under `~/.agent-bridge/worktrees/` instead
 ./agent-bridge profile diff <agent>
 ./agent-bridge profile deploy <agent> --dry-run
 ./agent-bridge setup discord tester
+./agent-bridge setup telegram tester --allow-from <telegram-user-id>
 ./agent-bridge setup agent tester
 ./agent-bridge cron inventory --mode one-shot --limit 20
 ./agent-bridge cron list --agent <agent>
@@ -492,7 +508,7 @@ bash ./scripts/oss-preflight.sh
 - `agb`: shorthand wrapper for `agent-bridge`
 - `bridge-start.sh`, `bridge-run.sh`: session startup paths
 - `bridge-task.sh`, `bridge-queue.py`: queue API and SQLite backend
-- `bridge-setup.sh`, `bridge-setup.py`: Discord onboarding and agent preflight checks
+- `bridge-setup.sh`, `bridge-setup.py`: Discord/Telegram onboarding and agent preflight checks
 - `bridge-cron.sh`, `bridge-cron.py`, `bridge-cron-scheduler.py`: bridge-native cron CRUD plus legacy OpenClaw cron inventory, scheduling, queue adapters, and cleanup helpers
 - `bridge-send.sh`, `bridge-action.sh`: urgent interrupts and predefined actions
 - `bridge-status.sh`, `bridge-daemon.sh`, `bridge-sync.sh`: status, background sync, and heartbeats

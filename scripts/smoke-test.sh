@@ -114,6 +114,9 @@ FAKE_BIN="$TMP_ROOT/bin"
 FAKE_DISCORD_PORT_FILE="$TMP_ROOT/fake-discord.port"
 FAKE_DISCORD_REQUESTS="$TMP_ROOT/fake-discord-requests.jsonl"
 FAKE_DISCORD_PID=""
+FAKE_TELEGRAM_PORT_FILE="$TMP_ROOT/fake-telegram.port"
+FAKE_TELEGRAM_REQUESTS="$TMP_ROOT/fake-telegram-requests.jsonl"
+FAKE_TELEGRAM_PID=""
 CODEX_HOOKS_FILE="$TMP_ROOT/codex-home/.codex/hooks.json"
 
 cleanup() {
@@ -128,6 +131,10 @@ cleanup() {
   if [[ -n "$FAKE_DISCORD_PID" ]]; then
     kill "$FAKE_DISCORD_PID" >/dev/null 2>&1 || true
     wait "$FAKE_DISCORD_PID" >/dev/null 2>&1 || true
+  fi
+  if [[ -n "$FAKE_TELEGRAM_PID" ]]; then
+    kill "$FAKE_TELEGRAM_PID" >/dev/null 2>&1 || true
+    wait "$FAKE_TELEGRAM_PID" >/dev/null 2>&1 || true
   fi
   rm -rf "$TMP_ROOT"
 }
@@ -237,6 +244,13 @@ cat >"$TMP_ROOT/openclaw.json" <<'EOF'
           "token": "smoke-token"
         }
       }
+    },
+    "telegram": {
+      "accounts": {
+        "smoke": {
+          "token": "smoke-telegram-token"
+        }
+      }
     }
   }
 }
@@ -306,6 +320,57 @@ for _ in $(seq 1 50); do
 done
 [[ -f "$FAKE_DISCORD_PORT_FILE" ]] || die "fake Discord API failed to start"
 FAKE_DISCORD_API_BASE="http://127.0.0.1:$(cat "$FAKE_DISCORD_PORT_FILE")"
+
+log "starting fake Telegram API"
+python3 -u - "$FAKE_TELEGRAM_PORT_FILE" "$FAKE_TELEGRAM_REQUESTS" <<'PY' >/dev/null 2>&1 &
+import json
+import sys
+from http.server import BaseHTTPRequestHandler, HTTPServer
+
+port_file, requests_file = sys.argv[1], sys.argv[2]
+TOKEN = "smoke-telegram-token"
+
+class Handler(BaseHTTPRequestHandler):
+    def log_message(self, fmt, *args):
+        return
+
+    def _send(self, code, payload):
+        body = json.dumps(payload).encode("utf-8")
+        self.send_response(code)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def do_GET(self):
+        if self.path == f"/bot{TOKEN}/getMe":
+            self._send(200, {"ok": True, "result": {"id": "4242", "username": "smoke_telegram_bot"}})
+            return
+        self._send(404, {"ok": False, "description": "not found"})
+
+    def do_POST(self):
+        length = int(self.headers.get("Content-Length", "0"))
+        body = self.rfile.read(length).decode("utf-8") if length else "{}"
+        with open(requests_file, "a", encoding="utf-8") as handle:
+            handle.write(json.dumps({"path": self.path, "body": json.loads(body)}) + "\n")
+        if self.path == f"/bot{TOKEN}/sendMessage":
+            self._send(200, {"ok": True, "result": {"message_id": 1}})
+            return
+        self._send(404, {"ok": False, "description": "not found"})
+
+server = HTTPServer(("127.0.0.1", 0), Handler)
+with open(port_file, "w", encoding="utf-8") as handle:
+    handle.write(str(server.server_address[1]))
+server.serve_forever()
+PY
+FAKE_TELEGRAM_PID=$!
+
+for _ in $(seq 1 50); do
+  [[ -f "$FAKE_TELEGRAM_PORT_FILE" ]] && break
+  sleep 0.1
+done
+[[ -f "$FAKE_TELEGRAM_PORT_FILE" ]] || die "fake Telegram API failed to start"
+FAKE_TELEGRAM_API_BASE="http://127.0.0.1:$(cat "$FAKE_TELEGRAM_PORT_FILE")"
 
 log "verifying empty runtime starts clean"
 BRIDGE_ROSTER_LOCAL_FILE=/nonexistent bash "$REPO_ROOT/bridge-start.sh" --list >/dev/null
@@ -641,6 +706,18 @@ assert_contains "$(cat "$BRIDGE_ROSTER_LOCAL_FILE")" "plugin:telegram"
 [[ -f "$BRIDGE_AGENT_HOME_ROOT/$CREATED_AGENT/SKILLS.md" ]] || die "agent create did not scaffold SKILLS.md"
 [[ -f "$BRIDGE_AGENT_HOME_ROOT/$CREATED_AGENT/MEMORY.md" ]] || die "agent create did not scaffold MEMORY.md"
 [[ -L "$BRIDGE_AGENT_HOME_ROOT/$CREATED_AGENT/.claude/skills/agent-bridge-runtime" ]] || die "agent create did not link runtime skill"
+SETUP_TELEGRAM_OUTPUT="$("$REPO_ROOT/agent-bridge" setup telegram "$CREATED_AGENT" --openclaw-account smoke --openclaw-config "$TMP_ROOT/openclaw.json" --allow-from 123456789 --default-chat 123456789 --api-base-url "$FAKE_TELEGRAM_API_BASE" --yes)"
+assert_contains "$SETUP_TELEGRAM_OUTPUT" "telegram_dir: $BRIDGE_AGENT_HOME_ROOT/$CREATED_AGENT/.telegram"
+assert_contains "$SETUP_TELEGRAM_OUTPUT" "validation: ok"
+assert_contains "$SETUP_TELEGRAM_OUTPUT" "send: ok"
+[[ -f "$BRIDGE_AGENT_HOME_ROOT/$CREATED_AGENT/.telegram/.env" ]] || die "setup telegram did not create .env"
+[[ -f "$BRIDGE_AGENT_HOME_ROOT/$CREATED_AGENT/.telegram/access.json" ]] || die "setup telegram did not create access.json"
+assert_contains "$(cat "$BRIDGE_AGENT_HOME_ROOT/$CREATED_AGENT/.telegram/.env")" "TELEGRAM_BOT_TOKEN=smoke-telegram-token"
+assert_contains "$(cat "$FAKE_TELEGRAM_REQUESTS")" "[Agent Bridge setup]"
+SETUP_CREATED_AGENT_OUTPUT="$("$REPO_ROOT/agent-bridge" setup agent "$CREATED_AGENT" --skip-discord --skip-telegram)"
+assert_contains "$SETUP_CREATED_AGENT_OUTPUT" "telegram_dir: $BRIDGE_AGENT_HOME_ROOT/$CREATED_AGENT/.telegram"
+assert_contains "$SETUP_CREATED_AGENT_OUTPUT" "telegram_allow_from: 123456789"
+assert_contains "$SETUP_CREATED_AGENT_OUTPUT" "channel_status: ok"
 CREATE_LIST_JSON="$("$REPO_ROOT/agent-bridge" agent list --json)"
 CREATE_SHOW_JSON="$("$REPO_ROOT/agent-bridge" agent show "$CREATED_AGENT" --json)"
 python3 - "$CREATE_LIST_JSON" "$CREATE_SHOW_JSON" "$CREATED_AGENT" "$SMOKE_AGENT" <<'PY'
@@ -670,6 +747,13 @@ assert_contains "$CREATED_START_DRY_RUN" "session=$CREATED_SESSION"
 assert_contains "$CREATED_START_DRY_RUN" "channels=plugin:telegram"
 assert_contains "$CREATED_START_DRY_RUN" "channel_status=ok"
 assert_contains "$CREATED_START_DRY_RUN" "bridge-run.sh $CREATED_AGENT"
+CREATED_AGENT_LAUNCH="$("$BASH4_BIN" -c '
+  source "'"$REPO_ROOT"'/bridge-lib.sh"
+  bridge_load_roster
+  bridge_agent_launch_cmd "'"$CREATED_AGENT"'"
+')"
+assert_contains "$CREATED_AGENT_LAUNCH" "TELEGRAM_STATE_DIR=$BRIDGE_AGENT_HOME_ROOT/$CREATED_AGENT/.telegram"
+assert_contains "$CREATED_AGENT_LAUNCH" "claude --dangerously-skip-permissions --name $CREATED_AGENT --channels plugin:telegram"
 CREATED_AGENT_START_OUTPUT="$("$REPO_ROOT/agent-bridge" agent start "$CREATED_AGENT" --dry-run)"
 assert_contains "$CREATED_AGENT_START_OUTPUT" "session=$CREATED_SESSION"
 CREATED_AGENT_RESTART_OUTPUT="$("$REPO_ROOT/agent-bridge" agent restart "$CREATED_AGENT" --dry-run)"

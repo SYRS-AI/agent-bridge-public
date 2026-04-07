@@ -395,6 +395,16 @@ bridge_agent_discord_state_dir() {
   bridge_agent_default_discord_state_dir "$agent"
 }
 
+bridge_agent_default_telegram_state_dir() {
+  local agent="$1"
+  printf '%s/.telegram' "$(bridge_agent_workdir "$agent")"
+}
+
+bridge_agent_telegram_state_dir() {
+  local agent="$1"
+  bridge_agent_default_telegram_state_dir "$agent"
+}
+
 bridge_agent_workdir() {
   local agent="$1"
   local explicit="${BRIDGE_AGENT_WORKDIR[$agent]-}"
@@ -623,6 +633,15 @@ bridge_agent_channel_status_reason() {
     discord_dir="$(bridge_agent_discord_state_dir "$agent")"
     if [[ ! -f "$discord_dir/.env" || ! -f "$discord_dir/access.json" ]]; then
       printf 'missing Discord runtime files under %s (.env and access.json required)' "$discord_dir"
+      return 0
+    fi
+  fi
+
+  if bridge_channel_csv_contains "$required" "plugin:telegram"; then
+    local telegram_dir=""
+    telegram_dir="$(bridge_agent_telegram_state_dir "$agent")"
+    if [[ ! -f "$telegram_dir/.env" || ! -f "$telegram_dir/access.json" ]]; then
+      printf 'missing Telegram runtime files under %s (.env and access.json required)' "$telegram_dir"
       return 0
     fi
   fi

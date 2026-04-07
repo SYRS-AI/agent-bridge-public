@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Interactive Discord onboarding helpers for Agent Bridge."""
+"""Interactive Discord and Telegram onboarding helpers for Agent Bridge."""
 
 from __future__ import annotations
 
@@ -118,21 +118,21 @@ def inspect_discord_dir(discord_dir: Path) -> dict[str, Any]:
     }
 
 
-def load_discord_accounts(config_path: Path) -> dict[str, dict[str, Any]]:
+def load_channel_accounts(config_path: Path, kind: str) -> dict[str, dict[str, Any]]:
     payload = load_json(config_path, {})
     channels = payload.get("channels") or {}
-    discord = channels.get("discord") or {}
-    accounts = discord.get("accounts") or {}
+    channel_cfg = channels.get(kind) or {}
+    accounts = channel_cfg.get("accounts") or {}
     if not isinstance(accounts, dict):
         return {}
     return {str(name): cfg for name, cfg in accounts.items() if isinstance(cfg, dict)}
 
 
-def load_account_token(config_path: Path, account: str) -> str:
-    accounts = load_discord_accounts(config_path)
+def load_account_token(config_path: Path, kind: str, account: str) -> str:
+    accounts = load_channel_accounts(config_path, kind)
     account_cfg = accounts.get(account)
     if not account_cfg:
-        raise SetupError(f"OpenClaw Discord account not found: {account}")
+        raise SetupError(f"Configured {kind} account not found: {account}")
     token = str(account_cfg.get("token") or "").strip()
     if token:
         return token
@@ -143,7 +143,7 @@ def load_account_token(config_path: Path, account: str) -> str:
             token = token_path.read_text(encoding="utf-8").strip()
             if token:
                 return token
-    raise SetupError(f"OpenClaw Discord account token is empty: {account}")
+    raise SetupError(f"Configured {kind} account token is empty: {account}")
 
 
 def candidate_openclaw_accounts(agent: str, accounts: dict[str, dict[str, Any]]) -> list[str]:
@@ -162,6 +162,23 @@ def candidate_openclaw_accounts(agent: str, accounts: dict[str, dict[str, Any]])
             seen.add(candidate)
             ordered.append(candidate)
     return ordered
+
+
+def inspect_telegram_dir(telegram_dir: Path) -> dict[str, Any]:
+    env_path = telegram_dir / ".env"
+    access_path = telegram_dir / "access.json"
+    env = load_dotenv(env_path)
+    access_payload = load_json(access_path, {})
+    allow_from = normalize_id_list(access_payload.get("allowFrom") or [], "allow_from")
+    default_chat = str(access_payload.get("defaultChatId") or "").strip()
+    return {
+        "env_path": env_path,
+        "access_path": access_path,
+        "token": env.get("TELEGRAM_BOT_TOKEN", "").strip(),
+        "allow_from": allow_from,
+        "default_chat": default_chat,
+        "access_payload": access_payload if isinstance(access_payload, dict) else {},
+    }
 
 
 def http_json(token: str, url: str, method: str = "GET", payload: dict[str, Any] | None = None) -> Any:
@@ -223,6 +240,72 @@ def validate_discord(token: str, channels: list[str], api_base_url: str, send_te
     }
 
 
+def http_telegram_json(token: str, api_base_url: str, method: str, payload: dict[str, Any] | None = None) -> Any:
+    body = None
+    headers = {
+        "User-Agent": "agent-bridge-setup/0.1",
+    }
+    if payload is not None:
+        body = json.dumps(payload).encode("utf-8")
+        headers["Content-Type"] = "application/json"
+
+    base = api_base_url.rstrip("/")
+    request = Request(
+        f"{base}/bot{token}/{method}",
+        data=body,
+        headers=headers,
+        method="POST" if payload is not None else "GET",
+    )
+    try:
+        with urlopen(request, timeout=15) as response:
+            data = response.read().decode("utf-8")
+            if not data:
+                return {}
+            payload = json.loads(data)
+    except HTTPError as exc:
+        details = exc.read().decode("utf-8", errors="replace")
+        raise SetupError(f"Telegram API {method} failed: HTTP {exc.code}: {details}") from exc
+    except URLError as exc:
+        raise SetupError(f"Telegram API {method} failed: {exc.reason}") from exc
+
+    if not payload.get("ok", False):
+        raise SetupError(f"Telegram API {method} failed: {payload}")
+    return payload.get("result") or {}
+
+
+def validate_telegram(
+    token: str,
+    api_base_url: str,
+    send_test: bool,
+    agent: str,
+    test_chat_id: str,
+) -> dict[str, Any]:
+    bot = http_telegram_json(token, api_base_url, "getMe")
+    result: dict[str, Any] = {
+        "status": "ok",
+        "bot": {
+            "id": str(bot.get("id") or ""),
+            "username": str(bot.get("username") or ""),
+        },
+        "send": "skipped",
+        "test_chat_id": test_chat_id,
+    }
+    if send_test and test_chat_id:
+        response = http_telegram_json(
+            token,
+            api_base_url,
+            "sendMessage",
+            {
+                "chat_id": test_chat_id,
+                "text": f"[Agent Bridge setup] {agent} write access check. Safe to ignore.",
+                "disable_web_page_preview": True,
+            },
+        )
+        result["send"] = "ok"
+        result["message_id"] = str(response.get("message_id") or "")
+    return result
+
+
 def build_access_payload(existing: dict[str, Any], channels: list[str], allow_from: list[str], require_mention: bool) -> dict[str, Any]:
     payload = dict(existing)
     old_groups = payload.get("groups") or {}
@@ -279,6 +362,39 @@ def print_result(result: dict[str, Any]) -> None:
         print(f"error: {result['error']}")
 
 
+def print_telegram_result(result: dict[str, Any]) -> None:
+    print(f"agent: {result['agent']}")
+    print(f"telegram_dir: {result['telegram_dir']}")
+    print(f"env_file: {result['env_file']}")
+    print(f"access_file: {result['access_file']}")
+    print(f"token_source: {result['token_source']}")
+    if result["allow_from"]:
+        print(f"allow_from: {', '.join(result['allow_from'])}")
+    else:
+        print("allow_from: (none)")
+    if result["default_chat"]:
+        print(f"default_chat: {result['default_chat']}")
+    else:
+        print("default_chat: (unset)")
+    print(f"write_status: {result['write_status']}")
+
+    validation = result.get("validation") or {}
+    print(f"validation: {validation.get('status', 'skipped')}")
+    if validation.get("bot"):
+        bot = validation["bot"]
+        print(f"bot: {bot.get('username', '')} ({bot.get('id', '')})")
+    if validation.get("test_chat_id"):
+        print(f"test_chat_id: {validation['test_chat_id']}")
+    if validation.get("send"):
+        print(f"send: {validation['send']}")
+
+    for warning in result.get("warnings") or []:
+        print(f"warning: {warning}")
+
+    if result.get("error"):
+        print(f"error: {result['error']}")
+
+
 def cmd_discord(args: argparse.Namespace) -> int:
     discord_dir = Path(args.discord_dir).expanduser()
     inspected = inspect_discord_dir(discord_dir)
@@ -301,13 +417,13 @@ def cmd_discord(args: argparse.Namespace) -> int:
     }
 
     try:
-        accounts = load_discord_accounts(Path(args.openclaw_config)) if args.openclaw_config else {}
+        accounts = load_channel_accounts(Path(args.openclaw_config), "discord") if args.openclaw_config else {}
         token = str(args.token or "").strip()
         token_source = ""
         if token:
             token_source = "flag"
         elif args.openclaw_account:
-            token = load_account_token(Path(args.openclaw_config), args.openclaw_account)
+            token = load_account_token(Path(args.openclaw_config), "discord", args.openclaw_account)
             token_source = f"openclaw:{args.openclaw_account}"
         elif inspected["token"]:
             token = inspected["token"]
@@ -404,6 +520,126 @@ def cmd_discord(args: argparse.Namespace) -> int:
         return 1
 
 
+def cmd_telegram(args: argparse.Namespace) -> int:
+    telegram_dir = Path(args.telegram_dir).expanduser()
+    inspected = inspect_telegram_dir(telegram_dir)
+    access_payload = inspected["access_payload"]
+    warnings: list[str] = []
+    interactive = sys.stdin.isatty() and sys.stdout.isatty() and not args.yes
+
+    result: dict[str, Any] = {
+        "agent": args.agent,
+        "telegram_dir": str(telegram_dir),
+        "env_file": str(inspected["env_path"]),
+        "access_file": str(inspected["access_path"]),
+        "token_source": "",
+        "allow_from": [],
+        "default_chat": "",
+        "write_status": "pending",
+        "validation": {"status": "skipped"},
+        "warnings": warnings,
+    }
+
+    try:
+        accounts = load_channel_accounts(Path(args.openclaw_config), "telegram") if args.openclaw_config else {}
+        token = str(args.token or "").strip()
+        token_source = ""
+        if token:
+            token_source = "flag"
+        elif args.openclaw_account:
+            token = load_account_token(Path(args.openclaw_config), "telegram", args.openclaw_account)
+            token_source = f"openclaw:{args.openclaw_account}"
+        elif inspected["token"]:
+            token = inspected["token"]
+            token_source = "existing:.telegram/.env"
+        elif interactive and accounts:
+            candidates = candidate_openclaw_accounts(args.agent, accounts)
+            if candidates:
+                default_account = candidates[0]
+                choice = prompt_text(
+                    "Configured Telegram account to import (enter 'skip' to paste manually)",
+                    default_account,
+                )
+                if choice.lower() not in {"skip", "none", "manual"}:
+                    token = load_account_token(Path(args.openclaw_config), "telegram", choice)
+                    token_source = f"openclaw:{choice}"
+
+        if not token and interactive:
+            token = prompt_text("Telegram bot token", secret=True)
+            token_source = "prompt"
+        if not token:
+            raise SetupError("Telegram bot token is required. Pass --token or --openclaw-account, or run in an interactive TTY.")
+
+        explicit_allow_from = normalize_id_list(args.allow_from or [], "allow_from")
+        if interactive and not explicit_allow_from:
+            default_allow_csv = ",".join(inspected["allow_from"])
+            raw_allow_from = prompt_text("Allowed Telegram user/chat id(s), comma-separated", default_allow_csv)
+            allow_from = normalize_id_list([raw_allow_from], "allow_from")
+        else:
+            allow_from = explicit_allow_from or inspected["allow_from"]
+
+        default_chat = str(args.default_chat or inspected["default_chat"]).strip()
+        if interactive and not args.default_chat:
+            default_chat = prompt_text("Default Telegram chat id for test messages / notify target (optional)", default_chat)
+
+        test_chat_id = str(args.test_chat or default_chat or (allow_from[0] if allow_from else "")).strip()
+        send_test = not args.skip_send_test and bool(test_chat_id)
+        if interactive and not args.skip_validate and test_chat_id:
+            send_test = prompt_yes_no("Send a Telegram write-access test message now?", True)
+        if not allow_from:
+            warnings.append(
+                f"No Telegram allow_from ids configured for {args.agent}. Update {telegram_dir / 'access.json'} so the plugin can accept messages from intended users."
+            )
+        if not default_chat:
+            warnings.append(
+                f"No default Telegram chat id configured for {args.agent}. Set --default-chat if you want a stable notify/test target."
+            )
+
+        result["token_source"] = token_source or "existing:.telegram/.env"
+        result["allow_from"] = allow_from
+        result["default_chat"] = default_chat
+
+        access_doc = dict(access_payload)
+        access_doc["dmPolicy"] = "allowlist"
+        access_doc["allowFrom"] = allow_from
+        if default_chat:
+            access_doc["defaultChatId"] = default_chat
+        elif "defaultChatId" in access_doc:
+            access_doc.pop("defaultChatId", None)
+        pending = access_doc.get("pending")
+        if not isinstance(pending, dict):
+            access_doc["pending"] = {}
+
+        if args.dry_run:
+            result["write_status"] = "dry_run"
+            result["validation"] = {"status": "dry_run"}
+            print_telegram_result(result)
+            return 0
+
+        telegram_dir.mkdir(parents=True, exist_ok=True)
+        save_text(inspected["env_path"], f"TELEGRAM_BOT_TOKEN={token}\n")
+        save_json(inspected["access_path"], access_doc)
+        result["write_status"] = "ok"
+
+        if args.skip_validate:
+            result["validation"] = {"status": "skipped"}
+            print_telegram_result(result)
+            return 0
+
+        validation = validate_telegram(token, args.api_base_url, send_test, args.agent, test_chat_id)
+        result["validation"] = validation
+        print_telegram_result(result)
+        return 0
+    except SetupError as exc:
+        result["error"] = str(exc)
+        if result["write_status"] == "pending":
+            result["write_status"] = "skipped"
+        if result["token_source"] == "":
+            result["token_source"] = "(unset)"
+        print_telegram_result(result)
+        return 1
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="bridge-setup.py")
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -424,6 +660,22 @@ def build_parser() -> argparse.ArgumentParser:
     discord_parser.add_argument("--dry-run", action="store_true")
     discord_parser.add_argument("--api-base-url", default="https://discord.com/api/v10")
     discord_parser.set_defaults(handler=cmd_discord)
+
+    telegram_parser = subparsers.add_parser("telegram")
+    telegram_parser.add_argument("--agent", required=True)
+    telegram_parser.add_argument("--telegram-dir", required=True)
+    telegram_parser.add_argument("--openclaw-config", default="")
+    telegram_parser.add_argument("--openclaw-account")
+    telegram_parser.add_argument("--token")
+    telegram_parser.add_argument("--allow-from", action="append", default=[])
+    telegram_parser.add_argument("--default-chat", default="")
+    telegram_parser.add_argument("--test-chat", default="")
+    telegram_parser.add_argument("--yes", action="store_true")
+    telegram_parser.add_argument("--skip-validate", action="store_true")
+    telegram_parser.add_argument("--skip-send-test", action="store_true")
+    telegram_parser.add_argument("--dry-run", action="store_true")
+    telegram_parser.add_argument("--api-base-url", default="https://api.telegram.org")
+    telegram_parser.set_defaults(handler=cmd_telegram)
 
     return parser
 

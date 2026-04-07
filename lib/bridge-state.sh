@@ -197,6 +197,69 @@ print(f"{env_prefix}{quoted}" if env_prefix else quoted)
 PY
 }
 
+bridge_claude_launch_with_channel_state_dirs() {
+  local agent="$1"
+  local original="$2"
+  local required=""
+  local discord_dir=""
+  local telegram_dir=""
+
+  required="$(bridge_agent_channels_csv "$agent")"
+  if [[ -z "$required" ]]; then
+    printf '%s' "$original"
+    return 0
+  fi
+
+  discord_dir="$(bridge_agent_discord_state_dir "$agent")"
+  telegram_dir="$(bridge_agent_telegram_state_dir "$agent")"
+
+  bridge_require_python
+  python3 - "$original" "$required" "$discord_dir" "$telegram_dir" <<'PY'
+import re
+import shlex
+import sys
+
+original, required_csv, discord_dir, telegram_dir = sys.argv[1:]
+
+def normalize(raw: str):
+    values = []
+    seen = set()
+    for chunk in raw.split(","):
+        item = chunk.strip()
+        if not item or item in seen:
+            continue
+        seen.add(item)
+        values.append(item)
+    return values
+
+required = normalize(required_csv)
+if not required:
+    print(original)
+    raise SystemExit(0)
+
+match = re.match(r"^(?P<prefix>.*?)(?P<command>claude(?:\s|$).*)$", original)
+if not match:
+    print(original)
+    raise SystemExit(0)
+
+env_prefix = match.group("prefix")
+command = match.group("command")
+assignments = []
+
+if any(item == "plugin:discord" or item.startswith("plugin:discord@") for item in required):
+    assignments.append(("DISCORD_STATE_DIR", discord_dir))
+if any(item == "plugin:telegram" or item.startswith("plugin:telegram@") for item in required):
+    assignments.append(("TELEGRAM_STATE_DIR", telegram_dir))
+
+for name, value in assignments:
+    if f"{name}=" in env_prefix:
+        continue
+    env_prefix += f"{name}={shlex.quote(value)} "
+
+print(f"{env_prefix}{command}" if env_prefix else command)
+PY
+}
+
 bridge_build_static_claude_launch_cmd() {
   local agent="$1"
   local fallback=""
@@ -271,6 +334,7 @@ bridge_agent_launch_cmd() {
         launch_cmd="$(bridge_codex_launch_with_hooks "$launch_cmd")"
       elif [[ "$(bridge_agent_engine "$agent")" == "claude" ]]; then
         launch_cmd="$(bridge_claude_launch_with_channels "$agent" "$launch_cmd")"
+        launch_cmd="$(bridge_claude_launch_with_channel_state_dirs "$agent" "$launch_cmd")"
       fi
       launch_cmd="$(bridge_claude_launch_with_webhook "$agent" "$launch_cmd")"
       printf '%s' "$launch_cmd"
@@ -281,6 +345,7 @@ bridge_agent_launch_cmd() {
       launch_cmd="$(bridge_codex_launch_with_hooks "$launch_cmd")"
     elif [[ "$(bridge_agent_engine "$agent")" == "claude" ]]; then
       launch_cmd="$(bridge_claude_launch_with_channels "$agent" "$launch_cmd")"
+      launch_cmd="$(bridge_claude_launch_with_channel_state_dirs "$agent" "$launch_cmd")"
     fi
     launch_cmd="$(bridge_claude_launch_with_webhook "$agent" "$launch_cmd")"
     printf '%s' "$launch_cmd"
@@ -290,6 +355,7 @@ bridge_agent_launch_cmd() {
   fallback="${BRIDGE_AGENT_LAUNCH_CMD[$agent]-}"
   if [[ "$(bridge_agent_engine "$agent")" == "claude" ]] && launch_cmd="$(bridge_build_static_claude_launch_cmd "$agent")"; then
     launch_cmd="$(bridge_claude_launch_with_channels "$agent" "$launch_cmd")"
+    launch_cmd="$(bridge_claude_launch_with_channel_state_dirs "$agent" "$launch_cmd")"
     launch_cmd="$(bridge_claude_launch_with_webhook "$agent" "$launch_cmd")"
     printf '%s' "$launch_cmd"
     return 0
@@ -299,6 +365,7 @@ bridge_agent_launch_cmd() {
       launch_cmd="$(bridge_codex_launch_with_hooks "$launch_cmd")"
     elif [[ "$(bridge_agent_engine "$agent")" == "claude" ]]; then
       launch_cmd="$(bridge_claude_launch_with_channels "$agent" "$launch_cmd")"
+      launch_cmd="$(bridge_claude_launch_with_channel_state_dirs "$agent" "$launch_cmd")"
     fi
     launch_cmd="$(bridge_claude_launch_with_webhook "$agent" "$launch_cmd")"
     printf '%s' "$launch_cmd"
@@ -309,6 +376,7 @@ bridge_agent_launch_cmd() {
     fallback="$(bridge_codex_launch_with_hooks "$fallback")"
   elif [[ "$(bridge_agent_engine "$agent")" == "claude" ]]; then
     fallback="$(bridge_claude_launch_with_channels "$agent" "$fallback")"
+    fallback="$(bridge_claude_launch_with_channel_state_dirs "$agent" "$fallback")"
   fi
   launch_cmd="$(bridge_claude_launch_with_webhook "$agent" "$fallback")"
   printf '%s' "$launch_cmd"
