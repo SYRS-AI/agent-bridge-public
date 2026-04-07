@@ -105,6 +105,7 @@ mkdir -p "$BRIDGE_LOG_DIR" "$BRIDGE_SHARED_DIR"
 cd "$WORK_DIR" || bridge_die "$WORK_DIR 디렉토리가 없습니다."
 
 LOGFILE="$BRIDGE_LOG_DIR/${AGENT}-$(date '+%Y%m%d').log"
+ERRFILE="$BRIDGE_LOG_DIR/${AGENT}-$(date '+%Y%m%d').err.log"
 
 log_line() {
   local line
@@ -116,16 +117,33 @@ log_line "${AGENT} 에이전트 시작 (engine=${ENGINE}, dir=${WORK_DIR})"
 
 FAIL_COUNT=0
 while true; do
+  local_err_size_before=0
+  local_err_size_after=0
   log_line "실행: ${LAUNCH_CMD}"
-  "$BRIDGE_BASH_BIN" -lc "$LAUNCH_CMD"
-  EXIT_CODE=$?
+  if [[ -f "$ERRFILE" ]]; then
+    local_err_size_before="$(wc -c <"$ERRFILE" 2>/dev/null || echo 0)"
+  fi
+  if "$BRIDGE_BASH_BIN" -lc "$LAUNCH_CMD" 2> >(tee -a "$ERRFILE" >&2); then
+    EXIT_CODE=0
+  else
+    EXIT_CODE=$?
+  fi
+  if [[ -f "$ERRFILE" ]]; then
+    local_err_size_after="$(wc -c <"$ERRFILE" 2>/dev/null || echo 0)"
+  fi
 
   if [[ $ONCE -eq 1 ]]; then
+    if [[ $local_err_size_after -gt $local_err_size_before ]]; then
+      log_line "stderr captured: ${ERRFILE}"
+    fi
     log_line "1회 실행 종료 (코드: ${EXIT_CODE})"
     exit "$EXIT_CODE"
   fi
 
   if [[ $EXIT_CODE -ne 0 ]]; then
+    if [[ $local_err_size_after -gt $local_err_size_before ]]; then
+      log_line "stderr captured: ${ERRFILE}"
+    fi
     FAIL_COUNT=$((FAIL_COUNT + 1))
     log_line "비정상 종료 (코드: ${EXIT_CODE}, 연속실패: ${FAIL_COUNT}회). 5초 후 재시작..."
     if [[ $FAIL_COUNT -ge 10 ]]; then

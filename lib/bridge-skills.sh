@@ -7,10 +7,10 @@ bridge_project_skill_dir_for() {
 
   case "$engine" in
     codex)
-      printf '%s/.agents/skills/agent-bridge-project' "$workdir"
+      printf '%s/.agents/skills/agent-bridge' "$workdir"
       ;;
     claude)
-      printf '%s/.claude/skills/agent-bridge-project' "$workdir"
+      printf '%s/.claude/skills/agent-bridge' "$workdir"
       ;;
     *)
       return 1
@@ -149,7 +149,7 @@ bridge_render_codex_project_skill() {
 
   cat <<EOF
 ---
-name: agent-bridge-project
+name: agent-bridge
 description: Use when work needs tmux-based multi-agent coordination through \`${bridge_home}\`, including reading the roster, starting ad hoc workers with \`agent-bridge\`, sending messages between agents, triggering predefined actions, or sharing long reports through \`${bridge_home}/shared/\`.
 ---
 
@@ -186,7 +186,7 @@ bridge_render_claude_project_skill() {
 
   cat <<EOF
 ---
-name: agent-bridge-project
+name: agent-bridge
 description: Use PROACTIVELY when a task involves tmux-based multi-agent coordination through \`${bridge_home}\`, including roster lookup, inter-agent messaging, ad hoc worker startup with \`agent-bridge\`, predefined bridge actions, or shared handoff files.
 ---
 
@@ -245,25 +245,41 @@ bridge_bootstrap_project_skill() {
   local engine="$1"
   local workdir="$2"
   local skill_dir skill_file reference_file
+  local legacy_skill_dir=""
 
   if ! skill_dir="$(bridge_project_skill_dir_for "$engine" "$workdir")"; then
     return 0
   fi
+
+  case "$engine" in
+    codex)
+      legacy_skill_dir="$workdir/.agents/skills/agent-bridge-project"
+      ;;
+    claude)
+      legacy_skill_dir="$workdir/.claude/skills/agent-bridge-project"
+      ;;
+  esac
 
   skill_file="${skill_dir}/SKILL.md"
   reference_file="${skill_dir}/references/bridge-commands.md"
 
   case "$engine" in
     codex)
-      bridge_render_codex_project_skill "$BRIDGE_HOME" | bridge_write_managed_markdown "$skill_file" "project Codex bridge skill" || return 1
+      bridge_render_codex_project_skill "$BRIDGE_HOME" | bridge_write_managed_markdown "$skill_file" "Codex bridge skill" || return 1
       ;;
     claude)
-      bridge_render_claude_project_skill "$BRIDGE_HOME" | bridge_write_managed_markdown "$skill_file" "project Claude bridge skill" || return 1
+      bridge_render_claude_project_skill "$BRIDGE_HOME" | bridge_write_managed_markdown "$skill_file" "Claude bridge skill" || return 1
       ;;
     *)
       return 0
       ;;
   esac
 
-  bridge_render_project_bridge_reference "$BRIDGE_HOME" | bridge_write_managed_markdown "$reference_file" "project bridge reference" || return 1
+  bridge_render_project_bridge_reference "$BRIDGE_HOME" | bridge_write_managed_markdown "$reference_file" "bridge reference" || return 1
+
+  if [[ -n "$legacy_skill_dir" && -d "$legacy_skill_dir" && "$legacy_skill_dir" != "$skill_dir" ]]; then
+    if [[ -f "$legacy_skill_dir/SKILL.md" ]] && bridge_is_managed_markdown "$legacy_skill_dir/SKILL.md"; then
+      rm -rf "$legacy_skill_dir"
+    fi
+  fi
 }

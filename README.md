@@ -575,8 +575,8 @@ cd ~/some-project
 
 The current directory becomes the agent's workdir. `agent-bridge` will also install a small project-local bridge skill:
 
-- Codex: `.agents/skills/agent-bridge-project/SKILL.md`
-- Claude: `.claude/skills/agent-bridge-project/SKILL.md`
+- Codex: `.agents/skills/agent-bridge/SKILL.md`
+- Claude: `.claude/skills/agent-bridge/SKILL.md`
 - Bridge-owned Claude homes also get:
   - `.claude/skills/agent-bridge-runtime/SKILL.md`
   - `.claude/skills/cron-manager/SKILL.md`

@@ -4,6 +4,6 @@
 
 - `agent-bridge-runtime`
 - `cron-manager`
-- `agent-bridge-project` (project/local context에서 필요할 때)
+- `agent-bridge` (project/local context에서 필요할 때)
 
 추가 private skill은 `skills/` 아래에 배치한다.

@@ -7,6 +7,7 @@ bridge_build_dynamic_launch_cmd() {
 
   engine="$(bridge_agent_engine "$agent")"
   continue_mode="$(bridge_agent_continue "$agent")"
+  bridge_normalize_agent_session_id "$agent"
   session_id="$(bridge_agent_session_id "$agent")"
 
   case "$engine" in
@@ -42,6 +43,7 @@ bridge_build_resume_launch_cmd() {
 
   engine="$(bridge_agent_engine "$agent")"
   continue_mode="$(bridge_agent_continue "$agent")"
+  bridge_normalize_agent_session_id "$agent"
   session_id="$(bridge_agent_session_id "$agent")"
 
   if [[ "$continue_mode" != "1" || -z "$session_id" ]]; then
@@ -72,6 +74,33 @@ bridge_build_resume_launch_cmd() {
       ;;
     *)
       return 1
+      ;;
+  esac
+}
+
+bridge_clear_agent_session_id() {
+  local agent="$1"
+  BRIDGE_AGENT_SESSION_ID["$agent"]=""
+  bridge_persist_agent_state "$agent"
+}
+
+bridge_normalize_agent_session_id() {
+  local agent="$1"
+  local engine=""
+  local workdir=""
+  local session_id=""
+
+  engine="$(bridge_agent_engine "$agent")"
+  workdir="$(bridge_agent_workdir "$agent")"
+  session_id="$(bridge_agent_session_id "$agent")"
+  [[ -n "$session_id" ]] || return 0
+
+  case "$engine" in
+    claude)
+      if ! bridge_claude_session_id_exists "$session_id" "$workdir"; then
+        bridge_clear_agent_session_id "$agent"
+        return 0
+      fi
       ;;
   esac
 }
@@ -327,12 +356,18 @@ bridge_agent_launch_cmd() {
   local agent="$1"
   local fallback=""
   local launch_cmd=""
+  local engine=""
+
+  engine="$(bridge_agent_engine "$agent")"
+  if [[ "$engine" == "claude" ]]; then
+    bridge_normalize_agent_session_id "$agent"
+  fi
 
   if [[ "$(bridge_agent_source "$agent")" == "dynamic" ]]; then
     if launch_cmd="$(bridge_build_resume_launch_cmd "$agent")"; then
-      if [[ "$(bridge_agent_engine "$agent")" == "codex" ]]; then
+      if [[ "$engine" == "codex" ]]; then
         launch_cmd="$(bridge_codex_launch_with_hooks "$launch_cmd")"
-      elif [[ "$(bridge_agent_engine "$agent")" == "claude" ]]; then
+      elif [[ "$engine" == "claude" ]]; then
         launch_cmd="$(bridge_claude_launch_with_channels "$agent" "$launch_cmd")"
         launch_cmd="$(bridge_claude_launch_with_channel_state_dirs "$agent" "$launch_cmd")"
       fi
@@ -341,9 +376,9 @@ bridge_agent_launch_cmd() {
       return 0
     fi
     launch_cmd="$(bridge_build_dynamic_launch_cmd "$agent")"
-    if [[ "$(bridge_agent_engine "$agent")" == "codex" ]]; then
+    if [[ "$engine" == "codex" ]]; then
       launch_cmd="$(bridge_codex_launch_with_hooks "$launch_cmd")"
-    elif [[ "$(bridge_agent_engine "$agent")" == "claude" ]]; then
+    elif [[ "$engine" == "claude" ]]; then
       launch_cmd="$(bridge_claude_launch_with_channels "$agent" "$launch_cmd")"
       launch_cmd="$(bridge_claude_launch_with_channel_state_dirs "$agent" "$launch_cmd")"
     fi
@@ -353,7 +388,7 @@ bridge_agent_launch_cmd() {
   fi
 
   fallback="${BRIDGE_AGENT_LAUNCH_CMD[$agent]-}"
-  if [[ "$(bridge_agent_engine "$agent")" == "claude" ]] && launch_cmd="$(bridge_build_static_claude_launch_cmd "$agent")"; then
+  if [[ "$engine" == "claude" ]] && launch_cmd="$(bridge_build_static_claude_launch_cmd "$agent")"; then
     launch_cmd="$(bridge_claude_launch_with_channels "$agent" "$launch_cmd")"
     launch_cmd="$(bridge_claude_launch_with_channel_state_dirs "$agent" "$launch_cmd")"
     launch_cmd="$(bridge_claude_launch_with_webhook "$agent" "$launch_cmd")"
@@ -420,7 +455,11 @@ bridge_load_dynamic_agent_file() {
   BRIDGE_AGENT_META_FILE["$AGENT_ID"]="$file"
   BRIDGE_AGENT_LOOP["$AGENT_ID"]="${AGENT_LOOP:-1}"
   BRIDGE_AGENT_CONTINUE["$AGENT_ID"]="${AGENT_CONTINUE:-1}"
-  BRIDGE_AGENT_SESSION_ID["$AGENT_ID"]="${AGENT_SESSION_ID:-}"
+  if [[ -n "$AGENT_SESSION_ID" && "$AGENT_ENGINE" == "claude" ]] && ! bridge_claude_session_id_exists "$AGENT_SESSION_ID" "$AGENT_WORKDIR"; then
+    BRIDGE_AGENT_SESSION_ID["$AGENT_ID"]=""
+  else
+    BRIDGE_AGENT_SESSION_ID["$AGENT_ID"]="${AGENT_SESSION_ID:-}"
+  fi
   BRIDGE_AGENT_HISTORY_KEY["$AGENT_ID"]="${AGENT_HISTORY_KEY:-}"
   BRIDGE_AGENT_CREATED_AT["$AGENT_ID"]="${AGENT_CREATED_AT:-}"
   BRIDGE_AGENT_UPDATED_AT["$AGENT_ID"]="${AGENT_UPDATED_AT:-}"
@@ -485,7 +524,11 @@ bridge_restore_dynamic_agents_from_history() {
     BRIDGE_AGENT_SOURCE["$AGENT_ID"]="dynamic"
     BRIDGE_AGENT_LOOP["$AGENT_ID"]="${AGENT_LOOP:-1}"
     BRIDGE_AGENT_CONTINUE["$AGENT_ID"]="${AGENT_CONTINUE:-1}"
-    BRIDGE_AGENT_SESSION_ID["$AGENT_ID"]="${AGENT_SESSION_ID:-}"
+    if [[ -n "$AGENT_SESSION_ID" && "$AGENT_ENGINE" == "claude" ]] && ! bridge_claude_session_id_exists "$AGENT_SESSION_ID" "$AGENT_WORKDIR"; then
+      BRIDGE_AGENT_SESSION_ID["$AGENT_ID"]=""
+    else
+      BRIDGE_AGENT_SESSION_ID["$AGENT_ID"]="${AGENT_SESSION_ID:-}"
+    fi
     BRIDGE_AGENT_HISTORY_KEY["$AGENT_ID"]="${AGENT_HISTORY_KEY:-}"
     BRIDGE_AGENT_CREATED_AT["$AGENT_ID"]="${AGENT_CREATED_AT:-}"
     BRIDGE_AGENT_UPDATED_AT["$AGENT_ID"]="${AGENT_UPDATED_AT:-}"

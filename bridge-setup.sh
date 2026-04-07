@@ -476,7 +476,7 @@ run_agent() {
     echo "== Claude Skills =="
     bridge_bootstrap_project_skill "$engine" "$workdir" >/dev/null 2>&1 || true
     bridge_bootstrap_claude_shared_skills "$workdir" >/dev/null 2>&1 || true
-    printf 'project_skill: %s\n' "$workdir/.claude/skills/agent-bridge-project/SKILL.md"
+    printf 'project_skill: %s\n' "$workdir/.claude/skills/agent-bridge/SKILL.md"
     printf 'runtime_skill: %s\n' "$workdir/.claude/skills/agent-bridge-runtime/SKILL.md"
     printf 'cron_skill: %s\n' "$workdir/.claude/skills/cron-manager/SKILL.md"
 
@@ -523,7 +523,7 @@ run_agent() {
     echo
     echo "== Codex Skills =="
     bridge_bootstrap_project_skill "$engine" "$workdir" >/dev/null 2>&1 || true
-    printf 'project_skill: %s\n' "$workdir/.codex/skills/agent-bridge-project/SKILL.md"
+    printf 'project_skill: %s\n' "$workdir/.codex/skills/agent-bridge/SKILL.md"
 
     echo
     echo "== Codex Hooks =="

@@ -15,9 +15,15 @@ fi
 
 BRIDGE_SCRIPT_DIR="$(cd -P "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 if [[ -z "${BRIDGE_HOME:-}" ]]; then
-  BRIDGE_HOME="$BRIDGE_SCRIPT_DIR"
+  BRIDGE_HOME="$HOME/.agent-bridge"
 fi
-BRIDGE_ROSTER_FILE="${BRIDGE_ROSTER_FILE:-$BRIDGE_HOME/agent-roster.sh}"
+if [[ -z "${BRIDGE_ROSTER_FILE:-}" ]]; then
+  if [[ -f "$BRIDGE_HOME/agent-roster.sh" ]]; then
+    BRIDGE_ROSTER_FILE="$BRIDGE_HOME/agent-roster.sh"
+  else
+    BRIDGE_ROSTER_FILE="$BRIDGE_SCRIPT_DIR/agent-roster.sh"
+  fi
+fi
 BRIDGE_ROSTER_LOCAL_FILE="${BRIDGE_ROSTER_LOCAL_FILE:-$BRIDGE_HOME/agent-roster.local.sh}"
 BRIDGE_STATE_DIR="${BRIDGE_STATE_DIR:-$BRIDGE_HOME/state}"
 BRIDGE_ACTIVE_AGENT_DIR="${BRIDGE_ACTIVE_AGENT_DIR:-$BRIDGE_STATE_DIR/agents}"

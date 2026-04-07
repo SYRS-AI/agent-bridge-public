@@ -21,6 +21,11 @@ bridge_require_tmux_session() {
 bridge_attach_tmux_session() {
   local session="$1"
 
+  if [[ ! -t 0 || ! -t 1 ]]; then
+    echo "[info] session '$session' started; attach manually with: tmux attach -t $session"
+    return 0
+  fi
+
   if [[ -n "${TMUX:-}" ]]; then
     exec tmux switch-client -t "$session"
   fi

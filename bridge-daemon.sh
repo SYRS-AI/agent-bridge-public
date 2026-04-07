@@ -21,6 +21,71 @@ daemon_log_event() {
   printf '[%s] %s\n' "$timestamp" "$message" >>"$BRIDGE_DAEMON_CRASH_LOG"
 }
 
+daemon_info() {
+  local message="$1"
+  printf '[%s] [info] %s\n' "$(date '+%Y-%m-%dT%H:%M:%S%z')" "$message"
+}
+
+bridge_daemon_autostart_state_file() {
+  local agent="$1"
+  printf '%s/daemon-autostart/%s.env' "$BRIDGE_STATE_DIR" "$agent"
+}
+
+bridge_daemon_autostart_allowed() {
+  local agent="$1"
+  local file=""
+  local next_retry_ts=0
+  local now=0
+
+  file="$(bridge_daemon_autostart_state_file "$agent")"
+  [[ -f "$file" ]] || return 0
+  # shellcheck source=/dev/null
+  source "$file"
+  [[ "${AUTO_START_NEXT_RETRY_TS:-0}" =~ ^[0-9]+$ ]] || return 0
+  next_retry_ts="${AUTO_START_NEXT_RETRY_TS:-0}"
+  now="$(date +%s)"
+  (( now >= next_retry_ts ))
+}
+
+bridge_daemon_note_autostart_failure() {
+  local agent="$1"
+  local reason="$2"
+  local file=""
+  local fail_count=0
+  local next_retry_ts=0
+  local delay=5
+  local now=0
+
+  file="$(bridge_daemon_autostart_state_file "$agent")"
+  mkdir -p "$(dirname "$file")"
+  if [[ -f "$file" ]]; then
+    # shellcheck source=/dev/null
+    source "$file"
+  fi
+  [[ "${AUTO_START_FAIL_COUNT:-0}" =~ ^[0-9]+$ ]] || AUTO_START_FAIL_COUNT=0
+  fail_count=$(( AUTO_START_FAIL_COUNT + 1 ))
+  now="$(date +%s)"
+  if (( fail_count >= 10 )); then
+    delay=300
+  elif (( fail_count >= 5 )); then
+    delay=60
+  elif (( fail_count >= 3 )); then
+    delay=30
+  fi
+  next_retry_ts=$(( now + delay ))
+  cat >"$file" <<EOF
+AUTO_START_FAIL_COUNT=$fail_count
+AUTO_START_NEXT_RETRY_TS=$next_retry_ts
+AUTO_START_LAST_REASON=$(printf '%q' "$reason")
+EOF
+  daemon_info "auto-start backoff ${agent} (failures=${fail_count}, retry_in=${delay}s, reason=${reason})"
+}
+
+bridge_daemon_clear_autostart_failure() {
+  local agent="$1"
+  rm -f "$(bridge_daemon_autostart_state_file "$agent")"
+}
+
 bridge_dashboard_post_if_changed() {
   local summary_output="$1"
   local summary_file
@@ -77,7 +142,7 @@ nudge_agent_session() {
     return 1
   fi
   bridge_task_note_nudge "$agent" "$nudge_key" || true
-  echo "[info] nudged ${agent} (queued=${queued}, claimed=${claimed}, idle=${idle}s)"
+  daemon_info "nudged ${agent} (queued=${queued}, claimed=${claimed}, idle=${idle}s)"
 }
 
 recover_claude_bootstrap_blockers() {
@@ -95,7 +160,7 @@ recover_claude_bootstrap_blockers() {
     case "$state" in
       trust|summary)
         if bridge_tmux_prepare_claude_session "$session" 6 >/dev/null 2>&1; then
-          echo "[info] advanced claude startup blocker for ${agent} (${state})"
+          daemon_info "advanced claude startup blocker for ${agent} (${state})"
         else
           bridge_warn "failed to advance claude startup blocker for '${agent}' (${state})"
         fi
@@ -204,7 +269,7 @@ bridge_report_channel_health_miss() {
   elif [[ "$key" != "$last_key" || $(( now_ts - last_report_ts )) -ge ${BRIDGE_CHANNEL_HEALTH_REPORT_COOLDOWN_SECONDS:-1800} ]]; then
     create_output="$(bridge_queue_cli create --to "$admin_agent" --title "$title" --from daemon --priority urgent --body-file "$body_file" 2>/dev/null || true)"
     if [[ "$create_output" =~ created\ task\ \#([0-9]+) ]]; then
-      echo "[info] reported channel-health miss for ${agent} -> ${admin_agent} (#${BASH_REMATCH[1]})"
+      daemon_info "reported channel-health miss for ${agent} -> ${admin_agent} (#${BASH_REMATCH[1]})"
     fi
   else
     return 0
@@ -304,7 +369,7 @@ start_cron_dispatch_workers() {
     fi
 
     if start_cron_worker "$task_id"; then
-      echo "[info] started cron worker for task #${task_id} (${agent})"
+      daemon_info "started cron worker for task #${task_id} (${agent})"
       running_count=$((running_count + 1))
       started=1
       continue
@@ -418,7 +483,7 @@ cmd_run_cron_worker() {
     if [[ "$existing_followup_id" =~ ^[0-9]+$ ]]; then
       bridge_queue_cli update "$existing_followup_id" --actor "$followup_actor" --title "$followup_title" --priority "$followup_priority" --body-file "$followup_body_file" >/dev/null 2>&1 || true
       followup_task_id="$existing_followup_id"
-      echo "[info] refreshed cron followup task #${followup_task_id} for ${CRON_JOB_NAME:-$run_id}"
+      daemon_info "refreshed cron followup task #${followup_task_id} for ${CRON_JOB_NAME:-$run_id}"
     else
       create_output="$(bridge_queue_cli create --to "$TASK_ASSIGNED_TO" --title "$followup_title" --from "$followup_actor" --priority "$followup_priority" --body-file "$followup_body_file" 2>/dev/null || true)"
       if [[ "$create_output" =~ created\ task\ \#([0-9]+) ]]; then
@@ -430,7 +495,7 @@ cmd_run_cron_worker() {
   done_note_file="$(bridge_cron_dispatch_completion_note_file_by_id "$run_id")"
   bridge_cron_write_completion_note "$run_id" "$done_note_file" "$followup_task_id"
   bridge_queue_cli done "$task_id" --agent "$TASK_ASSIGNED_TO" --note-file "$done_note_file" >/dev/null
-  echo "[info] completed cron worker task #${task_id} run_id=${run_id} state=${CRON_RUN_STATE:-unknown} followup=${followup_task_id:-0}"
+  daemon_info "completed cron worker task #${task_id} run_id=${run_id} state=${CRON_RUN_STATE:-unknown} followup=${followup_task_id:-0}"
 }
 
 process_on_demand_agents() {
@@ -466,13 +531,27 @@ process_on_demand_agents() {
     if bridge_agent_is_always_on "$agent"; then
       always_on=1
     fi
+    if [[ "$active" == "1" ]]; then
+      bridge_daemon_clear_autostart_failure "$agent"
+    fi
 
     if [[ "$active" == "0" ]]; then
+      if ! bridge_daemon_autostart_allowed "$agent"; then
+        continue
+      fi
       if ((( always_on == 1 ))) && ! bridge_agent_is_active "$agent"; then
         if "$BRIDGE_BASH_BIN" "$SCRIPT_DIR/bridge-start.sh" "$agent" >/dev/null 2>&1; then
-          echo "[info] ensured always-on ${agent}"
-          changed=0
+          session="$(bridge_agent_session "$agent")"
+          sleep 1
+          if [[ -n "$session" ]] && bridge_tmux_session_exists "$session"; then
+            bridge_daemon_clear_autostart_failure "$agent"
+            daemon_info "ensured always-on ${agent}"
+            changed=0
+          else
+            bridge_daemon_note_autostart_failure "$agent" "session-exited-quickly"
+          fi
         else
+          bridge_daemon_note_autostart_failure "$agent" "start-command-failed"
           bridge_warn "always-on auto-start failed: ${agent}"
         fi
       elif [[ "$queued" =~ ^[0-9]+$ ]] && (( queued > 0 )) && ! bridge_agent_is_active "$agent"; then
@@ -480,12 +559,17 @@ process_on_demand_agents() {
           session="$(bridge_agent_session "$agent")"
           timeout="$(bridge_agent_idle_timeout "$agent")"
           [[ "$timeout" =~ ^[0-9]+$ ]] || timeout=0
+          sleep 1
           if [[ -n "$session" ]] && bridge_tmux_session_exists "$session"; then
+            bridge_daemon_clear_autostart_failure "$agent"
             nudge_agent_session "$agent" "$session" "$queued" "$claimed" "0" || true
+            daemon_info "auto-started ${agent} (queued=${queued}, timeout=${timeout}s)"
+            changed=0
+          else
+            bridge_daemon_note_autostart_failure "$agent" "session-exited-quickly"
           fi
-          echo "[info] auto-started ${agent} (queued=${queued}, timeout=${timeout}s)"
-          changed=0
         else
+          bridge_daemon_note_autostart_failure "$agent" "start-command-failed"
           bridge_warn "on-demand auto-start failed: ${agent}"
         fi
       fi
@@ -515,7 +599,7 @@ process_on_demand_agents() {
     fi
 
     if bridge_kill_agent_session "$agent" >/dev/null 2>&1; then
-      echo "[info] auto-stopped ${agent} (idle=${idle}s, timeout=${timeout}s)"
+      daemon_info "auto-stopped ${agent} (idle=${idle}s, timeout=${timeout}s)"
       changed=0
     else
       bridge_warn "on-demand auto-stop failed: ${agent}"
@@ -622,7 +706,7 @@ cmd_start() {
   local start_deadline
 
   if bridge_daemon_is_running; then
-    echo "[info] bridge daemon already running (pid=$(bridge_daemon_pid))"
+    daemon_info "bridge daemon already running (pid=$(bridge_daemon_pid))"
     return 0
   fi
 
@@ -637,7 +721,7 @@ cmd_start() {
   start_deadline=$(( $(date +%s) + BRIDGE_DAEMON_START_WAIT_SECONDS ))
   while (( $(date +%s) <= start_deadline )); do
     if bridge_daemon_is_running; then
-      echo "[info] bridge daemon started (pid=$(bridge_daemon_pid))"
+      daemon_info "bridge daemon started (pid=$(bridge_daemon_pid))"
       return 0
     fi
     sleep 0.1
@@ -675,22 +759,22 @@ cmd_stop() {
   if [[ -z "$pid" ]]; then
     if [[ -n "$recorded_pid" ]]; then
       rm -f "$BRIDGE_DAEMON_PID_FILE"
-      echo "[info] stale bridge daemon pid removed"
+      daemon_info "stale bridge daemon pid removed"
       return 0
     fi
-    echo "[info] bridge daemon not running"
+    daemon_info "bridge daemon not running"
     return 0
   fi
 
   if kill -0 "$pid" 2>/dev/null; then
     kill "$pid"
     rm -f "$BRIDGE_DAEMON_PID_FILE"
-    echo "[info] bridge daemon stopped"
+  daemon_info "bridge daemon stopped"
     return 0
   fi
 
   rm -f "$BRIDGE_DAEMON_PID_FILE"
-  echo "[info] stale bridge daemon pid removed"
+  daemon_info "stale bridge daemon pid removed"
 }
 
 cmd_status() {
