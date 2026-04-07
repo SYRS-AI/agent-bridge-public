@@ -243,6 +243,8 @@ def build_job_record(job):
     state = job.get("state") or {}
     schedule = job.get("schedule") or {}
     payload = job.get("payload") or {}
+    delivery = job.get("delivery") or {}
+    metadata = job.get("metadata") or {}
     next_run = parse_epoch_ms(state.get("nextRunAtMs"))
     if next_run is None and schedule.get("kind") == "at":
         next_run = parse_iso_datetime(schedule.get("at"))
@@ -275,6 +277,15 @@ def build_job_record(job):
         "session_target": job.get("sessionTarget", "-"),
         "wake_mode": job.get("wakeMode", "-"),
         "payload_kind": payload.get("kind", "-"),
+        "job_delivery_mode": delivery.get("mode", ""),
+        "job_delivery_channel": delivery.get("channel", ""),
+        "job_delivery_target": delivery.get("to", ""),
+        "allow_channel_delivery": bool(
+            metadata.get("allowChannelDelivery")
+            or metadata.get("allow_channel_delivery")
+            or metadata.get("directChannelDelivery")
+            or metadata.get("direct_channel_delivery")
+        ),
         "payload_text": payload_text,
         "payload_preview": preview_text(payload_text),
         "raw": job,
@@ -384,6 +395,10 @@ def serialize_record(record, include_payload=False):
         "session_target": record["session_target"],
         "wake_mode": record["wake_mode"],
         "payload_kind": record["payload_kind"],
+        "job_delivery_mode": record["job_delivery_mode"],
+        "job_delivery_channel": record["job_delivery_channel"],
+        "job_delivery_target": record["job_delivery_target"],
+        "allow_channel_delivery": record["allow_channel_delivery"],
         "payload_preview": record["payload_preview"],
     }
     if include_payload:

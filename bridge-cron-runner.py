@@ -107,7 +107,27 @@ def validate_result(payload: dict[str, Any]) -> dict[str, Any]:
     return result
 
 
+def csv_items(raw: str) -> list[str]:
+    values: list[str] = []
+    seen: set[str] = set()
+    for chunk in str(raw or "").split(","):
+        item = chunk.strip()
+        if not item or item in seen:
+            continue
+        seen.add(item)
+        values.append(item)
+    return values
+
+
+def channel_enabled(channels: list[str], prefix: str) -> bool:
+    return any(item == prefix or item.startswith(f"{prefix}@") for item in channels)
+
+
 def build_prompt(request: dict[str, Any], payload_text: str) -> str:
+    allow_channel_delivery = bool(request.get("allow_channel_delivery"))
+    target_channels = csv_items(request.get("target_channels", ""))
+    channel_name = str(request.get("job_delivery_channel") or "").strip()
+    channel_target = str(request.get("job_delivery_target") or "").strip()
     lines = [
         "You are a disposable cron execution worker for Agent Bridge.",
         "",
@@ -115,28 +135,52 @@ def build_prompt(request: dict[str, Any], payload_text: str) -> str:
         "Do the heavy cron work in this disposable run, then return JSON only.",
         "",
         "Hard rules:",
-        "- Do not send user-facing messages directly.",
-        "- Do not post to Discord, Telegram, email, or any human channel.",
-        "- Do not call agent-bridge urgent/task create/task done/handoff for delivery.",
-        "- If the legacy cron would normally notify someone, record that in recommended_next_steps instead.",
-        "- Set needs_human_followup=true only when the parent agent must review, decide, or act after this run, or when the run fails.",
-        "- Routine monitoring with no material change should set needs_human_followup=false.",
-        "- If you already completed the work and no parent follow-up is required, leave recommended_next_steps empty and set needs_human_followup=false.",
-        "- Keep the summary concise and operator-facing.",
-        "",
-        f"Parent agent: {request['target_agent']} ({request['target_engine']})",
-        f"Job: {request['job_name']}",
-        f"Family: {request['family']}",
-        f"Slot: {request['slot']}",
-        f"Run ID: {request['run_id']}",
-        f"Payload file: {request['payload_file']}",
-        "",
-        "Legacy cron payload follows:",
-        "",
-        payload_text.rstrip(),
-        "",
-        "Return JSON only matching the provided schema.",
     ]
+    if allow_channel_delivery:
+        lines.extend(
+            [
+                "- You may send a user-facing message when the payload explicitly requires it.",
+                "- If you do send one, use only the configured target agent channel tools that are available in this run.",
+                f"- Preferred delivery channel: {channel_name or 'configured target agent channels'}",
+                f"- Preferred delivery target: {channel_target or '(not specified)'}",
+                "- Do not use agent-bridge urgent/task create/task done/handoff for delivery.",
+                "- If direct delivery succeeds and nothing else requires parent review, set needs_human_followup=false.",
+                "- If delivery cannot be completed, set needs_human_followup=true and explain the blocker in recommended_next_steps.",
+                "- Keep the summary concise and operator-facing.",
+            ]
+        )
+    else:
+        lines.extend(
+            [
+                "- Do not send user-facing messages directly.",
+                "- Do not post to Discord, Telegram, email, or any human channel.",
+                "- Do not call agent-bridge urgent/task create/task done/handoff for delivery.",
+                "- If the legacy cron would normally notify someone, record that in recommended_next_steps instead.",
+                "- Set needs_human_followup=true only when the parent agent must review, decide, or act after this run, or when the run fails.",
+                "- Routine monitoring with no material change should set needs_human_followup=false.",
+                "- If you already completed the work and no parent follow-up is required, leave recommended_next_steps empty and set needs_human_followup=false.",
+                "- Keep the summary concise and operator-facing.",
+            ]
+        )
+    if target_channels:
+        lines.extend(["", f"Target channels: {', '.join(target_channels)}"])
+    lines.extend(
+        [
+            "",
+            f"Parent agent: {request['target_agent']} ({request['target_engine']})",
+            f"Job: {request['job_name']}",
+            f"Family: {request['family']}",
+            f"Slot: {request['slot']}",
+            f"Run ID: {request['run_id']}",
+            f"Payload file: {request['payload_file']}",
+            "",
+            "Legacy cron payload follows:",
+            "",
+            payload_text.rstrip(),
+            "",
+            "Return JSON only matching the provided schema.",
+        ]
+    )
     return "\n".join(lines).strip() + "\n"
 
 
@@ -161,6 +205,37 @@ def runner_env() -> dict[str, str]:
     env = dict(os.environ)
     env["PATH"] = augmented_path()
     return env
+
+
+def apply_channel_runtime_env(request: dict[str, Any], env: dict[str, str]) -> dict[str, str]:
+    channels = csv_items(request.get("target_channels", ""))
+    updated = dict(env)
+    if channel_enabled(channels, "plugin:discord"):
+        discord_dir = str(request.get("target_discord_state_dir") or "").strip()
+        if discord_dir:
+            updated["DISCORD_STATE_DIR"] = discord_dir
+    if channel_enabled(channels, "plugin:telegram"):
+        telegram_dir = str(request.get("target_telegram_state_dir") or "").strip()
+        if telegram_dir:
+            updated["TELEGRAM_STATE_DIR"] = telegram_dir
+    return updated
+
+
+def validate_channel_delivery_request(request: dict[str, Any]) -> None:
+    if not request.get("allow_channel_delivery"):
+        return
+
+    channels = csv_items(request.get("target_channels", ""))
+    if not channels:
+        raise RuntimeError("channel delivery is allowed for this run, but target agent has no configured channels")
+
+    preferred = str(request.get("job_delivery_channel") or "").strip().lower()
+    if preferred:
+        expected = f"plugin:{preferred}"
+        if not channel_enabled(channels, expected):
+            raise RuntimeError(
+                f"channel delivery requested for {preferred}, but target agent channels are {', '.join(channels)}"
+            )
 
 
 def resolve_binary(name: str, override_env: str) -> str:
@@ -210,6 +285,7 @@ def run_codex(request: dict[str, Any], prompt: str, schema_path: Path, timeout: 
 def run_claude(request: dict[str, Any], prompt: str, timeout: int) -> tuple[list[str], subprocess.CompletedProcess[str]]:
     workdir = request["target_workdir"]
     claude_bin = resolve_binary("claude", "BRIDGE_CLAUDE_BIN")
+    channels = csv_items(request.get("target_channels", ""))
     command = [
         claude_bin,
         "-p",
@@ -221,10 +297,13 @@ def run_claude(request: dict[str, Any], prompt: str, timeout: int) -> tuple[list
         "bypassPermissions",
         prompt,
     ]
+    if channels:
+        command[2:2] = ["--channels", ",".join(channels)]
+    env = apply_channel_runtime_env(request, runner_env())
     completed = subprocess.run(
         command,
         cwd=workdir,
-        env=runner_env(),
+        env=env,
         capture_output=True,
         text=True,
         timeout=timeout,
@@ -372,6 +451,7 @@ def cmd_run(args: argparse.Namespace) -> int:
     prompt = build_prompt(request, payload_text)
     write_text(prompt_file, prompt)
     write_json(schema_file, RESULT_SCHEMA)
+    validate_channel_delivery_request(request)
 
     timeout = int(os.environ.get("BRIDGE_CRON_SUBAGENT_TIMEOUT_SECONDS", "900"))
     started_at = now_iso()

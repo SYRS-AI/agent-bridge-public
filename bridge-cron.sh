@@ -238,6 +238,10 @@ write_materialized_payload() {
   local source_file="$3"
   local target="$4"
   local delivery_mode="$5"
+  local channel_delivery_mode="${6:-}"
+  local channel_delivery_channel="${7:-}"
+  local channel_delivery_target="${8:-}"
+  local allow_channel_delivery="${9:-0}"
 
   mkdir -p "$(dirname "$payload_file")"
   {
@@ -246,6 +250,10 @@ write_materialized_payload() {
     printf -- '- openclaw_agent: %s\n' "$CRON_JOB_AGENT"
     printf -- '- target_agent: %s\n' "$target"
     printf -- '- delivery_mode: %s\n' "$delivery_mode"
+    printf -- '- channel_delivery_mode: %s\n' "$channel_delivery_mode"
+    printf -- '- channel_delivery_channel: %s\n' "$channel_delivery_channel"
+    printf -- '- channel_delivery_target: %s\n' "$channel_delivery_target"
+    printf -- '- allow_channel_delivery: %s\n' "$allow_channel_delivery"
     printf -- '- family: %s\n' "$CRON_JOB_FAMILY"
     printf -- '- schedule: %s\n' "$CRON_JOB_SCHEDULE_TEXT"
     printf -- '- source_file: %s\n' "$source_file"
@@ -266,6 +274,10 @@ write_dispatch_body() {
   local target="$8"
   local target_engine="$9"
   local delivery_mode="${10}"
+  local channel_delivery_mode="${11:-}"
+  local channel_delivery_channel="${12:-}"
+  local channel_delivery_target="${13:-}"
+  local allow_channel_delivery="${14:-0}"
 
   mkdir -p "$(dirname "$body_file")"
   {
@@ -275,6 +287,10 @@ write_dispatch_body() {
     printf -- '- target_agent: %s\n' "$target"
     printf -- '- target_engine: %s\n' "$target_engine"
     printf -- '- delivery_mode: %s\n' "$delivery_mode"
+    printf -- '- channel_delivery_mode: %s\n' "$channel_delivery_mode"
+    printf -- '- channel_delivery_channel: %s\n' "$channel_delivery_channel"
+    printf -- '- channel_delivery_target: %s\n' "$channel_delivery_target"
+    printf -- '- allow_channel_delivery: %s\n' "$allow_channel_delivery"
     printf -- '- openclaw_agent: %s\n' "$CRON_JOB_AGENT"
     printf -- '- family: %s\n' "$CRON_JOB_FAMILY"
     printf -- '- payload_file: %s\n' "$payload_file"
@@ -326,6 +342,13 @@ run_enqueue() {
   local shell_payload=""
   local delivery_mode="resolved"
   local fallback_agent=""
+  local job_delivery_mode=""
+  local job_delivery_channel=""
+  local job_delivery_target=""
+  local allow_channel_delivery="0"
+  local target_channels=""
+  local target_discord_state_dir=""
+  local target_telegram_state_dir=""
 
   while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -423,6 +446,13 @@ run_enqueue() {
   manifest_file="$(bridge_cron_manifest_file "$CRON_JOB_NAME" "$CRON_JOB_ID" "$slot")"
   target_engine="$(bridge_agent_engine "$target")"
   target_workdir="$(bridge_agent_workdir "$target")"
+  target_channels="$(bridge_agent_channels_csv "$target")"
+  target_discord_state_dir="$(bridge_agent_discord_state_dir "$target")"
+  target_telegram_state_dir="$(bridge_agent_telegram_state_dir "$target")"
+  job_delivery_mode="${CRON_JOB_JOB_DELIVERY_MODE:-}"
+  job_delivery_channel="${CRON_JOB_JOB_DELIVERY_CHANNEL:-}"
+  job_delivery_target="${CRON_JOB_JOB_DELIVERY_TARGET:-}"
+  allow_channel_delivery="${CRON_JOB_ALLOW_CHANNEL_DELIVERY:-0}"
   request_rel="${request_file#$BRIDGE_HOME/}"
   result_rel="${result_file#$BRIDGE_HOME/}"
   status_rel="${status_file#$BRIDGE_HOME/}"
@@ -462,8 +492,8 @@ run_enqueue() {
     return 0
   fi
 
-  write_materialized_payload "$payload_file" "$slot" "$jobs_file" "$target" "$delivery_mode"
-  write_dispatch_body "$body_file" "$slot" "$run_id" "$payload_file" "$request_file" "$result_file" "$status_file" "$target" "$target_engine" "$delivery_mode"
+  write_materialized_payload "$payload_file" "$slot" "$jobs_file" "$target" "$delivery_mode" "$job_delivery_mode" "$job_delivery_channel" "$job_delivery_target" "$allow_channel_delivery"
+  write_dispatch_body "$body_file" "$slot" "$run_id" "$payload_file" "$request_file" "$result_file" "$status_file" "$target" "$target_engine" "$delivery_mode" "$job_delivery_mode" "$job_delivery_channel" "$job_delivery_target" "$allow_channel_delivery"
   create_output="$(bridge_queue_cli create --to "$target" --title "$title" --from "$actor" --priority "$priority" --body-file "$body_file")"
   printf '%s\n' "$create_output"
 
@@ -474,9 +504,9 @@ run_enqueue() {
   fi
 
   created_at="$(bridge_now_iso)"
-  bridge_cron_write_request "$request_file" "$run_id" "$CRON_JOB_ID" "$CRON_JOB_NAME" "$CRON_JOB_FAMILY" "$CRON_JOB_AGENT" "$target" "$slot" "$task_id" "$created_at" "$body_file" "$payload_file" "$result_file" "$status_file" "$stdout_log" "$stderr_log" "$jobs_file" "$CRON_JOB_PAYLOAD_KIND" "$target_engine" "$target_workdir"
+  bridge_cron_write_request "$request_file" "$run_id" "$CRON_JOB_ID" "$CRON_JOB_NAME" "$CRON_JOB_FAMILY" "$CRON_JOB_AGENT" "$target" "$slot" "$task_id" "$created_at" "$body_file" "$payload_file" "$result_file" "$status_file" "$stdout_log" "$stderr_log" "$jobs_file" "$CRON_JOB_PAYLOAD_KIND" "$target_engine" "$target_workdir" "$target_channels" "$target_discord_state_dir" "$target_telegram_state_dir" "$job_delivery_mode" "$job_delivery_channel" "$job_delivery_target" "$allow_channel_delivery" "$delivery_mode"
   bridge_cron_write_status "$status_file" "$run_id" "queued" "$target_engine" "$request_file" "$result_file" "$created_at"
-  bridge_cron_write_manifest "$manifest_file" "$CRON_JOB_ID" "$CRON_JOB_NAME" "$CRON_JOB_FAMILY" "$CRON_JOB_AGENT" "$target" "$slot" "$task_id" "$created_at" "$body_file" "$jobs_file" "$run_id" "$request_file" "$payload_file" "$result_file" "$status_file" "$stdout_log" "$stderr_log"
+  bridge_cron_write_manifest "$manifest_file" "$CRON_JOB_ID" "$CRON_JOB_NAME" "$CRON_JOB_FAMILY" "$CRON_JOB_AGENT" "$target" "$slot" "$task_id" "$created_at" "$body_file" "$jobs_file" "$run_id" "$request_file" "$payload_file" "$result_file" "$status_file" "$stdout_log" "$stderr_log" "$job_delivery_mode" "$job_delivery_channel" "$job_delivery_target" "$allow_channel_delivery" "$delivery_mode"
   printf 'run_id: %s\n' "$run_id"
   printf 'request_file: %s\n' "$request_rel"
   printf 'result_file: %s\n' "$result_rel"

@@ -1013,6 +1013,7 @@ assert_contains "$HOOK_CONTEXT_OUTPUT" "[Agent Bridge] 1 pending task(s) for cla
 assert_contains "$HOOK_CONTEXT_OUTPUT" "ACTION REQUIRED: Use your Bash tool now."
 assert_contains "$HOOK_CONTEXT_OUTPUT" "Run exactly: ~/.agent-bridge/agb inbox claude-static"
 assert_contains "$HOOK_CONTEXT_OUTPUT" "Highest priority: Task #"
+assert_contains "$HOOK_CONTEXT_OUTPUT" "Should the result of this task be shared with a human teammate?"
 
 log "ensuring Claude webhook MCP config merge"
 cat >"$MCP_WORKDIR/.mcp.json" <<'EOF'
@@ -1329,6 +1330,71 @@ assert result["status"] == "completed"
 assert result["summary"] == "The cron run finished successfully with no events to remind."
 assert result["needs_human_followup"] is False
 assert result["confidence"] == "low"
+PY
+
+log "preserving cron channel-delivery metadata and target channel runtime"
+CRON_CHANNEL_JOBS_FILE="$TMP_ROOT/cron-channel-jobs.json"
+cat >"$CRON_CHANNEL_JOBS_FILE" <<EOF
+{
+  "jobs": [
+    {
+      "id": "channel-job",
+      "name": "channel-job",
+      "enabled": true,
+      "agentId": "$SMOKE_AGENT",
+      "schedule": {
+        "kind": "cron",
+        "expr": "0 9 * * *",
+        "tz": "UTC"
+      },
+      "delivery": {
+        "mode": "direct",
+        "channel": "telegram",
+        "to": "telegram:123"
+      },
+      "metadata": {
+        "allowChannelDelivery": true
+      },
+      "payload": {
+        "text": "send a telegram update"
+      }
+    }
+  ]
+}
+EOF
+CHANNEL_SHELL_OUTPUT="$(python3 "$REPO_ROOT/bridge-cron.py" show --jobs-file "$CRON_CHANNEL_JOBS_FILE" --format shell channel-job)"
+assert_contains "$CHANNEL_SHELL_OUTPUT" "CRON_JOB_JOB_DELIVERY_MODE=direct"
+assert_contains "$CHANNEL_SHELL_OUTPUT" "CRON_JOB_JOB_DELIVERY_CHANNEL=telegram"
+assert_contains "$CHANNEL_SHELL_OUTPUT" "CRON_JOB_ALLOW_CHANNEL_DELIVERY=1"
+
+python3 - <<'PY'
+import importlib.util
+from pathlib import Path
+
+path = Path("bridge-cron-runner.py").resolve()
+spec = importlib.util.spec_from_file_location("bridge_cron_runner", path)
+module = importlib.util.module_from_spec(spec)
+assert spec.loader is not None
+spec.loader.exec_module(module)
+
+request = {
+    "target_agent": "tester",
+    "target_engine": "claude",
+    "job_name": "channel-job",
+    "family": "channel-job",
+    "slot": "2026-04-05T09:00+00:00",
+    "run_id": "channel-job--2026-04-05T09-00-00-00",
+    "payload_file": "/tmp/payload.md",
+    "target_channels": "plugin:telegram",
+    "target_telegram_state_dir": "/tmp/telegram-state",
+    "allow_channel_delivery": True,
+    "job_delivery_channel": "telegram",
+    "job_delivery_target": "telegram:123",
+}
+prompt = module.build_prompt(request, "send a telegram update")
+assert "You may send a user-facing message" in prompt
+env = module.apply_channel_runtime_env(request, {"PATH": "/usr/bin"})
+assert env["TELEGRAM_STATE_DIR"] == "/tmp/telegram-state"
 PY
 
 log "checkpointing cron sync progress only through the successful prefix"

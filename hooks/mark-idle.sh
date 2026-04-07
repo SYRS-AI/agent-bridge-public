@@ -41,3 +41,4 @@ if [[ -n "$open_task_shell" ]]; then
 fi
 
 bridge_queue_attention_message "$AGENT_ID" "$queued" "${TASK_ID:-}" "${TASK_PRIORITY:-normal}" "${TASK_TITLE:-}"
+printf '\nShould the result of this task be shared with a human teammate? If yes, send a concise update in the appropriate channel. If not, continue.\n'
