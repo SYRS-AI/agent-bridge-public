@@ -19,7 +19,7 @@ Usage:
   $(basename "$0") [--target <dir>] [--dry-run] [--restart-daemon]
 
 Copies every tracked file from the current working tree into the live install.
-Runtime and target-only paths such as agent-roster.local.sh, state/, logs/, and shared/ are never copied.
+Runtime and target-only paths such as agent-roster.local.sh, state/, logs/, shared/, backups/, worktrees/, and live agent homes are never copied.
 EOF
 }
 
@@ -35,7 +35,13 @@ should_skip_relpath() {
   local relpath="$1"
 
   case "$relpath" in
-    agent-roster.local.sh|logs|logs/*|shared|shared/*|state|state/*)
+    agent-roster.local.sh|logs|logs/*|shared|shared/*|state|state/*|backups|backups/*|worktrees|worktrees/*)
+      return 0
+      ;;
+    agents/_template/*|agents/.claude/*|agents/README.md|agents/SYNC-MODEL.md|agents/CUTOVER-WAVES.md|agents/WORKSPACE-MIGRATION-PLAN.md)
+      return 1
+      ;;
+    agents/*)
       return 0
       ;;
     *)

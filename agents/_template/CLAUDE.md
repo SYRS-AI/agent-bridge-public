@@ -38,6 +38,8 @@ task를 수신하면 아래 순서를 반드시 따른다:
 - Agent Bridge 코어 버그나 제품 개선점으로 보이면, 바로 GitHub issue를 만들지 않는다.
 - 먼저 사용자에게 증상, 재현 조건, 영향 범위, 왜 코어 이슈라고 판단했는지 짧게 보고하고 upstream issue 등록 허락을 받는다.
 - 사용자가 명시적으로 승인한 뒤에만 GitHub issue를 등록한다.
+- 사용자와 함께 작업하다가 범용 제품에 들어갈 만한 변경이 보이면, upstream 후보라고 먼저 알린다.
+- upstream 성격의 변경은 관리자 에이전트가 로컬 live install이나 repo에 바로 적용하지 않는다. 먼저 사용자 승인 또는 upstream 제안 여부를 확인한다.
 <!-- END AGENT BRIDGE DOC MIGRATION -->
 
 너는 **<Agent Name>**야. <한 줄 역할 설명>.

@@ -1446,6 +1446,34 @@ assert_contains "$SYNC_DRY_RUN_OUTPUT" "due=1"
 NATIVE_DELETE_OUTPUT="$("$REPO_ROOT/agent-bridge" cron delete "$NATIVE_JOB_ID")"
 assert_contains "$NATIVE_DELETE_OUTPUT" "deleted native cron job"
 
+log "creating a one-shot bridge-native cron job"
+NATIVE_ONESHOT_OUTPUT="$("$REPO_ROOT/agent-bridge" cron create --agent "$SMOKE_AGENT" --at '2026-04-08T10:15:00+09:00' --title 'native smoke one-shot' --payload 'Run once.' --delete-after-run)"
+assert_contains "$NATIVE_ONESHOT_OUTPUT" "created native cron job"
+NATIVE_ONESHOT_ID="$(python3 - <<'PY' "$BRIDGE_NATIVE_CRON_JOBS_FILE"
+import json, sys
+jobs = json.load(open(sys.argv[1], encoding='utf-8'))['jobs']
+for job in jobs:
+    if job.get('name') == 'native smoke one-shot':
+        print(job['id'])
+        break
+PY
+)"
+[[ -n "$NATIVE_ONESHOT_ID" ]] || die "native one-shot cron id was empty"
+python3 - <<'PY' "$BRIDGE_NATIVE_CRON_JOBS_FILE" "$NATIVE_ONESHOT_ID"
+import json, sys
+jobs = json.load(open(sys.argv[1], encoding='utf-8'))['jobs']
+job = next(job for job in jobs if job.get('id') == sys.argv[2])
+assert job['schedule']['kind'] == 'at'
+assert job['deleteAfterRun'] is True
+PY
+NATIVE_ONESHOT_DELETE_OUTPUT="$("$REPO_ROOT/agent-bridge" cron delete "$NATIVE_ONESHOT_ID")"
+assert_contains "$NATIVE_ONESHOT_DELETE_OUTPUT" "deleted native cron job"
+
+log "dry-run upgrade preserves custom paths"
+UPGRADE_JSON="$("$REPO_ROOT/agent-bridge" upgrade --dry-run --json)"
+assert_contains "$UPGRADE_JSON" "\"mode\": \"upgrade\""
+assert_contains "$UPGRADE_JSON" "\"preserved_paths\""
+
 log "inventorying legacy runtime references"
 LEGACY_ROOT="$TMP_ROOT/legacy-runtime"
 mkdir -p "$LEGACY_ROOT/cron" "$LEGACY_ROOT/scripts" "$LEGACY_ROOT/skills/sample-skill" "$LEGACY_ROOT/credentials"

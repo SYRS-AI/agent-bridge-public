@@ -670,6 +670,13 @@ def read_payload_argument(payload_text, payload_file):
     return ""
 
 
+def parse_at_datetime(value):
+    parsed = parse_iso_datetime(value)
+    if parsed is None:
+        raise ValueError(f"invalid --at value: {value}")
+    return parsed.isoformat(timespec="seconds")
+
+
 def resolve_native_job(records, ref):
     return resolve_show_record(records, ref)
 
@@ -679,13 +686,32 @@ def native_job_payload(job):
     return payload.get("text") or payload.get("message") or ""
 
 
-def build_native_job(*, job_id, title, agent, schedule_expr, tz_name, payload_text, enabled, actor, existing_job=None):
+def build_native_job(
+    *,
+    job_id,
+    title,
+    agent,
+    schedule_expr,
+    at_value,
+    tz_name,
+    payload_text,
+    enabled,
+    actor,
+    delete_after_run,
+    existing_job=None,
+):
     now_ms_value = now_epoch_ms()
-    schedule = {
-        "kind": "cron",
-        "expr": validate_cron_expr(schedule_expr),
-        "tz": tz_name or default_tz_name(),
-    }
+    if at_value is not None:
+        schedule = {
+            "kind": "at",
+            "at": parse_at_datetime(at_value),
+        }
+    else:
+        schedule = {
+            "kind": "cron",
+            "expr": validate_cron_expr(schedule_expr),
+            "tz": tz_name or default_tz_name(),
+        }
     job = dict(existing_job or {})
     job.update(
         {
@@ -696,6 +722,7 @@ def build_native_job(*, job_id, title, agent, schedule_expr, tz_name, payload_te
             "createdAtMs": job.get("createdAtMs") or now_ms_value,
             "updatedAtMs": now_ms_value,
             "schedule": schedule,
+            "deleteAfterRun": bool(delete_after_run),
             "payload": {
                 "kind": "text",
                 "text": payload_text,
@@ -781,10 +808,12 @@ def run_native_create(args):
         title=title,
         agent=args.agent,
         schedule_expr=args.schedule,
+        at_value=args.at,
         tz_name=args.tz,
         payload_text=payload_text,
         enabled=not args.disabled,
         actor=actor,
+        delete_after_run=args.delete_after_run,
     )
     jobs.append(job)
     raw_payload["jobs"] = jobs
@@ -815,8 +844,11 @@ def run_native_update(args):
     existing = dict(jobs[job_index])
     title = args.title.strip() if args.title is not None else existing.get("name", record["name"])
     agent = args.agent or existing.get("agentId") or existing.get("agent") or record["agent"]
-    schedule_expr = args.schedule or (existing.get("schedule") or {}).get("expr") or ""
-    tz_name = args.tz or (existing.get("schedule") or {}).get("tz") or default_tz_name()
+    schedule = existing.get("schedule") or {}
+    schedule_kind = schedule.get("kind") or "cron"
+    schedule_expr = args.schedule or (schedule.get("expr") if schedule_kind == "cron" else "") or ""
+    at_value = args.at or (schedule.get("at") if schedule_kind == "at" else None)
+    tz_name = args.tz or schedule.get("tz") or default_tz_name()
     payload_text = native_job_payload(existing)
     if args.payload is not None or args.payload_file is not None:
         payload_text = read_payload_argument(args.payload, args.payload_file)
@@ -826,16 +858,23 @@ def run_native_update(args):
         enabled = True
     if args.disable:
         enabled = False
+    delete_after_run = bool(existing.get("deleteAfterRun"))
+    if args.delete_after_run:
+        delete_after_run = True
+    if args.keep_after_run:
+        delete_after_run = False
 
     updated_job = build_native_job(
         job_id=record["id"],
         title=title,
         agent=agent,
         schedule_expr=schedule_expr,
+        at_value=at_value,
         tz_name=tz_name,
         payload_text=payload_text,
         enabled=enabled,
         actor=actor,
+        delete_after_run=delete_after_run,
         existing_job=existing,
     )
     jobs[job_index] = updated_job
@@ -1145,7 +1184,9 @@ def build_parser():
     native_create_parser = subparsers.add_parser("native-create", help="Create a bridge-native cron job.")
     native_create_parser.add_argument("--jobs-file", required=True)
     native_create_parser.add_argument("--agent", required=True)
-    native_create_parser.add_argument("--schedule", required=True)
+    create_schedule_group = native_create_parser.add_mutually_exclusive_group(required=True)
+    create_schedule_group.add_argument("--schedule")
+    create_schedule_group.add_argument("--at")
     native_create_parser.add_argument("--title", required=True)
     native_payload_group = native_create_parser.add_mutually_exclusive_group()
     native_payload_group.add_argument("--payload")
@@ -1153,18 +1194,24 @@ def build_parser():
     native_create_parser.add_argument("--tz", default=default_tz_name())
     native_create_parser.add_argument("--actor")
     native_create_parser.add_argument("--disabled", action="store_true")
+    native_create_parser.add_argument("--delete-after-run", action="store_true")
 
     native_update_parser = subparsers.add_parser("native-update", help="Update a bridge-native cron job.")
     native_update_parser.add_argument("--jobs-file", required=True)
     native_update_parser.add_argument("job_ref")
     native_update_parser.add_argument("--agent")
-    native_update_parser.add_argument("--schedule")
+    update_schedule_group = native_update_parser.add_mutually_exclusive_group()
+    update_schedule_group.add_argument("--schedule")
+    update_schedule_group.add_argument("--at")
     native_update_parser.add_argument("--title")
     native_update_payload_group = native_update_parser.add_mutually_exclusive_group()
     native_update_payload_group.add_argument("--payload")
     native_update_payload_group.add_argument("--payload-file")
     native_update_parser.add_argument("--tz")
     native_update_parser.add_argument("--actor")
+    delete_after_run_group = native_update_parser.add_mutually_exclusive_group()
+    delete_after_run_group.add_argument("--delete-after-run", action="store_true")
+    delete_after_run_group.add_argument("--keep-after-run", action="store_true")
     enabled_group = native_update_parser.add_mutually_exclusive_group()
     enabled_group.add_argument("--enable", action="store_true")
     enabled_group.add_argument("--disable", action="store_true")

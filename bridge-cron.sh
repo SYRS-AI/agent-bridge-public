@@ -14,8 +14,8 @@ Usage:
   $(basename "$0") show <job-name-or-id> [--json]
   $(basename "$0") import [--source-jobs-file <path>] [--dry-run]
   $(basename "$0") list [--agent <bridge-agent>] [--enabled yes|no|all] [--limit <count>] [--json]
-  $(basename "$0") create --agent <bridge-agent> --schedule "<cron-expr>" --title "<title>" [--payload "<text>" | --payload-file <path>] [--tz <iana-tz>]
-  $(basename "$0") update <job-id> [--agent <bridge-agent>] [--schedule "<cron-expr>"] [--title "<title>"] [--payload "<text>" | --payload-file <path>] [--tz <iana-tz>] [--enable|--disable]
+  $(basename "$0") create --agent <bridge-agent> (--schedule "<cron-expr>" | --at "<iso-datetime>") --title "<title>" [--payload "<text>" | --payload-file <path>] [--tz <iana-tz>] [--delete-after-run]
+  $(basename "$0") update <job-id> [--agent <bridge-agent>] [--schedule "<cron-expr>" | --at "<iso-datetime>"] [--title "<title>"] [--payload "<text>" | --payload-file <path>] [--tz <iana-tz>] [--enable|--disable] [--delete-after-run|--keep-after-run]
   $(basename "$0") delete <job-id>
   $(basename "$0") enqueue <job-name-or-id> [--slot <slot-key>] [--target <bridge-agent>] [--from <actor>] [--priority normal|high] [--dry-run]
   $(basename "$0") sync [--dry-run] [--json] [--since <iso-datetime>] [--now <iso-datetime>]
@@ -167,12 +167,12 @@ run_create() {
 
   while [[ $# -gt 0 ]]; do
     case "$1" in
-      --agent|--schedule|--title|--payload|--payload-file|--tz|--actor)
+      --agent|--schedule|--at|--title|--payload|--payload-file|--tz|--actor)
         [[ $# -lt 2 ]] && bridge_die "$1 뒤에 값을 지정하세요."
         py_args+=("$1" "$2")
         shift 2
         ;;
-      --disabled)
+      --disabled|--delete-after-run)
         py_args+=("$1")
         shift
         ;;
@@ -197,17 +197,17 @@ run_update() {
   )
 
   shift || true
-  [[ -n "$job_ref" ]] || bridge_die "Usage: $(basename "$0") update <job-id> [--agent <bridge-agent>] [--schedule <cron-expr>] [--title <title>] [--payload <text>|--payload-file <path>] [--tz <iana-tz>] [--enable|--disable]"
+  [[ -n "$job_ref" ]] || bridge_die "Usage: $(basename "$0") update <job-id> [--agent <bridge-agent>] [--schedule <cron-expr>|--at <iso-datetime>] [--title <title>] [--payload <text>|--payload-file <path>] [--tz <iana-tz>] [--enable|--disable] [--delete-after-run|--keep-after-run]"
   py_args+=("$job_ref")
 
   while [[ $# -gt 0 ]]; do
     case "$1" in
-      --agent|--schedule|--title|--payload|--payload-file|--tz|--actor)
+      --agent|--schedule|--at|--title|--payload|--payload-file|--tz|--actor)
         [[ $# -lt 2 ]] && bridge_die "$1 뒤에 값을 지정하세요."
         py_args+=("$1" "$2")
         shift 2
         ;;
-      --enable|--disable)
+      --enable|--disable|--delete-after-run|--keep-after-run)
         py_args+=("$1")
         shift
         ;;

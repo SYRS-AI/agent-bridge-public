@@ -17,6 +17,7 @@ Usage:
   $CLI_NAME admin [--replace] [--continue|--no-continue] [--no-attach] [--no-project-skill]
   $CLI_NAME bootstrap [bootstrap options...] [init options...]
   $CLI_NAME init [--admin <agent>] [--engine claude|codex] [--session <name>] [--channels <csv>] [--dry-run] [--json]
+  $CLI_NAME upgrade [--pull] [--restart-daemon] [--dry-run] [--json]
   $CLI_NAME agent <create|list|show|start|stop|restart|attach> ...
   $CLI_NAME kill <number|all>
   $CLI_NAME attach [number|name]
@@ -63,8 +64,8 @@ Usage:
   $CLI_NAME cron show <job-name-or-id>
   $CLI_NAME cron import [--source-jobs-file <path>] [--dry-run]
   $CLI_NAME cron list [--agent <bridge-agent>] [--enabled yes|no|all] [--limit <count>] [--json]
-  $CLI_NAME cron create --agent <bridge-agent> --schedule "<cron-expr>" --title "<title>" [--payload "<text>" | --payload-file <path>] [--tz <iana-tz>]
-  $CLI_NAME cron update <job-id> [--agent <bridge-agent>] [--schedule "<cron-expr>"] [--title "<title>"] [--payload "<text>" | --payload-file <path>] [--tz <iana-tz>] [--enable|--disable]
+  $CLI_NAME cron create --agent <bridge-agent> (--schedule "<cron-expr>" | --at "<iso-datetime>") --title "<title>" [--payload "<text>" | --payload-file <path>] [--tz <iana-tz>] [--delete-after-run]
+  $CLI_NAME cron update <job-id> [--agent <bridge-agent>] [--schedule "<cron-expr>" | --at "<iso-datetime>"] [--title "<title>"] [--payload "<text>" | --payload-file <path>] [--tz <iana-tz>] [--enable|--disable] [--delete-after-run|--keep-after-run]
   $CLI_NAME cron delete <job-id>
   $CLI_NAME cron enqueue <job-name-or-id> [--slot <slot-key>] [--dry-run]
   $CLI_NAME cron sync [--dry-run] [--json] [--since <iso-datetime>] [--now <iso-datetime>]
@@ -83,6 +84,7 @@ Examples:
   $CLI_NAME admin
   $CLI_NAME bootstrap --admin manager --engine claude --channels plugin:telegram@claude-plugins-official
   $CLI_NAME init --admin manager --engine claude --channels plugin:telegram@claude-plugins-official
+  $CLI_NAME upgrade --pull --restart-daemon
   $CLI_NAME list
   $CLI_NAME kill 1
   $CLI_NAME kill all
@@ -299,6 +301,10 @@ if [[ $# -gt 0 ]]; then
     init)
       shift
       exec "$BRIDGE_BASH_BIN" "$SCRIPT_DIR/bridge-init.sh" "$@"
+      ;;
+    upgrade)
+      shift
+      exec "$BRIDGE_BASH_BIN" "$SCRIPT_DIR/bridge-upgrade.sh" "$@"
       ;;
     list)
       if [[ $# -ne 1 ]]; then

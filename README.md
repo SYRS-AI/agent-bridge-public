@@ -11,6 +11,20 @@ This repository is designed for trusted local projects. It assumes you are inten
 
 If you hand this repository URL to another Claude or Codex agent, the preferred bootstrap is now AI-native: the helper agent installs the bridge, bootstraps one long-lived admin role, and then hands control to that admin role.
 
+## Updating an existing live install
+
+Use the repo checkout as source of truth, then update the live bridge while preserving local operator customizations:
+
+```bash
+./agent-bridge upgrade --pull --restart-daemon
+```
+
+This preserves:
+- `agent-roster.local.sh`
+- `state/`, `logs/`, `shared/`
+- `backups/`, `worktrees/`
+- live agent homes under `agents/<agent>/`
+
 ## AI-Native Install (한국어)
 
 원하는 최종 상태는 이겁니다.
