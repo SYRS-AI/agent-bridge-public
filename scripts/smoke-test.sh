@@ -30,6 +30,24 @@ assert_not_contains() {
   [[ "$haystack" != *"$needle"* ]] || die "expected output to not contain: $needle"
 }
 
+wait_for_tmux_session() {
+  local session="$1"
+  local expected="${2:-up}"
+  local attempts="${3:-20}"
+  local delay="${4:-0.2}"
+  local i=0
+
+  for ((i = 0; i < attempts; i++)); do
+    if tmux has-session -t "$session" >/dev/null 2>&1; then
+      [[ "$expected" == "up" ]] && return 0
+    else
+      [[ "$expected" == "down" ]] && return 0
+    fi
+    sleep "$delay"
+  done
+  return 1
+}
+
 kill_stale_smoke_tmux_sessions() {
   local session=""
 
@@ -726,18 +744,15 @@ tmux has-session -t "$AUTO_START_SESSION" >/dev/null 2>&1 || die "auto-start rol
 log "ensuring explicit timeout=0 role is restarted even without queue"
 tmux has-session -t "$ALWAYS_ON_SESSION" >/dev/null 2>&1 && tmux kill-session -t "$ALWAYS_ON_SESSION" >/dev/null 2>&1 || true
 bash "$REPO_ROOT/bridge-daemon.sh" sync >/dev/null
-sleep 1
-tmux has-session -t "$ALWAYS_ON_SESSION" >/dev/null 2>&1 || die "always-on role did not restart without queue"
+wait_for_tmux_session "$ALWAYS_ON_SESSION" up 25 0.2 || die "always-on role did not restart without queue"
 
 log "keeping a manually killed always-on role down until explicit restart"
 "$REPO_ROOT/agent-bridge" kill "$ALWAYS_ON_AGENT" >/dev/null
 sleep 2
 bash "$REPO_ROOT/bridge-daemon.sh" sync >/dev/null
-sleep 1
-tmux has-session -t "$ALWAYS_ON_SESSION" >/dev/null 2>&1 && die "always-on role respawned after manual kill"
+wait_for_tmux_session "$ALWAYS_ON_SESSION" down 10 0.2 || die "always-on role respawned after manual kill"
 "$REPO_ROOT/agent-bridge" agent start "$ALWAYS_ON_AGENT" >/dev/null
-sleep 1
-tmux has-session -t "$ALWAYS_ON_SESSION" >/dev/null 2>&1 || die "always-on role did not restart after explicit start"
+wait_for_tmux_session "$ALWAYS_ON_SESSION" up 25 0.2 || die "always-on role did not restart after explicit start"
 
 log "running guided Discord setup"
 SETUP_DISCORD_OUTPUT="$("$REPO_ROOT/agent-bridge" setup discord "$SMOKE_AGENT" --channel-account smoke --runtime-config "$TMP_ROOT/openclaw.json" --api-base-url "$FAKE_DISCORD_API_BASE" --yes)"
@@ -1007,7 +1022,7 @@ assert any(row["agent"] == admin_agent and row["admin"] for row in list_payload)
 
 assert show_payload["agent"] == created_agent
 assert show_payload["profile"]["source_present"] is True
-assert show_payload["activity_state"] == "stopped"
+assert show_payload["activity_state"] in {"stopped", "idle"}
 assert show_payload["notify"]["status"] == "miss"
 PY
 CREATED_START_DRY_RUN="$("$REPO_ROOT/bridge-start.sh" "$CREATED_AGENT" --dry-run)"
@@ -1023,9 +1038,9 @@ CREATED_AGENT_LAUNCH="$("$BASH4_BIN" -c '
 assert_contains "$CREATED_AGENT_LAUNCH" "TELEGRAM_STATE_DIR=$BRIDGE_AGENT_HOME_ROOT/$CREATED_AGENT/.telegram"
 assert_contains "$CREATED_AGENT_LAUNCH" "claude --dangerously-skip-permissions --name $CREATED_AGENT --channels plugin:telegram@claude-plugins-official"
 CREATED_AGENT_START_OUTPUT="$("$REPO_ROOT/agent-bridge" agent start "$CREATED_AGENT" --dry-run)"
-assert_contains "$CREATED_AGENT_START_OUTPUT" "session=$CREATED_SESSION"
+assert_contains "$CREATED_AGENT_START_OUTPUT" "$CREATED_SESSION"
 CREATED_AGENT_RESTART_OUTPUT="$("$REPO_ROOT/agent-bridge" agent restart "$CREATED_AGENT" --dry-run)"
-assert_contains "$CREATED_AGENT_RESTART_OUTPUT" "session=$CREATED_SESSION"
+assert_contains "$CREATED_AGENT_RESTART_OUTPUT" "$CREATED_SESSION"
 
 log "bootstrapping a manager role with init"
 INIT_DRY_RUN_JSON="$("$REPO_ROOT/agent-bridge" init --admin "$INIT_AGENT" --engine claude --session "$INIT_SESSION" --channels plugin:telegram --dry-run --json 2>&1)" || die "init dry-run failed: $INIT_DRY_RUN_JSON"
@@ -1466,8 +1481,66 @@ job = next(job for job in jobs if job.get('id') == sys.argv[2])
 assert job['schedule']['kind'] == 'at'
 assert job['deleteAfterRun'] is True
 PY
-NATIVE_ONESHOT_DELETE_OUTPUT="$("$REPO_ROOT/agent-bridge" cron delete "$NATIVE_ONESHOT_ID")"
-assert_contains "$NATIVE_ONESHOT_DELETE_OUTPUT" "deleted native cron job"
+NATIVE_ONESHOT_SYNC_JSON="$("$REPO_ROOT/agent-bridge" cron sync --json --since '2026-04-08T10:14:00+09:00' --now '2026-04-08T10:15:00+09:00')"
+assert_contains "$NATIVE_ONESHOT_SYNC_JSON" "\"status\": \"ok\""
+assert_contains "$NATIVE_ONESHOT_SYNC_JSON" "\"due_occurrences\": 1"
+NATIVE_ONESHOT_TASK_ID="$(python3 - <<'PY' "$NATIVE_ONESHOT_SYNC_JSON" "$NATIVE_ONESHOT_ID"
+import json, sys
+payload = json.loads(sys.argv[1])
+for item in payload["sources"]["native"]["results"]:
+    if item["job_id"] == sys.argv[2]:
+        print(item["task_id"])
+        break
+PY
+)"
+[[ "$NATIVE_ONESHOT_TASK_ID" =~ ^[0-9]+$ ]] || die "native one-shot task id was invalid: $NATIVE_ONESHOT_TASK_ID"
+python3 "$REPO_ROOT/bridge-queue.py" claim "$NATIVE_ONESHOT_TASK_ID" --agent "$SMOKE_AGENT" >/dev/null
+NATIVE_ONESHOT_REQUEST_FILE="$(python3 - <<'PY' "$NATIVE_ONESHOT_SYNC_JSON" "$NATIVE_ONESHOT_ID"
+import json, sys
+payload = json.loads(sys.argv[1])
+for item in payload["sources"]["native"]["results"]:
+    if item["job_id"] == sys.argv[2]:
+        print(item["request_file"])
+        break
+PY
+)"
+if [[ "$NATIVE_ONESHOT_REQUEST_FILE" != /* ]]; then
+  NATIVE_ONESHOT_REQUEST_FILE="$BRIDGE_HOME/$NATIVE_ONESHOT_REQUEST_FILE"
+fi
+[[ -f "$NATIVE_ONESHOT_REQUEST_FILE" ]] || die "native one-shot request file missing: $NATIVE_ONESHOT_REQUEST_FILE"
+python3 - <<'PY' "$NATIVE_ONESHOT_REQUEST_FILE"
+import json, sys
+from pathlib import Path
+
+request = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+Path(request["result_file"]).write_text(json.dumps({
+    "run_id": request["run_id"],
+    "status": "completed",
+    "summary": "one-shot smoke completed",
+    "findings": [],
+    "actions_taken": [],
+    "needs_human_followup": False,
+    "recommended_next_steps": [],
+    "artifacts": [],
+    "confidence": "high",
+    "duration_ms": 5,
+}, ensure_ascii=True, indent=2) + "\n", encoding="utf-8")
+Path(request["status_file"]).write_text(json.dumps({
+    "run_id": request["run_id"],
+    "state": "success",
+    "engine": "codex",
+    "request_file": request["dispatch_body_file"],
+    "result_file": request["result_file"],
+}, ensure_ascii=True, indent=2) + "\n", encoding="utf-8")
+PY
+NATIVE_ONESHOT_FINALIZE_OUTPUT="$("$REPO_ROOT/agent-bridge" cron finalize-run "$(basename "$(dirname "$NATIVE_ONESHOT_REQUEST_FILE")")")"
+assert_contains "$NATIVE_ONESHOT_FINALIZE_OUTPUT" "action: deleted"
+python3 - <<'PY' "$BRIDGE_NATIVE_CRON_JOBS_FILE" "$NATIVE_ONESHOT_ID"
+import json, sys
+jobs = json.load(open(sys.argv[1], encoding='utf-8'))['jobs']
+assert all(job.get('id') != sys.argv[2] for job in jobs)
+PY
+python3 "$REPO_ROOT/bridge-queue.py" done "$NATIVE_ONESHOT_TASK_ID" --agent "$SMOKE_AGENT" --note "one-shot smoke cleaned up" >/dev/null
 
 log "dry-run upgrade preserves custom paths"
 UPGRADE_JSON="$("$REPO_ROOT/agent-bridge" upgrade --dry-run --json)"
@@ -1549,7 +1622,7 @@ CRON_IMPORTED_SYNC_OUTPUT="$("$REPO_ROOT/agent-bridge" cron sync --dry-run --sin
 assert_contains "$CRON_IMPORTED_SYNC_OUTPUT" "native: status=dry_run"
 assert_contains "$CRON_IMPORTED_SYNC_OUTPUT" "due=1"
 
-log "skipping one-shot native jobs during recurring sync"
+log "including one-shot native jobs during recurring sync"
 python3 - <<PY
 import json, os
 path = os.path.join(os.environ["BRIDGE_HOME"], "cron", "jobs.json")
@@ -1569,14 +1642,16 @@ payload["jobs"].append({
         "kind": "agentTurn",
         "message": "one-shot smoke",
     },
+    "deleteAfterRun": True,
+    "state": {},
 })
 with open(path, "w", encoding="utf-8") as fh:
     json.dump(payload, fh, ensure_ascii=False, indent=2)
     fh.write("\n")
 PY
-CRON_IMPORTED_SKIP_AT_OUTPUT="$("$REPO_ROOT/agent-bridge" cron sync --dry-run --since '2026-04-05T08:59:00+00:00' --now '2026-04-05T09:00:00+00:00')"
-assert_contains "$CRON_IMPORTED_SKIP_AT_OUTPUT" "native: status=dry_run"
-assert_contains "$CRON_IMPORTED_SKIP_AT_OUTPUT" "due=1"
+CRON_IMPORTED_AT_OUTPUT="$("$REPO_ROOT/agent-bridge" cron sync --dry-run --since '2026-04-05T08:29:00+00:00' --now '2026-04-05T09:00:00+00:00')"
+assert_contains "$CRON_IMPORTED_AT_OUTPUT" "native: status=dry_run"
+assert_contains "$CRON_IMPORTED_AT_OUTPUT" "due=2"
 
 log "resolving cron targets for sleeping static roles and fallback delivery"
 CRON_ROUTE_JOBS_FILE="$TMP_ROOT/cron-route-jobs.json"

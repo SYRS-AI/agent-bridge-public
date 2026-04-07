@@ -907,6 +907,144 @@ def run_native_delete(args):
     return 0
 
 
+def run_native_finalize(args):
+    jobs_path = Path(args.jobs_file).expanduser().resolve()
+    request_path = Path(args.request_file).expanduser().resolve()
+    if not request_path.is_file():
+        raise FileNotFoundError(f"request file not found: {request_path}")
+
+    request = json.loads(request_path.read_text(encoding="utf-8"))
+    source_file = str(request.get("source_file") or "").strip()
+    if not source_file:
+        payload = {
+            "status": "skipped",
+            "reason": "missing_source_file",
+            "request_file": str(request_path),
+        }
+        print(json.dumps(payload, ensure_ascii=False, indent=2) if args.json else "status: skipped\nreason: missing_source_file")
+        return 0
+
+    source_path = Path(source_file).expanduser().resolve()
+    if source_path != jobs_path:
+        payload = {
+            "status": "skipped",
+            "reason": "non_native_source",
+            "request_file": str(request_path),
+            "source_file": str(source_path),
+            "jobs_file": str(jobs_path),
+        }
+        if args.json:
+            print(json.dumps(payload, ensure_ascii=False, indent=2))
+        else:
+            print("status: skipped")
+            print("reason: non_native_source")
+            print(f"source_file: {source_path}")
+            print(f"jobs_file: {jobs_path}")
+        return 0
+
+    raw_payload, jobs = load_native_jobs_payload(jobs_path)
+    job_id = str(request.get("job_id") or "").strip()
+    run_id = str(request.get("run_id") or request_path.parent.name).strip()
+    result_file = Path(str(request.get("result_file") or "")).expanduser()
+    status_file = Path(str(request.get("status_file") or "")).expanduser()
+    result = json.loads(result_file.read_text(encoding="utf-8")) if result_file.is_file() else {}
+    status = json.loads(status_file.read_text(encoding="utf-8")) if status_file.is_file() else {}
+
+    job_index = next((index for index, job in enumerate(jobs) if job.get("id") == job_id), -1)
+    if job_index < 0:
+        payload = {
+            "status": "skipped",
+            "reason": "job_not_found",
+            "job_id": job_id,
+            "run_id": run_id,
+        }
+        if args.json:
+            print(json.dumps(payload, ensure_ascii=False, indent=2))
+        else:
+            print("status: skipped")
+            print("reason: job_not_found")
+            print(f"job_id: {job_id}")
+            print(f"run_id: {run_id}")
+        return 0
+
+    job = dict(jobs[job_index])
+    schedule = job.get("schedule") or {}
+    job_state = dict(job.get("state") or {})
+    run_state = str(status.get("state") or "")
+    result_status = str(result.get("status") or "")
+    now_ms_value = now_epoch_ms()
+    final_status = "success" if run_state == "success" and result_status != "error" else "error"
+    duration_ms = result.get("duration_ms")
+    try:
+        duration_ms = int(duration_ms) if duration_ms not in (None, "") else None
+    except (TypeError, ValueError):
+        duration_ms = None
+
+    job_state["lastRunAtMs"] = now_ms_value
+    job_state["lastStatus"] = final_status
+    job_state["lastRunStatus"] = final_status
+    job_state["nextRunAtMs"] = 0
+    if duration_ms is not None:
+        job_state["lastDurationMs"] = duration_ms
+
+    if final_status == "success":
+        job_state["consecutiveErrors"] = 0
+        job_state.pop("lastErrorAtMs", None)
+        job_state.pop("lastError", None)
+    else:
+        try:
+            previous_errors = int(job_state.get("consecutiveErrors") or 0)
+        except (TypeError, ValueError):
+            previous_errors = 0
+        job_state["consecutiveErrors"] = previous_errors + 1
+        job_state["lastErrorAtMs"] = now_ms_value
+        job_state["lastError"] = (
+            result.get("runner_error")
+            or status.get("error")
+            or result.get("summary")
+            or "cron run failed"
+        )
+
+    action = "updated"
+    if schedule.get("kind") == "at":
+        if job.get("deleteAfterRun") is True:
+            del jobs[job_index]
+            action = "deleted"
+        else:
+            job["enabled"] = False
+            job["state"] = job_state
+            job["updatedAtMs"] = now_ms_value
+            jobs[job_index] = job
+            action = "disabled"
+    else:
+        job["state"] = job_state
+        job["updatedAtMs"] = now_ms_value
+        jobs[job_index] = job
+
+    raw_payload["jobs"] = jobs
+    raw_payload["updatedAt"] = datetime.now().astimezone().isoformat()
+    atomic_write_jobs(jobs_path, raw_payload)
+
+    payload = {
+        "status": "ok",
+        "action": action,
+        "job_id": job_id,
+        "run_id": run_id,
+        "final_status": final_status,
+        "jobs_file": str(jobs_path),
+    }
+    if args.json:
+        print(json.dumps(payload, ensure_ascii=False, indent=2))
+    else:
+        print("status: ok")
+        print(f"action: {action}")
+        print(f"job_id: {job_id}")
+        print(f"run_id: {run_id}")
+        print(f"final_status: {final_status}")
+        print(f"jobs_file: {jobs_path}")
+    return 0
+
+
 def run_native_import(args):
     source_path = Path(args.source_jobs_file).expanduser()
     target_path = Path(args.jobs_file).expanduser()
@@ -1224,6 +1362,11 @@ def build_parser():
     native_import_parser.add_argument("--jobs-file", required=True)
     native_import_parser.add_argument("--source-jobs-file", required=True)
     native_import_parser.add_argument("--dry-run", action="store_true")
+
+    native_finalize_parser = subparsers.add_parser("native-finalize-run", help="Finalize native cron state after a dispatch run.")
+    native_finalize_parser.add_argument("--jobs-file", required=True)
+    native_finalize_parser.add_argument("--request-file", required=True)
+    native_finalize_parser.add_argument("--json", action="store_true")
     return parser
 
 
@@ -1273,6 +1416,16 @@ def main():
     if args.command == "native-import":
         try:
             return run_native_import(args)
+        except FileNotFoundError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 2
+        except ValueError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 2
+
+    if args.command == "native-finalize-run":
+        try:
+            return run_native_finalize(args)
         except FileNotFoundError as exc:
             print(f"error: {exc}", file=sys.stderr)
             return 2

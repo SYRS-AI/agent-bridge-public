@@ -122,11 +122,14 @@ def job_enabled(job: dict[str, Any]) -> bool:
     return bool(job.get("enabled", False))
 
 
-def job_is_recurring(job: dict[str, Any]) -> bool:
+def job_is_schedulable(job: dict[str, Any]) -> bool:
     schedule = job.get("schedule") or {}
-    if schedule.get("kind") == "at" or job.get("deleteAfterRun") is True:
+    kind = schedule.get("kind")
+    if kind == "at":
+        return True
+    if job.get("deleteAfterRun") is True:
         return False
-    return schedule.get("kind") in {"cron", "every"}
+    return kind in {"cron", "every"}
 
 
 def load_state(path: Path) -> dict[str, Any]:
@@ -287,6 +290,16 @@ def enumerate_every_occurrences(job: dict[str, Any], start_dt: datetime, end_dt:
     return occurrences
 
 
+def enumerate_at_occurrences(job: dict[str, Any], start_dt: datetime, end_dt: datetime) -> list[datetime]:
+    schedule = job.get("schedule") or {}
+    occurrence = parse_iso(schedule.get("at"))
+    if occurrence is None:
+        return []
+    if occurrence <= start_dt or occurrence > end_dt:
+        return []
+    return [occurrence]
+
+
 def derive_slot(family: str, occurrence_at: datetime, job: dict[str, Any]) -> str:
     schedule = job.get("schedule") or {}
     schedule_tz = normalize_tz(schedule.get("tz"))
@@ -315,11 +328,7 @@ def enumerate_due_runs(
         schedule = job.get("schedule") or {}
         kind = schedule.get("kind")
 
-        if kind == "at":
-            counters["non_recurring"] += 1
-            continue
-
-        if not job_is_recurring(job):
+        if not job_is_schedulable(job):
             counters["non_recurring"] += 1
             continue
 
@@ -327,6 +336,8 @@ def enumerate_due_runs(
             occurrences = enumerate_cron_occurrences(job, start_dt, end_dt)
         elif kind == "every":
             occurrences = enumerate_every_occurrences(job, start_dt, end_dt)
+        elif kind == "at":
+            occurrences = enumerate_at_occurrences(job, start_dt, end_dt)
         else:
             counters["unsupported"] += 1
             continue

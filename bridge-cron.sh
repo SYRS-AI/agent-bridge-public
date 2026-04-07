@@ -20,6 +20,7 @@ Usage:
   $(basename "$0") enqueue <job-name-or-id> [--slot <slot-key>] [--target <bridge-agent>] [--from <actor>] [--priority normal|high] [--dry-run]
   $(basename "$0") sync [--dry-run] [--json] [--since <iso-datetime>] [--now <iso-datetime>]
   $(basename "$0") run-subagent <run-id> [--dry-run]
+  $(basename "$0") finalize-run <run-id> [--json]
   $(basename "$0") errors report [--agent <agent>] [--family <family>] [--limit <count>] [--json]
   $(basename "$0") cleanup report [--mode expired-one-shot] [--json]
   $(basename "$0") cleanup prune [--mode expired-one-shot] [--dry-run]
@@ -550,6 +551,44 @@ run_subagent() {
   bridge_cron_runner_python "${args[@]}"
 }
 
+run_finalize() {
+  local run_id="${1:-}"
+  local json_output=0
+  local request_file=""
+
+  shift || true
+  [[ -n "$run_id" ]] || bridge_die "Usage: $(basename "$0") finalize-run <run-id> [--json]"
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --json)
+        json_output=1
+        shift
+        ;;
+      -h|--help)
+        usage
+        exit 0
+        ;;
+      *)
+        bridge_die "지원하지 않는 finalize-run 옵션입니다: $1"
+        ;;
+    esac
+  done
+
+  request_file="$(bridge_cron_request_file_by_id "$run_id")"
+  [[ -f "$request_file" ]] || bridge_die "cron run request를 찾지 못했습니다: $run_id"
+
+  local args=(
+    native-finalize-run
+    --jobs-file "$BRIDGE_NATIVE_CRON_JOBS_FILE"
+    --request-file "$request_file"
+  )
+  if [[ $json_output -eq 1 ]]; then
+    args+=(--json)
+  fi
+  bridge_cron_python "${args[@]}"
+}
+
 run_sync() {
   local dry_run=0
   local json_output=0
@@ -857,6 +896,9 @@ case "$subcommand" in
     ;;
   run-subagent)
     run_subagent "$@"
+    ;;
+  finalize-run)
+    run_finalize "$@"
     ;;
   errors)
     run_errors "$@"

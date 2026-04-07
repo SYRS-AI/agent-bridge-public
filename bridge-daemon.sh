@@ -493,6 +493,8 @@ cmd_run_cron_worker() {
     fi
   fi
 
+  "$BRIDGE_BASH_BIN" "$SCRIPT_DIR/bridge-cron.sh" finalize-run "$run_id" >/dev/null 2>&1 || true
+
   done_note_file="$(bridge_cron_dispatch_completion_note_file_by_id "$run_id")"
   bridge_cron_write_completion_note "$run_id" "$done_note_file" "$followup_task_id"
   bridge_queue_cli done "$task_id" --agent "$TASK_ASSIGNED_TO" --note-file "$done_note_file" >/dev/null
