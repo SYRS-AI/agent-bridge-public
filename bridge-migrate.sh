@@ -159,6 +159,39 @@ runtime_sync_one() {
   fi
 }
 
+runtime_ensure_legacy_config_link() {
+  local runtime_root="$1"
+  local backup_root="$2"
+  local dry_run="$3"
+  local canonical_config="$runtime_root/bridge-config.json"
+  local legacy_config="$runtime_root/openclaw.json"
+
+  [[ -e "$canonical_config" ]] || return 0
+
+  printf 'compat[config-link]: %s -> %s\n' "$legacy_config" "$canonical_config"
+  if [[ "$dry_run" == "1" ]]; then
+    printf '  action: symlink (dry-run)\n'
+    return 0
+  fi
+
+  mkdir -p "$backup_root"
+  if [[ -L "$legacy_config" ]]; then
+    local current_target
+    current_target="$(readlink "$legacy_config" || true)"
+    if [[ "$current_target" == "bridge-config.json" ]]; then
+      printf '  action: already_linked\n'
+      return 0
+    fi
+  fi
+
+  if [[ -e "$legacy_config" && ! -e "$backup_root/config-legacy-link" ]]; then
+    cp -RP "$legacy_config" "$backup_root/config-legacy-link"
+  fi
+  rm -rf "$legacy_config"
+  ln -s "bridge-config.json" "$legacy_config"
+  printf '  action: linked\n'
+}
+
 cmd_runtime_sync() {
   local dry_run=0
   local legacy_home="$BRIDGE_OPENCLAW_HOME"
@@ -215,6 +248,7 @@ cmd_runtime_sync() {
   runtime_sync_one "credentials" "$legacy_home/credentials" "$runtime_root/credentials" "$backup_root" "$dry_run"
   runtime_sync_one "secrets" "$legacy_home/secrets" "$runtime_root/secrets" "$backup_root" "$dry_run"
   runtime_sync_one "config" "$legacy_home/openclaw.json" "$runtime_root/bridge-config.json" "$backup_root" "$dry_run"
+  runtime_ensure_legacy_config_link "$runtime_root" "$backup_root" "$dry_run"
 }
 
 cmd_runtime_canonicalize() {
