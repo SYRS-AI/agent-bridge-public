@@ -12,9 +12,9 @@ bridge_build_dynamic_launch_cmd() {
   case "$engine" in
     codex)
       if [[ "$continue_mode" == "1" && -n "$session_id" ]]; then
-        bridge_join_quoted codex resume "$session_id" --dangerously-bypass-approvals-and-sandbox --no-alt-screen
+        bridge_join_quoted codex resume "$session_id" -c "features.codex_hooks=true" --dangerously-bypass-approvals-and-sandbox --no-alt-screen
       else
-        bridge_join_quoted codex --dangerously-bypass-approvals-and-sandbox --no-alt-screen
+        bridge_join_quoted codex -c "features.codex_hooks=true" --dangerously-bypass-approvals-and-sandbox --no-alt-screen
       fi
       ;;
     claude)
@@ -50,7 +50,7 @@ bridge_build_resume_launch_cmd() {
 
   case "$engine" in
     codex)
-      bridge_join_quoted codex resume "$session_id" --dangerously-bypass-approvals-and-sandbox --no-alt-screen
+      bridge_join_quoted codex resume "$session_id" -c "features.codex_hooks=true" --dangerously-bypass-approvals-and-sandbox --no-alt-screen
       ;;
     claude)
       original_cmd="${BRIDGE_AGENT_LAUNCH_CMD[$agent]-}"
@@ -74,6 +74,47 @@ bridge_build_resume_launch_cmd() {
       return 1
       ;;
   esac
+}
+
+bridge_codex_launch_with_hooks() {
+  local original="$1"
+
+  python3 - "$original" <<'PY'
+import re
+import shlex
+import sys
+
+original = sys.argv[1]
+match = re.match(r"^(?P<prefix>.*?)(?P<command>codex(?:\s|$).*)$", original)
+if not match:
+    print(original)
+    raise SystemExit(0)
+
+env_prefix = match.group("prefix")
+args = shlex.split(match.group("command"))
+if not args or args[0] != "codex":
+    print(original)
+    raise SystemExit(0)
+
+rest = args[1:]
+has_flag = False
+i = 0
+while i < len(rest):
+    token = rest[i]
+    if token == "--enable" and i + 1 < len(rest) and rest[i + 1] == "codex_hooks":
+        has_flag = True
+        break
+    if token == "-c" and i + 1 < len(rest) and "features.codex_hooks=true" in rest[i + 1]:
+        has_flag = True
+        break
+    i += 2 if token in {"-c", "--enable", "--disable", "--profile", "-p", "--model", "-m", "--cd", "-C"} and i + 1 < len(rest) else 1
+
+if not has_flag:
+    rest = ["-c", "features.codex_hooks=true", *rest]
+
+quoted = " ".join(shlex.quote(token) for token in [args[0], *rest])
+print(f"{env_prefix}{quoted}" if env_prefix else quoted)
+PY
 }
 
 bridge_build_static_claude_launch_cmd() {
@@ -146,11 +187,17 @@ bridge_agent_launch_cmd() {
 
   if [[ "$(bridge_agent_source "$agent")" == "dynamic" ]]; then
     if launch_cmd="$(bridge_build_resume_launch_cmd "$agent")"; then
+      if [[ "$(bridge_agent_engine "$agent")" == "codex" ]]; then
+        launch_cmd="$(bridge_codex_launch_with_hooks "$launch_cmd")"
+      fi
       launch_cmd="$(bridge_claude_launch_with_webhook "$agent" "$launch_cmd")"
       printf '%s' "$launch_cmd"
       return 0
     fi
     launch_cmd="$(bridge_build_dynamic_launch_cmd "$agent")"
+    if [[ "$(bridge_agent_engine "$agent")" == "codex" ]]; then
+      launch_cmd="$(bridge_codex_launch_with_hooks "$launch_cmd")"
+    fi
     launch_cmd="$(bridge_claude_launch_with_webhook "$agent" "$launch_cmd")"
     printf '%s' "$launch_cmd"
     return 0
@@ -163,11 +210,17 @@ bridge_agent_launch_cmd() {
     return 0
   fi
   if launch_cmd="$(bridge_build_resume_launch_cmd "$agent")"; then
+    if [[ "$(bridge_agent_engine "$agent")" == "codex" ]]; then
+      launch_cmd="$(bridge_codex_launch_with_hooks "$launch_cmd")"
+    fi
     launch_cmd="$(bridge_claude_launch_with_webhook "$agent" "$launch_cmd")"
     printf '%s' "$launch_cmd"
     return 0
   fi
 
+  if [[ "$(bridge_agent_engine "$agent")" == "codex" ]]; then
+    fallback="$(bridge_codex_launch_with_hooks "$fallback")"
+  fi
   launch_cmd="$(bridge_claude_launch_with_webhook "$agent" "$fallback")"
   printf '%s' "$launch_cmd"
 }

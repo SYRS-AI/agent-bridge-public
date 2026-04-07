@@ -14,6 +14,10 @@ bridge_hook_clear_idle_path() {
   printf '%s/clear-idle.sh' "$BRIDGE_HOOKS_DIR"
 }
 
+bridge_codex_hooks_file() {
+  printf '%s/.codex/hooks.json' "$HOME"
+}
+
 bridge_hook_settings_file_for() {
   local workdir="$1"
   printf '%s/.claude/settings.json' "$workdir"
@@ -78,4 +82,12 @@ bridge_ensure_claude_prompt_hook() {
   else
     bridge_hooks_python ensure-prompt-hook --workdir "$workdir" --bridge-home "$BRIDGE_HOME" --bash-bin "$BRIDGE_BASH_BIN"
   fi
+}
+
+bridge_codex_hooks_status() {
+  bridge_hooks_python status-codex-hooks --codex-hooks-file "$(bridge_codex_hooks_file)"
+}
+
+bridge_ensure_codex_hooks() {
+  bridge_hooks_python ensure-codex-hooks --codex-hooks-file "$(bridge_codex_hooks_file)" --bridge-home "$BRIDGE_HOME" --python-bin "$(command -v python3)"
 }

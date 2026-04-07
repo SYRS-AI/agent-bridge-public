@@ -146,6 +146,11 @@ if [[ "$ENGINE" == "claude" ]]; then
   if ! bridge_disable_claude_webhook_channel "$AGENT" "$WORK_DIR" >/dev/null 2>&1; then
     bridge_warn "Claude backlog webhook channel cleanup skipped: $WORK_DIR"
   fi
+elif [[ "$ENGINE" == "codex" ]]; then
+  bridge_bootstrap_project_skill "$ENGINE" "$WORK_DIR" || true
+  if ! bridge_ensure_codex_hooks >/dev/null; then
+    bridge_die "Codex hook 설정에 실패했습니다: $WORK_DIR"
+  fi
 fi
 
 bridge_agent_clear_idle_marker "$AGENT"

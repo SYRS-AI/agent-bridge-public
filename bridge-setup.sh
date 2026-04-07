@@ -322,6 +322,21 @@ run_agent() {
       failures=$((failures + 1))
       warnings+=("Add a CLAUDE.md file in the tracked profile or live workdir before cutover.")
     fi
+  elif [[ "$engine" == "codex" ]]; then
+    echo
+    echo "== Codex Skills =="
+    bridge_bootstrap_project_skill "$engine" "$workdir" >/dev/null 2>&1 || true
+    printf 'project_skill: %s\n' "$workdir/.codex/skills/agent-bridge-project/SKILL.md"
+
+    echo
+    echo "== Codex Hooks =="
+    if hook_output="$(bridge_ensure_codex_hooks 2>&1)"; then
+      echo "$hook_output"
+    else
+      echo "$hook_output"
+      failures=$((failures + 1))
+    fi
+    printf 'claude_md: n/a (engine=%s)\n' "$engine"
   else
     printf 'claude_md: n/a (engine=%s)\n' "$engine"
   fi

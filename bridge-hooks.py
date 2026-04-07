@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Manage Claude Code hook settings for Agent Bridge."""
+"""Manage Claude Code and Codex hook settings for Agent Bridge."""
 
 from __future__ import annotations
 
@@ -39,6 +39,16 @@ def prompt_hook_command(bridge_home: Path, bash_bin: str) -> str:
     return shlex.join([bash_bin, str(hook_path)])
 
 
+def codex_session_start_hook_command(bridge_home: Path, python_bin: str) -> str:
+    hook_path = bridge_home / "hooks" / "codex-session-start.py"
+    return shlex.join([python_bin, str(hook_path)])
+
+
+def codex_stop_hook_command(bridge_home: Path, python_bin: str) -> str:
+    hook_path = bridge_home / "hooks" / "codex-stop.py"
+    return shlex.join([python_bin, str(hook_path)])
+
+
 def resolve_settings_path(args: argparse.Namespace) -> Path:
     settings_file = getattr(args, "settings_file", None)
     if settings_file:
@@ -76,6 +86,14 @@ def is_mark_idle_hook(command: str) -> bool:
 
 def is_clear_idle_hook(command: str) -> bool:
     return "clear-idle.sh" in str(command)
+
+
+def is_codex_session_start_hook(command: str) -> bool:
+    return "codex-session-start.py" in str(command)
+
+
+def is_codex_stop_hook(command: str) -> bool:
+    return "codex-stop.py" in str(command)
 
 
 def find_command_hook(
@@ -145,6 +163,8 @@ def ensure_command_hook(
     *,
     timeout: int = 3,
     additional_context: bool | None = None,
+    status_message: str | None = None,
+    group_matcher: str | None = None,
 ) -> bool:
     settings = ensure_settings_root(settings_path)
     event_hooks = hooks_list(settings, event_name)
@@ -154,11 +174,13 @@ def ensure_command_hook(
     if hook is None:
         event_hooks.append(
             {
+                **({"matcher": group_matcher} if group_matcher is not None else {}),
                 "hooks": [
                     {
                         "type": "command",
                         "command": desired_command,
                         "timeout": timeout,
+                        **({"statusMessage": status_message} if status_message is not None else {}),
                         **({"additionalContext": additional_context} if additional_context is not None else {}),
                     }
                 ]
@@ -175,8 +197,14 @@ def ensure_command_hook(
         if int(hook.get("timeout") or 0) != timeout:
             hook["timeout"] = timeout
             changed = True
+        if status_message is not None and str(hook.get("statusMessage") or "") != status_message:
+            hook["statusMessage"] = status_message
+            changed = True
         if additional_context is not None and bool(hook.get("additionalContext")) != bool(additional_context):
             hook["additionalContext"] = additional_context
+            changed = True
+        if group_matcher is not None and group is not None and str(group.get("matcher") or "") != group_matcher:
+            group["matcher"] = group_matcher
             changed = True
         if group is None:
             changed = True
@@ -249,6 +277,84 @@ def cmd_ensure_prompt_hook(args: argparse.Namespace) -> int:
         "HOOK_COMMAND": desired_command,
     }
     print_payload(payload, args.format)
+    return 0
+
+
+def codex_hooks_path(args: argparse.Namespace) -> Path:
+    hooks_file = getattr(args, "codex_hooks_file", None)
+    if hooks_file:
+        return Path(hooks_file).expanduser()
+    return Path.home() / ".codex" / "hooks.json"
+
+
+def print_codex_payload(data: dict[str, str], fmt: str) -> None:
+    if fmt == "shell":
+        for key, value in data.items():
+            print(shell_line(key, value))
+        return
+
+    print(f"hooks_file: {data['CODEX_HOOKS_FILE']}")
+    print(f"status: {data['CODEX_HOOK_STATUS']}")
+    print(f"session_start_hook: {data['CODEX_SESSION_START_HOOK']}")
+    print(f"stop_hook: {data['CODEX_STOP_HOOK']}")
+    print(f"session_start_command: {data['CODEX_SESSION_START_COMMAND']}")
+    print(f"stop_command: {data['CODEX_STOP_COMMAND']}")
+    print("feature_flag: launch_cli_override")
+
+
+def cmd_status_codex_hooks(args: argparse.Namespace) -> int:
+    hooks_path = codex_hooks_path(args)
+    settings = ensure_settings_root(hooks_path)
+    session_hooks = hooks_list(settings, "SessionStart")
+    stop_hooks = hooks_list(settings, "Stop")
+    _session_group, session_hook = find_command_hook(session_hooks, is_codex_session_start_hook)
+    _stop_group, stop_hook = find_command_hook(stop_hooks, is_codex_stop_hook)
+    payload = {
+        "CODEX_HOOKS_FILE": str(hooks_path),
+        "CODEX_HOOK_STATUS": "present" if session_hook and stop_hook else "missing",
+        "CODEX_SESSION_START_HOOK": "present" if session_hook else "missing",
+        "CODEX_STOP_HOOK": "present" if stop_hook else "missing",
+        "CODEX_SESSION_START_COMMAND": str(session_hook.get("command") or "") if session_hook else "",
+        "CODEX_STOP_COMMAND": str(stop_hook.get("command") or "") if stop_hook else "",
+    }
+    print_codex_payload(payload, args.format)
+    return 0 if session_hook and stop_hook else 1
+
+
+def cmd_ensure_codex_hooks(args: argparse.Namespace) -> int:
+    bridge_home = Path(args.bridge_home).expanduser()
+    hooks_path = codex_hooks_path(args)
+    hooks_path.parent.mkdir(parents=True, exist_ok=True)
+    session_command = codex_session_start_hook_command(bridge_home, args.python_bin)
+    stop_command = codex_stop_hook_command(bridge_home, args.python_bin)
+    changed = False
+    changed = ensure_command_hook(
+        hooks_path,
+        "SessionStart",
+        session_command,
+        is_codex_session_start_hook,
+        timeout=3,
+        status_message="Loading Agent Bridge queue context",
+        group_matcher="startup|resume",
+    ) or changed
+    changed = ensure_command_hook(
+        hooks_path,
+        "Stop",
+        stop_command,
+        is_codex_stop_hook,
+        timeout=3,
+        status_message="Checking Agent Bridge inbox",
+    ) or changed
+
+    payload = {
+        "CODEX_HOOKS_FILE": str(hooks_path),
+        "CODEX_HOOK_STATUS": "updated" if changed else "unchanged",
+        "CODEX_SESSION_START_HOOK": "present",
+        "CODEX_STOP_HOOK": "present",
+        "CODEX_SESSION_START_COMMAND": session_command,
+        "CODEX_STOP_COMMAND": stop_command,
+    }
+    print_codex_payload(payload, args.format)
     return 0
 
 
@@ -408,6 +514,18 @@ def build_parser() -> argparse.ArgumentParser:
     status_prompt_parser.add_argument("--bash-bin", required=True)
     status_prompt_parser.add_argument("--format", choices=("text", "shell"), default="text")
     status_prompt_parser.set_defaults(handler=cmd_status_prompt_hook)
+
+    ensure_codex_parser = subparsers.add_parser("ensure-codex-hooks")
+    ensure_codex_parser.add_argument("--codex-hooks-file")
+    ensure_codex_parser.add_argument("--bridge-home", required=True)
+    ensure_codex_parser.add_argument("--python-bin", required=True)
+    ensure_codex_parser.add_argument("--format", choices=("text", "shell"), default="text")
+    ensure_codex_parser.set_defaults(handler=cmd_ensure_codex_hooks)
+
+    status_codex_parser = subparsers.add_parser("status-codex-hooks")
+    status_codex_parser.add_argument("--codex-hooks-file")
+    status_codex_parser.add_argument("--format", choices=("text", "shell"), default="text")
+    status_codex_parser.set_defaults(handler=cmd_status_codex_hooks)
 
     link_shared_parser = subparsers.add_parser("link-shared-settings")
     link_shared_parser.add_argument("--workdir", required=True)
