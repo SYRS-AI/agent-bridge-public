@@ -3,796 +3,247 @@
 [![CI](https://github.com/SYRS-AI/agent-bridge/actions/workflows/ci.yml/badge.svg)](https://github.com/SYRS-AI/agent-bridge/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](./LICENSE)
 
-Agent Bridge is a `tmux`-based coordination layer for running Claude Code and Codex side by side. It provides a shared roster, queue-first task handoff, live status views, urgent interrupts, and optional git worktree isolation for parallel workers.
+Agent Bridge는 Claude Code와 Codex를 함께 운영하기 위한 `tmux` 기반 로컬 orchestration layer입니다. 핵심 UX는 단순합니다. 사람은 관리자 에이전트에게 자연어로 요청하고, 에이전트 실행, 작업 큐 전달, 상태 확인, worktree 분리, 채널 온보딩 같은 운영 작업은 Agent Bridge가 맡습니다.
 
-The primary CLI is `agent-bridge`. A bundled shorthand wrapper, `agb`, calls the same entry point.
+이 프로젝트는 신뢰된 로컬 작업 환경을 전제로 합니다. 즉, Claude Code 또는 Codex에게 현재 디렉토리 접근 권한을 의도적으로 주는 흐름을 기본 가정으로 합니다.
 
-This repository is designed for trusted local projects. It assumes you are intentionally granting Claude Code or Codex access to the directory where you launch them.
+> 대부분의 사용자는 설치 후 `agb admin`만 알면 충분합니다.
 
-If you hand this repository URL to another Claude or Codex agent, the preferred bootstrap is now AI-native: the helper agent installs the bridge, bootstraps one long-lived admin role, and then hands control to that admin role.
+## 한눈에 보기
 
-## Updating an existing live install
-
-Use the repo checkout as source of truth, then update the live bridge while preserving local operator customizations:
-
-```bash
-./agent-bridge upgrade --pull --restart-daemon
+```mermaid
+flowchart TD
+  U["사용자"] -->|설치 요청| I["Claude Code 설치 세션"]
+  I -->|bootstrap| B["Agent Bridge"]
+  B --> A["관리자 역할"]
+  U -->|일상 사용| C["agb admin"]
+  C --> A
+  A --> Q["작업 큐 / 상태 / 역할 관리"]
+  Q --> W["Claude Code / Codex 워커"]
+  D["Daemon"] -->|idle 감지 / 주기 작업| W
 ```
 
-This preserves:
-- `agent-roster.local.sh`
-- `state/`, `logs/`, `shared/`
-- `backups/`, `worktrees/`
-- live agent homes under `agents/<agent>/`
+## 이 프로젝트가 푸는 문제
 
-## AI-Native Install (한국어)
+- Claude Code와 Codex를 같은 로컬 환경에서 같이 굴리고 싶다.
+- 여러 에이전트에게 일을 나눠주되, 누가 무엇을 처리 중인지 한눈에 보고 싶다.
+- 일반 작업은 큐로 안전하게 넘기고, 진짜 급할 때만 인터럽트하고 싶다.
+- 같은 저장소에서 동시에 여러 에이전트가 수정해야 할 때 충돌을 줄이고 싶다.
+- 설치와 운영은 가능하면 사람 대신 관리자 에이전트가 맡았으면 좋겠다.
 
-원하는 최종 상태는 이겁니다.
+## 기본 원칙
 
-1. 사용자는 Claude Code만 설치한다.
-2. Claude Code에게 이 레포를 설치하라고 시킨다.
-3. 설치가 끝나면 Claude Code를 종료한다.
-4. 사용자는 `agb admin`만 실행한다.
-5. 이후부터는 관리자 에이전트가 나머지 온보딩과 운영을 안내한다.
+- 사람은 저수준 명령보다 `agb admin`과 자연어 요청을 우선합니다.
+- 일반 협업은 queue-first로 처리합니다.
+- 긴급 인터럽트는 예외 상황에만 씁니다.
+- 같은 저장소에서 동시 쓰기가 필요하면 worktree를 분리합니다.
+- 새 설치는 비어 있는 정적 역할에서 시작하고, bootstrap이 관리자 역할부터 만듭니다.
 
-즉 사용자가 `agent-roster.local.sh`, `setup discord`, `daemon ensure`, `cron create` 같은 세부 명령을 외우는 흐름이 아니라, 관리자 에이전트 중심 운영으로 바로 넘어가는 설치를 기준으로 한다.
+## 설치 방법
 
-### 추천 사용법
+### 권장: Claude Code에게 설치 맡기기
 
-새 컴퓨터에서 Claude Code를 아무 폴더에서나 열고, 아래처럼 말하면 됩니다.
+가장 권장하는 방식은 Claude Code에게 이 저장소 설치를 맡기는 것입니다. 목표는 설치가 끝난 뒤 사람이 `agb admin`만 실행하면 되도록 만드는 것입니다.
+
+Claude Code에게 아래처럼 요청하면 됩니다.
 
 ```text
-Install Agent Bridge from https://github.com/SYRS-AI/agent-bridge.
+https://github.com/SYRS-AI/agent-bridge 를 설치해줘.
 
-Read the README and use the AI-native bootstrap flow.
-Before you run any bridge script, detect the OS and verify prerequisites.
+README를 읽고 AI-native bootstrap 흐름으로 진행해.
+실행 전에 OS와 필수 도구를 점검해.
 
-On macOS:
-- if Homebrew is missing, install it first
-- install or upgrade bash, tmux, python3, git, and shellcheck with Homebrew
-- make sure Homebrew's bin directory is first in PATH
-- do not continue until `bash --version` reports Bash 4 or newer
+macOS라면:
+- Homebrew가 없으면 먼저 설치해
+- bash, tmux, python3, git, shellcheck를 설치하거나 업그레이드해
+- PATH에서 Homebrew bin이 먼저 오게 해
+- `bash --version`이 4 이상이 아니면 진행하지 마
 
-On Linux:
-- install bash, tmux, python3, git, and shellcheck with the system package manager if needed
+Linux라면:
+- bash, tmux, python3, git, shellcheck를 패키지 매니저로 준비해
 
-Create one long-lived admin role for me.
-Do the shell integration, bridge bootstrap, and daemon setup, including the macOS LaunchAgent when supported.
-Stop when the final handoff is: close this session and run `agb admin`.
+관리자 역할은 Claude Code 기반으로 하나 만들어줘.
+shell integration, bootstrap, daemon setup까지 마치고 마지막 안내는 `agb admin`만 남겨줘.
 
-If Telegram or Discord credentials are missing, explain exactly how to get them in beginner-friendly steps, then continue the install.
-Do not ask me to type bridge commands manually unless you need a token, a user/channel/chat ID, login approval, or a 2FA step.
+Telegram 또는 Discord 자격 증명이 없으면 초보자도 따라할 수 있게 단계별로 설명한 뒤 설치를 이어가.
+토큰, 채널 ID, 로그인 승인, 2FA가 필요한 경우를 제외하면 내가 bridge 하위 명령을 직접 입력하지 않게 해줘.
 ```
 
-설치 에이전트는 내부적으로 아래 순서를 강하게 지키는 게 좋습니다.
+설치가 끝나면 보통 순서는 이렇습니다.
 
-1. OS 감지
-2. 필수 도구 확인: `bash`, `tmux`, `python3`, `git`, 그리고 `claude` 또는 `codex`
-3. macOS면 Homebrew Bash가 실제 기본 `bash`로 잡히는지 확인
-2. 레포 clone
-3. `./agent-bridge bootstrap ...`
-4. shell integration 반영
-5. 관리자 역할 생성 + 채널 설정 + preflight
-6. daemon ensure
-7. 마지막 handoff 안내: `agb admin`
+1. 설치용 Claude Code 세션을 닫습니다.
+2. 현재 셸이 아직 갱신되지 않았다면 새 셸을 엽니다.
+3. `agb admin`을 실행합니다.
 
-When a channel plugin is already configured in Claude Code, bootstrap can reuse
-the plugin token from `~/.claude/channels/<kind>/.env`. Otherwise, pass
-`--channel-account <name>` or let the installer run interactively and paste the
-token when prompted.
+### 수동 설치
 
-### macOS 클린 설치에서 특히 중요한 점
+직접 설치해야 한다면, 저수준 `bridge-*.sh`를 조합하지 말고 `bootstrap` 하나로 끝내는 방향을 권장합니다.
 
-- macOS 기본 `/bin/bash` 는 `3.2`라서 그대로는 안 됩니다.
-- Agent Bridge는 associative array를 쓰기 때문에 Bash `4+`가 필요합니다.
-- 설치 에이전트는 반드시:
-  1. `brew install bash tmux python shellcheck git`
-  2. `export PATH="$(brew --prefix)/bin:$PATH"`
-  3. `bash --version`
-  순서로 확인하고, `bash`가 실제로 Homebrew Bash를 가리키는지 확인한 뒤에 bootstrap을 진행해야 합니다.
+필수 요구 사항:
 
-이 단계가 빠지면 "설치는 된 것 같은데 `agb admin`에서 갑자기 깨짐" 같은 증상이 나기 쉽습니다.
-
-### 채널 자격 증명이 없을 때 설치 에이전트가 안내해야 할 내용
-
-#### Telegram
-
-가장 쉬운 경로는 Claude Code Telegram plugin이 이미 연결돼 있는 경우입니다. 그러면 bootstrap이 `~/.claude/channels/telegram/.env`를 재사용할 수 있습니다.
-
-처음부터 만드는 경우에는 설치 에이전트가 아래 단계를 설명해야 합니다.
-
-1. Telegram에서 `@BotFather`를 연다.
-2. `/newbot` 을 보내고 봇 이름과 username을 만든다.
-3. BotFather가 돌려준 bot token을 복사한다.
-4. 그 봇에게 직접 메시지를 한 번 보낸다.
-5. 브라우저에서 아래 URL을 열어 JSON을 확인한다.
-
-```text
-https://api.telegram.org/bot<YOUR_BOT_TOKEN>/getUpdates
-```
-
-6. 응답 JSON에서 아래 두 값을 찾는다.
-   - `message.from.id` → `--allow-from`
-   - `message.chat.id` → `--default-chat`
-
-초보자에게는 "토큰은 BotFather가 주고, user/chat ID는 `getUpdates` JSON에서 복사한다"라고 설명하는 게 가장 단순합니다.
-
-#### Discord
-
-가장 쉬운 경로는 Claude Code Discord plugin이 이미 연결돼 있는 경우입니다. 그러면 bootstrap이 기존 channel runtime을 재사용할 수 있습니다.
-
-처음부터 만드는 경우에는 설치 에이전트가 아래 단계를 설명해야 합니다.
-
-1. <https://discord.com/developers/applications> 에서 `New Application`
-2. `Bot` 탭에서 봇을 만든다.
-3. `Reset Token` 또는 token 표시 버튼을 눌러 bot token을 복사한다.
-4. 필요하면 `Message Content Intent`를 켠다.
-5. `OAuth2 -> URL Generator`에서 bot invite URL을 만들고 서버에 초대한다.
-6. Discord 앱에서 `User Settings -> Advanced -> Developer Mode`를 켠다.
-7. 원하는 채널을 우클릭해서 `Copy Channel ID`
-
-초보자에게는 "bot token은 Discord Developer Portal, channel ID는 Developer Mode 켠 뒤 채널 우클릭"이라고 설명하면 됩니다.
-
-### 핵심 명령
-
-사람이 직접 브리지를 설치할 때도, `init`보다 `bootstrap`을 우선 권장합니다.
-
-예시:
-
-```bash
-./agent-bridge bootstrap \
-  --admin manager \
-  --engine claude \
-  --channels plugin:telegram@claude-plugins-official \
-  --allow-from <telegram-user-id> \
-  --default-chat <telegram-chat-id>
-```
-
-먼저 계획만 보고 싶으면:
-
-```bash
-./agent-bridge bootstrap --admin manager --engine claude --dry-run --json
-```
-
-bootstrap이 끝나면 handoff는 이것 하나입니다.
-
-```bash
-agb admin
-```
-
-만약 현재 터미널이 shell integration을 아직 reload하지 않았다면, 새 shell을 열거나 `exec zsh` / `exec bash` 한 번만 한 뒤 `agb admin`을 실행하면 됩니다.
-
-For Claude plugin-backed channels, the explicit form is safest:
-
-- `plugin:telegram@claude-plugins-official`
-- `plugin:discord@claude-plugins-official`
-
-The bridge will auto-qualify `plugin:telegram` and `plugin:discord` to the official Claude plugin marketplace ids, and it will also try to resolve other bare plugin names from `~/.claude/plugins/installed_plugins.json`.
-
-Companion docs for maintainers:
-
-- [`ARCHITECTURE.md`](./ARCHITECTURE.md)
-- [`OPERATIONS.md`](./OPERATIONS.md)
-- [`KNOWN_ISSUES.md`](./KNOWN_ISSUES.md)
-- [`agents/README.md`](./agents/README.md)
-- [`agents/SYNC-MODEL.md`](./agents/SYNC-MODEL.md)
-- [`agents/WORKSPACE-MIGRATION-PLAN.md`](./agents/WORKSPACE-MIGRATION-PLAN.md)
-
-## Highlights
-
-- Start ad hoc Claude or Codex agents from the current directory with `agent-bridge`
-- Keep long-lived named roles in a static roster
-- Route normal collaboration through a durable SQLite task queue
-- Reserve direct messages for urgent interrupts only
-- Watch queue load, active sessions, stale health, and open work in a single dashboard
-- Spawn isolated git worktree workers when one checkout is not enough
-
-## Requirements
-
-- Bash 4+ available in `PATH` for running the bridge scripts
+- Bash 4+
 - `tmux`
 - `python3`
 - `git`
-- At least one agent CLI:
-  - `claude`
-  - `codex`
+- 최소 하나의 에이전트 CLI
+- `claude` 또는 `codex`
 
-Optional but recommended:
+macOS에서는 기본 `/bin/bash`가 `3.2`라서 그대로는 부족합니다. Homebrew Bash가 `PATH` 앞에 오도록 먼저 맞춰야 합니다.
 
-- `shellcheck`
-- GitHub CLI `gh`
-
-## Install
-
-### macOS
-
-Your interactive shell can stay `zsh`. The bridge scripts themselves run with `bash`, so the only requirement is that a modern Bash is available in `PATH`.
-
-Install the base tools:
+macOS 예시:
 
 ```bash
-brew install bash tmux python shellcheck
-```
-
-Make sure Homebrew Bash is first in `PATH`:
-
-```bash
+brew install bash tmux python shellcheck git
 echo 'export PATH="$(brew --prefix)/bin:$PATH"' >> ~/.zshrc
 exec zsh
 bash --version
 ```
 
-If `bash --version` shows the macOS system Bash `3.2`, the bridge will not work correctly.
-
-### Linux
-
-Install the same toolchain with your package manager. Example for Ubuntu:
+Linux 예시:
 
 ```bash
 sudo apt update
-sudo apt install -y bash tmux python3 python3-venv shellcheck git
+sudo apt install -y bash tmux python3 shellcheck git
+bash --version
 ```
 
-### Clone
-
-If you have GitHub CLI:
+그 다음 저장소를 가져오고 bootstrap을 실행합니다.
 
 ```bash
 gh repo clone SYRS-AI/agent-bridge ~/agent-bridge
 cd ~/agent-bridge
+./agb bootstrap --admin manager --engine claude
 ```
 
-Or use Git directly:
+`gh`가 없다면:
 
 ```bash
 git clone https://github.com/SYRS-AI/agent-bridge.git ~/agent-bridge
 cd ~/agent-bridge
+./agb bootstrap --admin manager --engine claude
 ```
 
-### Agent CLIs
-
-Install and authenticate the CLIs you want to use:
-
-- `claude`
-- `codex`
-
-The bridge does not install those tools for you.
-
-### Optional legacy migration
-
-Some bridge features are kept for teams migrating from an older agent runtime:
-
-- cron inventory / enqueue / cleanup helpers
-- `tools/memory-manager.py`
-- legacy workspace migration docs under [`agents/`](./agents/README.md)
-
-Clean installs can ignore those features entirely.
-
-### Optional static roster
-
-Fresh installs ship with no static roles. You can use dynamic agents with `agent-bridge` immediately and ignore the roster entirely.
-
-If you want long-lived named roles like `developer` or `tester`, create a local roster file:
+설치 계획만 먼저 보고 싶다면:
 
 ```bash
-cp ~/agent-bridge/agent-roster.local.example.sh ~/agent-bridge/agent-roster.local.sh
+./agb bootstrap --admin manager --engine claude --dry-run --json
 ```
 
-`agent-roster.local.sh` is git-ignored and is sourced after the default roster, so you can add your own workdirs, descriptions, launch commands, and actions without changing the tracked repo.
+bootstrap은 shell integration, 관리자 역할 생성, daemon setup, 지원되는 macOS 환경의 LaunchAgent 등록까지 함께 처리합니다. 설치 후에는 새 셸을 열고 `agb admin`으로 들어가면 됩니다.
 
-By default, static roles can live under the standard bridge-owned home root:
+## 일상 사용법
 
-```bash
-BRIDGE_AGENT_HOME_ROOT="$HOME/.agent-bridge/agents"
-```
+### 사람 기준 기본 흐름
 
-If `BRIDGE_AGENT_WORKDIR["agent"]` is omitted, the bridge now defaults that role to `$BRIDGE_AGENT_HOME_ROOT/<agent>`. For tracked profiles, `profile deploy` also defaults to that same target.
-
-Only declare `BRIDGE_AGENT_PROFILE_HOME` when the live CLI home differs from the workdir:
-
-```bash
-BRIDGE_AGENT_WORKDIR["analyst"]="$HOME/project-analyst"
-BRIDGE_AGENT_PROFILE_HOME["analyst"]="$HOME/.agent-bridge/agents/analyst"
-```
-
-If one static role should act as the bridge admin, set it explicitly:
-
-```bash
-BRIDGE_ADMIN_AGENT_ID="developer"
-```
-
-After that, `agent-bridge admin` and `agb admin` always open that role using
-its configured engine and home, regardless of the current working directory.
-
-For Claude static roles, keep `BRIDGE_AGENT_LAUNCH_CMD` free of `-c`,
-`--continue`, or `--resume`. The bridge manages continue/resume itself so
-subcommands like `agent-bridge admin --no-continue` can work predictably.
-
-### Optional zsh shell integration
-
-If you use `zsh` and do not want to type `./agent-bridge`, install the shell integration:
-
-```bash
-cd ~/agent-bridge
-./scripts/install-shell-integration.sh --shell zsh --apply
-exec zsh
-```
-
-After that you can run:
-
-```bash
-agent-bridge status
-agb status
-bridge-start --list
-bridge-daemon status
-```
-
-The integration adds the repo to `PATH`, registers completion for `agent-bridge` and `agb`, and installs convenience aliases for the `bridge-*.sh` commands.
-
-### Deploy into a live local install
-
-If you develop in `~/agent-bridge` but run the bridge from `~/.agent-bridge`, use the deploy helper instead of copying files by hand:
-
-```bash
-cd ~/agent-bridge
-./scripts/deploy-live-install.sh --dry-run
-./scripts/deploy-live-install.sh --restart-daemon
-```
-
-The deploy helper copies every tracked file from the working tree, verifies the copied bytes, and preserves target-only runtime files such as `agent-roster.local.sh`, `state/`, `logs/`, and `shared/`.
-
-### Claude idle wake
-
-Claude roles now wake through the local tmux session only when the bridge has
-explicitly marked them idle via the installed hooks:
-
-- `Stop` hook writes `idle-since` and prints a short inbox summary as additional context
-- `UserPromptSubmit` clears `idle-since`
-- the daemon sends only a short line such as `agb inbox <agent>` when `idle-since` exists
-
-For bridge-owned Claude homes under `BRIDGE_AGENT_HOME_ROOT`, the bridge now
-keeps one shared settings file at `<agent-home-root>/.claude/settings.json`
-and symlinks each `<agent-home>/.claude/settings.json` to it. Claude workdirs
-outside the bridge-owned home root keep using a local settings file.
-
-This keeps the durable payload in the queue and avoids mid-turn delivery.
-
-### Optional external channel notifications
-
-`bridge-notify.py` still supports explicit Discord webhooks or Telegram posts,
-but that is not the core A2A delivery path for Claude roles.
-
-Use these only when you intentionally want an out-of-band notification:
-
-```bash
-BRIDGE_AGENT_NOTIFY_KIND["tester"]="discord-webhook"
-BRIDGE_AGENT_NOTIFY_TARGET["tester"]="<discord-webhook-url>"
-BRIDGE_AGENT_NOTIFY_ACCOUNT["tester"]="default"
-```
-
-### Backlog: custom Claude channels
-
-The repo still includes the dormant channel-webhook helpers:
-
-- `bridge-channel-server.py`
-- `bridge-channels.py`
-- `lib/bridge-channels.sh`
-
-They are currently disabled in the runtime path because
-`--dangerously-load-development-channels` is not suitable for unattended setup
-or OSS onboarding. If Claude later supports safe custom channels without that
-prompt, the bridge can switch back to channel-based wake.
-
-### Manual bootstrap (advanced)
-
-If you are not using the AI-native installer flow above, use `bootstrap`
-instead of wiring shell integration, `init`, and daemon setup by hand.
-
-```bash
-./agent-bridge bootstrap \
-  --admin manager \
-  --engine claude \
-  --session manager \
-  --channels plugin:telegram@claude-plugins-official \
-  --allow-from <telegram-user-id> \
-  --default-chat <telegram-chat-id>
-```
-
-The bootstrap flow can:
-
-- install shell integration for `zsh` or `bash`
-- create the static role if it does not exist yet
-- scaffold the agent home from the public template
-- run channel setup for Discord and/or Telegram
-- save the chosen role as `BRIDGE_ADMIN_AGENT_ID`
-- run the same `setup agent` preflight used by later manager operations
-- hand off to the admin role with `agb admin`
-
-Use `--dry-run --json` first if you want to inspect the planned changes without
-writing files.
-
-### Onboard a Discord-backed agent
-
-If an agent should read and reply in Discord, set its primary channel metadata
-in `agent-roster.local.sh` first:
-
-```bash
-BRIDGE_AGENT_CHANNELS["tester"]="plugin:discord@claude-plugins-official"
-BRIDGE_AGENT_DISCORD_CHANNEL_ID["tester"]="<channel-id>"
-```
-
-Then run the guided setup:
-
-```bash
-./agent-bridge setup discord tester
-./agent-bridge setup telegram tester --allow-from <telegram-user-id>
-./agent-bridge setup agent tester
-./agent-bridge agent create reviewer --engine claude
-./agent-bridge agent start reviewer --dry-run
-./agent-bridge setup admin tester
-```
-
-After `setup admin`, the expected handoff command is:
+사람이 기억해야 하는 핵심 명령은 사실상 이것 하나입니다.
 
 ```bash
 agb admin
 ```
 
-`setup discord` writes the runtime Discord files into the agent workdir:
+이후에는 관리자 에이전트에게 자연어로 요청하면 됩니다. 예시:
 
-- `<workdir>/.discord/.env`
-- `<workdir>/.discord/access.json`
+- "현재 열려 있는 에이전트와 대기 중인 작업을 보여줘."
+- "Codex 워커 하나 더 띄워서 이 리포 작업 분산해줘."
+- "이 수정 사항을 tester에게 큐로 넘기고 재확인 받게 해줘."
+- "동시 편집 충돌이 나지 않게 worktree로 별도 워커를 만들어줘."
+- "Telegram 연결까지 마저 진행해줘."
+- "업데이트 가능한지 확인하고 필요하면 브리지 업그레이드해줘."
 
-The wizard can:
+### 사람이 직접 쓸 최소 명령
 
-- reuse the existing `.discord` token
-- import a bot token from a legacy runtime config during migration
-- scaffold the allowlist for one or more channel IDs
-- validate the bot token
-- send a small write-access test message unless you pass `--skip-send-test`
-
-`setup telegram` writes the runtime Telegram files into the agent workdir:
-
-- `<workdir>/.telegram/.env`
-- `<workdir>/.telegram/access.json`
-
-The Telegram setup flow can:
-
-- reuse the existing `.telegram` token
-- import a bot token from a legacy runtime config during migration
-- scaffold the allowlist of permitted user IDs
-- set a default chat/thread target for notifications
-- validate the bot token with `getMe`
-- send a small write-access test message unless you pass `--skip-send-test`
-
-For broader preflight, `setup agent` also checks:
-
-- roster presence and workdir/session wiring
-- Claude `Stop` + `UserPromptSubmit` hook installation into `<workdir>/.claude/settings.json`
-  - bridge-owned Claude homes use the shared `<agent-home-root>/.claude/settings.json` symlink target
-- Claude webhook channel entry in `<workdir>/.mcp.json` when a webhook port is enabled
-- `CLAUDE.md` presence for Claude roles
-- tracked profile status
-- `bridge-start.sh --dry-run`
-
-Use `--test-start` only when you want a real tmux launch smoke test:
+운영 중에 사람이 직접 칠 가능성이 있는 명령은 보통 이 정도면 충분합니다.
 
 ```bash
-./agent-bridge setup agent tester --test-start
+agb admin
+agb status
+agb list
+agb upgrade --pull --restart-daemon
 ```
 
-### Optional: inspect and import existing cron jobs
+설명:
 
-If you are migrating existing cron jobs into Agent Bridge, start with the read-only inventory and then import them into the bridge-native store:
+- `agb admin`: 관리자 역할에 붙습니다.
+- `agb status`: 전체 상태 대시보드를 봅니다.
+- `agb list`: 현재 활성 에이전트를 간단히 봅니다.
+- `agb upgrade --pull --restart-daemon`: 저장소 기준 최신 코드로 라이브 설치를 갱신합니다.
 
-```bash
-./agent-bridge cron inventory
-./agent-bridge cron inventory --family memory-daily --limit 10
-./agent-bridge cron inventory --mode one-shot --limit 20
-./agent-bridge cron show <job-id>
-./agent-bridge cron import --dry-run
-./agent-bridge cron import
-./agent-bridge cron enqueue <memory-daily-job-id> --slot 2026-04-05 --dry-run
-./agent-bridge cron enqueue <monthly-highlights-job-id> --dry-run
-./agent-bridge cron sync --dry-run
-./agent-bridge cron errors report --limit 20
-./agent-bridge cron cleanup report
-./agent-bridge cron cleanup prune --dry-run
-```
+### 사람이 굳이 외울 필요 없는 것
 
-`cron inventory`, `show`, `enqueue`, `errors`, and `cleanup` prefer `~/.agent-bridge/cron/jobs.json` when it exists. Before the cutover import runs, they fall back to `BRIDGE_SOURCE_CRON_JOBS_FILE` so you can still inspect an older source snapshot. Use `cron import` once to copy that source into the bridge-native store.
+CLI 표면은 넓지만, 다음 명령은 주로 관리자 에이전트나 유지보수자가 다룹니다.
 
-`cron enqueue` now works for recurring jobs in general. It writes a materialized note under `shared/cron/`, records per-slot manifests under `state/cron/dispatch/`, and creates compact `[cron-dispatch]` queue tasks for the bridge daemon. The daemon claims those tasks, runs `agent-bridge cron run-subagent <run-id>` in a disposable child, then closes the dispatch task when the result artifact is ready.
+- `agb task ...`
+- `agb setup ...`
+- `agb cron ...`
+- `agb memory ...`
+- `agb profile ...`
+- `agb agent ...`
+- 저장소 루트의 `bridge-*.sh` 스크립트들
 
-Cron delivery targets are resolved against registered long-lived roles, not only currently running tmux sessions. A sleeping role can still receive cron work because the daemon auto-starts it when queued work appears. If a source job references an agent that is not mapped to any launchable long-lived role, set `BRIDGE_CRON_AGENT_TARGET["source-agent"]="bridge-role"` or configure `BRIDGE_CRON_FALLBACK_AGENT` so results go to a manager/admin role instead of hard-failing.
+README도 의도적으로 이 명령들을 사람용 주 흐름으로 밀지 않습니다. 보통은 `agb admin`으로 들어가 자연어로 부탁하는 편이 맞습니다.
 
-For `memory-daily` the default slot is `YYYY-MM-DD`. For `monthly-highlights` it is `YYYY-MM`. Other recurring jobs default to the current minute as an ISO timestamp, so repeated enqueue calls on the same day do not collapse into one slot.
+## 주요 기능
 
-`cron sync` is the bridge-owned recurring scheduler. It scans the bridge-native recurring job store, derives due occurrence slots, and enqueues each occurrence through the same disposable-child path. When `BRIDGE_CRON_SYNC_ENABLED=1`, the daemon also drains queued `[cron-dispatch]` tasks itself, so recurring jobs do not wake long-lived agent sessions unless a run explicitly needs a separate `[cron-followup]` task. `BRIDGE_LEGACY_CRON_SYNC_ENABLED` and the older `BRIDGE_OPENCLAW_CRON_SYNC_ENABLED` name still work as compatibility aliases.
+### 1. 관리자 에이전트 중심 운영
 
-If your daemon environment does not inherit the same `PATH` as your interactive shell, set `BRIDGE_CLAUDE_BIN` or `BRIDGE_CODEX_BIN` explicitly in `agent-roster.local.sh`. The cron runner also searches common install locations such as `~/.local/bin`, `/opt/homebrew/bin`, and `/usr/local/bin`.
+bootstrap은 먼저 장기 실행용 관리자 역할을 만듭니다. 설치가 끝난 뒤 사람은 관리자 에이전트에게 자연어로 요청하고, 관리자 에이전트가 나머지 역할 생성과 운영을 이어받습니다.
 
-`cron errors report` is the report-only view for recurring cron failures. It shows `lastErrorAt`, consecutive error counts, family and prefix summaries, and the highest-error outliers first so model-switch fallout is easy to separate from older failures.
+### 2. Queue-first 협업
 
-`cron cleanup report` and `cron cleanup prune --dry-run` are the safe way to inspect stale one-shot jobs before deleting them. The current prune target is intentionally narrow: expired `schedule.kind=at` jobs with `deleteAfterRun=true` and `enabled=false`.
+일반 작업 전달은 durable SQLite task queue를 중심으로 처리합니다. 작업 생성, 확인, claim, 완료, handoff가 모두 큐를 중심으로 돌아가며, `tmux` 세션이 꺼졌다 켜져도 상태를 유지합니다.
 
-### Bridge-native cron jobs
+### 3. 정적 역할과 동적 에이전트
 
-For recurring work defined inside Agent Bridge itself, use the bridge-native cron store:
+- 정적 역할은 장기 운영용 이름 있는 역할입니다.
+- 동적 에이전트는 현재 디렉토리에서 즉시 띄우는 온디맨드 워커입니다.
 
-```bash
-./agent-bridge cron list --agent <agent>
-./agent-bridge cron create --agent <agent> --schedule "0 9 * * *" --title "Daily check" --payload "Review the daily queue and summarize anything that needs follow-up."
-./agent-bridge cron update <job-id> --schedule "0 10 * * *"
-./agent-bridge cron delete <job-id>
-```
+새 설치는 정적 역할이 비어 있는 상태에서 시작합니다. 필요할 때 관리자 역할이 장기 역할을 추가하거나, 즉석 워커를 띄우는 식으로 운영하면 됩니다.
 
-Bridge-native jobs live at `~/.agent-bridge/cron/jobs.json`. `cron import` is the one-shot cutover step for an older source snapshot; after that, `cron sync` reads the bridge-native store directly.
+### 4. 상태 대시보드와 daemon
 
-The status dashboard also includes a lightweight health check for active sessions. It classifies them as `ok`, `warn`, or `crit` from recorded session activity age. Inactive on-demand roles are not treated as stale. Defaults are `BRIDGE_HEALTH_WARN_SECONDS=3600` and `BRIDGE_HEALTH_CRITICAL_SECONDS=14400`, and you can override them in `agent-roster.local.sh`.
+`agb status`는 큐 적체, 활성 세션, stale 상태 같은 운영 정보를 한 번에 보여줍니다. daemon은 live roster 동기화, heartbeat, idle 에이전트 nudge, 반복 작업 처리 같은 배경 동작을 맡습니다.
 
-For static roles, an explicit `BRIDGE_AGENT_IDLE_TIMEOUT["agent"]="0"` means "always on": the daemon will not auto-stop that role, and it will restart the role automatically if its tmux session disappears.
+일반 사용자는 daemon을 직접 만지기보다 bootstrap과 관리자 에이전트에 맡기는 흐름을 권장합니다.
 
-### Optional: derived memory index
+### 5. Git worktree 격리
 
-The memory wiki stores source-of-truth data in markdown files. If you want a
-faster derived SQLite index on top of that wiki, you can rebuild and query it:
+같은 저장소에서 여러 에이전트가 동시에 수정해야 하면 worktree 기반 격리 워커를 만들 수 있습니다. 공유 체크아웃 하나를 억지로 같이 쓰는 것보다 안전하고, 충돌 가능성을 줄이기 좋습니다.
 
-```bash
-./agent-bridge memory rebuild-index --agent <agent-id>
-./agent-bridge memory query --agent <agent-id> --query "recent incident summary"
-```
+### 6. 채널 연동
 
-The bundled compatibility helper can also read the derived index, plus older
-legacy memory SQLite files when you are migrating an existing install:
+Telegram, Discord 같은 채널 연동을 지원합니다. 다만 이 README는 사람이 `setup` 하위 명령을 외우도록 설계하지 않습니다. 설치나 온보딩이 필요하면 관리자 에이전트에게 맡기는 흐름을 기본으로 둡니다.
 
-```bash
-python3 tools/memory-manager.py search --agent <agent-id> "recent incident summary"
-```
+### 7. Cron과 Memory
 
-For agent-side automation, there is also a one-step helper that keeps the raw
-capture and wiki update flow together:
+반복 작업과 메모리 위키/검색도 포함되어 있습니다. 다만 이 둘은 운영 자동화나 고급 워크플로우에 가까운 기능입니다. 대부분의 사용자는 직접 명령을 치기보다 관리자 에이전트에게 "이 작업을 매일 돌려줘" 또는 "이 선호를 기억해줘"라고 말하는 쪽이 자연스럽습니다.
 
-```bash
-./agent-bridge memory remember --agent <agent-id> --user owner --source chat --text "The user prefers concise morning updates." --kind user
-```
+## 전제와 보안
 
-This is intended for the agent itself when it decides a natural-language
-conversation produced a durable fact. End users do not need to learn or type it.
+- Agent Bridge는 trusted local project 전용입니다.
+- 에이전트에게 현재 디렉토리 접근을 의도적으로 주는 상황을 가정합니다.
+- 멀티테넌트 서버 오케스트레이션이나 미승인 원격 환경 제어를 목표로 하지 않습니다.
 
-Managed Claude homes automatically link a shared `memory-wiki` skill so the
-agent can decide when to preserve memory without teaching humans special
-commands.
+## 프로젝트 구성
 
-### Start the daemon
+- `agb`: 짧은 사용자 진입점
+- `agent-bridge`: 전체 CLI 엔트리포인트
+- `lib/`: 공용 Bash 구현
+- `bridge-queue.py`: 큐와 daemon 측 상태 저장
+- `agents/_template/`: 공개용 장기 역할 템플릿
+- `shared/`: 사람이나 에이전트가 넘겨보는 handoff 메모
+- `state/`, `logs/`: 런타임 산출물
 
-```bash
-bash bridge-daemon.sh ensure
-```
+공개 저장소는 private agent profile을 그대로 싣지 않습니다. 장기 역할 프로필은 템플릿을 기반으로 별도 로컬 환경이나 private companion repo에서 관리하는 흐름을 권장합니다.
 
-The daemon keeps the live roster, queue heartbeats, and idle nudges in sync.
+## 추가 문서
 
-On macOS you can also register it as a `LaunchAgent` so crashes auto-restart:
+- [ARCHITECTURE.md](./ARCHITECTURE.md)
+- [OPERATIONS.md](./OPERATIONS.md)
+- [KNOWN_ISSUES.md](./KNOWN_ISSUES.md)
+- [agents/README.md](./agents/README.md)
+- [CONTRIBUTING.md](./CONTRIBUTING.md)
+- [SECURITY.md](./SECURITY.md)
 
-```bash
-./scripts/install-daemon-launchagent.sh --apply --load
-launchctl print gui/$UID/ai.agent-bridge.daemon
-```
+## 라이선스
 
-## Quick Start
-
-### Run an agent against the bridge repo itself
-
-If you want an agent to work on `agent-bridge`:
-
-```bash
-cd ~/agent-bridge
-./agent-bridge --codex --name dev
-```
-
-Or:
-
-```bash
-cd ~/agent-bridge
-./agent-bridge --claude --name tester
-```
-
-### Run an agent against another project
-
-From the target repo:
-
-```bash
-cd ~/some-project
-~/agent-bridge/agent-bridge --codex --name dev
-```
-
-The current directory becomes the agent's workdir. `agent-bridge` will also install a small project-local bridge skill:
-
-- Codex: `.agents/skills/agent-bridge/SKILL.md`
-- Claude: `.claude/skills/agent-bridge/SKILL.md`
-- Bridge-owned Claude homes also get:
-  - `.claude/skills/agent-bridge-runtime/SKILL.md`
-  - `.claude/skills/cron-manager/SKILL.md`
-  - `.claude/skills/memory-wiki/SKILL.md`
-
-### Queue-first workflow
-
-Start an agent:
-
-```bash
-./agent-bridge --claude --name tester
-```
-
-Create work:
-
-```bash
-./agent-bridge task create --to tester --title "check this" --body-file ~/agent-bridge/shared/note.md
-```
-
-Inspect or complete work:
-
-```bash
-./agent-bridge inbox tester
-./agent-bridge claim 1 --agent tester
-./agent-bridge done 1 --agent tester --note "done"
-```
-
-Send a direct interrupt only when waiting for the queue is not acceptable:
-
-```bash
-./agent-bridge urgent tester "Check your inbox now."
-```
-
-## Core Concepts
-
-### Static roles
-
-Static roles are optional. If you want long-lived names such as `developer`, `tester`, `codex-developer`, or `codex-tester`, define them in `agent-roster.local.sh`. Otherwise, just use dynamic agents with `agent-bridge`.
-
-### Tracked agent profiles
-
-If you are migrating existing long-lived agents, use [`agents/_template/`](./agents/_template/CLAUDE.md)
-as the public scaffold and keep real production profiles in a private companion
-repo or a local untracked tree.
-
-- the public repo intentionally ships only the `_template/` profile scaffold
-- `agent-bridge profile status|diff|deploy` still manages explicit copy-based promotion into the live home
-- optional migration planning docs live under [`agents/`](./agents/README.md)
-
-### Dynamic agents
-
-Dynamic agents are created with `agent-bridge --codex|--claude --name ...` from the current directory. They are good for one-off workers and local experiments.
-
-### Queue first, urgent second
-
-Normal collaboration should go through the queue:
-
-- `agent-bridge task create`
-- `agent-bridge inbox`
-- `agent-bridge claim`
-- `agent-bridge done`
-- `agent-bridge handoff`
-
-Use `agent-bridge urgent` only when another agent must be interrupted immediately.
-
-### Worktree workers
-
-If one repository needs multiple active writers, prefer:
-
-```bash
-./agent-bridge --codex --name reviewer-a --prefer new
-```
-
-That creates an isolated git worktree under `~/.agent-bridge/worktrees/` instead of reusing the shared checkout.
-
-## Common Commands
-
-```bash
-./agent-bridge status
-./agb status
-./agent-bridge status --watch
-./agent-bridge list
-./agent-bridge profile status --all
-./agent-bridge profile diff <agent>
-./agent-bridge profile deploy <agent> --dry-run
-./agent-bridge setup discord tester
-./agent-bridge setup telegram tester --allow-from <telegram-user-id>
-./agent-bridge setup agent tester
-./agent-bridge cron inventory --mode one-shot --limit 20
-./agent-bridge cron list --agent <agent>
-./agent-bridge cron create --agent <agent> --schedule "0 9 * * *" --title "Daily check"
-./agent-bridge cron enqueue <memory-daily-job-id> --slot 2026-04-05 --dry-run
-./agent-bridge cron enqueue <monthly-highlights-job-id> --dry-run
-./agent-bridge cron errors report --limit 20
-./agent-bridge cron cleanup report
-./agent-bridge kill 1
-./agent-bridge kill all
-./agent-bridge worktree list
-bash bridge-start.sh --list
-bash bridge-daemon.sh status
-bash ./scripts/oss-preflight.sh
-```
-
-## Repository Layout
-
-- `agent-bridge`: primary operator entry point
-- `agb`: shorthand wrapper for `agent-bridge`
-- `bridge-start.sh`, `bridge-run.sh`: session startup paths
-- `bridge-task.sh`, `bridge-queue.py`: queue API and SQLite backend
-- `bridge-setup.sh`, `bridge-setup.py`: Discord/Telegram onboarding and agent preflight checks
-- `bridge-cron.sh`, `bridge-cron.py`, `bridge-cron-scheduler.py`: bridge-native cron CRUD plus legacy cron inventory, scheduling, queue adapters, and cleanup helpers
-- `bridge-send.sh`, `bridge-action.sh`: urgent interrupts and predefined actions
-- `bridge-status.sh`, `bridge-daemon.sh`, `bridge-sync.sh`: status, background sync, and heartbeats
-- `bridge-lib.sh`: thin loader for shared shell modules
-- `lib/`: modular shell implementation split by concern (`core`, `agents`, `tmux`, `skills`, `state`)
-- `agent-roster.sh`: static role definitions
-- `shared/`, `logs/`, `state/`: runtime artifacts and handoff files
-
-## Troubleshooting
-
-### macOS uses Bash 3.2
-
-Fix `PATH` so Homebrew Bash comes first:
-
-```bash
-echo 'export PATH="$(brew --prefix)/bin:$PATH"' >> ~/.zshrc
-exec zsh
-```
-
-### Claude shows a trust prompt on first run
-
-That is expected in a new folder. Confirm the prompt once, then future resumes will work normally.
-
-### Discord replies fail with "channel is not allowlisted"
-
-Run:
-
-```bash
-./agent-bridge setup discord <agent>
-```
-
-Make sure the intended channel ID is present in `<workdir>/.discord/access.json`
-under `groups`, then restart the agent session if it was already running. If the
-agent should always launch with Discord or Telegram attached, declare that in
-`BRIDGE_AGENT_CHANNELS["<agent>"]` instead of relying on a hand-written raw
-`--channels ...` launch command.
-
-### The daemon is not running
-
-```bash
-bash ~/agent-bridge/bridge-daemon.sh ensure
-bash ~/agent-bridge/bridge-daemon.sh status
-```
-
-If it keeps dying, inspect:
-
-```bash
-tail -n 80 ~/.agent-bridge/state/daemon.log
-tail -n 80 ~/.agent-bridge/state/daemon-crash.log
-tail -n 80 ~/.agent-bridge/state/launchagent.log
-```
-
-### You want to inspect everything at once
-
-```bash
-~/agent-bridge/agent-bridge status
-~/agent-bridge/agent-bridge list
-~/agent-bridge/agent-bridge summary
-```
-
-## Verification
-
-For bridge changes, the minimum local check is:
-
-```bash
-bash -n *.sh agent-bridge agb
-shellcheck *.sh agent-bridge agb
-./scripts/smoke-test.sh
-```
-
-## Project Metadata
-
-- License: [`MIT`](./LICENSE)
-- Contributing guide: [`CONTRIBUTING.md`](./CONTRIBUTING.md)
-- Code of conduct: [`CODE_OF_CONDUCT.md`](./CODE_OF_CONDUCT.md)
-- Security policy: [`SECURITY.md`](./SECURITY.md)
+[MIT](./LICENSE)
