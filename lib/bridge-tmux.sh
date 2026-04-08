@@ -309,3 +309,23 @@ bridge_tmux_session_activity_ts() {
   # without key input, so session_activity causes false idle detection.
   tmux display-message -p -t "$session" '#{window_activity}' 2>/dev/null || true
 }
+
+bridge_tmux_session_attached_count() {
+  local session="$1"
+  tmux display-message -p -t "$session" '#{session_attached}' 2>/dev/null || true
+}
+
+bridge_tmux_session_idle_seconds() {
+  local session="$1"
+  local activity
+  local now
+
+  activity="$(bridge_tmux_session_activity_ts "$session")"
+  [[ "$activity" =~ ^[0-9]+$ ]] || {
+    printf '0'
+    return 0
+  }
+  now="$(date +%s)"
+  (( activity > now )) && activity="$now"
+  printf '%s' "$(( now - activity ))"
+}

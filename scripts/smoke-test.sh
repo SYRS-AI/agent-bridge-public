@@ -877,6 +877,53 @@ printf '%s\n' "$LATE_DYNAMIC_SUMMARY" | awk -F'\t' 'NR==1 { exit !($5 == 1 && $9
 cp "$TMP_ROOT/codex-cron-fake" "$FAKE_BIN/codex"
 chmod +x "$FAKE_BIN/codex"
 
+log "reaping idle dynamic agents and orphan smoke sessions"
+IDLE_REAP_AGENT="idle-reap-agent-$SESSION_NAME"
+IDLE_REAP_WORKDIR="$TMP_ROOT/idle-reap-workdir"
+ORPHAN_REAP_SESSION="bridge-smoke-orphan-$SESSION_NAME"
+mkdir -p "$IDLE_REAP_WORKDIR"
+IDLE_REAP_OUTPUT="$("$BASH4_BIN" -lc '
+  set -euo pipefail
+  tmp_daemon="'"$TMP_ROOT"'/daemon-reaper.sh"
+  {
+    printf "%s\n" "set -euo pipefail"
+    printf "SCRIPT_DIR=%q\n" "'"$REPO_ROOT"'"
+    printf "%s\n" "source \"\$SCRIPT_DIR/bridge-lib.sh\""
+    printf "%s\n" "bridge_load_roster"
+    printf "%s\n" "daemon_info() { :; }"
+    printf "%s\n" "bridge_daemon_autostart_allowed() { return 0; }"
+    printf "%s\n" "bridge_daemon_note_autostart_failure() { :; }"
+    printf "%s\n" "bridge_daemon_clear_autostart_failure() { :; }"
+    printf "%s\n" "bridge_dashboard_post_if_changed() { :; }"
+    sed -n '"'"'/^nudge_agent_session()/,/^CMD="${1:-}"/p'"'"' "'"$REPO_ROOT"'/bridge-daemon.sh" | sed '"'"'$d'"'"'
+  } >"$tmp_daemon"
+  source "$tmp_daemon"
+  "'"$REPO_ROOT"'/agent-bridge" --codex --name "'"$IDLE_REAP_AGENT"'" --workdir "'"$IDLE_REAP_WORKDIR"'" --no-attach >/dev/null
+  tmux new-session -d -s "'"$ORPHAN_REAP_SESSION"'" "sleep 30"
+  sleep 2
+  export BRIDGE_DYNAMIC_IDLE_REAP_SECONDS=1
+  export BRIDGE_ORPHAN_SESSION_REAP_SECONDS=1
+  cmd_sync_cycle >/dev/null
+  if tmux has-session -t "'"$IDLE_REAP_AGENT"'" 2>/dev/null; then
+    echo "DYNAMIC_ALIVE=yes"
+  else
+    echo "DYNAMIC_ALIVE=no"
+  fi
+  if tmux has-session -t "'"$ORPHAN_REAP_SESSION"'" 2>/dev/null; then
+    echo "ORPHAN_ALIVE=yes"
+  else
+    echo "ORPHAN_ALIVE=no"
+  fi
+  if test -f "'"$BRIDGE_ACTIVE_AGENT_DIR"'/'"$IDLE_REAP_AGENT"'.env"; then
+    echo "DYNAMIC_META=yes"
+  else
+    echo "DYNAMIC_META=no"
+  fi
+')"
+assert_contains "$IDLE_REAP_OUTPUT" "DYNAMIC_ALIVE=no"
+assert_contains "$IDLE_REAP_OUTPUT" "ORPHAN_ALIVE=no"
+assert_contains "$IDLE_REAP_OUTPUT" "DYNAMIC_META=no"
+
 log "falling back when a dynamic Claude resume session id is stale"
 STALE_RESUME_OUTPUT="$("$BASH4_BIN" -lc '
   source "'"$REPO_ROOT"'/bridge-lib.sh"

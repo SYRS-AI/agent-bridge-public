@@ -612,6 +612,120 @@ process_on_demand_agents() {
   return "$changed"
 }
 
+session_is_registered_agent_session() {
+  local session="$1"
+  local agent
+  for agent in "${BRIDGE_AGENT_IDS[@]}"; do
+    if [[ "$(bridge_agent_session "$agent")" == "$session" ]]; then
+      return 0
+    fi
+  done
+  return 1
+}
+
+session_matches_idle_reap_patterns() {
+  local session="$1"
+  case "$session" in
+    bridge-smoke-*|bridge-requester-*|auto-start-session-*|always-on-session-*|static-session-*|claude-static-bridge-smoke-*|worker-reuse-*|late-dynamic-agent-*|created-session-*|bootstrap-session-*|bootstrap-wrapper-session-*|broken-channel-*|codex-cli-session-*|memtest*|bootstrap-fail*|memphase4-*)
+      return 0
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
+reap_idle_dynamic_agents() {
+  local threshold="${BRIDGE_DYNAMIC_IDLE_REAP_SECONDS:-3600}"
+  local agent
+  local session
+  local attached
+  local idle
+  local summary
+  local live_agent=""
+  local queued=0
+  local claimed=0
+  local blocked=0
+  local changed=1
+
+  [[ "$threshold" =~ ^[0-9]+$ ]] || threshold=3600
+  (( threshold > 0 )) || return 0
+
+  for agent in "${BRIDGE_AGENT_IDS[@]}"; do
+    [[ "$(bridge_agent_source "$agent")" == "dynamic" ]] || continue
+    session="$(bridge_agent_session "$agent")"
+    [[ -n "$session" ]] || continue
+    bridge_tmux_session_exists "$session" || continue
+
+    attached="$(bridge_tmux_session_attached_count "$session")"
+    [[ "$attached" =~ ^[0-9]+$ ]] || attached=0
+    (( attached == 0 )) || continue
+
+    summary="$(bridge_queue_cli summary --agent "$agent" --format tsv 2>/dev/null | head -n 1 || true)"
+    if [[ -n "$summary" ]]; then
+      IFS=$'\t' read -r live_agent queued claimed blocked _live_active _live_idle _live_last_seen _live_last_nudge _live_session _live_engine _live_workdir <<<"$summary"
+      [[ "$queued" =~ ^[0-9]+$ ]] || queued=0
+      [[ "$claimed" =~ ^[0-9]+$ ]] || claimed=0
+      [[ "$blocked" =~ ^[0-9]+$ ]] || blocked=0
+      if [[ "$live_agent" != "$agent" ]]; then
+        queued=0
+        claimed=0
+        blocked=0
+      fi
+    else
+      queued=0
+      claimed=0
+      blocked=0
+    fi
+    (( queued == 0 && claimed == 0 && blocked == 0 )) || continue
+
+    idle="$(bridge_tmux_session_idle_seconds "$session")"
+    [[ "$idle" =~ ^[0-9]+$ ]] || idle=0
+    (( idle >= threshold )) || continue
+
+    if bridge_kill_agent_session "$agent" >/dev/null 2>&1; then
+      bridge_archive_dynamic_agent "$agent"
+      bridge_remove_dynamic_agent_file "$agent"
+      daemon_info "reaped dynamic ${agent} (idle=${idle}s)"
+      changed=0
+    fi
+  done
+
+  return "$changed"
+}
+
+reap_idle_orphan_sessions() {
+  local threshold="${BRIDGE_ORPHAN_SESSION_REAP_SECONDS:-600}"
+  local session
+  local attached
+  local idle
+  local changed=1
+
+  [[ "$threshold" =~ ^[0-9]+$ ]] || threshold=600
+  (( threshold > 0 )) || return 0
+
+  while IFS= read -r session; do
+    [[ -n "$session" ]] || continue
+    session_is_registered_agent_session "$session" && continue
+    session_matches_idle_reap_patterns "$session" || continue
+
+    attached="$(bridge_tmux_session_attached_count "$session")"
+    [[ "$attached" =~ ^[0-9]+$ ]] || attached=0
+    (( attached == 0 )) || continue
+
+    idle="$(bridge_tmux_session_idle_seconds "$session")"
+    [[ "$idle" =~ ^[0-9]+$ ]] || idle=0
+    (( idle >= threshold )) || continue
+
+    if tmux kill-session -t "$session" >/dev/null 2>&1; then
+      daemon_info "reaped orphan session ${session} (idle=${idle}s)"
+      changed=0
+    fi
+  done < <(tmux list-sessions -F '#{session_name}' 2>/dev/null || true)
+
+  return "$changed"
+}
+
 cmd_sync_cycle() {
   local snapshot_file
   local ready_agents_file
@@ -668,6 +782,12 @@ cmd_sync_cycle() {
 
   summary_output="$(bridge_queue_cli summary --format tsv 2>/dev/null || true)"
   if [[ -n "$summary_output" ]] && process_on_demand_agents "$summary_output"; then
+    changed=0
+  fi
+  if reap_idle_dynamic_agents; then
+    changed=0
+  fi
+  if reap_idle_orphan_sessions; then
     changed=0
   fi
   if [[ "$changed" == "0" ]]; then
