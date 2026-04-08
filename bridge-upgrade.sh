@@ -143,6 +143,17 @@ DEPLOY_OUTPUT="$("${deploy_cmd[@]}")"
 
 if [[ $MIGRATE_AGENTS -eq 1 ]]; then
   MIGRATION_JSON="$(python3 "$SOURCE_ROOT/bridge-upgrade.py" migrate-agents --source-root "$SOURCE_ROOT" --target-root "$TARGET_ROOT" --admin-agent "$ADMIN_AGENT_ID" $([[ $DRY_RUN -eq 1 ]] && printf '%s' '--dry-run'))"
+  "$BRIDGE_BASH_BIN" -lc '
+    set -euo pipefail
+    export BRIDGE_HOME="$1"
+    source "$2/bridge-lib.sh"
+    bridge_load_roster
+    dry_run="$3"
+    for agent in "${BRIDGE_AGENT_IDS[@]}"; do
+      [[ "$(bridge_agent_engine "$agent")" == "claude" ]] || continue
+      bridge_sync_claude_runtime_skills "$agent" "$(bridge_agent_workdir "$agent")" "$dry_run" >/dev/null 2>&1 || true
+    done
+  ' -- "$TARGET_ROOT" "$SOURCE_ROOT" "$DRY_RUN"
 fi
 
 if [[ $RESTART_DAEMON -eq 1 && $DRY_RUN -eq 0 ]]; then

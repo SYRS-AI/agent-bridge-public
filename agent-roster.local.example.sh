@@ -63,6 +63,10 @@ BRIDGE_AGENT_SESSION["codex-developer"]="codex-developer"
 # launch command so the bridge can validate and inject them consistently.
 # BRIDGE_AGENT_CHANNELS["tester"]="plugin:discord@claude-plugins-official"
 # BRIDGE_AGENT_CHANNELS["developer"]="plugin:telegram@claude-plugins-official"
+# Optional: declare extra runtime skills to symlink into managed Claude homes.
+# These should match directories under ~/.agent-bridge/runtime/skills/.
+# BRIDGE_AGENT_SKILLS["tester"]="shopify-api tracx-logis-api"
+# BRIDGE_AGENT_SKILLS["developer"]="agent-db"
 #
 # Optional/backlog: dormant custom channel port. The runtime path does not use
 # this today because development channels require an interactive trust prompt.

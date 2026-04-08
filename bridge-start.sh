@@ -138,7 +138,7 @@ if [[ "$ENGINE" == "claude" ]]; then
       bridge_warn "Claude bridge skill bootstrap skipped or conflicted: $WORK_DIR"
     fi
   fi
-  bridge_bootstrap_claude_shared_skills "$WORK_DIR" || true
+  bridge_bootstrap_claude_shared_skills "$AGENT" "$WORK_DIR" || true
   if ! bridge_ensure_claude_project_trust "$WORK_DIR" >/dev/null 2>&1; then
     bridge_warn "Claude project trust seed failed: $WORK_DIR"
   fi

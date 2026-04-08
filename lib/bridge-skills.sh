@@ -37,17 +37,26 @@ bridge_agent_claude_skill_link_dir() {
   printf '%s/.claude/skills/%s' "$workdir" "$skill_name"
 }
 
-bridge_link_shared_claude_skill() {
-  local workdir="$1"
-  local skill_name="$2"
-  local source_dir=""
-  local link_dir=""
+bridge_is_shared_claude_skill_name() {
+  local skill_name="$1"
+  case "$skill_name" in
+    agent-bridge-runtime|cron-manager|memory-wiki)
+      return 0
+      ;;
+  esac
+  return 1
+}
 
-  [[ "$(bridge_path_is_within_root "$workdir" "$BRIDGE_AGENT_HOME_ROOT")" == "1" ]] || return 0
+bridge_runtime_claude_skill_source_dir() {
+  local skill_name="$1"
+  local runtime_path="$BRIDGE_RUNTIME_SKILLS_DIR/$skill_name"
+  [[ -d "$runtime_path" ]] || return 1
+  printf '%s' "$runtime_path"
+}
 
-  source_dir="$(bridge_shared_claude_skill_source_dir "$skill_name")"
-  [[ -d "$source_dir" ]] || return 0
-  link_dir="$(bridge_agent_claude_skill_link_dir "$workdir" "$skill_name")"
+bridge_link_claude_skill_dir() {
+  local source_dir="$1"
+  local link_dir="$2"
 
   bridge_require_python
   python3 - "$source_dir" "$link_dir" <<'PY'
@@ -75,12 +84,104 @@ link_dir.symlink_to(rel_target, target_is_directory=True)
 PY
 }
 
-bridge_bootstrap_claude_shared_skills() {
+bridge_link_shared_claude_skill() {
   local workdir="$1"
+  local skill_name="$2"
+  local source_dir=""
+  local link_dir=""
+
+  [[ "$(bridge_path_is_within_root "$workdir" "$BRIDGE_AGENT_HOME_ROOT")" == "1" ]] || return 0
+
+  source_dir="$(bridge_shared_claude_skill_source_dir "$skill_name")"
+  [[ -d "$source_dir" ]] || return 0
+  link_dir="$(bridge_agent_claude_skill_link_dir "$workdir" "$skill_name")"
+  bridge_link_claude_skill_dir "$source_dir" "$link_dir"
+}
+
+bridge_sync_claude_runtime_skills() {
+  local agent="$1"
+  local workdir="$2"
+  local dry_run="${3:-0}"
+  local configured=""
+  local skill=""
+  local skills_dir=""
+  local existing=""
+  local target=""
+  local source_dir=""
+  local runtime_target=""
+  local found=0
+  local configured_skill=""
+
+  [[ "$(bridge_path_is_within_root "$workdir" "$BRIDGE_AGENT_HOME_ROOT")" == "1" ]] || return 0
+  skills_dir="$workdir/.claude/skills"
+  mkdir -p "$skills_dir"
+
+  configured="$(bridge_agent_skills_csv "$agent")"
+
+  shopt -s nullglob
+  for existing in "$skills_dir"/*; do
+    [[ -L "$existing" ]] || continue
+    skill="$(basename "$existing")"
+    bridge_is_shared_claude_skill_name "$skill" && continue
+    runtime_target="$(bridge_runtime_claude_skill_source_dir "$skill" || true)"
+    [[ -n "$runtime_target" ]] || continue
+    target="$(python3 - "$existing" "$runtime_target" <<'PY'
+import os
+import sys
+
+link_path = os.path.realpath(sys.argv[1])
+runtime_path = os.path.realpath(sys.argv[2])
+print("1" if link_path == runtime_path else "0")
+PY
+)"
+    [[ "$target" == "1" ]] || continue
+    found=0
+    for configured_skill in $configured; do
+      if [[ "$configured_skill" == "$skill" ]]; then
+        found=1
+        break
+      fi
+    done
+    (( found == 1 )) && continue
+    if [[ "$dry_run" != "1" ]]; then
+      rm -f "$existing"
+    fi
+  done
+  shopt -u nullglob
+
+  for skill in $configured; do
+    [[ "$skill" =~ ^[A-Za-z0-9._-]+$ ]] || continue
+    bridge_is_shared_claude_skill_name "$skill" && continue
+    source_dir="$(bridge_runtime_claude_skill_source_dir "$skill" || true)"
+    if [[ -z "$source_dir" ]]; then
+      bridge_warn "runtime skill '$skill' is configured for '$agent' but missing under $BRIDGE_RUNTIME_SKILLS_DIR"
+      continue
+    fi
+    if [[ "$dry_run" == "1" ]]; then
+      continue
+    fi
+    bridge_link_claude_skill_dir "$source_dir" "$(bridge_agent_claude_skill_link_dir "$workdir" "$skill")"
+  done
+}
+
+bridge_bootstrap_claude_shared_skills() {
+  local agent=""
+  local workdir=""
+
+  if [[ $# -ge 2 ]]; then
+    agent="$1"
+    workdir="$2"
+  else
+    workdir="$1"
+  fi
 
   bridge_link_shared_claude_skill "$workdir" "agent-bridge-runtime"
   bridge_link_shared_claude_skill "$workdir" "cron-manager"
   bridge_link_shared_claude_skill "$workdir" "memory-wiki"
+
+  if [[ -n "$agent" ]]; then
+    bridge_sync_claude_runtime_skills "$agent" "$workdir"
+  fi
 }
 
 bridge_is_managed_markdown() {

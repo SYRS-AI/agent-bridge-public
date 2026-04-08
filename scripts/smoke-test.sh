@@ -2173,6 +2173,13 @@ assert_contains "$RUNTIME_SYNC_OUTPUT" "item[scripts]"
 [[ -f "$BRIDGE_HOME/runtime/secrets/example.token" ]] || die "expected runtime secrets copy"
 [[ -f "$BRIDGE_HOME/runtime/bridge-config.json" ]] || die "expected runtime config copy"
 
+log "linking configured runtime skills into managed Claude homes"
+"$BASH4_BIN" -lc "source \"$REPO_ROOT/bridge-lib.sh\"; bridge_load_roster; BRIDGE_AGENT_SKILLS[\"claude-static\"]='sample-skill'; bridge_bootstrap_claude_shared_skills 'claude-static' '$CLAUDE_STATIC_WORKDIR'"
+[[ -L "$CLAUDE_STATIC_WORKDIR/.claude/skills/sample-skill" ]] || die "expected runtime sample-skill symlink"
+assert_contains "$(readlink "$CLAUDE_STATIC_WORKDIR/.claude/skills/sample-skill")" "sample-skill"
+"$BASH4_BIN" -lc "source \"$REPO_ROOT/bridge-lib.sh\"; bridge_load_roster; BRIDGE_AGENT_SKILLS[\"claude-static\"]=''; bridge_bootstrap_claude_shared_skills 'claude-static' '$CLAUDE_STATIC_WORKDIR'"
+[[ ! -e "$CLAUDE_STATIC_WORKDIR/.claude/skills/sample-skill" ]] || die "expected runtime skill symlink pruning when roster mapping is removed"
+
 RUNTIME_COMPAT_PATHS_OUTPUT="$("$BASH4_BIN" -c "source \"$REPO_ROOT/bridge-lib.sh\"; bridge_load_roster; printf '%s\n%s\n%s\n' \"\$(bridge_compat_config_file)\" \"\$(bridge_compat_credentials_dir)\" \"\$(bridge_compat_secrets_dir)\"")"
 assert_contains "$RUNTIME_COMPAT_PATHS_OUTPUT" "$BRIDGE_HOME/runtime/bridge-config.json"
 assert_contains "$RUNTIME_COMPAT_PATHS_OUTPUT" "$BRIDGE_HOME/runtime/credentials"

@@ -476,11 +476,16 @@ run_agent() {
     echo "== Claude Skills =="
     bridge_ensure_project_claude_guidance "$workdir" >/dev/null 2>&1 || true
     bridge_bootstrap_project_skill "$engine" "$workdir" >/dev/null 2>&1 || true
-    bridge_bootstrap_claude_shared_skills "$workdir" >/dev/null 2>&1 || true
+    bridge_bootstrap_claude_shared_skills "$agent" "$workdir" >/dev/null 2>&1 || true
     printf 'claude_bridge_guidance: %s\n' "$workdir/CLAUDE.md"
     printf 'project_skill: %s\n' "$workdir/.claude/skills/agent-bridge/SKILL.md"
     printf 'runtime_skill: %s\n' "$workdir/.claude/skills/agent-bridge-runtime/SKILL.md"
     printf 'cron_skill: %s\n' "$workdir/.claude/skills/cron-manager/SKILL.md"
+    if [[ -n "$(bridge_agent_skills_csv "$agent")" ]]; then
+      printf 'configured_runtime_skills: %s\n' "$(bridge_agent_skills_csv "$agent")"
+    else
+      printf 'configured_runtime_skills: (none)\n'
+    fi
 
     echo
     echo "== Claude Activity Hooks =="

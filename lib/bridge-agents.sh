@@ -942,6 +942,22 @@ bridge_agent_inject_timestamp() {
   printf '%s' "${BRIDGE_AGENT_INJECT_TIMESTAMP[$agent]-1}"
 }
 
+bridge_agent_skills_csv() {
+  local agent="$1"
+  local configured="${BRIDGE_AGENT_SKILLS[$agent]-}"
+  local normalized=""
+  local skill=""
+
+  configured="${configured//,/ }"
+  for skill in $configured; do
+    skill="$(bridge_trim_whitespace "$skill")"
+    [[ -n "$skill" ]] || continue
+    normalized+="${normalized:+ }$skill"
+  done
+
+  printf '%s' "$normalized"
+}
+
 bridge_list_actions() {
   local agent="$1"
   local key

@@ -873,7 +873,7 @@ run_create() {
     fi
     bridge_bootstrap_project_skill "$engine" "$workdir" >/dev/null 2>&1 || true
     if [[ "$engine" == "claude" ]]; then
-      bridge_bootstrap_claude_shared_skills "$workdir" >/dev/null 2>&1 || true
+      bridge_bootstrap_claude_shared_skills "$agent" "$workdir" >/dev/null 2>&1 || true
     fi
     bridge_write_role_block \
       "$agent" \
