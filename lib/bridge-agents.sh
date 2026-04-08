@@ -915,6 +915,28 @@ bridge_agent_is_always_on() {
   (( timeout == 0 ))
 }
 
+bridge_agent_memory_daily_refresh_enabled() {
+  local agent="$1"
+  local configured=""
+
+  [[ "$(bridge_agent_source "$agent")" == "static" ]] || return 1
+  [[ "$(bridge_agent_engine "$agent")" == "claude" ]] || return 1
+
+  if [[ -v "BRIDGE_AGENT_MEMORY_DAILY_REFRESH[$agent]" ]]; then
+    configured="${BRIDGE_AGENT_MEMORY_DAILY_REFRESH[$agent]-}"
+    case "$configured" in
+      1|true|yes|on)
+        return 0
+        ;;
+      0|false|no|off)
+        return 1
+        ;;
+    esac
+  fi
+
+  return 0
+}
+
 bridge_list_actions() {
   local agent="$1"
   local key

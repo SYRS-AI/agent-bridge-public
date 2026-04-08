@@ -924,6 +924,70 @@ assert_contains "$IDLE_REAP_OUTPUT" "DYNAMIC_ALIVE=no"
 assert_contains "$IDLE_REAP_OUTPUT" "ORPHAN_ALIVE=no"
 assert_contains "$IDLE_REAP_OUTPUT" "DYNAMIC_META=no"
 
+log "refreshing a static Claude session after memory-daily when prompt is free"
+MEMORY_REFRESH_OUTPUT="$("$BASH4_BIN" -lc '
+  set -euo pipefail
+  tmp_daemon="'"$TMP_ROOT"'/daemon-memory-refresh.sh"
+  {
+    printf "%s\n" "set -euo pipefail"
+    printf "SCRIPT_DIR=%q\n" "'"$REPO_ROOT"'"
+    printf "%s\n" "source \"\$SCRIPT_DIR/bridge-lib.sh\""
+    printf "%s\n" "bridge_load_roster"
+    printf "%s\n" "daemon_info() { :; }"
+    sed -n '"'"'/^bridge_report_channel_health_miss()/,/^process_channel_health()/p'"'"' "'"$REPO_ROOT"'/bridge-daemon.sh" | sed '"'"'$d'"'"'
+  } >"$tmp_daemon"
+  source "$tmp_daemon"
+  send_log="'"$TMP_ROOT"'/memory-refresh-send.log"
+  bridge_tmux_send_and_submit() {
+    printf "%s|%s|%s\n" "$1" "$2" "$3" >>"'"$TMP_ROOT"'/memory-refresh-send.log"
+    return 0
+  }
+  tmux kill-session -t "'"$CLAUDE_STATIC_SESSION"'" >/dev/null 2>&1 || true
+  tmux new-session -d -s "'"$CLAUDE_STATIC_SESSION"'" "sleep 30"
+  "'"$REPO_ROOT"'/agent-bridge" task create --to claude-static --title "busy refresh" --body "wait" --from smoke >/dev/null
+  busy_task="$(python3 "'"$REPO_ROOT"'/bridge-queue.py" find-open --agent claude-static | head -n 1)"
+  [[ "$busy_task" =~ ^[0-9]+$ ]] || exit 1
+  python3 "'"$REPO_ROOT"'/bridge-queue.py" claim "$busy_task" --agent claude-static >/dev/null
+  bridge_agent_note_memory_daily_refresh "claude-static" "run-busy" "2026-04-08"
+  process_memory_daily_refresh_requests || true
+  if bridge_agent_memory_daily_refresh_pending "claude-static"; then
+    echo "BUSY_PENDING=yes"
+  else
+    echo "BUSY_PENDING=no"
+  fi
+  if [[ -f "$send_log" ]]; then
+    send_count=0
+    while IFS= read -r _line || [[ -n "$_line" ]]; do
+      send_count=$((send_count + 1))
+    done <"$send_log"
+    echo "BUSY_SENDS=$send_count"
+  else
+    echo "BUSY_SENDS=0"
+  fi
+  python3 "'"$REPO_ROOT"'/bridge-queue.py" done "$busy_task" --agent claude-static --note "ok" >/dev/null
+  process_memory_daily_refresh_requests || true
+  if bridge_agent_memory_daily_refresh_pending "claude-static"; then
+    echo "FINAL_PENDING=yes"
+  else
+    echo "FINAL_PENDING=no"
+  fi
+  if [[ -f "$send_log" ]]; then
+    send_count=0
+    while IFS= read -r _line || [[ -n "$_line" ]]; do
+      send_count=$((send_count + 1))
+    done <"$send_log"
+    echo "FINAL_SENDS=$send_count"
+    cat "$send_log"
+  else
+    echo "FINAL_SENDS=0"
+  fi
+')"
+assert_contains "$MEMORY_REFRESH_OUTPUT" "BUSY_PENDING=yes"
+assert_contains "$MEMORY_REFRESH_OUTPUT" "BUSY_SENDS=0"
+assert_contains "$MEMORY_REFRESH_OUTPUT" "FINAL_PENDING=no"
+assert_contains "$MEMORY_REFRESH_OUTPUT" "FINAL_SENDS=1"
+assert_contains "$MEMORY_REFRESH_OUTPUT" "$CLAUDE_STATIC_SESSION|claude|/new"
+
 log "falling back when a dynamic Claude resume session id is stale"
 STALE_RESUME_OUTPUT="$("$BASH4_BIN" -lc '
   source "'"$REPO_ROOT"'/bridge-lib.sh"

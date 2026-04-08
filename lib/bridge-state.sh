@@ -705,6 +705,37 @@ bridge_agent_manual_stop_file() {
   printf '%s/manual-stop' "$(bridge_agent_idle_marker_dir "$agent")"
 }
 
+bridge_agent_memory_daily_refresh_file() {
+  local agent="$1"
+  printf '%s/session-refresh/%s.env' "$BRIDGE_STATE_DIR" "$agent"
+}
+
+bridge_agent_memory_daily_refresh_pending() {
+  local agent="$1"
+  [[ -f "$(bridge_agent_memory_daily_refresh_file "$agent")" ]]
+}
+
+bridge_agent_note_memory_daily_refresh() {
+  local agent="$1"
+  local run_id="$2"
+  local slot="${3:-}"
+  local file
+
+  file="$(bridge_agent_memory_daily_refresh_file "$agent")"
+  mkdir -p "$(dirname "$file")"
+  cat >"$file" <<EOF
+REFRESH_REASON='memory-daily'
+REFRESH_RUN_ID=$(printf '%q' "$run_id")
+REFRESH_SLOT=$(printf '%q' "$slot")
+REFRESH_REQUESTED_AT=$(printf '%q' "$(bridge_now_iso)")
+EOF
+}
+
+bridge_agent_clear_memory_daily_refresh() {
+  local agent="$1"
+  rm -f "$(bridge_agent_memory_daily_refresh_file "$agent")"
+}
+
 bridge_agent_idle_since_epoch() {
   local agent="$1"
   local file

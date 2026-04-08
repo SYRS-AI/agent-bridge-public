@@ -283,6 +283,61 @@ LAST_REPORT_TS=$(printf '%q' "$now_ts")
 EOF
 }
 
+process_memory_daily_refresh_requests() {
+  local agent
+  local session
+  local summary=""
+  local live_agent=""
+  local queued=0
+  local claimed=0
+  local blocked=0
+  local changed=1
+
+  for agent in "${BRIDGE_AGENT_IDS[@]}"; do
+    bridge_agent_memory_daily_refresh_enabled "$agent" || continue
+    bridge_agent_memory_daily_refresh_pending "$agent" || continue
+
+    if ! bridge_agent_is_active "$agent"; then
+      bridge_agent_clear_memory_daily_refresh "$agent"
+      daemon_info "cleared pending memory-daily refresh for inactive ${agent}"
+      changed=0
+      continue
+    fi
+
+    session="$(bridge_agent_session "$agent")"
+    [[ -n "$session" ]] || continue
+
+    summary="$(bridge_queue_cli summary --agent "$agent" --format tsv 2>/dev/null | head -n 1 || true)"
+    if [[ -n "$summary" ]]; then
+      IFS=$'\t' read -r live_agent queued claimed blocked _live_active _live_idle _live_last_seen _live_last_nudge _live_session _live_engine _live_workdir <<<"$summary"
+      [[ "$queued" =~ ^[0-9]+$ ]] || queued=0
+      [[ "$claimed" =~ ^[0-9]+$ ]] || claimed=0
+      [[ "$blocked" =~ ^[0-9]+$ ]] || blocked=0
+      if [[ "$live_agent" != "$agent" ]]; then
+        queued=0
+        claimed=0
+        blocked=0
+      fi
+    else
+      queued=0
+      claimed=0
+      blocked=0
+    fi
+
+    if (( claimed > 0 || blocked > 0 )); then
+      continue
+    fi
+
+    if bridge_tmux_send_and_submit "$session" "claude" "/new" >/dev/null 2>&1; then
+      bridge_agent_clear_memory_daily_refresh "$agent"
+      daemon_info "refreshed ${agent} after memory-daily"
+      changed=0
+    fi
+  done
+
+  return "$changed"
+}
+
 process_channel_health() {
   local agent
 
@@ -494,6 +549,13 @@ cmd_run_cron_worker() {
   fi
 
   "$BRIDGE_BASH_BIN" "$SCRIPT_DIR/bridge-cron.sh" finalize-run "$run_id" >/dev/null 2>&1 || true
+
+  if [[ "${CRON_FAMILY:-}" == "memory-daily" && "${CRON_RUN_STATE:-}" == "success" && "${CRON_RESULT_STATUS:-}" != "error" ]]; then
+    if bridge_agent_memory_daily_refresh_enabled "$TASK_ASSIGNED_TO"; then
+      bridge_agent_note_memory_daily_refresh "$TASK_ASSIGNED_TO" "$run_id" "${CRON_SLOT:-}"
+      daemon_info "queued memory-daily session refresh for ${TASK_ASSIGNED_TO} run_id=${run_id}"
+    fi
+  fi
 
   done_note_file="$(bridge_cron_dispatch_completion_note_file_by_id "$run_id")"
   bridge_cron_write_completion_note "$run_id" "$done_note_file" "$followup_task_id"
@@ -781,6 +843,9 @@ cmd_sync_cycle() {
   done <<<"$nudge_output"
 
   summary_output="$(bridge_queue_cli summary --format tsv 2>/dev/null || true)"
+  if process_memory_daily_refresh_requests; then
+    changed=0
+  fi
   if [[ -n "$summary_output" ]] && process_on_demand_agents "$summary_output"; then
     changed=0
   fi
