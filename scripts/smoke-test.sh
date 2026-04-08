@@ -845,7 +845,7 @@ LATE_DYNAMIC_OUTPUT="$("$BASH4_BIN" -lc '
     printf "%s\n" "bridge_daemon_note_autostart_failure() { :; }"
     printf "%s\n" "bridge_daemon_clear_autostart_failure() { :; }"
     printf "%s\n" "bridge_dashboard_post_if_changed() { :; }"
-    sed -n '"'"'/^nudge_agent_session()/,/^CMD="${1:-}"/p'"'"' "'"$REPO_ROOT"'/bridge-daemon.sh" | sed '"'"'$d'"'"'
+    sed -n '"'"'/^bridge_agent_heartbeat_file()/,/^CMD="${1:-}"/p'"'"' "'"$REPO_ROOT"'/bridge-daemon.sh" | sed '"'"'$d'"'"'
   } >"$tmp_daemon"
   source "$tmp_daemon"
   "'"$REPO_ROOT"'/agent-bridge" --codex --name "'"$LATE_DYNAMIC_AGENT"'" --workdir "'"$LATE_DYNAMIC_WORKDIR"'" --no-attach >/dev/null
@@ -895,7 +895,7 @@ IDLE_REAP_OUTPUT="$("$BASH4_BIN" -lc '
     printf "%s\n" "bridge_daemon_note_autostart_failure() { :; }"
     printf "%s\n" "bridge_daemon_clear_autostart_failure() { :; }"
     printf "%s\n" "bridge_dashboard_post_if_changed() { :; }"
-    sed -n '"'"'/^nudge_agent_session()/,/^CMD="${1:-}"/p'"'"' "'"$REPO_ROOT"'/bridge-daemon.sh" | sed '"'"'$d'"'"'
+    sed -n '"'"'/^bridge_agent_heartbeat_file()/,/^CMD="${1:-}"/p'"'"' "'"$REPO_ROOT"'/bridge-daemon.sh" | sed '"'"'$d'"'"'
   } >"$tmp_daemon"
   source "$tmp_daemon"
   "'"$REPO_ROOT"'/agent-bridge" --codex --name "'"$IDLE_REAP_AGENT"'" --workdir "'"$IDLE_REAP_WORKDIR"'" --no-attach >/dev/null
@@ -1204,6 +1204,11 @@ CREATED_AGENT_START_OUTPUT="$("$REPO_ROOT/agent-bridge" agent start "$CREATED_AG
 assert_contains "$CREATED_AGENT_START_OUTPUT" "$CREATED_SESSION"
 CREATED_AGENT_RESTART_OUTPUT="$("$REPO_ROOT/agent-bridge" agent restart "$CREATED_AGENT" --dry-run)"
 assert_contains "$CREATED_AGENT_RESTART_OUTPUT" "$CREATED_SESSION"
+log "writing HEARTBEAT.md for static roles"
+BRIDGE_HEARTBEAT_INTERVAL_SECONDS=1 "$REPO_ROOT/bridge-daemon.sh" sync >/dev/null
+[[ -f "$BRIDGE_AGENT_HOME_ROOT/$CREATED_AGENT/HEARTBEAT.md" ]] || die "daemon did not write HEARTBEAT.md"
+assert_contains "$(cat "$BRIDGE_AGENT_HOME_ROOT/$CREATED_AGENT/HEARTBEAT.md")" "agent: $CREATED_AGENT"
+assert_contains "$(cat "$BRIDGE_AGENT_HOME_ROOT/$CREATED_AGENT/HEARTBEAT.md")" "activity_state:"
 
 log "bootstrapping a manager role with init"
 INIT_DRY_RUN_JSON="$("$REPO_ROOT/agent-bridge" init --admin "$INIT_AGENT" --engine claude --session "$INIT_SESSION" --channels plugin:telegram --dry-run --json 2>&1)" || die "init dry-run failed: $INIT_DRY_RUN_JSON"

@@ -26,6 +26,164 @@ daemon_info() {
   printf '[%s] [info] %s\n' "$(date '+%Y-%m-%dT%H:%M:%S%z')" "$message"
 }
 
+bridge_agent_heartbeat_file() {
+  local agent="$1"
+  local workdir=""
+
+  workdir="$(bridge_agent_workdir "$agent")"
+  [[ -n "$workdir" ]] || return 1
+  printf '%s/HEARTBEAT.md' "$workdir"
+}
+
+bridge_agent_heartbeat_state_file() {
+  local agent="$1"
+  printf '%s/heartbeat/%s.env' "$BRIDGE_STATE_DIR" "$agent"
+}
+
+bridge_agent_heartbeat_activity_state() {
+  local agent="$1"
+  local session=""
+  local engine=""
+
+  if ! bridge_agent_is_active "$agent"; then
+    printf '%s' "stopped"
+    return 0
+  fi
+
+  session="$(bridge_agent_session "$agent")"
+  engine="$(bridge_agent_engine "$agent")"
+  if bridge_tmux_session_has_prompt "$session" "$engine"; then
+    printf '%s' "idle"
+    return 0
+  fi
+
+  printf '%s' "working"
+}
+
+bridge_agent_heartbeat_due() {
+  local agent="$1"
+  local interval="${BRIDGE_HEARTBEAT_INTERVAL_SECONDS:-300}"
+  local file=""
+  local next_ts=0
+  local now=0
+
+  [[ "$interval" =~ ^[0-9]+$ ]] || interval=300
+  (( interval > 0 )) || return 0
+  file="$(bridge_agent_heartbeat_state_file "$agent")"
+  [[ -f "$file" ]] || return 0
+  # shellcheck source=/dev/null
+  source "$file"
+  [[ "${HEARTBEAT_NEXT_TS:-0}" =~ ^[0-9]+$ ]] || return 0
+  next_ts="${HEARTBEAT_NEXT_TS:-0}"
+  now="$(date +%s)"
+  (( now >= next_ts ))
+}
+
+bridge_note_agent_heartbeat() {
+  local agent="$1"
+  local interval="${BRIDGE_HEARTBEAT_INTERVAL_SECONDS:-300}"
+  local file=""
+  local now=0
+  local next_ts=0
+
+  [[ "$interval" =~ ^[0-9]+$ ]] || interval=300
+  (( interval > 0 )) || interval=300
+  file="$(bridge_agent_heartbeat_state_file "$agent")"
+  mkdir -p "$(dirname "$file")"
+  now="$(date +%s)"
+  next_ts=$(( now + interval ))
+  cat >"$file" <<EOF
+HEARTBEAT_UPDATED_TS=$now
+HEARTBEAT_NEXT_TS=$next_ts
+EOF
+}
+
+write_agent_heartbeat() {
+  local agent="$1"
+  local heartbeat_file=""
+  local state="stopped"
+  local summary=""
+  local queued=0
+  local claimed=0
+  local blocked=0
+  local active="no"
+  local idle="-"
+  local last_seen="-"
+  local last_nudge="-"
+  local session=""
+  local workdir=""
+  local temp_file=""
+
+  heartbeat_file="$(bridge_agent_heartbeat_file "$agent")" || return 0
+  workdir="$(bridge_agent_workdir "$agent")"
+  [[ -d "$workdir" ]] || return 0
+  mkdir -p "$(dirname "$heartbeat_file")"
+
+  session="$(bridge_agent_session "$agent")"
+  if bridge_agent_is_active "$agent"; then
+    active="yes"
+  fi
+  state="$(bridge_agent_heartbeat_activity_state "$agent")"
+  summary="$(bridge_queue_cli summary --agent "$agent" --format tsv 2>/dev/null | head -n 1 || true)"
+  if [[ -n "$summary" ]]; then
+    IFS=$'\t' read -r _agent queued claimed blocked _active idle last_seen last_nudge _session _engine _workdir <<<"$summary"
+  fi
+
+  temp_file="$(mktemp)"
+  cat >"$temp_file" <<EOF
+# Heartbeat
+
+- generated_at: $(bridge_now_iso)
+- agent: ${agent}
+- description: $(bridge_agent_desc "$agent")
+- engine: $(bridge_agent_engine "$agent")
+- source: $(bridge_agent_source "$agent")
+- session: ${session:--}
+- workdir: ${workdir:--}
+- active: ${active}
+- activity_state: ${state}
+- always_on: $(bridge_agent_is_always_on "$agent" && printf 'yes' || printf 'no')
+- wake_status: $(bridge_agent_wake_status "$agent")
+- notify_status: $(bridge_agent_notify_status "$agent")
+- channel_status: $(bridge_agent_channel_status "$agent")
+
+## Queue
+
+- queued: ${queued}
+- claimed: ${claimed}
+- blocked: ${blocked}
+
+## Runtime
+
+- idle_seconds: ${idle}
+- last_seen: ${last_seen}
+- last_nudge: ${last_nudge}
+EOF
+
+  if [[ -f "$heartbeat_file" ]] && cmp -s "$temp_file" "$heartbeat_file"; then
+    rm -f "$temp_file"
+  else
+    mv "$temp_file" "$heartbeat_file"
+  fi
+  bridge_note_agent_heartbeat "$agent"
+}
+
+refresh_agent_heartbeats() {
+  local agent
+  local changed=1
+
+  for agent in "${BRIDGE_AGENT_IDS[@]}"; do
+    [[ "$(bridge_agent_source "$agent")" == "static" ]] || continue
+    if ! bridge_agent_heartbeat_due "$agent"; then
+      continue
+    fi
+    write_agent_heartbeat "$agent"
+    changed=0
+  done
+
+  return "$changed"
+}
+
 bridge_daemon_autostart_state_file() {
   local agent="$1"
   printf '%s/daemon-autostart/%s.env' "$BRIDGE_STATE_DIR" "$agent"
@@ -844,6 +1002,9 @@ cmd_sync_cycle() {
 
   summary_output="$(bridge_queue_cli summary --format tsv 2>/dev/null || true)"
   if process_memory_daily_refresh_requests; then
+    changed=0
+  fi
+  if refresh_agent_heartbeats; then
     changed=0
   fi
   if [[ -n "$summary_output" ]] && process_on_demand_agents "$summary_output"; then
