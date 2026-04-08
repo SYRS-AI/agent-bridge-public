@@ -103,6 +103,33 @@ bridge_tmux_claude_prompt_line_ready() {
   return 0
 }
 
+bridge_tmux_codex_prompt_line_ready() {
+  local trimmed="$1"
+  [[ "$trimmed" == ›* || "$trimmed" == '>'* ]]
+}
+
+bridge_tmux_prompt_line_has_pending_input() {
+  local engine="$1"
+  local trimmed="$2"
+
+  case "$engine" in
+    claude)
+      if [[ "$trimmed" == ❯* || "$trimmed" == '>'* ]]; then
+        ! bridge_tmux_claude_prompt_line_ready "$trimmed"
+        return
+      fi
+      ;;
+    codex)
+      return 1
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+
+  return 1
+}
+
 bridge_tmux_session_has_prompt() {
   local session="$1"
   local engine="$2"
@@ -142,17 +169,91 @@ bridge_tmux_session_has_prompt_from_text() {
         fi
         ;;
       codex)
-        if [[ "$trimmed" == ›* || "$trimmed" == '>'* ]]; then
+        if bridge_tmux_codex_prompt_line_ready "$trimmed"; then
           return 0
         fi
         ;;
       *)
         if [[ "$trimmed" == '>'* ]]; then
-          return 0
+          local remainder="${trimmed#>}"
+          remainder="${remainder#"${remainder%%[![:space:]]*}"}"
+          [[ -z "$remainder" ]] && return 0
         fi
         ;;
     esac
   done <<<"$recent"
+
+  return 1
+}
+
+bridge_tmux_session_has_pending_input_from_text() {
+  local engine="$1"
+  local recent="$2"
+  local line=""
+  local trimmed=""
+
+  bridge_tmux_engine_requires_prompt "$engine" || return 1
+  [[ -n "$recent" ]] || return 1
+
+  if [[ "$engine" == "claude" ]]; then
+    if [[ "$(bridge_tmux_claude_blocker_state_from_text "$recent")" != "none" ]]; then
+      return 1
+    fi
+  fi
+
+  while IFS= read -r line; do
+    line="${line//$'\r'/}"
+    line="${line//$'\u00A0'/ }"
+    trimmed="${line#"${line%%[![:space:]]*}"}"
+    trimmed="${trimmed%"${trimmed##*[![:space:]]}"}"
+    if bridge_tmux_prompt_line_has_pending_input "$engine" "$trimmed"; then
+      return 0
+    fi
+  done <<<"$recent"
+
+  return 1
+}
+
+bridge_tmux_session_has_pending_input() {
+  local session="$1"
+  local engine="$2"
+  local recent=""
+
+  bridge_tmux_engine_requires_prompt "$engine" || return 1
+  recent="$(bridge_capture_recent "$session" 20 2>/dev/null || true)"
+  [[ -n "$recent" ]] || return 1
+  bridge_tmux_session_has_pending_input_from_text "$engine" "$recent"
+}
+
+bridge_tmux_session_recent_keypress() {
+  local session="$1"
+  local threshold="${2:-3}"
+  local last_input=""
+  local now=""
+
+  [[ "$threshold" =~ ^[0-9]+$ ]] || threshold=3
+  (( threshold > 0 )) || return 1
+  last_input="$(tmux display-message -p -t "$session" '#{session_activity}' 2>/dev/null || true)"
+  [[ "$last_input" =~ ^[0-9]+$ ]] || return 1
+  now="$(date +%s)"
+  [[ "$now" =~ ^[0-9]+$ ]] || return 1
+  (( now - last_input < threshold ))
+}
+
+bridge_tmux_session_inject_busy() {
+  local session="$1"
+  local engine="$2"
+  local grace="${3:-3}"
+
+  if bridge_tmux_session_has_pending_input "$session" "$engine"; then
+    return 0
+  fi
+
+  local attached="0"
+  attached="$(bridge_tmux_session_attached_count "$session" 2>/dev/null || printf '0')"
+  if [[ "$attached" =~ ^[1-9][0-9]*$ ]] && bridge_tmux_session_recent_keypress "$session" "$grace"; then
+    return 0
+  fi
 
   return 1
 }
@@ -276,9 +377,14 @@ bridge_tmux_send_and_submit() {
   local session="$1"
   local engine="$2"
   local text="$3"
+  local inject_grace="${BRIDGE_TMUX_INJECT_IDLE_GRACE_SECONDS:-3}"
 
   if ! bridge_tmux_wait_for_prompt "$session" "$engine"; then
     bridge_warn "session prompt unavailable; skipping send to '$session'"
+    return 1
+  fi
+  if bridge_tmux_session_inject_busy "$session" "$engine" "$inject_grace"; then
+    bridge_warn "session busy; deferring send to '$session'"
     return 1
   fi
 

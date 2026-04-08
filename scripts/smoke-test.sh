@@ -1502,6 +1502,8 @@ CLAUDE_SUMMARY_BLOCKER="$("$BASH4_BIN" -lc "source \"$REPO_ROOT/bridge-lib.sh\";
 assert_contains "$CLAUDE_SUMMARY_BLOCKER" "summary"
 CLAUDE_PROMPT_READY="$("$BASH4_BIN" -lc "source \"$REPO_ROOT/bridge-lib.sh\"; if bridge_tmux_claude_prompt_line_ready '❯ 1. Resume from summary'; then echo bad; else echo ok; fi")"
 assert_contains "$CLAUDE_PROMPT_READY" "ok"
+CODEX_PROMPT_READY="$("$BASH4_BIN" -lc "source \"$REPO_ROOT/bridge-lib.sh\"; if bridge_tmux_codex_prompt_line_ready '> '; then echo ok; else echo bad; fi")"
+assert_contains "$CODEX_PROMPT_READY" "ok"
 
 log "ensuring mark-idle hook emits inbox summary context"
 HOOK_QUEUE_CREATE_OUTPUT="$(python3 "$REPO_ROOT/bridge-queue.py" create --to claude-static --title "Follow-up task" --from smoke --priority high --body "check inbox")"
