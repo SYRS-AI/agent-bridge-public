@@ -831,6 +831,16 @@ CODEX_READY_OUTPUT="$("$BASH4_BIN" -lc '
 ')"
 assert_contains "$CODEX_READY_OUTPUT" "$CODEX_CLI_AGENT"
 python3 "$REPO_ROOT/bridge-queue.py" done "$CODEX_READY_TASK_ID" --agent "$CODEX_CLI_AGENT" --note "codex ready smoke cleanup" >/dev/null
+
+log "sending an immediate normal task nudge when the target session is prompt-ready"
+NORMAL_NUDGE_OUTPUT="$(bash "$REPO_ROOT/bridge-task.sh" create --to "$CODEX_CLI_AGENT" --title "normal ready pickup" --body "pickup" --from "$REQUESTER_AGENT")"
+assert_contains "$NORMAL_NUDGE_OUTPUT" "created task #"
+NORMAL_NUDGE_TASK_ID="$(printf '%s\n' "$NORMAL_NUDGE_OUTPUT" | sed -n 's/^created task #\([0-9][0-9]*\).*/\1/p' | head -n1)"
+[[ -n "$NORMAL_NUDGE_TASK_ID" ]] || die "expected normal task id"
+sleep 1
+NORMAL_NUDGE_RECENT="$(tmux capture-pane -pt "$CODEX_CLI_SESSION" -S -20 2>/dev/null || true)"
+assert_contains "$NORMAL_NUDGE_RECENT" "agb inbox $CODEX_CLI_AGENT"
+python3 "$REPO_ROOT/bridge-queue.py" done "$NORMAL_NUDGE_TASK_ID" --agent "$CODEX_CLI_AGENT" --note "normal nudge smoke cleanup" >/dev/null
 tmux kill-session -t "$CODEX_CLI_SESSION" >/dev/null 2>&1 || true
 
 log "reloading dynamic agents inside a long-lived daemon cycle"

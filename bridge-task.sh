@@ -112,6 +112,11 @@ cmd_create() {
   local priority="normal"
   local body=""
   local body_file=""
+  local TASK_ID=""
+  local TASK_ASSIGNED_TO=""
+  local TASK_PRIORITY=""
+  local TASK_TITLE=""
+  local notice_message=""
 
   while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -170,7 +175,14 @@ cmd_create() {
     args+=(--body-file "$body_file")
   fi
 
-  bridge_queue_cli "${args[@]}"
+  # shellcheck disable=SC1090
+  source <(bridge_queue_cli "${args[@]}" --format shell)
+  printf 'created task #%s for %s [%s] %s\n' "$TASK_ID" "$TASK_ASSIGNED_TO" "$TASK_PRIORITY" "$TASK_TITLE"
+
+  if [[ "$target" != "$actor" ]]; then
+    notice_message="agb inbox ${target}"
+    bridge_dispatch_notification "$target" "$TASK_TITLE" "$notice_message" "$TASK_ID" "$priority" >/dev/null 2>&1 || true
+  fi
 }
 
 cmd_inbox() {
