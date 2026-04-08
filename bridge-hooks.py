@@ -36,6 +36,14 @@ def stop_hook_command(bridge_home: Path, bash_bin: str) -> str:
     return shlex.join([bash_bin, str(hook_path)])
 
 
+def session_start_hook_command(bridge_home: Path, python_bin: str, fmt: str = "text") -> str:
+    hook_path = bridge_home / "hooks" / "session-start.py"
+    command = [python_bin, str(hook_path)]
+    if fmt != "text":
+        command.extend(["--format", fmt])
+    return shlex.join(command)
+
+
 def prompt_hook_command(bridge_home: Path, bash_bin: str) -> str:
     hook_path = bridge_home / "hooks" / "clear-idle.sh"
     return shlex.join([bash_bin, str(hook_path)])
@@ -47,8 +55,8 @@ def codex_session_start_hook_command(bridge_home: Path, python_bin: str) -> str:
 
 
 def codex_stop_hook_command(bridge_home: Path, python_bin: str) -> str:
-    hook_path = bridge_home / "hooks" / "codex-stop.py"
-    return shlex.join([python_bin, str(hook_path)])
+    hook_path = bridge_home / "hooks" / "check-inbox.py"
+    return shlex.join([python_bin, str(hook_path), "--format", "codex"])
 
 
 def resolve_settings_path(args: argparse.Namespace) -> Path:
@@ -86,16 +94,22 @@ def is_mark_idle_hook(command: str) -> bool:
     return "mark-idle.sh" in str(command)
 
 
+def is_session_start_hook(command: str) -> bool:
+    command = str(command)
+    return "session-start.py" in command or "codex-session-start.py" in command
+
+
 def is_clear_idle_hook(command: str) -> bool:
     return "clear-idle.sh" in str(command)
 
 
 def is_codex_session_start_hook(command: str) -> bool:
-    return "codex-session-start.py" in str(command)
+    return is_session_start_hook(command)
 
 
 def is_codex_stop_hook(command: str) -> bool:
-    return "codex-stop.py" in str(command)
+    command = str(command)
+    return "check-inbox.py" in command or "codex-stop.py" in command
 
 
 def find_command_hook(
@@ -154,6 +168,26 @@ def cmd_status_stop_hook(args: argparse.Namespace) -> int:
         "HOOK_ADDITIONAL_CONTEXT": "true" if hook and bool(hook.get("additionalContext")) else "false",
     }
     print_payload(payload, args.format)
+    return 0 if hook else 1
+
+
+def cmd_status_session_start_hook(args: argparse.Namespace) -> int:
+    settings_path = resolve_settings_path(args)
+    settings = ensure_settings_root(settings_path)
+    session_hooks = hooks_list(settings, "SessionStart")
+    _group, hook = find_command_hook(session_hooks, is_session_start_hook)
+    command = str(hook.get("command") or "") if hook else ""
+    payload = {
+        "HOOK_SETTINGS_FILE": str(settings_path),
+        "HOOK_STATUS": "present" if hook else "missing",
+        "HOOK_STOP_HOOK": "",
+        "HOOK_PROMPT_HOOK": "",
+        "HOOK_COMMAND": command,
+        "HOOK_ADDITIONAL_CONTEXT": "true" if hook and bool(hook.get("additionalContext")) else "false",
+    }
+    print_payload(payload, args.format)
+    if args.format != "shell":
+        print(f"session_start_hook: {'present' if hook else 'missing'}")
     return 0 if hook else 1
 
 
@@ -242,6 +276,33 @@ def cmd_ensure_stop_hook(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_ensure_session_start_hook(args: argparse.Namespace) -> int:
+    bridge_home = Path(args.bridge_home).expanduser()
+    settings_path = resolve_settings_path(args)
+    desired_command = session_start_hook_command(bridge_home, args.python_bin, "text")
+    changed = ensure_command_hook(
+        settings_path,
+        "SessionStart",
+        desired_command,
+        is_session_start_hook,
+        timeout=3,
+        additional_context=True,
+    )
+
+    payload = {
+        "HOOK_SETTINGS_FILE": str(settings_path),
+        "HOOK_STATUS": "updated" if changed else "unchanged",
+        "HOOK_STOP_HOOK": "",
+        "HOOK_PROMPT_HOOK": "",
+        "HOOK_COMMAND": desired_command,
+        "HOOK_ADDITIONAL_CONTEXT": "true",
+    }
+    print_payload(payload, args.format)
+    if args.format != "shell":
+        print("session_start_hook: present")
+    return 0
+
+
 def cmd_status_prompt_hook(args: argparse.Namespace) -> int:
     settings_path = resolve_settings_path(args)
     settings = ensure_settings_root(settings_path)
@@ -327,7 +388,7 @@ def cmd_ensure_codex_hooks(args: argparse.Namespace) -> int:
     bridge_home = Path(args.bridge_home).expanduser()
     hooks_path = codex_hooks_path(args)
     hooks_path.parent.mkdir(parents=True, exist_ok=True)
-    session_command = codex_session_start_hook_command(bridge_home, args.python_bin)
+    session_command = session_start_hook_command(bridge_home, args.python_bin, "codex")
     stop_command = codex_stop_hook_command(bridge_home, args.python_bin)
     changed = False
     changed = ensure_command_hook(
@@ -500,6 +561,22 @@ def build_parser() -> argparse.ArgumentParser:
     status_parser.add_argument("--bash-bin", required=True)
     status_parser.add_argument("--format", choices=("text", "shell"), default="text")
     status_parser.set_defaults(handler=cmd_status_stop_hook)
+
+    ensure_session_parser = subparsers.add_parser("ensure-session-start-hook")
+    ensure_session_parser.add_argument("--workdir")
+    ensure_session_parser.add_argument("--settings-file")
+    ensure_session_parser.add_argument("--bridge-home", required=True)
+    ensure_session_parser.add_argument("--python-bin", required=True)
+    ensure_session_parser.add_argument("--format", choices=("text", "shell"), default="text")
+    ensure_session_parser.set_defaults(handler=cmd_ensure_session_start_hook)
+
+    status_session_parser = subparsers.add_parser("status-session-start-hook")
+    status_session_parser.add_argument("--workdir")
+    status_session_parser.add_argument("--settings-file")
+    status_session_parser.add_argument("--bridge-home", required=True)
+    status_session_parser.add_argument("--python-bin", required=True)
+    status_session_parser.add_argument("--format", choices=("text", "shell"), default="text")
+    status_session_parser.set_defaults(handler=cmd_status_session_start_hook)
 
     ensure_prompt_parser = subparsers.add_parser("ensure-prompt-hook")
     ensure_prompt_parser.add_argument("--workdir")

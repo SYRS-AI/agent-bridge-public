@@ -55,6 +55,15 @@ bridge_claude_stop_hook_status() {
   fi
 }
 
+bridge_claude_session_start_hook_status() {
+  local workdir="$1"
+  if [[ "$(bridge_claude_settings_mode "$workdir")" == "shared" ]]; then
+    bridge_hooks_python status-session-start-hook --settings-file "$(bridge_hook_shared_settings_file)" --bridge-home "$BRIDGE_HOME" --python-bin "$(command -v python3)"
+  else
+    bridge_hooks_python status-session-start-hook --workdir "$workdir" --bridge-home "$BRIDGE_HOME" --python-bin "$(command -v python3)"
+  fi
+}
+
 bridge_claude_prompt_hook_status() {
   local workdir="$1"
   if [[ "$(bridge_claude_settings_mode "$workdir")" == "shared" ]]; then
@@ -71,6 +80,16 @@ bridge_ensure_claude_stop_hook() {
     bridge_link_claude_settings_to_shared "$workdir"
   else
     bridge_hooks_python ensure-stop-hook --workdir "$workdir" --bridge-home "$BRIDGE_HOME" --bash-bin "$BRIDGE_BASH_BIN"
+  fi
+}
+
+bridge_ensure_claude_session_start_hook() {
+  local workdir="$1"
+  if [[ "$(bridge_claude_settings_mode "$workdir")" == "shared" ]]; then
+    bridge_hooks_python ensure-session-start-hook --settings-file "$(bridge_hook_shared_settings_file)" --bridge-home "$BRIDGE_HOME" --python-bin "$(command -v python3)" >/dev/null
+    bridge_link_claude_settings_to_shared "$workdir"
+  else
+    bridge_hooks_python ensure-session-start-hook --workdir "$workdir" --bridge-home "$BRIDGE_HOME" --python-bin "$(command -v python3)"
   fi
 }
 

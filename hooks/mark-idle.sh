@@ -25,20 +25,11 @@ blocked="${blocked:-0}"
 [[ "$claimed" =~ ^[0-9]+$ ]] || claimed=0
 [[ "$blocked" =~ ^[0-9]+$ ]] || blocked=0
 
-if (( queued == 0 && blocked == 0 )); then
+if (( queued == 0 && blocked == 0 && claimed == 0 )); then
   exit 0
 fi
 
-# Show highest-priority task summary + direct agent to process all via inbox
-TASK_ID=""
-TASK_TITLE=""
-TASK_PRIORITY=""
-TASK_BODY_PATH=""
-open_task_shell="$(bridge_queue_cli find-open --agent "$AGENT_ID" --format shell 2>/dev/null || true)"
-if [[ -n "$open_task_shell" ]]; then
-  # shellcheck disable=SC1091
-  source /dev/stdin <<<"$open_task_shell"
-fi
-
-bridge_queue_attention_message "$AGENT_ID" "$queued" "${TASK_ID:-}" "${TASK_PRIORITY:-normal}" "${TASK_TITLE:-}"
+attention="$(python3 "$BRIDGE_HOME/hooks/check-inbox.py" --format text 2>/dev/null || true)"
+[[ -n "$attention" ]] || exit 0
+printf '%s\n' "$attention"
 printf '\nShould the result of this task be shared with a human teammate? If yes, send a concise update in the appropriate channel. If not, continue.\n'

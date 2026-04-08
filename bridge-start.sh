@@ -127,6 +127,9 @@ if [[ "$ENGINE" == "claude" ]]; then
   if ! bridge_claude_stop_hook_status "$WORK_DIR" >/dev/null 2>&1; then
     FORCE_FRESH_SESSION=1
   fi
+  if ! bridge_claude_session_start_hook_status "$WORK_DIR" >/dev/null 2>&1; then
+    FORCE_FRESH_SESSION=1
+  fi
   if ! bridge_claude_prompt_hook_status "$WORK_DIR" >/dev/null 2>&1; then
     FORCE_FRESH_SESSION=1
   fi
@@ -141,6 +144,9 @@ if [[ "$ENGINE" == "claude" ]]; then
   fi
   if ! bridge_ensure_claude_stop_hook "$WORK_DIR" >/dev/null; then
     bridge_die "Claude Stop hook 설정에 실패했습니다: $WORK_DIR"
+  fi
+  if ! bridge_ensure_claude_session_start_hook "$WORK_DIR" >/dev/null; then
+    bridge_die "Claude SessionStart hook 설정에 실패했습니다: $WORK_DIR"
   fi
   if ! bridge_ensure_claude_prompt_hook "$WORK_DIR" >/dev/null; then
     bridge_die "Claude UserPromptSubmit hook 설정에 실패했습니다: $WORK_DIR"

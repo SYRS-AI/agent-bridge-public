@@ -768,10 +768,10 @@ else:
     print(f"eligible_jobs: {totals['eligible_jobs']}")
     print(f"due_occurrences: {totals['due_occurrences']}")
     print(f"created: {totals['created']}")
-print(f"already_enqueued: {totals['already_enqueued']}")
-print(f"errors: {totals['errors']}")
-if cleanup_payload is not None:
-    print(f"cleanup_deleted_jobs: {totals['cleanup_deleted_jobs']}")
+    print(f"already_enqueued: {totals['already_enqueued']}")
+    print(f"errors: {totals['errors']}")
+    if cleanup_payload is not None:
+        print(f"cleanup_deleted_jobs: {totals['cleanup_deleted_jobs']}")
 PY
   return "$status"
 }
