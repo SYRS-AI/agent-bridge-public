@@ -27,6 +27,7 @@ Options:
   --description <text>         roster description
   --display-name <text>        scaffold display name (default: <agent>)
   --role <text>                scaffold role summary
+  --session-type <type>        admin|static-claude|static-codex|dynamic|cron
   --user <id[:display-name]>   scaffold one user memory partition (repeatable)
   --launch-cmd <cmd>           explicit launch command
   --channels <csv>             required Claude channels metadata
@@ -95,13 +96,14 @@ bridge_render_template_string() {
   local display_name="$3"
   local role_text="$4"
   local engine="$5"
+  local session_type="$6"
 
-  bridge_agent_manage_python "$source_file" "$agent_id" "$display_name" "$role_text" "$engine" <<'PY'
+  bridge_agent_manage_python "$source_file" "$agent_id" "$display_name" "$role_text" "$engine" "$session_type" <<'PY'
 from pathlib import Path
 import sys
 
 source = Path(sys.argv[1])
-agent_id, display_name, role_text, engine = sys.argv[2:]
+agent_id, display_name, role_text, engine, session_type = sys.argv[2:]
 runtime = "Claude Code CLI" if engine == "claude" else "Codex CLI"
 text = source.read_text(encoding="utf-8")
 replacements = {
@@ -113,6 +115,7 @@ replacements = {
     "<Boss>": "관리자 에이전트",
     "<한 줄 역할 설명>": role_text,
     "<표시 이름>": display_name,
+    "<Session Type>": session_type,
     "<핵심 책임>": role_text,
     "<주 요청자>": "관리자 에이전트",
     "<Claude Code CLI | Codex CLI>": runtime,
@@ -132,13 +135,16 @@ bridge_scaffold_agent_home() {
   local display_name="$3"
   local role_text="$4"
   local engine="$5"
+  local session_type="$6"
   local template_root="$SCRIPT_DIR/agents/_template"
+  local session_template="$template_root/session-types/$session_type.md"
   local file=""
   local rel=""
   local target=""
 
   mkdir -p "$home"
   [[ -d "$template_root" ]] || bridge_die "agent template root가 없습니다: $template_root"
+  [[ -f "$session_template" ]] || bridge_die "session type template가 없습니다: $session_type"
 
   while IFS= read -r file; do
     rel="${file#"$template_root"/}"
@@ -147,12 +153,16 @@ bridge_scaffold_agent_home() {
     if [[ -e "$target" ]]; then
       continue
     fi
-    bridge_render_template_string "$file" "$agent" "$display_name" "$role_text" "$engine" >"$target"
-  done < <(find "$template_root" -type f | LC_ALL=C sort)
+    bridge_render_template_string "$file" "$agent" "$display_name" "$role_text" "$engine" "$session_type" >"$target"
+  done < <(find "$template_root" -path "$template_root/session-types" -prune -o -type f -print | LC_ALL=C sort)
+
+  if [[ ! -e "$home/SESSION-TYPE.md" ]]; then
+    bridge_render_template_string "$session_template" "$agent" "$display_name" "$role_text" "$engine" "$session_type" >"$home/SESSION-TYPE.md"
+  fi
 
   while IFS= read -r rel; do
     mkdir -p "$home/$rel"
-  done < <(cd "$template_root" && find . -type d | sed 's#^\./##' | grep -v '^$' | LC_ALL=C sort)
+  done < <(cd "$template_root" && find . -path './session-types' -prune -o -type d -print | sed 's#^\./##' | grep -v '^$' | LC_ALL=C sort)
 }
 
 bridge_normalize_user_specs_json() {
@@ -371,15 +381,17 @@ emit_create_json() {
   local roster_file="$8"
   local dry_run="$9"
   local users_json="${10}"
+  local session_type="${11}"
 
-  bridge_agent_manage_python "$agent" "$engine" "$session" "$workdir" "$profile_home" "$launch_cmd" "$channels" "$roster_file" "$dry_run" "$users_json" <<'PY'
+  bridge_agent_manage_python "$agent" "$engine" "$session" "$workdir" "$profile_home" "$launch_cmd" "$channels" "$roster_file" "$dry_run" "$users_json" "$session_type" <<'PY'
 import json
 import sys
 
-agent, engine, session, workdir, profile_home, launch_cmd, channels, roster_file, dry_run, users_json = sys.argv[1:]
+agent, engine, session, workdir, profile_home, launch_cmd, channels, roster_file, dry_run, users_json, session_type = sys.argv[1:]
 payload = {
     "agent": agent,
     "engine": engine,
+    "session_type": session_type,
     "session": session,
     "workdir": workdir,
     "profile_home": profile_home,
@@ -675,6 +687,7 @@ run_show() {
 run_create() {
   local agent="${1:-}"
   local engine="claude"
+  local session_type=""
   local session=""
   local workdir=""
   local profile_home=""
@@ -739,6 +752,11 @@ run_create() {
       --role)
         [[ $# -ge 2 ]] || bridge_die "옵션 값이 필요합니다: $1"
         role_text="$2"
+        shift 2
+        ;;
+      --session-type)
+        [[ $# -ge 2 ]] || bridge_die "옵션 값이 필요합니다: $1"
+        session_type="$2"
         shift 2
         ;;
       --user)
@@ -811,6 +829,17 @@ run_create() {
     *) bridge_die "지원하지 않는 engine 입니다: $engine" ;;
   esac
 
+  if [[ -z "$session_type" ]]; then
+    case "$engine" in
+      claude) session_type="static-claude" ;;
+      codex) session_type="static-codex" ;;
+    esac
+  fi
+  case "$session_type" in
+    admin|static-claude|static-codex|dynamic|cron) ;;
+    *) bridge_die "지원하지 않는 session type 입니다: $session_type" ;;
+  esac
+
   session="${session:-$agent}"
   default_home="$(bridge_agent_default_home "$agent")"
   workdir="$(bridge_expand_user_path "${workdir:-$default_home}")"
@@ -837,7 +866,7 @@ run_create() {
         bridge_die "workdir가 이미 존재하고 비어 있지 않습니다: $workdir"
       fi
     fi
-    bridge_scaffold_agent_home "$agent" "$workdir" "$display_name" "$role_text" "$engine"
+    bridge_scaffold_agent_home "$agent" "$workdir" "$display_name" "$role_text" "$engine" "$session_type"
     bridge_scaffold_user_partitions "$workdir" "$users_json"
     if [[ "$engine" == "claude" ]]; then
       bridge_ensure_project_claude_guidance "$workdir" >/dev/null 2>&1 || true
@@ -867,12 +896,13 @@ run_create() {
   fi
 
   if [[ $json_mode -eq 1 ]]; then
-    emit_create_json "$agent" "$engine" "$session" "$workdir" "$profile_home" "$launch_cmd" "$channels" "$BRIDGE_ROSTER_LOCAL_FILE" "$dry_run" "$users_json"
+    emit_create_json "$agent" "$engine" "$session" "$workdir" "$profile_home" "$launch_cmd" "$channels" "$BRIDGE_ROSTER_LOCAL_FILE" "$dry_run" "$users_json" "$session_type"
     exit 0
   fi
 
   printf 'agent: %s\n' "$agent"
   printf 'engine: %s\n' "$engine"
+  printf 'session_type: %s\n' "$session_type"
   printf 'session: %s\n' "$session"
   printf 'workdir: %s\n' "$workdir"
   if [[ -n "$profile_home" ]]; then

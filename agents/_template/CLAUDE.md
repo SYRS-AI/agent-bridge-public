@@ -4,6 +4,7 @@
 ## Agent Bridge Runtime Canon
 - `SOUL.md`가 성격과 말투의 기준이다. 매 세션 시작 시 가장 먼저 읽는다.
 - `CLAUDE.md`는 운영 계약서다. 레거시 문서와 충돌하면 이 파일이 우선한다.
+- `SESSION-TYPE.md`는 이 세션이 어떤 종류의 역할인지와 첫 세션 온보딩 상태를 정의한다.
 - `MEMORY-SCHEMA.md`는 memory wiki를 어떻게 유지할지 정의한다.
 - `MEMORY.md`와 `memory/`는 작업 메모리이자 장기 기억 위키다. `HEARTBEAT.md`는 필요할 때만 읽는 운영 참고 문서다.
 - `TOOLS.md`와 `SKILLS.md`는 현재 bridge-native runtime reference다.
@@ -55,11 +56,18 @@ task를 수신하면 아래 순서를 반드시 따른다:
 ## 매 세션 시작 시
 1. `SOUL.md` 읽기
 2. 이 `CLAUDE.md` 읽기
-3. `MEMORY-SCHEMA.md` 읽기
-4. 현재 대화 상대의 `users/<user-id>/USER.md`와 최근 메모가 있으면 먼저 확인
-5. `MEMORY.md`와 `memory/` 확인
-6. `TOOLS.md`, `SKILLS.md` 확인
-7. 필요하면 `HEARTBEAT.md`와 로컬 `references/` 확인
+3. `SESSION-TYPE.md` 읽기
+4. `MEMORY-SCHEMA.md` 읽기
+5. 현재 대화 상대의 `users/<user-id>/USER.md`와 최근 메모가 있으면 먼저 확인
+6. `MEMORY.md`와 `memory/` 확인
+7. `TOOLS.md`, `SKILLS.md` 확인
+8. 필요하면 `HEARTBEAT.md`와 로컬 `references/` 확인
+
+## First Session Onboarding
+- `SESSION-TYPE.md`에 `Onboarding State: pending`이 남아 있거나 템플릿 placeholder가 그대로 있으면, 일반 작업 전에 온보딩부터 수행한다.
+- 온보딩에서는 사용자와 짧게 대화하며 이름, 역할, 말투, 경계, 보고 방식, 주요 사용자 partition을 확인한다.
+- 온보딩이 끝나면 `SOUL.md`, `SESSION-TYPE.md`, 필요 시 `users/<user-id>/USER.md`를 업데이트하고 다시 읽는다.
+- 온보딩이 끝난 뒤 `SESSION-TYPE.md`의 상태를 `complete`로 바꾼다.
 
 ## 메모리 관리
 - `memory/`는 markdown-first memory wiki다. raw source를 그대로 쌓는 곳이 아니라, 정리된 기억을 유지하는 곳이다.

@@ -293,7 +293,7 @@ bridge_init_require_command "$engine"
 if bridge_agent_exists "$admin_agent"; then
   bridge_require_static_agent "$admin_agent"
 else
-  create_args=(agent create "$admin_agent" --engine "$engine" --session "$session" --display-name "$display_name" --role "$role_text" --description "$description")
+  create_args=(agent create "$admin_agent" --engine "$engine" --session-type admin --session "$session" --display-name "$display_name" --role "$role_text" --description "$description")
   [[ -n "$workdir" ]] && create_args+=(--workdir "$workdir")
   [[ -n "$profile_home" ]] && create_args+=(--profile-home "$profile_home")
   [[ -n "$channels" ]] && create_args+=(--channels "$channels")
