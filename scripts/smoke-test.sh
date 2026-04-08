@@ -54,7 +54,7 @@ kill_stale_smoke_tmux_sessions() {
   while IFS= read -r session; do
     [[ -n "$session" ]] || continue
     case "$session" in
-      bridge-smoke-*|bridge-requester-*|auto-start-session-*|always-on-session-*|static-session-*|claude-static-bridge-smoke-*|worker-reuse-*|late-dynamic-agent-*|created-session-*|bootstrap-session-*|bootstrap-wrapper-session-*|broken-channel-*|codex-cli-session-*)
+      bridge-smoke-*|bridge-requester-*|auto-start-session-*|always-on-session-*|static-session-*|claude-static-bridge-smoke-*|worker-reuse-*|late-dynamic-agent-*|created-session-*|bootstrap-session-*|bootstrap-wrapper-session-*|broken-channel-*|codex-cli-session-*|project-claude-session-bridge-smoke-*)
         tmux kill-session -t "$session" >/dev/null 2>&1 || true
         ;;
     esac
@@ -2180,6 +2180,9 @@ grep -q 'agent-bridge task create' "$BRIDGE_HOME/runtime/scripts/email-webhook-h
 grep -q 'queue-dispatch' "$BRIDGE_HOME/runtime/scripts/webhook_utils.py" || die "expected bridge-native one-shot cron helper in webhook utils"
 grep -q 'gws_api' "$BRIDGE_HOME/runtime/skills/agent-db/scripts/email-sync.py" || die "expected gws-backed email sync script"
 
+log "stopping background daemon before deterministic cron-dispatch tail"
+bash "$REPO_ROOT/bridge-daemon.sh" stop >/dev/null
+
 log "processing one queued cron-dispatch task through the daemon"
 RUN_ID="smoke-job-1234--2026-04-05T10-00-00Z"
 RUN_DIR="$BRIDGE_STATE_DIR/cron/runs/$RUN_ID"
@@ -2228,13 +2231,26 @@ CRON_TASK_ID="${BASH_REMATCH[1]}"
 
 bash "$REPO_ROOT/bridge-daemon.sh" sync >/dev/null
 
-for _ in $(seq 1 20); do
+for _ in $(seq 1 80); do
   SHOW_CRON_OUTPUT="$(bash "$REPO_ROOT/bridge-task.sh" show "$CRON_TASK_ID")"
   if [[ "$SHOW_CRON_OUTPUT" == *"status: done"* ]]; then
     break
   fi
+  bash "$REPO_ROOT/bridge-daemon.sh" sync >/dev/null || true
   sleep 0.25
 done
+
+if [[ "$SHOW_CRON_OUTPUT" != *"status: done"* ]]; then
+  echo "[smoke][debug] cron-dispatch task did not finish within the polling window" >&2
+  echo "[smoke][debug] task show:" >&2
+  printf '%s\n' "$SHOW_CRON_OUTPUT" >&2
+  echo "[smoke][debug] worker dir:" >&2
+  ls -la "$BRIDGE_CRON_DISPATCH_WORKER_DIR" >&2 || true
+  echo "[smoke][debug] run status file:" >&2
+  sed -n '1,160p' "$RUN_DIR/status.json" >&2 || true
+  echo "[smoke][debug] run stderr:" >&2
+  sed -n '1,160p' "$RUN_DIR/stderr.log" >&2 || true
+fi
 
 assert_contains "$SHOW_CRON_OUTPUT" "status: done"
 [[ -f "$RUN_DIR/result.json" ]] || die "cron worker did not write result artifact"

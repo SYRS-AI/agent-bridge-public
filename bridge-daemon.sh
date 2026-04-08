@@ -619,6 +619,50 @@ cron_worker_running_count() {
   printf '%s' "$count"
 }
 
+cron_ready_rows_with_retry() {
+  local limit="$1"
+  local attempts="${BRIDGE_QUEUE_RETRY_ATTEMPTS:-5}"
+  local delay="${BRIDGE_QUEUE_RETRY_DELAY_SECONDS:-0.2}"
+  local output=""
+  local status=0
+  local try
+
+  [[ "$attempts" =~ ^[0-9]+$ ]] || attempts=5
+  (( attempts > 0 )) || attempts=1
+
+  for try in $(seq 1 "$attempts"); do
+    if output="$(bridge_queue_cli cron-ready --limit "$limit" --format tsv 2>/dev/null)"; then
+      printf '%s' "$output"
+      return 0
+    fi
+    status=$?
+    sleep "$delay"
+  done
+
+  return "$status"
+}
+
+claim_cron_task_with_retry() {
+  local task_id="$1"
+  local agent="$2"
+  local lease_seconds="$3"
+  local attempts="${BRIDGE_QUEUE_RETRY_ATTEMPTS:-5}"
+  local delay="${BRIDGE_QUEUE_RETRY_DELAY_SECONDS:-0.2}"
+  local try
+
+  [[ "$attempts" =~ ^[0-9]+$ ]] || attempts=5
+  (( attempts > 0 )) || attempts=1
+
+  for try in $(seq 1 "$attempts"); do
+    if bridge_queue_cli claim "$task_id" --agent "$agent" --lease-seconds "$lease_seconds" >/dev/null 2>&1; then
+      return 0
+    fi
+    sleep "$delay"
+  done
+
+  return 1
+}
+
 start_cron_worker() {
   local task_id="$1"
   local log_file
@@ -662,14 +706,14 @@ start_cron_dispatch_workers() {
   running_count="$(cron_worker_running_count)"
   (( running_count < max_parallel )) || return 0
 
-  ready_rows="$(bridge_queue_cli cron-ready --limit "$max_parallel" --format tsv 2>/dev/null || true)"
+  ready_rows="$(cron_ready_rows_with_retry "$max_parallel" || true)"
   [[ -n "$ready_rows" ]] || return 0
 
   while IFS=$'\t' read -r task_id agent _priority _title _body_path; do
     [[ -n "$task_id" && -n "$agent" ]] || continue
     (( running_count < max_parallel )) || break
 
-    if ! bridge_queue_cli claim "$task_id" --agent "$agent" --lease-seconds "$BRIDGE_CRON_DISPATCH_LEASE_SECONDS" >/dev/null 2>&1; then
+    if ! claim_cron_task_with_retry "$task_id" "$agent" "$BRIDGE_CRON_DISPATCH_LEASE_SECONDS"; then
       continue
     fi
 
@@ -937,7 +981,7 @@ session_is_registered_agent_session() {
 session_matches_idle_reap_patterns() {
   local session="$1"
   case "$session" in
-    bridge-smoke-*|bridge-requester-*|auto-start-session-*|always-on-session-*|static-session-*|claude-static-bridge-smoke-*|worker-reuse-*|late-dynamic-agent-*|created-session-*|bootstrap-session-*|bootstrap-wrapper-session-*|broken-channel-*|codex-cli-session-*|memtest*|bootstrap-fail*|memphase4-*)
+    bridge-smoke-*|bridge-requester-*|auto-start-session-*|always-on-session-*|static-session-*|claude-static-bridge-smoke-*|worker-reuse-*|late-dynamic-agent-*|created-session-*|bootstrap-session-*|bootstrap-wrapper-session-*|broken-channel-*|codex-cli-session-*|project-claude-session-bridge-smoke-*|memtest*|bootstrap-fail*|memphase4-*)
       return 0
       ;;
     *)
