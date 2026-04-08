@@ -10,5 +10,7 @@
 - `~/.agent-bridge/agent-bridge task create --to <agent> ...`
 - `~/.agent-bridge/agent-bridge urgent <agent> "..."`
 - `~/.agent-bridge/agent-bridge cron ...`
+- `~/.agent-bridge/agent-bridge memory capture --agent <agent> ...`
+- `~/.agent-bridge/agent-bridge memory ingest --agent <agent> --latest`
 
 채널 응답은 연결된 Claude/Codex 세션 안에서 처리한다. queue와 roster 상태는 `~/.agent-bridge` live runtime 기준으로 본다.

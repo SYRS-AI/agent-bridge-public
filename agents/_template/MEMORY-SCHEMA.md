@@ -31,6 +31,9 @@ This agent keeps memory as a markdown-first wiki.
 
 ## Write Rules
 
+Humans should not have to memorize special slash commands for memory.
+If a message naturally contains durable preferences, stable context, or important facts, the agent may capture it proactively.
+
 ### Write to daily user memory when:
 
 - a new preference appears
@@ -80,3 +83,10 @@ Default read order:
 - Use `memory/log.md` to record meaningful promotions or restructures.
 - Prefer updating an existing page over creating near-duplicates.
 - If memory becomes contradictory, fix the wiki page instead of carrying both versions forward.
+
+## Bridge Commands
+
+- `agent-bridge memory capture`
+  - store raw candidate memory in `raw/captures/inbox/`
+- `agent-bridge memory ingest`
+  - move raw captures into the wiki's daily user memory and log the ingest

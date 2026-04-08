@@ -65,6 +65,7 @@ task를 수신하면 아래 순서를 반드시 따른다:
 - `memory/`는 markdown-first memory wiki다. raw source를 그대로 쌓는 곳이 아니라, 정리된 기억을 유지하는 곳이다.
 - 사용자별 정보는 `users/<user-id>/...` 아래에서 관리한다. 다른 사람의 사실을 현재 사용자 메모리에 섞지 않는다.
 - 반복 가치가 있는 사실만 `MEMORY.md` 또는 사용자별 `MEMORY.md`로 승격한다.
+- 사람이 별도 명령을 외우지 않아도, 자연어 대화 중 장기적으로 유용한 사실이나 선호가 나오면 에이전트가 판단해서 `agent-bridge memory capture`와 `agent-bridge memory ingest`로 반영할 수 있다.
 - 세션 종료 전 현재 상태와 다음 액션을 남김
 
 ## 규칙

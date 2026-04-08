@@ -26,6 +26,7 @@ Usage:
   $CLI_NAME profile <status|diff|deploy> ...
   $CLI_NAME setup <discord|telegram|agent|admin> ...
   $CLI_NAME cron <inventory|show|import|list|create|update|delete|enqueue|sync|run-subagent|errors|cleanup> ...
+  $CLI_NAME memory <init|capture|ingest> ...
   $CLI_NAME discord <status|sync>
   $CLI_NAME migrate runtime inventory [--json] [--report <path>]
   $CLI_NAME migrate runtime sync [--dry-run]
@@ -73,6 +74,9 @@ Usage:
   $CLI_NAME cron errors report [--agent <agent>] [--family <family>] [--limit <count>] [--json]
   $CLI_NAME cron cleanup report [--mode expired-one-shot] [--json]
   $CLI_NAME cron cleanup prune [--mode expired-one-shot] [--dry-run]
+  $CLI_NAME memory init --agent <agent> [--user <id[:display-name]>] [--json]
+  $CLI_NAME memory capture --agent <agent> --source discord --user owner --text "..."
+  $CLI_NAME memory ingest --agent <agent> --latest
   $CLI_NAME migrate workspace plan <agent>
   $CLI_NAME migrate workspace copy <agent> [--dry-run]
   $CLI_NAME migrate workspace cutover <agent> --dry-run
@@ -106,6 +110,9 @@ Examples:
   $CLI_NAME cron run-subagent <run-id> --dry-run
   $CLI_NAME cron errors report --limit 20
   $CLI_NAME cron cleanup report
+  $CLI_NAME memory init --agent assistant --user owner:Owner
+  $CLI_NAME memory capture --agent assistant --source telegram --user owner --author "Alice" --text "I prefer morning updates."
+  $CLI_NAME memory ingest --agent assistant --latest
   $CLI_NAME setup discord tester
   $CLI_NAME setup telegram tester --allow-from 123456789
   $CLI_NAME setup agent tester
@@ -385,6 +392,10 @@ if [[ $# -gt 0 ]]; then
     cron)
       shift
       exec "$BRIDGE_BASH_BIN" "$SCRIPT_DIR/bridge-cron.sh" "$@"
+      ;;
+    memory)
+      shift
+      exec "$BRIDGE_BASH_BIN" "$SCRIPT_DIR/bridge-memory.sh" "$@"
       ;;
     discord)
       shift

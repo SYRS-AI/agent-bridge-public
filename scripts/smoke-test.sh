@@ -997,7 +997,21 @@ assert_contains "$(cat "$BRIDGE_ROSTER_LOCAL_FILE")" "plugin:telegram@claude-plu
 [[ ! -e "$BRIDGE_AGENT_HOME_ROOT/$CREATED_AGENT/users/default" ]] || die "agent create should remove default user when explicit users are provided"
 assert_contains "$(cat "$BRIDGE_AGENT_HOME_ROOT/$CREATED_AGENT/users/owner/USER.md")" "Name: Owner"
 assert_contains "$(cat "$BRIDGE_AGENT_HOME_ROOT/$CREATED_AGENT/memory/index.md")" "../users/owner/"
+[[ -f "$BRIDGE_AGENT_HOME_ROOT/$CREATED_AGENT/raw/captures/inbox/.gitkeep" ]] || die "agent create did not scaffold raw capture inbox"
 [[ -L "$BRIDGE_AGENT_HOME_ROOT/$CREATED_AGENT/.claude/skills/agent-bridge-runtime" ]] || die "agent create did not link runtime skill"
+MEMORY_CAPTURE_JSON="$("$REPO_ROOT/agent-bridge" memory capture --agent "$CREATED_AGENT" --user owner --source telegram --author "Owner" --channel "chat-1" --text "I prefer concise morning updates." --json)"
+MEMORY_CAPTURE_ID="$(python3 - "$MEMORY_CAPTURE_JSON" <<'PY'
+import json
+import sys
+print(json.loads(sys.argv[1])["capture_id"])
+PY
+)"
+[[ -f "$BRIDGE_AGENT_HOME_ROOT/$CREATED_AGENT/raw/captures/inbox/$MEMORY_CAPTURE_ID.json" ]] || die "memory capture did not create inbox file"
+MEMORY_INGEST_OUTPUT="$("$REPO_ROOT/agent-bridge" memory ingest --agent "$CREATED_AGENT" --capture "$MEMORY_CAPTURE_ID")"
+assert_contains "$MEMORY_INGEST_OUTPUT" "$MEMORY_CAPTURE_ID"
+[[ -f "$BRIDGE_AGENT_HOME_ROOT/$CREATED_AGENT/raw/captures/ingested/$MEMORY_CAPTURE_ID.json" ]] || die "memory ingest did not move capture to ingested"
+assert_contains "$(cat "$BRIDGE_AGENT_HOME_ROOT/$CREATED_AGENT/users/owner/memory/$(date +%F).md")" "I prefer concise morning updates."
+assert_contains "$(cat "$BRIDGE_AGENT_HOME_ROOT/$CREATED_AGENT/memory/log.md")" "$MEMORY_CAPTURE_ID"
 SETUP_TELEGRAM_OUTPUT="$("$REPO_ROOT/agent-bridge" setup telegram "$CREATED_AGENT" --channel-account smoke --runtime-config "$TMP_ROOT/openclaw.json" --allow-from 123456789 --default-chat 123456789 --api-base-url "$FAKE_TELEGRAM_API_BASE" --yes)"
 assert_contains "$SETUP_TELEGRAM_OUTPUT" "telegram_dir: $BRIDGE_AGENT_HOME_ROOT/$CREATED_AGENT/.telegram"
 assert_contains "$SETUP_TELEGRAM_OUTPUT" "validation: ok"
