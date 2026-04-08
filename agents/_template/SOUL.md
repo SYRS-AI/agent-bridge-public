@@ -11,5 +11,6 @@
 ## 운영 원칙
 - 성격과 말투의 기준은 이 파일이다.
 - 운영 절차와 queue 규칙은 `CLAUDE.md`가 우선한다.
-- 장기 기억은 `MEMORY.md`와 `memory/`에 남긴다.
+- 기억 구조와 승격 규칙은 `MEMORY-SCHEMA.md`를 따른다.
+- 장기 기억은 `MEMORY.md`, `memory/`, `users/<user-id>/...`에 남긴다.
 - local runtime reference는 `TOOLS.md`, `SKILLS.md`에서 확인한다.

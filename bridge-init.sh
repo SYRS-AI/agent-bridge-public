@@ -11,7 +11,7 @@ bridge_load_roster
 usage() {
   cat <<EOF
 Usage:
-  $(basename "$0") [--admin <agent>] [--engine claude|codex] [--session <name>] [--workdir <path>] [--channels <csv>] [--discord-channel <id>]... [--allow-from <id>]... [--default-chat <id>] [--channel-account <account>] [--runtime-config <path>] [--api-base-url <url>] [--skip-validate] [--skip-send-test] [--skip-channel-setup] [--test-start] [--dry-run] [--json]
+  $(basename "$0") [--admin <agent>] [--engine claude|codex] [--session <name>] [--workdir <path>] [--user <id[:display-name]>]... [--channels <csv>] [--discord-channel <id>]... [--allow-from <id>]... [--default-chat <id>] [--channel-account <account>] [--runtime-config <path>] [--api-base-url <url>] [--skip-validate] [--skip-send-test] [--skip-channel-setup] [--test-start] [--dry-run] [--json]
 
 Examples:
   $(basename "$0") --admin patch --engine claude --channels plugin:telegram@claude-plugins-official --allow-from 123456789 --default-chat 123456789 --channel-account default
@@ -139,6 +139,7 @@ notify_kind=""
 notify_target=""
 notify_account=""
 api_base_url=""
+user_specs=()
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -185,6 +186,11 @@ while [[ $# -gt 0 ]]; do
     --channels)
       [[ $# -ge 2 ]] || bridge_die "옵션 값이 필요합니다: $1"
       channels="$2"
+      shift 2
+      ;;
+    --user)
+      [[ $# -ge 2 ]] || bridge_die "옵션 값이 필요합니다: $1"
+      user_specs+=("$2")
       shift 2
       ;;
     --discord-channel)
@@ -291,6 +297,9 @@ else
   [[ -n "$workdir" ]] && create_args+=(--workdir "$workdir")
   [[ -n "$profile_home" ]] && create_args+=(--profile-home "$profile_home")
   [[ -n "$channels" ]] && create_args+=(--channels "$channels")
+  for item in "${user_specs[@]}"; do
+    create_args+=(--user "$item")
+  done
   [[ -n "$notify_kind" ]] && create_args+=(--notify-kind "$notify_kind")
   [[ -n "$notify_target" ]] && create_args+=(--notify-target "$notify_target")
   [[ -n "$notify_account" ]] && create_args+=(--notify-account "$notify_account")

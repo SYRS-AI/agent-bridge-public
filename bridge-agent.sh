@@ -27,6 +27,7 @@ Options:
   --description <text>         roster description
   --display-name <text>        scaffold display name (default: <agent>)
   --role <text>                scaffold role summary
+  --user <id[:display-name]>   scaffold one user memory partition (repeatable)
   --launch-cmd <cmd>           explicit launch command
   --channels <csv>             required Claude channels metadata
   --discord-channel <id>       primary Discord channel metadata
@@ -154,6 +155,96 @@ bridge_scaffold_agent_home() {
   done < <(cd "$template_root" && find . -type d | sed 's#^\./##' | grep -v '^$' | LC_ALL=C sort)
 }
 
+bridge_normalize_user_specs_json() {
+  bridge_agent_manage_python "$@" <<'PY'
+import json
+import re
+import sys
+
+NAME_RE = re.compile(r"^[A-Za-z0-9._-]+$")
+
+items = []
+seen = set()
+for raw in sys.argv[1:]:
+    if ":" in raw:
+        user_id, display_name = raw.split(":", 1)
+    else:
+        user_id, display_name = raw, raw
+    user_id = user_id.strip()
+    display_name = display_name.strip() or user_id
+    if not user_id:
+        raise SystemExit("empty user id is not allowed")
+    if not NAME_RE.match(user_id):
+        raise SystemExit(f"invalid user id: {user_id}")
+    if user_id in seen:
+        continue
+    seen.add(user_id)
+    items.append({"id": user_id, "display_name": display_name})
+
+if not items:
+    items = [{"id": "default", "display_name": "default"}]
+
+print(json.dumps(items, ensure_ascii=False))
+PY
+}
+
+bridge_scaffold_user_partitions() {
+  local home="$1"
+  local users_json="$2"
+
+  bridge_agent_manage_python "$home" "$users_json" <<'PY'
+from pathlib import Path
+import json
+import shutil
+import sys
+
+home = Path(sys.argv[1])
+users = json.loads(sys.argv[2])
+users_root = home / "users"
+default_root = users_root / "default"
+
+if not default_root.exists():
+    raise SystemExit(f"missing template user skeleton: {default_root}")
+
+def patch_user_file(path: Path, user_id: str, display_name: str) -> None:
+    text = path.read_text(encoding="utf-8")
+    text = text.replace("- Name:\n", f"- Name: {display_name}\n")
+    text = text.replace("- Preferred name:\n", f"- Preferred name: {display_name}\n")
+    path.write_text(text, encoding="utf-8")
+
+for user in users:
+    user_id = user["id"]
+    display_name = user.get("display_name") or user_id
+    target = users_root / user_id
+    if user_id == "default":
+        patch_user_file(target / "USER.md", user_id, display_name)
+        continue
+    if target.exists():
+        continue
+    shutil.copytree(default_root, target)
+    patch_user_file(target / "USER.md", user_id, display_name)
+
+if all(user["id"] != "default" for user in users):
+    shutil.rmtree(default_root)
+
+index_path = home / "memory" / "index.md"
+if index_path.exists():
+    lines = index_path.read_text(encoding="utf-8").splitlines()
+    out = []
+    inserted = False
+    for line in lines:
+        out.append(line)
+        if line.strip() == "## Users":
+            inserted = True
+            continue
+        if inserted and line.strip() == "- `../users/`":
+            for user in users:
+                out.append(f"- `../users/{user['id']}/`")
+            inserted = False
+    index_path.write_text("\n".join(out) + "\n", encoding="utf-8")
+PY
+}
+
 bridge_write_role_block() {
   local agent="$1"
   local description="$2"
@@ -279,12 +370,13 @@ emit_create_json() {
   local channels="$7"
   local roster_file="$8"
   local dry_run="$9"
+  local users_json="${10}"
 
-  bridge_agent_manage_python "$agent" "$engine" "$session" "$workdir" "$profile_home" "$launch_cmd" "$channels" "$roster_file" "$dry_run" <<'PY'
+  bridge_agent_manage_python "$agent" "$engine" "$session" "$workdir" "$profile_home" "$launch_cmd" "$channels" "$roster_file" "$dry_run" "$users_json" <<'PY'
 import json
 import sys
 
-agent, engine, session, workdir, profile_home, launch_cmd, channels, roster_file, dry_run = sys.argv[1:]
+agent, engine, session, workdir, profile_home, launch_cmd, channels, roster_file, dry_run, users_json = sys.argv[1:]
 payload = {
     "agent": agent,
     "engine": engine,
@@ -295,6 +387,7 @@ payload = {
     "channels": channels,
     "roster_file": roster_file,
     "dry_run": dry_run == "1",
+    "users": json.loads(users_json),
     "next_steps": [
         f"agent-bridge setup agent {agent}",
         f"agent-bridge status --all-agents",
@@ -599,6 +692,8 @@ run_create() {
   local always_on=0
   local dry_run=0
   local json_mode=0
+  local user_specs=()
+  local users_json=""
   local default_home=""
   local start_dry_run=""
 
@@ -644,6 +739,11 @@ run_create() {
       --role)
         [[ $# -ge 2 ]] || bridge_die "옵션 값이 필요합니다: $1"
         role_text="$2"
+        shift 2
+        ;;
+      --user)
+        [[ $# -ge 2 ]] || bridge_die "옵션 값이 필요합니다: $1"
+        user_specs+=("$2")
         shift 2
         ;;
       --launch-cmd)
@@ -720,6 +820,7 @@ run_create() {
   role_text="${role_text:-Long-lived agent role}"
   launch_cmd="${launch_cmd:-$(bridge_agent_default_launch_cmd "$engine")}"
   channels="$(bridge_normalize_channels_csv "$channels")"
+  users_json="$(bridge_normalize_user_specs_json "${user_specs[@]}")"
 
   default_home="$(bridge_expand_user_path "$default_home")"
   if [[ -z "$profile_home" && "$workdir" != "$default_home" ]]; then
@@ -737,6 +838,7 @@ run_create() {
       fi
     fi
     bridge_scaffold_agent_home "$agent" "$workdir" "$display_name" "$role_text" "$engine"
+    bridge_scaffold_user_partitions "$workdir" "$users_json"
     if [[ "$engine" == "claude" ]]; then
       bridge_ensure_project_claude_guidance "$workdir" >/dev/null 2>&1 || true
     fi
@@ -765,7 +867,7 @@ run_create() {
   fi
 
   if [[ $json_mode -eq 1 ]]; then
-    emit_create_json "$agent" "$engine" "$session" "$workdir" "$profile_home" "$launch_cmd" "$channels" "$BRIDGE_ROSTER_LOCAL_FILE" "$dry_run"
+    emit_create_json "$agent" "$engine" "$session" "$workdir" "$profile_home" "$launch_cmd" "$channels" "$BRIDGE_ROSTER_LOCAL_FILE" "$dry_run" "$users_json"
     exit 0
   fi
 
@@ -777,6 +879,7 @@ run_create() {
     printf 'profile_home: %s\n' "$profile_home"
   fi
   printf 'launch_cmd: %s\n' "$launch_cmd"
+  printf 'users: %s\n' "$users_json"
   if [[ -n "$channels" ]]; then
     printf 'channels: %s\n' "$channels"
   fi

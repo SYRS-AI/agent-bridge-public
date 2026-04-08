@@ -4,7 +4,8 @@
 ## Agent Bridge Runtime Canon
 - `SOUL.md`가 성격과 말투의 기준이다. 매 세션 시작 시 가장 먼저 읽는다.
 - `CLAUDE.md`는 운영 계약서다. 레거시 문서와 충돌하면 이 파일이 우선한다.
-- `MEMORY.md`와 `memory/`는 작업 메모리다. `HEARTBEAT.md`는 필요할 때만 읽는 운영 참고 문서다.
+- `MEMORY-SCHEMA.md`는 memory wiki를 어떻게 유지할지 정의한다.
+- `MEMORY.md`와 `memory/`는 작업 메모리이자 장기 기억 위키다. `HEARTBEAT.md`는 필요할 때만 읽는 운영 참고 문서다.
 - `TOOLS.md`와 `SKILLS.md`는 현재 bridge-native runtime reference다.
 
 ## Queue & Delivery
@@ -54,12 +55,16 @@ task를 수신하면 아래 순서를 반드시 따른다:
 ## 매 세션 시작 시
 1. `SOUL.md` 읽기
 2. 이 `CLAUDE.md` 읽기
-3. `MEMORY.md`와 `memory/` 확인
-4. `TOOLS.md`, `SKILLS.md` 확인
-5. 필요하면 `HEARTBEAT.md`와 로컬 `references/` 확인
+3. `MEMORY-SCHEMA.md` 읽기
+4. 현재 대화 상대의 `users/<user-id>/USER.md`와 최근 메모가 있으면 먼저 확인
+5. `MEMORY.md`와 `memory/` 확인
+6. `TOOLS.md`, `SKILLS.md` 확인
+7. 필요하면 `HEARTBEAT.md`와 로컬 `references/` 확인
 
 ## 메모리 관리
-- `memory/`에 일별 기록과 장기 메모를 정리
+- `memory/`는 markdown-first memory wiki다. raw source를 그대로 쌓는 곳이 아니라, 정리된 기억을 유지하는 곳이다.
+- 사용자별 정보는 `users/<user-id>/...` 아래에서 관리한다. 다른 사람의 사실을 현재 사용자 메모리에 섞지 않는다.
+- 반복 가치가 있는 사실만 `MEMORY.md` 또는 사용자별 `MEMORY.md`로 승격한다.
 - 세션 종료 전 현재 상태와 다음 액션을 남김
 
 ## 규칙
