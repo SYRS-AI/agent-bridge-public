@@ -71,6 +71,36 @@ PY
   esac
 }
 
+bridge_cron_slot_from_datetime() {
+  local value="${1:-}"
+
+  [[ -n "$value" ]] || return 1
+  bridge_require_python
+  python3 - "$value" <<'PY'
+from datetime import datetime
+import sys
+
+text = sys.argv[1]
+if text.endswith("Z"):
+    text = text[:-1] + "+00:00"
+dt = datetime.fromisoformat(text)
+print(dt.replace(second=0, microsecond=0).isoformat(timespec="minutes"))
+PY
+}
+
+bridge_cron_slot_for_job() {
+  local kind="${1:-}"
+  local family="${2:-memory-daily}"
+  local next_run_at="${3:-}"
+
+  if [[ "$kind" == "one-shot" && -n "$next_run_at" ]]; then
+    bridge_cron_slot_from_datetime "$next_run_at"
+    return 0
+  fi
+
+  bridge_cron_default_slot "$family"
+}
+
 bridge_cron_scheduler_state_file() {
   printf '%s/scheduler-state.json' "$BRIDGE_CRON_STATE_DIR"
 }

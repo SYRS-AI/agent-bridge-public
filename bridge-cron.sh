@@ -403,6 +403,7 @@ run_enqueue() {
   local CRON_JOB_KIND=""
   local CRON_JOB_ENABLED=""
   local CRON_JOB_SCHEDULE_TEXT=""
+  local CRON_JOB_NEXT_RUN_AT=""
   local CRON_JOB_PAYLOAD_KIND=""
   local CRON_JOB_PAYLOAD_TEXT=""
 
@@ -411,10 +412,15 @@ run_enqueue() {
   source <(printf '%s\n' "$shell_payload")
 
   [[ "$CRON_JOB_ENABLED" == "1" ]] || bridge_die "비활성 cron job은 enqueue할 수 없습니다: $CRON_JOB_NAME"
-  [[ "$CRON_JOB_KIND" == "recurring" ]] || bridge_die "recurring cron job만 enqueue할 수 있습니다: $CRON_JOB_NAME"
+  case "$CRON_JOB_KIND" in
+    recurring|one-shot) ;;
+    *)
+      bridge_die "지원하지 않는 cron job kind 입니다: $CRON_JOB_NAME ($CRON_JOB_KIND)"
+      ;;
+  esac
 
   if [[ -z "$slot" ]]; then
-    slot="$(bridge_cron_default_slot "$CRON_JOB_FAMILY")"
+    slot="$(bridge_cron_slot_for_job "$CRON_JOB_KIND" "$CRON_JOB_FAMILY" "$CRON_JOB_NEXT_RUN_AT")"
   fi
 
   if [[ -n "$target" ]]; then
