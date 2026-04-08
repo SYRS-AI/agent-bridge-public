@@ -278,7 +278,9 @@ Adapt or replace `tools/memory-manager.py`.
 
 - keep markdown files as source of truth
 - optionally maintain SQLite/vector indexes as derived state
-- add rebuild/query helpers only on top of the wiki, not instead of it
+- add `memory rebuild-index`
+- add `memory query`
+- keep rebuild/query helpers only on top of the wiki, not instead of it
 - keep compatibility mode only where it still adds value
 
 Deliverable:
@@ -287,10 +289,10 @@ Deliverable:
 
 ## Current State
 
-Phases 1, 2, 3A, 3B, and 3C are implemented in the repo.
+Phases 1, 2, 3A, 3B, 3C, and the first Phase 4 slice are implemented in the repo.
 
-The next meaningful step is Phase 4:
+The next meaningful step inside Phase 4 is:
 
-- connect or replace the legacy `tools/memory-manager.py` path
-- add derived search/index rebuild flows
+- finish the `tools/memory-manager.py` compatibility rewrite
+- add optional richer ranking over derived indexes
 - wire channel/runtime capture automation into the wiki model

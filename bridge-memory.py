@@ -4,9 +4,11 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import re
 import shutil
+import sqlite3
 import sys
 from dataclasses import dataclass
 from datetime import datetime
@@ -15,6 +17,8 @@ from pathlib import Path
 
 USER_ID_RE = re.compile(r"^[A-Za-z0-9._-]+$")
 SEARCH_SCOPES = ("wiki", "all", "user", "daily", "shared", "project", "decision", "raw")
+QUERY_SCOPES = ("all", "wiki", "user", "daily", "shared", "project", "decision", "raw")
+INDEX_KIND = "bridge-wiki-fts-v1"
 
 
 @dataclass
@@ -760,6 +764,367 @@ def cmd_search(args: argparse.Namespace) -> int:
     return 0
 
 
+def collect_index_documents(home: Path) -> list[dict]:
+    documents: list[dict] = []
+
+    def add_markdown(path: Path, kind: str, user_id: str = "") -> None:
+        if path.exists():
+            documents.append({"path": path, "kind": kind, "user_id": user_id, "format": "markdown"})
+
+    def add_json(path: Path, kind: str) -> None:
+        if path.exists():
+            documents.append({"path": path, "kind": kind, "user_id": "", "format": "json"})
+
+    add_markdown(home / "SOUL.md", "agent-soul")
+    add_markdown(home / "CLAUDE.md", "agent-contract")
+    add_markdown(home / "MEMORY-SCHEMA.md", "memory-schema")
+    add_markdown(home / "MEMORY.md", "agent-memory")
+    add_markdown(home / "memory" / "index.md", "wiki-index")
+    add_markdown(home / "memory" / "log.md", "wiki-log")
+
+    for subdir, kind in (("shared", "shared"), ("projects", "project"), ("decisions", "decision")):
+        root = home / "memory" / subdir
+        if root.exists():
+            for path in sorted(root.glob("*.md")):
+                add_markdown(path, kind)
+
+    users_root = home / "users"
+    if users_root.exists():
+        for user_root in sorted(path for path in users_root.iterdir() if path.is_dir()):
+            user_id = user_root.name
+            add_markdown(user_root / "USER.md", "user-profile", user_id=user_id)
+            add_markdown(user_root / "MEMORY.md", "user-memory", user_id=user_id)
+            daily_root = user_root / "memory"
+            if daily_root.exists():
+                for path in sorted(daily_root.glob("*.md")):
+                    add_markdown(path, "daily", user_id=user_id)
+
+    for raw_root, kind in (
+        (home / "raw" / "captures" / "ingested", "raw-ingested"),
+        (home / "raw" / "captures" / "inbox", "raw-inbox"),
+    ):
+        if raw_root.exists():
+            for path in sorted(raw_root.glob("*.json")):
+                add_json(path, kind)
+
+    return documents
+
+
+def chunk_markdown_text(text: str) -> list[tuple[int, int, str]]:
+    lines = text.splitlines()
+    chunks: list[tuple[int, int, str]] = []
+    current: list[str] = []
+    start_line = 1
+
+    def flush(end_line: int) -> None:
+        nonlocal current, start_line
+        compact = "\n".join(line.rstrip() for line in current).strip()
+        if compact:
+            chunks.append((start_line, end_line, compact))
+        current = []
+
+    for lineno, line in enumerate(lines, start=1):
+        if line.startswith("#"):
+            if current:
+                flush(lineno - 1)
+            current = [line]
+            start_line = lineno
+            continue
+        if line.strip() == "":
+            if current:
+                current.append(line)
+                flush(lineno)
+            else:
+                start_line = lineno + 1
+            continue
+        if not current:
+            current = [line]
+            start_line = lineno
+        else:
+            current.append(line)
+    if current:
+        flush(len(lines) if lines else start_line)
+    return chunks
+
+
+def chunk_json_capture(path: Path) -> tuple[int, int, str, str]:
+    payload = json.loads(read_text(path))
+    lines = [
+        f"capture_id: {payload.get('capture_id', '')}",
+        f"user: {payload.get('user', '')}",
+        f"source: {payload.get('source', '')}",
+        f"author: {payload.get('author', '')}",
+        f"channel: {payload.get('channel', '')}",
+        f"title: {payload.get('title', '')}",
+        f"text: {payload.get('text', '')}",
+        f"created_at: {payload.get('created_at', '')}",
+    ]
+    return 1, len(lines), "\n".join(lines).strip(), payload.get("user", "") or ""
+
+
+def ensure_index_schema(conn: sqlite3.Connection) -> None:
+    conn.executescript(
+        """
+        PRAGMA journal_mode=WAL;
+        CREATE TABLE IF NOT EXISTS meta (
+            key TEXT PRIMARY KEY,
+            value TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS documents (
+            path TEXT PRIMARY KEY,
+            kind TEXT NOT NULL,
+            user_id TEXT NOT NULL DEFAULT '',
+            format TEXT NOT NULL,
+            sha256 TEXT NOT NULL,
+            size_bytes INTEGER NOT NULL,
+            indexed_at TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS chunks (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            path TEXT NOT NULL,
+            source TEXT NOT NULL,
+            model TEXT NOT NULL DEFAULT 'bridge-wiki-fts-v1',
+            kind TEXT NOT NULL,
+            user_id TEXT NOT NULL DEFAULT '',
+            start_line INTEGER NOT NULL,
+            end_line INTEGER NOT NULL,
+            text TEXT NOT NULL,
+            embedding TEXT NOT NULL DEFAULT '[]'
+        );
+        CREATE VIRTUAL TABLE IF NOT EXISTS chunks_fts USING fts5(
+            text,
+            path UNINDEXED,
+            source UNINDEXED,
+            model UNINDEXED,
+            kind UNINDEXED,
+            user_id UNINDEXED,
+            content='chunks',
+            content_rowid='id'
+        );
+        CREATE TRIGGER IF NOT EXISTS chunks_ai AFTER INSERT ON chunks BEGIN
+          INSERT INTO chunks_fts(rowid, text, path, source, model, kind, user_id)
+          VALUES (new.id, new.text, new.path, new.source, new.model, new.kind, new.user_id);
+        END;
+        CREATE TRIGGER IF NOT EXISTS chunks_ad AFTER DELETE ON chunks BEGIN
+          INSERT INTO chunks_fts(chunks_fts, rowid, text, path, source, model, kind, user_id)
+          VALUES ('delete', old.id, old.text, old.path, old.source, old.model, old.kind, old.user_id);
+        END;
+        CREATE TRIGGER IF NOT EXISTS chunks_au AFTER UPDATE ON chunks BEGIN
+          INSERT INTO chunks_fts(chunks_fts, rowid, text, path, source, model, kind, user_id)
+          VALUES ('delete', old.id, old.text, old.path, old.source, old.model, old.kind, old.user_id);
+          INSERT INTO chunks_fts(rowid, text, path, source, model, kind, user_id)
+          VALUES (new.id, new.text, new.path, new.source, new.model, new.kind, new.user_id);
+        END;
+        """
+    )
+
+
+def build_fts_query(raw: str) -> str | None:
+    tokens = re.findall(r"\w+", raw, flags=re.UNICODE)
+    tokens = [token.strip() for token in tokens if token.strip()]
+    if not tokens:
+        return None
+    return " AND ".join(f'"{token.replace(chr(34), "")}"' for token in tokens)
+
+
+def default_index_db_path(bridge_home: Path, agent: str) -> Path:
+    return bridge_home / "runtime" / "memory" / f"{agent}.sqlite"
+
+
+def cmd_rebuild_index(args: argparse.Namespace) -> int:
+    home = Path(args.home)
+    bridge_home = Path(args.bridge_home)
+    db_path = Path(args.db_path) if args.db_path else default_index_db_path(bridge_home, args.agent)
+    indexed_at = datetime.now().astimezone().isoformat()
+    documents = collect_index_documents(home)
+
+    chunk_count = 0
+    if not args.dry_run:
+        db_path.parent.mkdir(parents=True, exist_ok=True)
+        conn = sqlite3.connect(db_path)
+        try:
+            ensure_index_schema(conn)
+            conn.execute("DELETE FROM chunks")
+            conn.execute("DELETE FROM documents")
+            conn.execute("DELETE FROM meta")
+            for doc in documents:
+                path = doc["path"]
+                relpath = str(path.relative_to(home))
+                if doc["format"] == "markdown":
+                    text = read_text(path)
+                    chunks = chunk_markdown_text(text)
+                    digest = hashlib.sha256(text.encode("utf-8")).hexdigest()
+                    size_bytes = len(text.encode("utf-8"))
+                    user_id = doc["user_id"]
+                else:
+                    start_line, end_line, text, capture_user = chunk_json_capture(path)
+                    chunks = [(start_line, end_line, text)]
+                    digest = hashlib.sha256(text.encode("utf-8")).hexdigest()
+                    size_bytes = len(text.encode("utf-8"))
+                    user_id = capture_user or doc["user_id"]
+
+                conn.execute(
+                    """
+                    INSERT INTO documents(path, kind, user_id, format, sha256, size_bytes, indexed_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (relpath, doc["kind"], user_id, doc["format"], digest, size_bytes, indexed_at),
+                )
+                for start_line, end_line, text in chunks:
+                    if not text.strip():
+                        continue
+                    conn.execute(
+                        """
+                        INSERT INTO chunks(path, source, model, kind, user_id, start_line, end_line, text, embedding)
+                        VALUES (?, ?, 'bridge-wiki-fts-v1', ?, ?, ?, ?, ?, '[]')
+                        """,
+                        (relpath, doc["kind"], doc["kind"], user_id, start_line, end_line, text),
+                    )
+                    chunk_count += 1
+
+            conn.executemany(
+                "INSERT INTO meta(key, value) VALUES (?, ?)",
+                {
+                    "index_kind": INDEX_KIND,
+                    "agent": args.agent,
+                    "home": str(home),
+                    "indexed_at": indexed_at,
+                    "document_count": str(len(documents)),
+                    "chunk_count": str(chunk_count),
+                }.items(),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+    else:
+        for doc in documents:
+            if doc["format"] == "markdown":
+                chunk_count += len(chunk_markdown_text(read_text(doc["path"])))
+            else:
+                chunk_count += 1
+
+    payload = {
+        "agent": args.agent,
+        "db_path": str(db_path),
+        "document_count": len(documents),
+        "chunk_count": chunk_count,
+        "indexed_at": indexed_at,
+        "dry_run": args.dry_run,
+    }
+    if args.json:
+        print(json.dumps(payload, ensure_ascii=False, indent=2))
+    else:
+        print(f"agent: {args.agent}")
+        print(f"db_path: {db_path}")
+        print(f"document_count: {len(documents)}")
+        print(f"chunk_count: {chunk_count}")
+        print(f"dry_run: {'yes' if args.dry_run else 'no'}")
+    return 0
+
+
+def cmd_query(args: argparse.Namespace) -> int:
+    home = Path(args.home)
+    bridge_home = Path(args.bridge_home)
+    db_path = Path(args.db_path) if args.db_path else default_index_db_path(bridge_home, args.agent)
+    if not db_path.exists():
+        fallback = argparse.Namespace(**vars(args))
+        fallback.scope = "all" if args.scope == "all" else args.scope
+        return cmd_search(fallback)
+
+    fts_query = build_fts_query(args.query)
+    if not fts_query:
+        die("query is empty")
+
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    try:
+        clauses = ["chunks_fts MATCH ?"]
+        params: list[object] = [fts_query]
+        if args.user:
+            clauses.append("chunks.user_id = ?")
+            params.append(args.user)
+        if args.scope != "all":
+            if args.scope == "wiki":
+                clauses.append("chunks.kind NOT LIKE 'raw-%'")
+            elif args.scope == "raw":
+                clauses.append("chunks.kind LIKE 'raw-%'")
+            elif args.scope == "user":
+                clauses.append("chunks.kind IN ('user-profile', 'user-memory')")
+            elif args.scope == "daily":
+                clauses.append("chunks.kind = 'daily'")
+            elif args.scope == "shared":
+                clauses.append("chunks.kind = 'shared'")
+            elif args.scope == "project":
+                clauses.append("chunks.kind = 'project'")
+            elif args.scope == "decision":
+                clauses.append("chunks.kind = 'decision'")
+        params.append(int(args.limit))
+        rows = conn.execute(
+            f"""
+            SELECT
+              chunks.kind,
+              chunks.user_id,
+              chunks.path,
+              chunks.start_line,
+              chunks.end_line,
+              bm25(chunks_fts) AS rank,
+              snippet(chunks_fts, 0, '', '', ' ... ', 20) AS snippet
+            FROM chunks_fts
+            JOIN chunks ON chunks.id = chunks_fts.rowid
+            WHERE {' AND '.join(clauses)}
+            ORDER BY rank ASC
+            LIMIT ?
+            """,
+            params,
+        ).fetchall()
+    finally:
+        conn.close()
+
+    results = []
+    for row in rows:
+        rank = row["rank"]
+        if isinstance(rank, (int, float)):
+            score = (-float(rank) / (1 + -float(rank))) if float(rank) < 0 else 1 / (1 + float(rank))
+        else:
+            score = 0.0
+        results.append(
+            {
+                "kind": row["kind"],
+                "user_id": row["user_id"],
+                "path": str(home / row["path"]),
+                "relative_path": row["path"],
+                "start_line": row["start_line"],
+                "end_line": row["end_line"],
+                "score": score,
+                "snippet": (row["snippet"] or "").strip(),
+            }
+        )
+
+    payload = {
+        "agent": args.agent,
+        "query": args.query,
+        "scope": args.scope,
+        "user": args.user or "",
+        "backend": "index",
+        "db_path": str(db_path),
+        "count": len(results),
+        "results": results,
+    }
+    if args.json:
+        print(json.dumps(payload, ensure_ascii=False, indent=2))
+    else:
+        print(f"agent: {args.agent}")
+        print(f"query: {args.query}")
+        print(f"scope: {args.scope}")
+        print("backend: index")
+        print(f"matches: {len(results)}")
+        for item in results:
+            print(f"- [{item['kind']}] {item['relative_path']}:{item['start_line']}-{item['end_line']} (score={item['score']:.4f})")
+            if item["snippet"]:
+                print(f"  {item['snippet']}")
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser()
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -821,6 +1186,15 @@ def build_parser() -> argparse.ArgumentParser:
     lint_parser.add_argument("--json", action="store_true")
     lint_parser.set_defaults(func=cmd_lint)
 
+    rebuild_parser = subparsers.add_parser("rebuild-index")
+    rebuild_parser.add_argument("--agent", required=True)
+    rebuild_parser.add_argument("--home", required=True)
+    rebuild_parser.add_argument("--bridge-home", required=True)
+    rebuild_parser.add_argument("--db-path")
+    rebuild_parser.add_argument("--dry-run", action="store_true")
+    rebuild_parser.add_argument("--json", action="store_true")
+    rebuild_parser.set_defaults(func=cmd_rebuild_index)
+
     search_parser = subparsers.add_parser("search")
     search_parser.add_argument("--agent", required=True)
     search_parser.add_argument("--home", required=True)
@@ -830,6 +1204,18 @@ def build_parser() -> argparse.ArgumentParser:
     search_parser.add_argument("--limit", type=int, default=10)
     search_parser.add_argument("--json", action="store_true")
     search_parser.set_defaults(func=cmd_search)
+
+    query_parser = subparsers.add_parser("query")
+    query_parser.add_argument("--agent", required=True)
+    query_parser.add_argument("--home", required=True)
+    query_parser.add_argument("--bridge-home", required=True)
+    query_parser.add_argument("--db-path")
+    query_parser.add_argument("--query", required=True)
+    query_parser.add_argument("--user")
+    query_parser.add_argument("--scope", choices=QUERY_SCOPES, default="all")
+    query_parser.add_argument("--limit", type=int, default=10)
+    query_parser.add_argument("--json", action="store_true")
+    query_parser.set_defaults(func=cmd_query)
 
     return parser
 

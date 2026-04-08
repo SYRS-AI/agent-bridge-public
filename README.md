@@ -533,17 +533,22 @@ The status dashboard also includes a lightweight health check for active session
 
 For static roles, an explicit `BRIDGE_AGENT_IDLE_TIMEOUT["agent"]="0"` means "always on": the daemon will not auto-stop that role, and it will restart the role automatically if its tmux session disappears.
 
-### Optional: search legacy memory
+### Optional: derived memory index
 
-If you are migrating a legacy install and want read-only retrieval over
-existing memory SQLite files, use the bundled helper:
+The memory wiki stores source-of-truth data in markdown files. If you want a
+faster derived SQLite index on top of that wiki, you can rebuild and query it:
+
+```bash
+./agent-bridge memory rebuild-index --agent <agent-id>
+./agent-bridge memory query --agent <agent-id> --query "recent incident summary"
+```
+
+The bundled compatibility helper can also read the derived index, plus older
+legacy memory SQLite files when you are migrating an existing install:
 
 ```bash
 python3 tools/memory-manager.py search --agent <agent-id> "recent incident summary"
 ```
-
-This helper is optional. It is intended for migration and compatibility work,
-not for fresh installs that do not have legacy memory state.
 
 ### Start the daemon
 

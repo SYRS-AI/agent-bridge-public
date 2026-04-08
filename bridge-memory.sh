@@ -17,6 +17,8 @@ Usage:
   $(basename "$0") promote --agent <agent> --kind user|shared|project|decision [--user <id>] [--capture <id>] [--page <slug>] [--summary <text>] [--dry-run] [--json]
   $(basename "$0") lint --agent <agent> [--json]
   $(basename "$0") search --agent <agent> --query <text> [--user <id>] [--scope wiki|all|user|daily|shared|project|decision|raw] [--limit <count>] [--json]
+  $(basename "$0") rebuild-index --agent <agent> [--db-path <path>] [--dry-run] [--json]
+  $(basename "$0") query --agent <agent> --query <text> [--user <id>] [--scope all|wiki|user|daily|shared|project|decision|raw] [--limit <count>] [--db-path <path>] [--json]
 EOF
 }
 
@@ -39,6 +41,7 @@ agent=""
 users=()
 dry_run=0
 json_mode=0
+bridge_home="${BRIDGE_HOME:-$HOME/.agent-bridge}"
 
 case "$command" in
   init)
@@ -316,6 +319,45 @@ case "$command" in
     run_python "${args[@]}"
     exit 0
     ;;
+  rebuild-index)
+    db_path=""
+    while [[ $# -gt 0 ]]; do
+      case "$1" in
+        --agent)
+          [[ $# -ge 2 ]] || bridge_die "옵션 값이 필요합니다: $1"
+          agent="$2"
+          shift 2
+          ;;
+        --db-path)
+          [[ $# -ge 2 ]] || bridge_die "옵션 값이 필요합니다: $1"
+          db_path="$2"
+          shift 2
+          ;;
+        --dry-run)
+          dry_run=1
+          shift
+          ;;
+        --json)
+          json_mode=1
+          shift
+          ;;
+        -h|--help|help)
+          usage
+          exit 0
+          ;;
+        *)
+          bridge_die "지원하지 않는 memory rebuild-index 옵션입니다: $1"
+          ;;
+      esac
+    done
+    [[ -n "$agent" ]] || bridge_die "--agent is required"
+    args=(rebuild-index --agent "$agent" --home "$(resolve_agent_home "$agent")" --bridge-home "$bridge_home")
+    [[ -n "$db_path" ]] && args+=(--db-path "$db_path")
+    [[ $dry_run -eq 1 ]] && args+=(--dry-run)
+    [[ $json_mode -eq 1 ]] && args+=(--json)
+    run_python "${args[@]}"
+    exit 0
+    ;;
   search)
     query=""
     user_id=""
@@ -365,6 +407,66 @@ case "$command" in
     [[ -n "$query" ]] || bridge_die "--query is required"
     args=(search --agent "$agent" --home "$(resolve_agent_home "$agent")" --query "$query" --scope "$scope" --limit "$limit")
     [[ -n "$user_id" ]] && args+=(--user "$user_id")
+    [[ $json_mode -eq 1 ]] && args+=(--json)
+    run_python "${args[@]}"
+    exit 0
+    ;;
+  query)
+    query=""
+    user_id=""
+    scope="all"
+    limit=10
+    db_path=""
+    while [[ $# -gt 0 ]]; do
+      case "$1" in
+        --agent)
+          [[ $# -ge 2 ]] || bridge_die "옵션 값이 필요합니다: $1"
+          agent="$2"
+          shift 2
+          ;;
+        --query)
+          [[ $# -ge 2 ]] || bridge_die "옵션 값이 필요합니다: $1"
+          query="$2"
+          shift 2
+          ;;
+        --user)
+          [[ $# -ge 2 ]] || bridge_die "옵션 값이 필요합니다: $1"
+          user_id="$2"
+          shift 2
+          ;;
+        --scope)
+          [[ $# -ge 2 ]] || bridge_die "옵션 값이 필요합니다: $1"
+          scope="$2"
+          shift 2
+          ;;
+        --limit)
+          [[ $# -ge 2 ]] || bridge_die "옵션 값이 필요합니다: $1"
+          limit="$2"
+          shift 2
+          ;;
+        --db-path)
+          [[ $# -ge 2 ]] || bridge_die "옵션 값이 필요합니다: $1"
+          db_path="$2"
+          shift 2
+          ;;
+        --json)
+          json_mode=1
+          shift
+          ;;
+        -h|--help|help)
+          usage
+          exit 0
+          ;;
+        *)
+          bridge_die "지원하지 않는 memory query 옵션입니다: $1"
+          ;;
+      esac
+    done
+    [[ -n "$agent" ]] || bridge_die "--agent is required"
+    [[ -n "$query" ]] || bridge_die "--query is required"
+    args=(query --agent "$agent" --home "$(resolve_agent_home "$agent")" --bridge-home "$bridge_home" --query "$query" --scope "$scope" --limit "$limit")
+    [[ -n "$user_id" ]] && args+=(--user "$user_id")
+    [[ -n "$db_path" ]] && args+=(--db-path "$db_path")
     [[ $json_mode -eq 1 ]] && args+=(--json)
     run_python "${args[@]}"
     exit 0

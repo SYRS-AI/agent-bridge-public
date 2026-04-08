@@ -14,5 +14,7 @@
 - `~/.agent-bridge/agent-bridge memory ingest --agent <agent> --latest`
 - `~/.agent-bridge/agent-bridge memory promote --agent <agent> ...`
 - `~/.agent-bridge/agent-bridge memory search --agent <agent> --query "..."`
+- `~/.agent-bridge/agent-bridge memory rebuild-index --agent <agent>`
+- `~/.agent-bridge/agent-bridge memory query --agent <agent> --query "..."`
 
 채널 응답은 연결된 Claude/Codex 세션 안에서 처리한다. queue와 roster 상태는 `~/.agent-bridge` live runtime 기준으로 본다.

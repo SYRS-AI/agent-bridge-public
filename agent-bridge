@@ -26,7 +26,7 @@ Usage:
   $CLI_NAME profile <status|diff|deploy> ...
   $CLI_NAME setup <discord|telegram|agent|admin> ...
   $CLI_NAME cron <inventory|show|import|list|create|update|delete|enqueue|sync|run-subagent|errors|cleanup> ...
-  $CLI_NAME memory <init|capture|ingest|promote|lint|search> ...
+  $CLI_NAME memory <init|capture|ingest|promote|lint|search|rebuild-index|query> ...
   $CLI_NAME discord <status|sync>
   $CLI_NAME migrate runtime inventory [--json] [--report <path>]
   $CLI_NAME migrate runtime sync [--dry-run]
@@ -118,6 +118,8 @@ Examples:
   $CLI_NAME memory promote --agent assistant --kind user --user owner --summary "User prefers concise morning updates."
   $CLI_NAME memory lint --agent assistant
   $CLI_NAME memory search --agent assistant --user owner --query "concise morning updates"
+  $CLI_NAME memory rebuild-index --agent assistant
+  $CLI_NAME memory query --agent assistant --user owner --query "morning updates"
   $CLI_NAME setup discord tester
   $CLI_NAME setup telegram tester --allow-from 123456789
   $CLI_NAME setup agent tester

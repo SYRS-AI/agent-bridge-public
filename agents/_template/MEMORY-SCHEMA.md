@@ -94,3 +94,7 @@ Default read order:
   - move durable facts into curated user/shared/project/decision pages
 - `agent-bridge memory search`
   - search the wiki first, then optional raw capture files if needed
+- `agent-bridge memory rebuild-index`
+  - rebuild a derived SQLite FTS index from the wiki and raw captures
+- `agent-bridge memory query`
+  - query the derived index for faster retrieval while keeping markdown as source of truth

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Read-only hybrid memory search for OpenClaw SQLite memory indexes."""
+"""Read-only memory search for Agent Bridge derived indexes and legacy stores."""
 
 import argparse
 import datetime as dt
@@ -104,7 +104,7 @@ def parse_args():
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     search = subparsers.add_parser("search")
-    search.add_argument("--agent", required=True, help="OpenClaw agent id or a bridge alias")
+    search.add_argument("--agent", required=True, help="Bridge agent id or a compatibility alias")
     search.add_argument("query", help="Search query")
     search.add_argument("--config")
     search.add_argument("--openclaw-root", default=str(Path.home() / ".openclaw"))
@@ -252,6 +252,18 @@ def open_db(path):
     return connection
 
 
+def detect_index_kind(connection):
+    tables = {
+        row["name"]
+        for row in connection.execute("SELECT name FROM sqlite_master WHERE type='table'")
+    }
+    if "meta" in tables:
+        row = connection.execute("SELECT value FROM meta WHERE key = 'index_kind'").fetchone()
+        if row and row["value"]:
+            return row["value"]
+    return "legacy-hybrid"
+
+
 def sql_in_clause(values):
     return ",".join("?" for _ in values)
 
@@ -279,16 +291,17 @@ def search_keyword(connection, query, limit, sources, model):
     clauses = ["chunks_fts MATCH ?"]
     params = [fts_query]
     if model:
-        clauses.append("model = ?")
+        clauses.append("chunks.model = ?")
         params.append(model)
     if sources:
-        clauses.append(f"source IN ({sql_in_clause(sources)})")
+        clauses.append(f"chunks.source IN ({sql_in_clause(sources)})")
         params.extend(sources)
     params.append(limit)
 
     sql = f"""
-        SELECT id, path, source, start_line, end_line, text, bm25(chunks_fts) AS rank
+        SELECT chunks.id, chunks.path, chunks.source, chunks.start_line, chunks.end_line, chunks.text, bm25(chunks_fts) AS rank
         FROM chunks_fts
+        JOIN chunks ON chunks.id = chunks_fts.rowid
         WHERE {' AND '.join(clauses)}
         ORDER BY rank ASC
         LIMIT ?
@@ -550,10 +563,33 @@ def search_memory(settings, query, sources_override=None, max_results=None, min_
     sources = sources_override or settings["sources"]
     connection = open_db(settings["db_path"])
     try:
-        query_vec = embed_query(query, settings["api_key"], settings["model"], settings["output_dimensionality"])
+        index_kind = detect_index_kind(connection)
         max_results = max_results or settings["max_results"]
         min_score = settings["min_score"] if min_score is None else min_score
         candidate_limit = min(200, max(1, int(math.floor(max_results * settings["candidate_multiplier"]))))
+
+        if index_kind == "bridge-wiki-fts-v1":
+            keyword_results = search_keyword(connection, query, candidate_limit, sources=None, model=None)
+            seen = {}
+            for item in keyword_results:
+                key = item["id"]
+                if key not in seen or item["textScore"] > seen[key]["score"]:
+                    seen[key] = {
+                        "id": item["id"],
+                        "path": item["path"],
+                        "startLine": item["startLine"],
+                        "endLine": item["endLine"],
+                        "source": item["source"],
+                        "snippet": item["snippet"],
+                        "vectorScore": 0.0,
+                        "textScore": item["textScore"],
+                        "score": item["textScore"],
+                    }
+            base = sorted(seen.values(), key=lambda item: item["score"], reverse=True)
+            strict = [item for item in base if item["score"] >= min_score]
+            return strict[:max_results]
+
+        query_vec = embed_query(query, settings["api_key"], settings["model"], settings["output_dimensionality"])
 
         vector_results = search_vector(connection, query_vec, candidate_limit, sources, settings["model"])
         keyword_results = search_keyword(connection, query, candidate_limit, sources, settings["model"])
