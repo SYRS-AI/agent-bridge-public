@@ -14,6 +14,7 @@ from pathlib import Path
 
 
 USER_ID_RE = re.compile(r"^[A-Za-z0-9._-]+$")
+SEARCH_SCOPES = ("wiki", "all", "user", "daily", "shared", "project", "decision", "raw")
 
 
 @dataclass
@@ -559,6 +560,206 @@ def cmd_lint(args: argparse.Namespace) -> int:
     return 0
 
 
+def tokenize_query(text: str) -> list[str]:
+    tokens = [item.lower() for item in re.findall(r"[A-Za-z0-9._-]+", text) if len(item) >= 2]
+    if not tokens and text.strip():
+        tokens = [text.strip().lower()]
+    seen: set[str] = set()
+    unique: list[str] = []
+    for token in tokens:
+        if token in seen:
+            continue
+        seen.add(token)
+        unique.append(token)
+    return unique
+
+
+def user_daily_sort_key(path: Path) -> tuple[int, str]:
+    try:
+        date_str = path.stem
+        return (0, date_str)
+    except Exception:
+        return (1, path.name)
+
+
+def iter_search_candidates(home: Path, scope: str, user_id: str | None) -> list[tuple[str, Path]]:
+    candidates: list[tuple[str, Path]] = []
+    include_wiki = scope in ("wiki", "all")
+
+    if include_wiki or scope == "user":
+        if user_id:
+            user_root = home / "users" / user_id
+            if user_root.exists():
+                candidates.extend(
+                    [
+                        ("user-profile", user_root / "USER.md"),
+                        ("user-memory", user_root / "MEMORY.md"),
+                    ]
+                )
+        else:
+            users_root = home / "users"
+            if users_root.exists():
+                for user_root in sorted(path for path in users_root.iterdir() if path.is_dir()):
+                    candidates.extend(
+                        [
+                            ("user-profile", user_root / "USER.md"),
+                            ("user-memory", user_root / "MEMORY.md"),
+                        ]
+                    )
+
+    if include_wiki or scope == "daily":
+        if user_id:
+            daily_root = home / "users" / user_id / "memory"
+            if daily_root.exists():
+                for path in sorted(daily_root.glob("*.md"), key=user_daily_sort_key, reverse=True):
+                    candidates.append(("daily", path))
+        else:
+            users_root = home / "users"
+            if users_root.exists():
+                for user_root in sorted(path for path in users_root.iterdir() if path.is_dir()):
+                    daily_root = user_root / "memory"
+                    if not daily_root.exists():
+                        continue
+                    for path in sorted(daily_root.glob("*.md"), key=user_daily_sort_key, reverse=True):
+                        candidates.append(("daily", path))
+
+    if include_wiki:
+        candidates.extend(
+            [
+                ("agent-memory", home / "MEMORY.md"),
+                ("wiki-index", home / "memory" / "index.md"),
+                ("wiki-log", home / "memory" / "log.md"),
+            ]
+        )
+
+    if include_wiki or scope == "shared":
+        shared_root = home / "memory" / "shared"
+        if shared_root.exists():
+            for path in sorted(shared_root.glob("*.md")):
+                candidates.append(("shared", path))
+
+    if include_wiki or scope == "project":
+        project_root = home / "memory" / "projects"
+        if project_root.exists():
+            for path in sorted(project_root.glob("*.md")):
+                candidates.append(("project", path))
+
+    if include_wiki or scope == "decision":
+        decision_root = home / "memory" / "decisions"
+        if decision_root.exists():
+            for path in sorted(decision_root.glob("*.md")):
+                candidates.append(("decision", path))
+
+    if scope in ("all", "raw"):
+        for raw_dir in (
+            home / "raw" / "captures" / "inbox",
+            home / "raw" / "captures" / "ingested",
+        ):
+            if not raw_dir.exists():
+                continue
+            for path in sorted(raw_dir.glob("*.json"), reverse=True):
+                candidates.append(("raw", path))
+
+    filtered: list[tuple[str, Path]] = []
+    seen_paths: set[Path] = set()
+    for kind, path in candidates:
+        if path in seen_paths or not path.exists():
+            continue
+        seen_paths.add(path)
+        filtered.append((kind, path))
+    return filtered
+
+
+def search_score(kind: str, path: Path, text: str, tokens: list[str]) -> tuple[int, list[str]]:
+    lower = text.lower()
+    hits: list[str] = []
+    score = 0
+    for token in tokens:
+        count = lower.count(token)
+        if count <= 0:
+            continue
+        hits.append(token)
+        score += count * 8
+        if token in path.name.lower():
+            score += 10
+    base_scores = {
+        "user-profile": 80,
+        "user-memory": 70,
+        "daily": 60,
+        "agent-memory": 55,
+        "shared": 50,
+        "project": 45,
+        "decision": 45,
+        "wiki-index": 30,
+        "wiki-log": 20,
+        "raw": 10,
+    }
+    score += base_scores.get(kind, 0)
+    return score, hits
+
+
+def build_snippet(text: str, tokens: list[str]) -> str:
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    if not lines:
+        return ""
+    for line in lines:
+        lower = line.lower()
+        if any(token in lower for token in tokens):
+            return line[:240]
+    return lines[0][:240]
+
+
+def cmd_search(args: argparse.Namespace) -> int:
+    home = Path(args.home)
+    tokens = tokenize_query(args.query)
+    if not tokens:
+        die("search query is empty")
+
+    results: list[dict] = []
+    for kind, path in iter_search_candidates(home, args.scope, args.user):
+        text = read_text(path)
+        score, hits = search_score(kind, path, text, tokens)
+        if score <= 0 or not hits:
+            continue
+        results.append(
+            {
+                "kind": kind,
+                "path": str(path),
+                "relative_path": str(path.relative_to(home)),
+                "score": score,
+                "hits": hits,
+                "snippet": build_snippet(text, tokens),
+            }
+        )
+
+    results.sort(key=lambda item: (-item["score"], item["relative_path"]))
+    limited = results[: args.limit]
+    payload = {
+        "agent": args.agent,
+        "query": args.query,
+        "tokens": tokens,
+        "scope": args.scope,
+        "user": args.user or "",
+        "count": len(limited),
+        "total_matches": len(results),
+        "results": limited,
+    }
+    if args.json:
+        print(json.dumps(payload, ensure_ascii=False, indent=2))
+    else:
+        print(f"agent: {args.agent}")
+        print(f"query: {args.query}")
+        print(f"scope: {args.scope}")
+        if args.user:
+            print(f"user: {args.user}")
+        print(f"matches: {len(limited)} / {len(results)}")
+        for item in limited:
+            print(f"- [{item['kind']}] {item['relative_path']} (score={item['score']})")
+            if item["snippet"]:
+                print(f"  {item['snippet']}")
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser()
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -619,6 +820,16 @@ def build_parser() -> argparse.ArgumentParser:
     lint_parser.add_argument("--home", required=True)
     lint_parser.add_argument("--json", action="store_true")
     lint_parser.set_defaults(func=cmd_lint)
+
+    search_parser = subparsers.add_parser("search")
+    search_parser.add_argument("--agent", required=True)
+    search_parser.add_argument("--home", required=True)
+    search_parser.add_argument("--query", required=True)
+    search_parser.add_argument("--user")
+    search_parser.add_argument("--scope", choices=SEARCH_SCOPES, default="wiki")
+    search_parser.add_argument("--limit", type=int, default=10)
+    search_parser.add_argument("--json", action="store_true")
+    search_parser.set_defaults(func=cmd_search)
 
     return parser
 

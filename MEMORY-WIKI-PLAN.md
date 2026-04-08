@@ -242,36 +242,55 @@ Deliverable:
 
 - a fresh agent can be born with a coherent identity and memory layout
 
-## Phase 3: Memory Write Path
+## Phase 3: Memory Write and Query Path
 
-Add bridge-native write operations.
+Add bridge-native memory operations in three slices.
 
-- `memory init`
-- `memory append`
+### Phase 3A: Raw Capture + Ingest
+
+- `memory capture`
+- `memory ingest`
+
+Deliverable:
+
+- the agent can turn natural-language interactions into raw captures and daily wiki notes
+
+### Phase 3B: Promote + Lint
+
 - `memory promote`
 - `memory lint`
 
 Deliverable:
 
-- the agent can maintain its own wiki rather than just search legacy memory
+- the agent can promote durable facts into curated pages and detect structural problems
 
-## Phase 4: Search and Derived Index
+### Phase 3C: Search
 
-Adapt or replace `tools/memory-manager.py`.
-
-- prefer file-based search as default
-- optionally maintain SQLite/vector indexes as derived state
-- keep compatibility mode only where useful
+- `memory search`
 
 Deliverable:
 
-- fast retrieval without making the index the source of truth
+- the agent can query the wiki first, with raw captures as a lower-priority fallback
 
-## Immediate Next Step
+## Phase 4: Derived Index and Legacy Search Rework
 
-Start with Phase 1.
+Adapt or replace `tools/memory-manager.py`.
 
-That is the lowest-risk change and it fixes the biggest structural gap:
-Agent Bridge already has `SOUL.md` and `MEMORY.md`, but it still lacks a proper schema and wiki skeleton.
+- keep markdown files as source of truth
+- optionally maintain SQLite/vector indexes as derived state
+- add rebuild/query helpers only on top of the wiki, not instead of it
+- keep compatibility mode only where it still adds value
 
-Phase 1 should ship before any memory indexing rewrite.
+Deliverable:
+
+- faster retrieval and maintenance without collapsing back into index-first memory
+
+## Current State
+
+Phases 1, 2, 3A, 3B, and 3C are implemented in the repo.
+
+The next meaningful step is Phase 4:
+
+- connect or replace the legacy `tools/memory-manager.py` path
+- add derived search/index rebuild flows
+- wire channel/runtime capture automation into the wiki model

@@ -90,3 +90,7 @@ Default read order:
   - store raw candidate memory in `raw/captures/inbox/`
 - `agent-bridge memory ingest`
   - move raw captures into the wiki's daily user memory and log the ingest
+- `agent-bridge memory promote`
+  - move durable facts into curated user/shared/project/decision pages
+- `agent-bridge memory search`
+  - search the wiki first, then optional raw capture files if needed

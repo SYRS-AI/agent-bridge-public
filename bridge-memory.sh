@@ -16,6 +16,7 @@ Usage:
   $(basename "$0") ingest --agent <agent> (--capture <id> | --latest | --all) [--dry-run] [--json]
   $(basename "$0") promote --agent <agent> --kind user|shared|project|decision [--user <id>] [--capture <id>] [--page <slug>] [--summary <text>] [--dry-run] [--json]
   $(basename "$0") lint --agent <agent> [--json]
+  $(basename "$0") search --agent <agent> --query <text> [--user <id>] [--scope wiki|all|user|daily|shared|project|decision|raw] [--limit <count>] [--json]
 EOF
 }
 
@@ -311,6 +312,59 @@ case "$command" in
     done
     [[ -n "$agent" ]] || bridge_die "--agent is required"
     args=(lint --agent "$agent" --home "$(resolve_agent_home "$agent")")
+    [[ $json_mode -eq 1 ]] && args+=(--json)
+    run_python "${args[@]}"
+    exit 0
+    ;;
+  search)
+    query=""
+    user_id=""
+    scope="wiki"
+    limit=10
+    while [[ $# -gt 0 ]]; do
+      case "$1" in
+        --agent)
+          [[ $# -ge 2 ]] || bridge_die "옵션 값이 필요합니다: $1"
+          agent="$2"
+          shift 2
+          ;;
+        --query)
+          [[ $# -ge 2 ]] || bridge_die "옵션 값이 필요합니다: $1"
+          query="$2"
+          shift 2
+          ;;
+        --user)
+          [[ $# -ge 2 ]] || bridge_die "옵션 값이 필요합니다: $1"
+          user_id="$2"
+          shift 2
+          ;;
+        --scope)
+          [[ $# -ge 2 ]] || bridge_die "옵션 값이 필요합니다: $1"
+          scope="$2"
+          shift 2
+          ;;
+        --limit)
+          [[ $# -ge 2 ]] || bridge_die "옵션 값이 필요합니다: $1"
+          limit="$2"
+          shift 2
+          ;;
+        --json)
+          json_mode=1
+          shift
+          ;;
+        -h|--help|help)
+          usage
+          exit 0
+          ;;
+        *)
+          bridge_die "지원하지 않는 memory search 옵션입니다: $1"
+          ;;
+      esac
+    done
+    [[ -n "$agent" ]] || bridge_die "--agent is required"
+    [[ -n "$query" ]] || bridge_die "--query is required"
+    args=(search --agent "$agent" --home "$(resolve_agent_home "$agent")" --query "$query" --scope "$scope" --limit "$limit")
+    [[ -n "$user_id" ]] && args+=(--user "$user_id")
     [[ $json_mode -eq 1 ]] && args+=(--json)
     run_python "${args[@]}"
     exit 0
