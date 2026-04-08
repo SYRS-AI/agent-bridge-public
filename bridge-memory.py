@@ -284,6 +284,17 @@ def resolve_capture_paths(home: Path, capture_id: str | None, latest: bool, all_
     die("specify --capture, --latest, or --all")
 
 
+def resolve_any_capture_path(home: Path, capture_id: str) -> Path:
+    for directory in (
+        home / "raw" / "captures" / "inbox",
+        home / "raw" / "captures" / "ingested",
+    ):
+        path = directory / f"{capture_id}.json"
+        if path.exists():
+            return path
+    die(f"capture not found: {capture_id}")
+
+
 def ensure_daily_note(path: Path, date_str: str, dry_run: bool) -> None:
     if path.exists():
         return
@@ -317,6 +328,10 @@ def append_memory_log(path: Path, capture: dict, daily_rel: str, dry_run: bool) 
     created_at = datetime.now().astimezone().isoformat()
     line = f"- {created_at} ingested `{capture['capture_id']}` into `{daily_rel}`\n"
     append_text(path, line, dry_run)
+
+
+def append_memory_event(path: Path, line: str, dry_run: bool) -> None:
+    append_text(path, line.rstrip() + "\n", dry_run)
 
 
 def cmd_ingest(args: argparse.Namespace) -> int:
@@ -364,6 +379,186 @@ def cmd_ingest(args: argparse.Namespace) -> int:
     return 0
 
 
+def ensure_section(path: Path, section: str, dry_run: bool) -> None:
+    if path.exists():
+        text = read_text(path)
+    else:
+        text = f"# {section}\n"
+    if f"## {section}\n" in text or text.startswith(f"# {section}\n"):
+        if not path.exists():
+            write_text(path, text, dry_run)
+        return
+    if not text.endswith("\n"):
+        text += "\n"
+    text += f"\n## {section}\n"
+    write_text(path, text, dry_run)
+
+
+def append_under_section(path: Path, section: str, block: str, dry_run: bool) -> None:
+    if path.exists():
+        text = read_text(path)
+    else:
+        text = ""
+    marker = f"\n## {section}\n"
+    if text.startswith(f"# {section}\n"):
+        text = text.rstrip() + "\n\n" + block
+    elif marker in text:
+        text = text.rstrip() + "\n" + block
+    else:
+        if text and not text.endswith("\n"):
+            text += "\n"
+        if text:
+            text += "\n"
+        text += f"## {section}\n{block}"
+    write_text(path, text.rstrip() + "\n", dry_run)
+
+
+def page_title_from_slug(slug: str) -> str:
+    return slug.replace("-", " ").replace("_", " ").strip().title() or "Memory Page"
+
+
+def ensure_page(path: Path, title: str, dry_run: bool) -> None:
+    if path.exists():
+        return
+    write_text(path, f"# {title}\n\n## Notes\n", dry_run)
+
+
+def cmd_promote(args: argparse.Namespace) -> int:
+    home = Path(args.home)
+    template_root = Path(args.template_root)
+    ensure_memory_layout(home, template_root, args.dry_run)
+
+    capture = None
+    if args.capture:
+        capture = json.loads(read_text(resolve_any_capture_path(home, args.capture)))
+    user_id = args.user or (capture.get("user") if capture else "default") or "default"
+    user = UserSpec(user_id=user_id, display_name=user_id)
+    ensure_user_partition(home, template_root, user, args.dry_run, [])
+
+    summary = args.summary or (capture.get("text") if capture else "")
+    if not summary:
+        die("promotion summary is required")
+
+    created_at = datetime.now().astimezone().isoformat()
+    kind = args.kind
+    title = args.title or args.page or (capture.get("title") if capture else "") or kind
+    block_lines = [
+        f"- {created_at}: {summary}",
+    ]
+    if capture:
+        block_lines.append(f"  - source capture: `{capture['capture_id']}`")
+        if capture.get("source"):
+            block_lines.append(f"  - source: {capture['source']}")
+    block = "\n".join(block_lines) + "\n"
+
+    target_path: Path
+    if kind == "user":
+        target_path = home / "users" / user.user_id / "MEMORY.md"
+        append_under_section(target_path, "Promotions", block, args.dry_run)
+    else:
+        page_slug = slugify(args.page or title)
+        if kind == "shared":
+            target_path = home / "memory" / "shared" / f"{page_slug}.md"
+        elif kind == "project":
+            target_path = home / "memory" / "projects" / f"{page_slug}.md"
+        elif kind == "decision":
+            target_path = home / "memory" / "decisions" / f"{page_slug}.md"
+        else:
+            die(f"unsupported promote kind: {kind}")
+        ensure_page(target_path, page_title_from_slug(page_slug), args.dry_run)
+        append_under_section(target_path, "Notes", block, args.dry_run)
+
+    log_line = f"- {created_at} promoted `{kind}` -> `{target_path.relative_to(home)}`"
+    if capture:
+        log_line += f" from `{capture['capture_id']}`"
+    append_memory_event(home / "memory" / "log.md", log_line, args.dry_run)
+
+    payload = {
+        "agent": args.agent,
+        "kind": kind,
+        "user": user.user_id,
+        "target": str(target_path),
+        "capture": capture["capture_id"] if capture else "",
+        "dry_run": args.dry_run,
+    }
+    if args.json:
+        print(json.dumps(payload, ensure_ascii=False, indent=2))
+    else:
+        print(f"agent: {args.agent}")
+        print(f"kind: {kind}")
+        print(f"user: {user.user_id}")
+        print(f"target: {target_path}")
+        if capture:
+            print(f"capture: {capture['capture_id']}")
+    return 0
+
+
+def cmd_lint(args: argparse.Namespace) -> int:
+    home = Path(args.home)
+    problems: list[str] = []
+    warnings: list[str] = []
+
+    for relpath in (
+        "SOUL.md",
+        "CLAUDE.md",
+        "MEMORY-SCHEMA.md",
+        "MEMORY.md",
+        "memory/index.md",
+        "memory/log.md",
+    ):
+        if not (home / relpath).exists():
+            problems.append(f"missing: {relpath}")
+
+    users_root = home / "users"
+    user_dirs = sorted(path for path in users_root.iterdir() if path.is_dir()) if users_root.exists() else []
+    if not user_dirs:
+        problems.append("missing: users/<user-id> partitions")
+    for user_dir in user_dirs:
+        if not (user_dir / "USER.md").exists():
+            problems.append(f"missing: {user_dir.relative_to(home)}/USER.md")
+        if not (user_dir / "MEMORY.md").exists():
+            problems.append(f"missing: {user_dir.relative_to(home)}/MEMORY.md")
+        if not (user_dir / "memory").exists():
+            problems.append(f"missing: {user_dir.relative_to(home)}/memory/")
+
+    index_path = home / "memory" / "index.md"
+    if index_path.exists():
+        index_text = read_text(index_path)
+        for user_dir in user_dirs:
+            expected = f"../users/{user_dir.name}/"
+            if expected not in index_text:
+                warnings.append(f"index_missing_user_ref: {expected}")
+
+    inbox_dir = home / "raw" / "captures" / "inbox"
+    pending_captures = sorted(path.name for path in inbox_dir.glob("*.json")) if inbox_dir.exists() else []
+    if pending_captures:
+        warnings.append(f"pending_captures: {len(pending_captures)}")
+
+    payload = {
+        "agent": args.agent,
+        "ok": len(problems) == 0,
+        "problems": problems,
+        "warnings": warnings,
+        "pending_captures": pending_captures,
+    }
+    if args.json:
+        print(json.dumps(payload, ensure_ascii=False, indent=2))
+    else:
+        print(f"agent: {args.agent}")
+        print(f"ok: {'yes' if not problems else 'no'}")
+        if problems:
+            for item in problems:
+                print(f"- {item}")
+        else:
+            print("- no problems")
+        if warnings:
+            print("warnings:")
+            for item in warnings:
+                print(f"- {item}")
+        print(f"pending_captures: {len(pending_captures)}")
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser()
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -404,6 +599,26 @@ def build_parser() -> argparse.ArgumentParser:
     ingest_parser.add_argument("--dry-run", action="store_true")
     ingest_parser.add_argument("--json", action="store_true")
     ingest_parser.set_defaults(func=cmd_ingest)
+
+    promote_parser = subparsers.add_parser("promote")
+    promote_parser.add_argument("--agent", required=True)
+    promote_parser.add_argument("--home", required=True)
+    promote_parser.add_argument("--template-root", required=True)
+    promote_parser.add_argument("--kind", choices=("user", "shared", "project", "decision"), required=True)
+    promote_parser.add_argument("--user")
+    promote_parser.add_argument("--capture")
+    promote_parser.add_argument("--page")
+    promote_parser.add_argument("--title")
+    promote_parser.add_argument("--summary")
+    promote_parser.add_argument("--dry-run", action="store_true")
+    promote_parser.add_argument("--json", action="store_true")
+    promote_parser.set_defaults(func=cmd_promote)
+
+    lint_parser = subparsers.add_parser("lint")
+    lint_parser.add_argument("--agent", required=True)
+    lint_parser.add_argument("--home", required=True)
+    lint_parser.add_argument("--json", action="store_true")
+    lint_parser.set_defaults(func=cmd_lint)
 
     return parser
 

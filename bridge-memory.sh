@@ -14,6 +14,8 @@ Usage:
   $(basename "$0") init --agent <agent> [--user <id[:display-name]>]... [--dry-run] [--json]
   $(basename "$0") capture --agent <agent> [--user <id>] --source <source> [--author <name>] [--channel <id>] [--title <text>] (--text <text> | --text-file <path>) [--dry-run] [--json]
   $(basename "$0") ingest --agent <agent> (--capture <id> | --latest | --all) [--dry-run] [--json]
+  $(basename "$0") promote --agent <agent> --kind user|shared|project|decision [--user <id>] [--capture <id>] [--page <slug>] [--summary <text>] [--dry-run] [--json]
+  $(basename "$0") lint --agent <agent> [--json]
 EOF
 }
 
@@ -208,6 +210,107 @@ case "$command" in
     [[ $latest -eq 1 ]] && args+=(--latest)
     [[ $all_items -eq 1 ]] && args+=(--all)
     [[ $dry_run -eq 1 ]] && args+=(--dry-run)
+    [[ $json_mode -eq 1 ]] && args+=(--json)
+    run_python "${args[@]}"
+    exit 0
+    ;;
+  promote)
+    kind=""
+    user_id=""
+    capture_id=""
+    page=""
+    title=""
+    summary=""
+    while [[ $# -gt 0 ]]; do
+      case "$1" in
+        --agent)
+          [[ $# -ge 2 ]] || bridge_die "옵션 값이 필요합니다: $1"
+          agent="$2"
+          shift 2
+          ;;
+        --kind)
+          [[ $# -ge 2 ]] || bridge_die "옵션 값이 필요합니다: $1"
+          kind="$2"
+          shift 2
+          ;;
+        --user)
+          [[ $# -ge 2 ]] || bridge_die "옵션 값이 필요합니다: $1"
+          user_id="$2"
+          shift 2
+          ;;
+        --capture)
+          [[ $# -ge 2 ]] || bridge_die "옵션 값이 필요합니다: $1"
+          capture_id="$2"
+          shift 2
+          ;;
+        --page)
+          [[ $# -ge 2 ]] || bridge_die "옵션 값이 필요합니다: $1"
+          page="$2"
+          shift 2
+          ;;
+        --title)
+          [[ $# -ge 2 ]] || bridge_die "옵션 값이 필요합니다: $1"
+          title="$2"
+          shift 2
+          ;;
+        --summary)
+          [[ $# -ge 2 ]] || bridge_die "옵션 값이 필요합니다: $1"
+          summary="$2"
+          shift 2
+          ;;
+        --dry-run)
+          dry_run=1
+          shift
+          ;;
+        --json)
+          json_mode=1
+          shift
+          ;;
+        -h|--help|help)
+          usage
+          exit 0
+          ;;
+        *)
+          bridge_die "지원하지 않는 memory promote 옵션입니다: $1"
+          ;;
+      esac
+    done
+    [[ -n "$agent" ]] || bridge_die "--agent is required"
+    [[ -n "$kind" ]] || bridge_die "--kind is required"
+    args=(promote --agent "$agent" --home "$(resolve_agent_home "$agent")" --template-root "$SCRIPT_DIR/agents/_template" --kind "$kind")
+    [[ -n "$user_id" ]] && args+=(--user "$user_id")
+    [[ -n "$capture_id" ]] && args+=(--capture "$capture_id")
+    [[ -n "$page" ]] && args+=(--page "$page")
+    [[ -n "$title" ]] && args+=(--title "$title")
+    [[ -n "$summary" ]] && args+=(--summary "$summary")
+    [[ $dry_run -eq 1 ]] && args+=(--dry-run)
+    [[ $json_mode -eq 1 ]] && args+=(--json)
+    run_python "${args[@]}"
+    exit 0
+    ;;
+  lint)
+    while [[ $# -gt 0 ]]; do
+      case "$1" in
+        --agent)
+          [[ $# -ge 2 ]] || bridge_die "옵션 값이 필요합니다: $1"
+          agent="$2"
+          shift 2
+          ;;
+        --json)
+          json_mode=1
+          shift
+          ;;
+        -h|--help|help)
+          usage
+          exit 0
+          ;;
+        *)
+          bridge_die "지원하지 않는 memory lint 옵션입니다: $1"
+          ;;
+      esac
+    done
+    [[ -n "$agent" ]] || bridge_die "--agent is required"
+    args=(lint --agent "$agent" --home "$(resolve_agent_home "$agent")")
     [[ $json_mode -eq 1 ]] && args+=(--json)
     run_python "${args[@]}"
     exit 0
