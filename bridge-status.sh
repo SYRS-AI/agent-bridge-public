@@ -6,6 +6,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd -P "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 # shellcheck source=/dev/null
 source "$SCRIPT_DIR/bridge-lib.sh"
+BRIDGE_FAST_ROSTER_LOAD=1
 bridge_load_roster
 
 usage() {

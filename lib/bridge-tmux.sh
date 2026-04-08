@@ -107,11 +107,21 @@ bridge_tmux_session_has_prompt() {
   local session="$1"
   local engine="$2"
   local recent=""
+ 
+  bridge_tmux_engine_requires_prompt "$engine" || return 0
+  recent="$(bridge_capture_recent "$session" 20 2>/dev/null || true)"
+  [[ -n "$recent" ]] || return 1
+
+  bridge_tmux_session_has_prompt_from_text "$engine" "$recent"
+}
+
+bridge_tmux_session_has_prompt_from_text() {
+  local engine="$1"
+  local recent="$2"
   local line=""
   local trimmed=""
 
   bridge_tmux_engine_requires_prompt "$engine" || return 0
-  recent="$(bridge_capture_recent "$session" 20 2>/dev/null || true)"
   [[ -n "$recent" ]] || return 1
 
   if [[ "$engine" == "claude" ]]; then

@@ -432,146 +432,169 @@ bridge_agent_launch_cmd_raw() {
   printf '%s' "${BRIDGE_AGENT_LAUNCH_CMD[$agent]-}"
 }
 
+bridge_trim_whitespace() {
+  local raw="${1-}"
+  raw="${raw#"${raw%%[![:space:]]*}"}"
+  raw="${raw%"${raw##*[![:space:]]}"}"
+  printf '%s' "$raw"
+}
+
+bridge_append_csv_unique() {
+  local csv="${1-}"
+  local value="${2-}"
+  local item=""
+
+  value="$(bridge_trim_whitespace "$value")"
+  [[ -n "$value" ]] || {
+    printf '%s' "$csv"
+    return 0
+  }
+
+  IFS=',' read -r -a items <<<"$csv"
+  for item in "${items[@]}"; do
+    item="$(bridge_trim_whitespace "$item")"
+    [[ -n "$item" ]] || continue
+    if [[ "$item" == "$value" ]]; then
+      printf '%s' "$csv"
+      return 0
+    fi
+  done
+
+  if [[ -n "$csv" ]]; then
+    printf '%s,%s' "$csv" "$value"
+  else
+    printf '%s' "$value"
+  fi
+}
+
+bridge_merge_channels_csv() {
+  local base="${1-}"
+  local extra="${2-}"
+  local merged="$base"
+  local item=""
+  local -a items=()
+
+  [[ -n "$extra" ]] || {
+    printf '%s' "$base"
+    return 0
+  }
+
+  IFS=',' read -r -a items <<<"$extra"
+  for item in "${items[@]}"; do
+    merged="$(bridge_append_csv_unique "$merged" "$item")"
+  done
+
+  printf '%s' "$merged"
+}
+
+bridge_qualify_channel_item() {
+  local item="${1-}"
+  local plugin_name=""
+
+  item="$(bridge_trim_whitespace "$item")"
+  [[ -n "$item" ]] || {
+    printf '%s' ""
+    return 0
+  }
+
+  if [[ "$item" == plugin:* && "$item" != *@* ]]; then
+    plugin_name="${item#plugin:}"
+    case "$plugin_name" in
+      telegram|discord)
+        printf 'plugin:%s@claude-plugins-official' "$plugin_name"
+        return 0
+        ;;
+    esac
+  fi
+
+  printf '%s' "$item"
+}
+
 bridge_normalize_channels_csv() {
   local raw="${1:-}"
-  local installed_plugins_file="${BRIDGE_CLAUDE_INSTALLED_PLUGINS_FILE:-$HOME/.claude/plugins/installed_plugins.json}"
+  local normalized=""
+  local chunk=""
+  local item=""
+  local -a chunks=()
 
-  bridge_require_python
-  python3 - "$raw" "$installed_plugins_file" <<'PY'
-import json
-from pathlib import Path
-import sys
+  raw="${raw//$'\n'/,}"
+  IFS=',' read -r -a chunks <<<"$raw"
+  for chunk in "${chunks[@]}"; do
+    item="$(bridge_qualify_channel_item "$chunk")"
+    normalized="$(bridge_append_csv_unique "$normalized" "$item")"
+  done
 
-raw = sys.argv[1]
-installed_plugins_file = Path(sys.argv[2]).expanduser()
-
-plugin_index = {}
-try:
-    payload = json.loads(installed_plugins_file.read_text(encoding="utf-8"))
-    plugins = payload.get("plugins") or {}
-    if isinstance(plugins, dict):
-        for plugin_id in plugins.keys():
-            if not isinstance(plugin_id, str):
-                continue
-            name = plugin_id.split("@", 1)[0].strip()
-            if not name:
-                continue
-            plugin_index.setdefault(name, []).append(plugin_id)
-except Exception:
-    plugin_index = {}
-
-def qualify(item: str) -> str:
-    if not item.startswith("plugin:") or "@" in item:
-        return item
-    plugin_name = item.split(":", 1)[1].strip()
-    if plugin_name in {"telegram", "discord"}:
-        return f"plugin:{plugin_name}@claude-plugins-official"
-    matches = plugin_index.get(plugin_name, [])
-    if len(matches) == 1:
-        return f"plugin:{matches[0]}"
-    official = [match for match in matches if match.endswith("@claude-plugins-official")]
-    if len(official) == 1:
-        return f"plugin:{official[0]}"
-    return item
-
-values = []
-seen = set()
-for chunk in str(raw).replace("\n", ",").split(","):
-    item = qualify(chunk.strip())
-    if not item or item in seen:
-        continue
-    seen.add(item)
-    values.append(item)
-print(",".join(values))
-PY
+  printf '%s' "$normalized"
 }
 
 bridge_extract_channels_from_command() {
   local command="${1:-}"
+  local rest="$command"
+  local value=""
+  local csv=""
 
-  bridge_require_python
-  python3 - "$command" <<'PY'
-import shlex
-import sys
+  while [[ "$rest" =~ --channels=([^[:space:]]+) ]]; do
+    value="${BASH_REMATCH[1]}"
+    csv="$(bridge_merge_channels_csv "$csv" "$(bridge_normalize_channels_csv "$value")")"
+    rest="${rest#*"${BASH_REMATCH[0]}"}"
+  done
 
-command = sys.argv[1]
-try:
-    args = shlex.split(command)
-except Exception:
-    print("")
-    raise SystemExit(0)
+  rest="$command"
+  while [[ "$rest" =~ --channels[[:space:]]+([^[:space:]]+) ]]; do
+    value="${BASH_REMATCH[1]}"
+    csv="$(bridge_merge_channels_csv "$csv" "$(bridge_normalize_channels_csv "$value")")"
+    rest="${rest#*"${BASH_REMATCH[0]}"}"
+  done
 
-values = []
-seen = set()
-i = 0
-while i < len(args):
-    token = args[i]
-    value = None
-    if token == "--channels" and i + 1 < len(args):
-        value = args[i + 1]
-        i += 2
-    elif token.startswith("--channels="):
-        value = token.split("=", 1)[1]
-        i += 1
-    else:
-        i += 1
-    if value is None:
-        continue
-    for chunk in str(value).split(","):
-        item = chunk.strip()
-        if not item or item in seen:
-            continue
-        seen.add(item)
-        values.append(item)
-
-print(",".join(values))
-PY
+  printf '%s' "$csv"
 }
 
 bridge_channel_csv_contains() {
   local csv="${1:-}"
   local needle="${2:-}"
+  local item=""
+  local -a items=()
 
   [[ -n "$csv" && -n "$needle" ]] || return 1
 
-  bridge_require_python
-  python3 - "$csv" "$needle" <<'PY'
-import sys
+  IFS=',' read -r -a items <<<"$csv"
+  for item in "${items[@]}"; do
+    item="$(bridge_trim_whitespace "$item")"
+    [[ -n "$item" ]] || continue
+    if [[ "$item" == "$needle" || "$item" == "$needle@"* ]]; then
+      return 0
+    fi
+  done
 
-values = [item.strip() for item in sys.argv[1].split(",") if item.strip()]
-needle = sys.argv[2]
-for value in values:
-    if value == needle or value.startswith(f"{needle}@"):
-        raise SystemExit(0)
-raise SystemExit(1)
-PY
+  return 1
 }
 
 bridge_channel_csv_is_subset() {
   local required_csv="${1:-}"
   local actual_csv="${2:-}"
+  local need=""
+  local have=""
+  local matched=0
 
-  bridge_require_python
-  python3 - "$required_csv" "$actual_csv" <<'PY'
-import sys
+  IFS=',' read -r -a required_items <<<"$required_csv"
+  IFS=',' read -r -a actual_items <<<"$actual_csv"
 
-def parse(raw: str) -> list[str]:
-    return [item.strip() for item in raw.split(",") if item.strip()]
+  for need in "${required_items[@]}"; do
+    need="$(bridge_trim_whitespace "$need")"
+    [[ -n "$need" ]] || continue
+    matched=1
+    for have in "${actual_items[@]}"; do
+      have="$(bridge_trim_whitespace "$have")"
+      [[ -n "$have" ]] || continue
+      if [[ "$have" == "$need" || "$have" == "$need@"* || "$need" == "$have@"* ]]; then
+        matched=0
+        break
+      fi
+    done
+    (( matched == 0 )) || return 1
+  done
 
-required = parse(sys.argv[1])
-actual = parse(sys.argv[2])
-
-for need in required:
-    matched = False
-    for have in actual:
-        if have == need or have.startswith(f"{need}@") or need.startswith(f"{have}@"):
-            matched = True
-            break
-    if not matched:
-        raise SystemExit(1)
-
-raise SystemExit(0)
-PY
+  return 0
 }
 
 bridge_agent_channels_csv() {
@@ -654,6 +677,7 @@ bridge_agent_channel_status_reason() {
   local agent="$1"
   local required=""
   local effective=""
+  local explicit=""
   local discord_dir=""
 
   required="$(bridge_agent_channels_csv "$agent")"
@@ -662,7 +686,13 @@ bridge_agent_channel_status_reason() {
     return 0
   fi
 
-  effective="$(bridge_extract_channels_from_command "$(bridge_agent_launch_cmd "$agent")")"
+  explicit="${BRIDGE_AGENT_CHANNELS[$agent]-}"
+  if [[ -n "$explicit" ]]; then
+    effective="$required"
+  else
+    effective="$(bridge_extract_channels_from_command "$(bridge_agent_launch_cmd_raw "$agent")")"
+  fi
+
   if ! bridge_channel_csv_is_subset "$required" "$effective"; then
     printf 'launch command missing required --channels (%s)' "$required"
     return 0

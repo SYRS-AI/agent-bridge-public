@@ -590,6 +590,7 @@ bridge_load_static_histories() {
 
 bridge_load_roster() {
   local agent
+  local fast_load="${BRIDGE_FAST_ROSTER_LOAD:-0}"
 
   bridge_reset_roster_maps
 
@@ -632,9 +633,11 @@ bridge_load_roster() {
     BRIDGE_AGENT_IDLE_TIMEOUT["$agent"]="${BRIDGE_AGENT_IDLE_TIMEOUT[$agent]-$BRIDGE_ON_DEMAND_IDLE_SECONDS}"
   done
 
-  bridge_load_static_histories
   bridge_load_dynamic_agents
-  bridge_restore_dynamic_agents_from_history
+  if [[ "$fast_load" != "1" ]]; then
+    bridge_load_static_histories
+    bridge_restore_dynamic_agents_from_history
+  fi
 }
 
 bridge_dynamic_agent_ids() {
@@ -1087,6 +1090,8 @@ bridge_write_roster_status_snapshot() {
   local session
   local activity_state
   local loop_mode
+  local engine
+  local recent
 
   {
     echo -e "agent\tengine\tsession\tworkdir\tsource\tloop\tactive\twake\tchannels\tactivity_state"
@@ -1096,18 +1101,32 @@ bridge_write_roster_status_snapshot() {
       channels="$(bridge_agent_channel_status "$agent")"
       activity_state="stopped"
       session="$(bridge_agent_session "$agent")"
+      engine="$(bridge_agent_engine "$agent")"
       loop_mode="$(bridge_agent_loop "$agent")"
       if bridge_agent_is_active "$agent"; then
         active=1
-        wake="$(bridge_agent_wake_status "$agent")"
-        if bridge_tmux_session_has_prompt "$session" "$(bridge_agent_engine "$agent")"; then
+        recent=""
+        if bridge_tmux_engine_requires_prompt "$engine"; then
+          recent="$(bridge_capture_recent "$session" 80 2>/dev/null || true)"
+        fi
+        if bridge_agent_requires_wake_channel "$agent"; then
+          wake="ok"
+          if [[ "$engine" == "claude" && -n "$recent" ]]; then
+            case "$(bridge_tmux_claude_blocker_state_from_text "$recent")" in
+              trust|summary)
+                wake="block"
+                ;;
+            esac
+          fi
+        fi
+        if bridge_tmux_session_has_prompt_from_text "$engine" "$recent"; then
           activity_state="idle"
         else
           activity_state="working"
         fi
       fi
 
-      echo -e "${agent}\t$(bridge_agent_engine "$agent")\t${session}\t$(bridge_agent_workdir "$agent")\t$(bridge_agent_source "$agent")\t${loop_mode}\t${active}\t${wake}\t${channels}\t${activity_state}"
+      echo -e "${agent}\t${engine}\t${session}\t$(bridge_agent_workdir "$agent")\t$(bridge_agent_source "$agent")\t${loop_mode}\t${active}\t${wake}\t${channels}\t${activity_state}"
     done
   } >"$file"
 }
