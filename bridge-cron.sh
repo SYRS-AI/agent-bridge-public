@@ -605,6 +605,7 @@ run_sync() {
   local tmp_dir=""
   local legacy_json=""
   local native_json=""
+  local cleanup_json=""
   local status=0
 
   while [[ $# -gt 0 ]]; do
@@ -668,15 +669,25 @@ run_sync() {
       status=1
     fi
     native_json="$tmp_dir/native.json"
+
+    if [[ $dry_run -eq 0 ]]; then
+      if ! bridge_cron_python cleanup-prune \
+        --jobs-file "$BRIDGE_NATIVE_CRON_JOBS_FILE" \
+        --mode expired-one-shot \
+        --json >"$tmp_dir/native-cleanup.json"; then
+        status=1
+      fi
+      cleanup_json="$tmp_dir/native-cleanup.json"
+    fi
   fi
 
   bridge_require_python
-  python3 - "$legacy_json" "$native_json" "$json_output" <<'PY'
+  python3 - "$legacy_json" "$native_json" "$cleanup_json" "$json_output" <<'PY'
 import json
 import sys
 from pathlib import Path
 
-legacy_path, native_path, json_output = sys.argv[1], sys.argv[2], sys.argv[3] == "1"
+legacy_path, native_path, cleanup_path, json_output = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4] == "1"
 
 def load(path_value):
     if not path_value:
@@ -691,6 +702,7 @@ for name, path_value in (("legacy", legacy_path), ("native", native_path)):
     payload = load(path_value)
     if payload is not None:
         sources[name] = payload
+cleanup_payload = load(cleanup_path)
 
 if not sources:
     payload = {"status": "skipped", "reason": "no_sources"}
@@ -707,6 +719,7 @@ totals = {
     "created": 0,
     "already_enqueued": 0,
     "errors": 0,
+    "cleanup_deleted_jobs": 0,
 }
 statuses = []
 for source_payload in sources.values():
@@ -717,6 +730,8 @@ for source_payload in sources.values():
     totals["already_enqueued"] += sum(1 for item in source_payload.get("results", []) if item.get("status") == "already_enqueued")
     totals["errors"] += sum(1 for item in source_payload.get("results", []) if item.get("status") == "error")
     statuses.append(source_payload.get("status", "ok"))
+if cleanup_payload is not None:
+    totals["cleanup_deleted_jobs"] = int(cleanup_payload.get("deleted_jobs", 0))
 
 if any(status == "error" for status in statuses) or totals["errors"] > 0:
     status_value = "error"
@@ -728,6 +743,7 @@ else:
 payload = {
     "status": status_value,
     "sources": sources,
+    "cleanup": cleanup_payload,
     "totals": totals,
 }
 
@@ -752,8 +768,10 @@ else:
     print(f"eligible_jobs: {totals['eligible_jobs']}")
     print(f"due_occurrences: {totals['due_occurrences']}")
     print(f"created: {totals['created']}")
-    print(f"already_enqueued: {totals['already_enqueued']}")
-    print(f"errors: {totals['errors']}")
+print(f"already_enqueued: {totals['already_enqueued']}")
+print(f"errors: {totals['errors']}")
+if cleanup_payload is not None:
+    print(f"cleanup_deleted_jobs: {totals['cleanup_deleted_jobs']}")
 PY
   return "$status"
 }
@@ -848,7 +866,7 @@ run_cleanup() {
             py_args+=("$1" "$2")
             shift 2
             ;;
-          --dry-run)
+          --dry-run|--json)
             py_args+=("$1")
             shift
             ;;

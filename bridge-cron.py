@@ -1091,25 +1091,45 @@ def run_cleanup_prune(args, raw_payload, records):
     jobs_path = Path(args.jobs_file).expanduser()
     remaining_jobs = [job for job in (raw_payload.get("jobs") if isinstance(raw_payload, dict) else raw_payload) if job.get("id") not in candidate_ids]
     remaining_count = len(remaining_jobs)
+    sample = [format_cleanup_candidate(record) for record in candidates[:10]]
+    payload = {
+        "status": "nothing_to_prune",
+        "mode": args.mode,
+        "candidate_jobs": len(candidates),
+        "remaining_jobs_after_prune": remaining_count,
+        "deleted_jobs": 0,
+        "remaining_jobs": remaining_count,
+        "source_file": str(jobs_path),
+        "sample_jobs": sample,
+    }
 
-    print("warning: cleanup prune rewrites gateway jobs.json directly.")
-    print("warning: run it between gateway cron ticks to reduce write collision risk.")
-    print(f"mode: {args.mode}")
-    print(f"candidate_jobs: {len(candidates)}")
-    print(f"remaining_jobs_after_prune: {remaining_count}")
+    if not args.json:
+        print("warning: cleanup prune rewrites gateway jobs.json directly.")
+        print("warning: run it between gateway cron ticks to reduce write collision risk.")
+        print(f"mode: {args.mode}")
+        print(f"candidate_jobs: {len(candidates)}")
+        print(f"remaining_jobs_after_prune: {remaining_count}")
 
     if not candidates:
-        print("status: nothing_to_prune")
+        if args.json:
+            print(json.dumps(payload, ensure_ascii=False, indent=2))
+        else:
+            print("status: nothing_to_prune")
         return 0
 
-    print("candidate_sample:")
-    for record in candidates[:10]:
-        print(f"- {format_cleanup_candidate(record)}")
-    if len(candidates) > 10:
-        print(f"- ... ({len(candidates) - 10} more candidates)")
+    if not args.json:
+        print("candidate_sample:")
+        for entry in sample:
+            print(f"- {entry}")
+        if len(candidates) > 10:
+            print(f"- ... ({len(candidates) - 10} more candidates)")
 
     if args.dry_run:
-        print("status: dry_run")
+        payload["status"] = "dry_run"
+        if args.json:
+            print(json.dumps(payload, ensure_ascii=False, indent=2))
+        else:
+            print("status: dry_run")
         return 0
 
     backup_path = backup_path_for(jobs_path)
@@ -1120,10 +1140,16 @@ def run_cleanup_prune(args, raw_payload, records):
     else:
         next_payload = remaining_jobs
     atomic_write_jobs(jobs_path, next_payload)
-    print("status: pruned")
-    print(f"deleted_jobs: {len(candidates)}")
-    print(f"remaining_jobs: {remaining_count}")
-    print(f"backup_file: {backup_path}")
+    payload["status"] = "pruned"
+    payload["deleted_jobs"] = len(candidates)
+    payload["backup_file"] = str(backup_path)
+    if args.json:
+        print(json.dumps(payload, ensure_ascii=False, indent=2))
+    else:
+        print("status: pruned")
+        print(f"deleted_jobs: {len(candidates)}")
+        print(f"remaining_jobs: {remaining_count}")
+        print(f"backup_file: {backup_path}")
     return 0
 
 
@@ -1311,6 +1337,7 @@ def build_parser():
     cleanup_prune_parser.add_argument("--jobs-file", required=True)
     cleanup_prune_parser.add_argument("--mode", choices=("expired-one-shot",), default="expired-one-shot")
     cleanup_prune_parser.add_argument("--dry-run", action="store_true")
+    cleanup_prune_parser.add_argument("--json", action="store_true")
 
     native_list_parser = subparsers.add_parser("native-list", help="List bridge-native cron jobs.")
     native_list_parser.add_argument("--jobs-file", required=True)

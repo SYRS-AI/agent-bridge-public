@@ -1702,6 +1702,42 @@ CRON_IMPORTED_AT_OUTPUT="$("$REPO_ROOT/agent-bridge" cron sync --dry-run --since
 assert_contains "$CRON_IMPORTED_AT_OUTPUT" "native: status=dry_run"
 assert_contains "$CRON_IMPORTED_AT_OUTPUT" "due=2"
 
+log "auto-pruning expired one-shot jobs during native sync"
+python3 - <<PY
+import json, os
+path = os.path.join(os.environ["BRIDGE_HOME"], "cron", "jobs.json")
+payload = json.load(open(path, "r", encoding="utf-8"))
+payload["jobs"].append({
+    "id": "expired-at-cleanup-smoke",
+    "agentId": "${SMOKE_AGENT}",
+    "name": "expired-at-cleanup-smoke",
+    "enabled": False,
+    "createdAtMs": 1743840000000,
+    "updatedAtMs": 1743840000000,
+    "schedule": {
+        "kind": "at",
+        "at": "2026-04-04T08:30:00+00:00",
+    },
+    "payload": {
+        "kind": "agentTurn",
+        "message": "expired cleanup smoke",
+    },
+    "deleteAfterRun": True,
+    "state": {},
+})
+with open(path, "w", encoding="utf-8") as fh:
+    json.dump(payload, fh, ensure_ascii=False, indent=2)
+    fh.write("\n")
+PY
+CRON_CLEANUP_SYNC_JSON="$("$REPO_ROOT/agent-bridge" cron sync --json --since '2026-04-05T08:29:00+00:00' --now '2026-04-05T09:00:00+00:00')"
+assert_contains "$CRON_CLEANUP_SYNC_JSON" "\"cleanup_deleted_jobs\": 1"
+python3 - <<PY
+import json, os
+path = os.path.join(os.environ["BRIDGE_HOME"], "cron", "jobs.json")
+payload = json.load(open(path, "r", encoding="utf-8"))
+assert all(job.get("id") != "expired-at-cleanup-smoke" for job in payload["jobs"])
+PY
+
 log "resolving cron targets for sleeping static roles and fallback delivery"
 CRON_ROUTE_JOBS_FILE="$TMP_ROOT/cron-route-jobs.json"
 cat >"$CRON_ROUTE_JOBS_FILE" <<EOF
