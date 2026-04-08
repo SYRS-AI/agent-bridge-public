@@ -184,6 +184,97 @@ refresh_agent_heartbeats() {
   return "$changed"
 }
 
+bridge_watchdog_state_file() {
+  printf '%s/watchdog.env' "$BRIDGE_STATE_DIR"
+}
+
+bridge_watchdog_report_file() {
+  printf '%s/watchdog/latest.md' "$BRIDGE_SHARED_DIR"
+}
+
+bridge_watchdog_due() {
+  local interval="${BRIDGE_WATCHDOG_INTERVAL_SECONDS:-1800}"
+  local file=""
+  local now=0
+  local next_ts=0
+
+  [[ "$interval" =~ ^[0-9]+$ ]] || interval=1800
+  (( interval > 0 )) || return 0
+  file="$(bridge_watchdog_state_file)"
+  [[ -f "$file" ]] || return 0
+  # shellcheck source=/dev/null
+  source "$file"
+  [[ "${WATCHDOG_NEXT_TS:-0}" =~ ^[0-9]+$ ]] || return 0
+  now="$(date +%s)"
+  next_ts="${WATCHDOG_NEXT_TS:-0}"
+  (( now >= next_ts ))
+}
+
+bridge_note_watchdog_scan() {
+  local interval="${BRIDGE_WATCHDOG_INTERVAL_SECONDS:-1800}"
+  local file=""
+  local now=0
+  local next_ts=0
+
+  [[ "$interval" =~ ^[0-9]+$ ]] || interval=1800
+  (( interval > 0 )) || interval=1800
+  file="$(bridge_watchdog_state_file)"
+  mkdir -p "$(dirname "$file")"
+  now="$(date +%s)"
+  next_ts=$(( now + interval ))
+  cat >"$file" <<EOF
+WATCHDOG_UPDATED_TS=$now
+WATCHDOG_NEXT_TS=$next_ts
+EOF
+}
+
+process_watchdog_report() {
+  local admin_agent="${BRIDGE_ADMIN_AGENT_ID:-}"
+  local title_prefix="[watchdog] "
+  local title="[watchdog] agent profile drift"
+  local report_file=""
+  local report_json=""
+  local problem_count=0
+  local existing_id=""
+
+  [[ "${BRIDGE_WATCHDOG_ENABLED:-1}" == "1" ]] || return 1
+  [[ -n "$admin_agent" ]] || return 1
+  bridge_agent_exists "$admin_agent" || return 1
+  bridge_watchdog_due || return 1
+
+  report_file="$(bridge_watchdog_report_file)"
+  mkdir -p "$(dirname "$report_file")"
+  if ! "$BRIDGE_BASH_BIN" "$SCRIPT_DIR/bridge-watchdog.sh" scan >"$report_file"; then
+    return 1
+  fi
+  if ! report_json="$("$BRIDGE_BASH_BIN" "$SCRIPT_DIR/bridge-watchdog.sh" scan --json 2>/dev/null)"; then
+    return 1
+  fi
+  problem_count="$(python3 - "$report_json" <<'PY'
+import json, sys
+try:
+    payload = json.loads(sys.argv[1])
+    print(int(payload.get("problem_count", 0)))
+except Exception:
+    print(0)
+PY
+)"
+  [[ "$problem_count" =~ ^[0-9]+$ ]] || problem_count=0
+  bridge_note_watchdog_scan
+  if (( problem_count == 0 )); then
+    return 1
+  fi
+
+  existing_id="$(bridge_queue_cli find-open --agent "$admin_agent" --title-prefix "$title_prefix" 2>/dev/null || true)"
+  if [[ "$existing_id" =~ ^[0-9]+$ ]]; then
+    bridge_queue_cli update "$existing_id" --actor "daemon" --title "$title" --priority high --body-file "$report_file" >/dev/null 2>&1 || true
+  else
+    bridge_queue_cli create --to "$admin_agent" --from "daemon" --priority high --title "$title" --body-file "$report_file" >/dev/null 2>&1 || true
+  fi
+  daemon_info "watchdog reported ${problem_count} agent profile issue(s)"
+  return 0
+}
+
 bridge_daemon_autostart_state_file() {
   local agent="$1"
   printf '%s/daemon-autostart/%s.env' "$BRIDGE_STATE_DIR" "$agent"
@@ -1005,6 +1096,9 @@ cmd_sync_cycle() {
     changed=0
   fi
   if refresh_agent_heartbeats; then
+    changed=0
+  fi
+  if process_watchdog_report; then
     changed=0
   fi
   if [[ -n "$summary_output" ]] && process_on_demand_agents "$summary_output"; then

@@ -27,6 +27,7 @@ Usage:
   $CLI_NAME setup <discord|telegram|agent|admin> ...
   $CLI_NAME cron <inventory|show|import|list|create|update|delete|enqueue|sync|run-subagent|errors|cleanup> ...
   $CLI_NAME memory <init|capture|ingest|promote|remember|lint|search|rebuild-index|query> ...
+  $CLI_NAME watchdog scan [agent...] [--json]
   $CLI_NAME discord <status|sync>
   $CLI_NAME migrate runtime inventory [--json] [--report <path>]
   $CLI_NAME migrate runtime sync [--dry-run]
@@ -34,6 +35,7 @@ Usage:
   $CLI_NAME migrate runtime rewrite-files [--dry-run] [--json]
   $CLI_NAME migrate docs audit [--all] [agent...]
   $CLI_NAME migrate docs apply [--all] [agent...] [--dry-run]
+  $CLI_NAME watchdog scan
   $CLI_NAME migrate workspace plan <agent>
   $CLI_NAME migrate workspace copy <agent> [--dry-run]
   $CLI_NAME migrate workspace cutover <agent> --dry-run
@@ -405,6 +407,10 @@ if [[ $# -gt 0 ]]; then
     memory)
       shift
       exec "$BRIDGE_BASH_BIN" "$SCRIPT_DIR/bridge-memory.sh" "$@"
+      ;;
+    watchdog)
+      shift
+      exec "$BRIDGE_BASH_BIN" "$SCRIPT_DIR/bridge-watchdog.sh" "$@"
       ;;
     discord)
       shift

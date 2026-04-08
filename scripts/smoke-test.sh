@@ -1209,6 +1209,11 @@ BRIDGE_HEARTBEAT_INTERVAL_SECONDS=1 "$REPO_ROOT/bridge-daemon.sh" sync >/dev/nul
 [[ -f "$BRIDGE_AGENT_HOME_ROOT/$CREATED_AGENT/HEARTBEAT.md" ]] || die "daemon did not write HEARTBEAT.md"
 assert_contains "$(cat "$BRIDGE_AGENT_HOME_ROOT/$CREATED_AGENT/HEARTBEAT.md")" "agent: $CREATED_AGENT"
 assert_contains "$(cat "$BRIDGE_AGENT_HOME_ROOT/$CREATED_AGENT/HEARTBEAT.md")" "activity_state:"
+log "scanning agent homes with watchdog"
+WATCHDOG_JSON="$("$REPO_ROOT/agent-bridge" watchdog scan "$CREATED_AGENT" --json)"
+assert_contains "$WATCHDOG_JSON" "\"agent\": \"$CREATED_AGENT\""
+assert_contains "$WATCHDOG_JSON" "\"onboarding_state\": \"pending\""
+assert_contains "$WATCHDOG_JSON" "\"problem_count\": 1"
 
 log "bootstrapping a manager role with init"
 INIT_DRY_RUN_JSON="$("$REPO_ROOT/agent-bridge" init --admin "$INIT_AGENT" --engine claude --session "$INIT_SESSION" --channels plugin:telegram --dry-run --json 2>&1)" || die "init dry-run failed: $INIT_DRY_RUN_JSON"
