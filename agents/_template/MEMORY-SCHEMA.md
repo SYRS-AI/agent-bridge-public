@@ -92,6 +92,11 @@ Default read order:
   - move raw captures into the wiki's daily user memory and log the ingest
 - `agent-bridge memory promote`
   - move durable facts into curated user/shared/project/decision pages
+- `agent-bridge memory remember`
+  - preferred one-step path when the agent decides a message contains a durable fact
+  - writes a raw capture, ingests it into daily memory, and optionally promotes it
+- `memory-wiki` shared skill
+  - behavioral guidance for deciding when to remember, how to separate users, and when to query existing memory first
 - `agent-bridge memory search`
   - search the wiki first, then optional raw capture files if needed
 - `agent-bridge memory rebuild-index`

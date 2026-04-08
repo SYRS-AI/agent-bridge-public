@@ -80,6 +80,7 @@ bridge_bootstrap_claude_shared_skills() {
 
   bridge_link_shared_claude_skill "$workdir" "agent-bridge-runtime"
   bridge_link_shared_claude_skill "$workdir" "cron-manager"
+  bridge_link_shared_claude_skill "$workdir" "memory-wiki"
 }
 
 bridge_is_managed_markdown() {

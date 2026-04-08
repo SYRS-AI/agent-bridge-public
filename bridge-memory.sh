@@ -15,6 +15,7 @@ Usage:
   $(basename "$0") capture --agent <agent> [--user <id>] --source <source> [--author <name>] [--channel <id>] [--title <text>] (--text <text> | --text-file <path>) [--dry-run] [--json]
   $(basename "$0") ingest --agent <agent> (--capture <id> | --latest | --all) [--dry-run] [--json]
   $(basename "$0") promote --agent <agent> --kind user|shared|project|decision [--user <id>] [--capture <id>] [--page <slug>] [--summary <text>] [--dry-run] [--json]
+  $(basename "$0") remember --agent <agent> [--user <id>] --source <source> [--author <name>] [--channel <id>] [--title <text>] --text <text> [--kind none|user|shared|project|decision] [--page <slug>] [--summary <text>] [--dry-run] [--json]
   $(basename "$0") lint --agent <agent> [--json]
   $(basename "$0") search --agent <agent> --query <text> [--user <id>] [--scope wiki|all|user|daily|shared|project|decision|raw] [--limit <count>] [--json]
   $(basename "$0") rebuild-index --agent <agent> [--db-path <path>] [--dry-run] [--json]
@@ -286,6 +287,99 @@ case "$command" in
     [[ -n "$capture_id" ]] && args+=(--capture "$capture_id")
     [[ -n "$page" ]] && args+=(--page "$page")
     [[ -n "$title" ]] && args+=(--title "$title")
+    [[ -n "$summary" ]] && args+=(--summary "$summary")
+    [[ $dry_run -eq 1 ]] && args+=(--dry-run)
+    [[ $json_mode -eq 1 ]] && args+=(--json)
+    run_python "${args[@]}"
+    exit 0
+    ;;
+  remember)
+    user_id="default"
+    source_name=""
+    author=""
+    channel=""
+    title=""
+    text=""
+    kind="user"
+    page=""
+    summary=""
+    while [[ $# -gt 0 ]]; do
+      case "$1" in
+        --agent)
+          [[ $# -ge 2 ]] || bridge_die "옵션 값이 필요합니다: $1"
+          agent="$2"
+          shift 2
+          ;;
+        --user)
+          [[ $# -ge 2 ]] || bridge_die "옵션 값이 필요합니다: $1"
+          user_id="$2"
+          shift 2
+          ;;
+        --source)
+          [[ $# -ge 2 ]] || bridge_die "옵션 값이 필요합니다: $1"
+          source_name="$2"
+          shift 2
+          ;;
+        --author)
+          [[ $# -ge 2 ]] || bridge_die "옵션 값이 필요합니다: $1"
+          author="$2"
+          shift 2
+          ;;
+        --channel)
+          [[ $# -ge 2 ]] || bridge_die "옵션 값이 필요합니다: $1"
+          channel="$2"
+          shift 2
+          ;;
+        --title)
+          [[ $# -ge 2 ]] || bridge_die "옵션 값이 필요합니다: $1"
+          title="$2"
+          shift 2
+          ;;
+        --text)
+          [[ $# -ge 2 ]] || bridge_die "옵션 값이 필요합니다: $1"
+          text="$2"
+          shift 2
+          ;;
+        --kind)
+          [[ $# -ge 2 ]] || bridge_die "옵션 값이 필요합니다: $1"
+          kind="$2"
+          shift 2
+          ;;
+        --page)
+          [[ $# -ge 2 ]] || bridge_die "옵션 값이 필요합니다: $1"
+          page="$2"
+          shift 2
+          ;;
+        --summary)
+          [[ $# -ge 2 ]] || bridge_die "옵션 값이 필요합니다: $1"
+          summary="$2"
+          shift 2
+          ;;
+        --dry-run)
+          dry_run=1
+          shift
+          ;;
+        --json)
+          json_mode=1
+          shift
+          ;;
+        -h|--help|help)
+          usage
+          exit 0
+          ;;
+        *)
+          bridge_die "지원하지 않는 memory remember 옵션입니다: $1"
+          ;;
+      esac
+    done
+    [[ -n "$agent" ]] || bridge_die "--agent is required"
+    [[ -n "$source_name" ]] || bridge_die "--source is required"
+    [[ -n "$text" ]] || bridge_die "--text is required"
+    args=(remember --agent "$agent" --home "$(resolve_agent_home "$agent")" --template-root "$SCRIPT_DIR/agents/_template" --user "$user_id" --source "$source_name" --text "$text" --kind "$kind")
+    [[ -n "$author" ]] && args+=(--author "$author")
+    [[ -n "$channel" ]] && args+=(--channel "$channel")
+    [[ -n "$title" ]] && args+=(--title "$title")
+    [[ -n "$page" ]] && args+=(--page "$page")
     [[ -n "$summary" ]] && args+=(--summary "$summary")
     [[ $dry_run -eq 1 ]] && args+=(--dry-run)
     [[ $json_mode -eq 1 ]] && args+=(--json)

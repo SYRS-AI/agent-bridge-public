@@ -289,10 +289,10 @@ Deliverable:
 
 ## Current State
 
-Phases 1, 2, 3A, 3B, 3C, and the first Phase 4 slice are implemented in the repo.
+Phases 1, 2, 3A, 3B, 3C, Phase 4, an agent-side `memory remember` helper, and a shared `memory-wiki` runtime skill are implemented in the repo.
 
-The next meaningful step inside Phase 4 is:
+The next meaningful step after this is:
 
-- finish the `tools/memory-manager.py` compatibility rewrite
 - add optional richer ranking over derived indexes
 - wire channel/runtime capture automation into the wiki model
+- add automated heuristics for deciding when a channel message should become a durable memory

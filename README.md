@@ -550,6 +550,20 @@ legacy memory SQLite files when you are migrating an existing install:
 python3 tools/memory-manager.py search --agent <agent-id> "recent incident summary"
 ```
 
+For agent-side automation, there is also a one-step helper that keeps the raw
+capture and wiki update flow together:
+
+```bash
+./agent-bridge memory remember --agent <agent-id> --user owner --source chat --text "The user prefers concise morning updates." --kind user
+```
+
+This is intended for the agent itself when it decides a natural-language
+conversation produced a durable fact. End users do not need to learn or type it.
+
+Managed Claude homes automatically link a shared `memory-wiki` skill so the
+agent can decide when to preserve memory without teaching humans special
+commands.
+
 ### Start the daemon
 
 ```bash
@@ -599,6 +613,7 @@ The current directory becomes the agent's workdir. `agent-bridge` will also inst
 - Bridge-owned Claude homes also get:
   - `.claude/skills/agent-bridge-runtime/SKILL.md`
   - `.claude/skills/cron-manager/SKILL.md`
+  - `.claude/skills/memory-wiki/SKILL.md`
 
 ### Queue-first workflow
 

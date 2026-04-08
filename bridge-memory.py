@@ -247,15 +247,20 @@ def capture_payload(args: argparse.Namespace) -> dict:
     }
 
 
+def write_capture_payload(home: Path, payload: dict, dry_run: bool) -> Path:
+    inbox_dir = home / "raw" / "captures" / "inbox"
+    path = inbox_dir / f"{payload['capture_id']}.json"
+    if not dry_run:
+        inbox_dir.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    return path
+
+
 def cmd_capture(args: argparse.Namespace) -> int:
     home = Path(args.home)
     ensure_memory_layout(home, Path(args.template_root), args.dry_run)
     payload = capture_payload(args)
-    inbox_dir = home / "raw" / "captures" / "inbox"
-    path = inbox_dir / f"{payload['capture_id']}.json"
-    if not args.dry_run:
-        inbox_dir.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    path = write_capture_payload(home, payload, args.dry_run)
     result = {
         "capture_id": payload["capture_id"],
         "agent": args.agent,
@@ -339,6 +344,34 @@ def append_memory_event(path: Path, line: str, dry_run: bool) -> None:
     append_text(path, line.rstrip() + "\n", dry_run)
 
 
+def ingest_capture_payload(
+    home: Path,
+    template_root: Path,
+    capture: dict,
+    capture_path: Path,
+    dry_run: bool,
+) -> dict:
+    user = UserSpec(user_id=capture.get("user") or "default", display_name=capture.get("user") or "default")
+    ensure_user_partition(home, template_root, user, dry_run, [])
+    created_at = datetime.fromisoformat(capture["created_at"])
+    date_str = created_at.date().isoformat()
+    daily_path = home / "users" / user.user_id / "memory" / f"{date_str}.md"
+    ensure_daily_note(daily_path, date_str, dry_run)
+    processed_dir = home / "raw" / "captures" / "ingested"
+    processed_path = processed_dir / capture_path.name
+    append_ingest_entry(daily_path, capture, processed_path, dry_run)
+    append_memory_log(home / "memory" / "log.md", capture, str(daily_path.relative_to(home)), dry_run)
+    if not dry_run:
+        processed_dir.mkdir(parents=True, exist_ok=True)
+        shutil.move(str(capture_path), str(processed_path))
+    return {
+        "capture_id": capture["capture_id"],
+        "user": user.user_id,
+        "daily_note": str(daily_path),
+        "processed_path": str(processed_path),
+    }
+
+
 def cmd_ingest(args: argparse.Namespace) -> int:
     home = Path(args.home)
     template_root = Path(args.template_root)
@@ -347,27 +380,7 @@ def cmd_ingest(args: argparse.Namespace) -> int:
     ingested: list[dict] = []
     for path in capture_paths:
         capture = json.loads(read_text(path))
-        user = UserSpec(user_id=capture.get("user") or "default", display_name=capture.get("user") or "default")
-        ensure_user_partition(home, template_root, user, args.dry_run, [])
-        created_at = datetime.fromisoformat(capture["created_at"])
-        date_str = created_at.date().isoformat()
-        daily_path = home / "users" / user.user_id / "memory" / f"{date_str}.md"
-        ensure_daily_note(daily_path, date_str, args.dry_run)
-        processed_dir = home / "raw" / "captures" / "ingested"
-        processed_path = processed_dir / path.name
-        append_ingest_entry(daily_path, capture, processed_path, args.dry_run)
-        append_memory_log(home / "memory" / "log.md", capture, str(daily_path.relative_to(home)), args.dry_run)
-        if not args.dry_run:
-            processed_dir.mkdir(parents=True, exist_ok=True)
-            shutil.move(str(path), str(processed_path))
-        ingested.append(
-            {
-                "capture_id": capture["capture_id"],
-                "user": user.user_id,
-                "daily_note": str(daily_path),
-                "processed_path": str(processed_path),
-            }
-        )
+        ingested.append(ingest_capture_payload(home, template_root, capture, path, args.dry_run))
     payload = {
         "agent": args.agent,
         "count": len(ingested),
@@ -495,6 +508,96 @@ def cmd_promote(args: argparse.Namespace) -> int:
         print(f"target: {target_path}")
         if capture:
             print(f"capture: {capture['capture_id']}")
+    return 0
+
+
+def promote_capture_or_summary(
+    home: Path,
+    template_root: Path,
+    agent: str,
+    kind: str,
+    user_id: str,
+    capture: dict | None,
+    page: str,
+    title: str,
+    summary: str,
+    dry_run: bool,
+) -> dict:
+    promote_args = argparse.Namespace(
+        agent=agent,
+        home=str(home),
+        template_root=str(template_root),
+        kind=kind,
+        user=user_id,
+        capture=capture["capture_id"] if capture else "",
+        page=page,
+        title=title,
+        summary=summary,
+        dry_run=dry_run,
+        json=True,
+    )
+    from io import StringIO
+    import contextlib
+
+    buffer = StringIO()
+    with contextlib.redirect_stdout(buffer):
+        cmd_promote(promote_args)
+    return json.loads(buffer.getvalue())
+
+
+def cmd_remember(args: argparse.Namespace) -> int:
+    home = Path(args.home)
+    template_root = Path(args.template_root)
+    ensure_memory_layout(home, template_root, args.dry_run)
+
+    capture_args = argparse.Namespace(
+        agent=args.agent,
+        user=args.user,
+        source=args.source,
+        author=args.author,
+        channel=args.channel,
+        title=args.title,
+        text=args.text,
+    )
+    capture = capture_payload(capture_args)
+    capture_path = write_capture_payload(home, capture, args.dry_run)
+    ingested = ingest_capture_payload(home, template_root, capture, capture_path, args.dry_run)
+
+    promotion = None
+    if args.kind != "none":
+        promotion = promote_capture_or_summary(
+            home=home,
+            template_root=template_root,
+            agent=args.agent,
+            kind=args.kind,
+            user_id=args.user,
+            capture=capture,
+            page=args.page,
+            title=args.title,
+            summary=args.summary or args.text,
+            dry_run=args.dry_run,
+        )
+
+    payload = {
+        "agent": args.agent,
+        "capture_id": capture["capture_id"],
+        "user": args.user,
+        "source": args.source,
+        "daily_note": ingested["daily_note"],
+        "processed_path": ingested["processed_path"],
+        "promotion": promotion or {},
+        "dry_run": args.dry_run,
+    }
+    if args.json:
+        print(json.dumps(payload, ensure_ascii=False, indent=2))
+    else:
+        print(f"agent: {args.agent}")
+        print(f"capture_id: {capture['capture_id']}")
+        print(f"user: {args.user}")
+        print(f"daily_note: {ingested['daily_note']}")
+        print(f"processed_path: {ingested['processed_path']}")
+        if promotion:
+            print(f"promotion: {promotion['kind']} -> {promotion['target']}")
     return 0
 
 
@@ -1179,6 +1282,23 @@ def build_parser() -> argparse.ArgumentParser:
     promote_parser.add_argument("--dry-run", action="store_true")
     promote_parser.add_argument("--json", action="store_true")
     promote_parser.set_defaults(func=cmd_promote)
+
+    remember_parser = subparsers.add_parser("remember")
+    remember_parser.add_argument("--agent", required=True)
+    remember_parser.add_argument("--home", required=True)
+    remember_parser.add_argument("--template-root", required=True)
+    remember_parser.add_argument("--user", default="default")
+    remember_parser.add_argument("--source", required=True)
+    remember_parser.add_argument("--author")
+    remember_parser.add_argument("--channel")
+    remember_parser.add_argument("--title")
+    remember_parser.add_argument("--text", required=True)
+    remember_parser.add_argument("--kind", choices=("none", "user", "shared", "project", "decision"), default="user")
+    remember_parser.add_argument("--page", default="")
+    remember_parser.add_argument("--summary", default="")
+    remember_parser.add_argument("--dry-run", action="store_true")
+    remember_parser.add_argument("--json", action="store_true")
+    remember_parser.set_defaults(func=cmd_remember)
 
     lint_parser = subparsers.add_parser("lint")
     lint_parser.add_argument("--agent", required=True)
