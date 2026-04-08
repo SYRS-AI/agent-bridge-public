@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Shared Agent Bridge SessionStart hook."""
+"""Inject per-turn timestamp context for Claude Code and Codex."""
 
 from __future__ import annotations
 
@@ -8,7 +8,7 @@ import json
 import os
 import sys
 
-from bridge_hook_common import remember_session_start, session_start_context
+from bridge_hook_common import agent_timestamp_enabled, prompt_timestamp_context
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -17,19 +17,18 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     agent = os.environ.get("BRIDGE_AGENT_ID", "").strip()
-    if not agent:
+    if not agent or not agent_timestamp_enabled(agent):
         if args.format == "codex":
             json.dump({}, sys.stdout, ensure_ascii=False)
             sys.stdout.write("\n")
         return 0
 
-    remember_session_start(agent)
-    context = session_start_context(agent)
+    context = prompt_timestamp_context(agent)
     if args.format == "codex":
         json.dump(
             {
                 "hookSpecificOutput": {
-                    "hookEventName": "SessionStart",
+                    "hookEventName": "UserPromptSubmit",
                     "additionalContext": context,
                 }
             },

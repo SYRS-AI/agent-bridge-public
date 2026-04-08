@@ -3,8 +3,10 @@
 
 from __future__ import annotations
 
+import json
 import os
 import sqlite3
+from datetime import datetime, timezone
 from pathlib import Path
 
 PRIORITY_ORDER = {"urgent": 0, "high": 1, "normal": 2, "low": 3}
@@ -18,6 +20,103 @@ def bridge_task_db() -> Path:
     if bridge_home:
         return Path(bridge_home).expanduser() / "state" / "tasks.db"
     return Path.home() / ".agent-bridge" / "state" / "tasks.db"
+
+
+def bridge_state_dir() -> Path:
+    explicit = os.environ.get("BRIDGE_STATE_DIR", "").strip()
+    if explicit:
+        return Path(explicit).expanduser()
+    bridge_home = os.environ.get("BRIDGE_HOME", "").strip()
+    if bridge_home:
+        return Path(bridge_home).expanduser() / "state"
+    return Path.home() / ".agent-bridge" / "state"
+
+
+def timestamp_state_path(agent: str) -> Path:
+    return bridge_state_dir() / "timestamps" / f"{agent}.json"
+
+
+def load_timestamp_state(agent: str) -> dict[str, int]:
+    path = timestamp_state_path(agent)
+    if not path.exists():
+        return {}
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    if not isinstance(payload, dict):
+        return {}
+    state: dict[str, int] = {}
+    for key in ("session_started_at", "last_prompt_at"):
+        value = payload.get(key)
+        if isinstance(value, int):
+            state[key] = value
+    return state
+
+
+def save_timestamp_state(agent: str, payload: dict[str, int]) -> None:
+    path = timestamp_state_path(agent)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(".tmp")
+    tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    os.chmod(tmp, 0o600)
+    tmp.replace(path)
+    os.chmod(path, 0o600)
+
+
+def agent_timestamp_enabled(agent: str) -> bool:
+    raw = os.environ.get("BRIDGE_AGENT_INJECT_TIMESTAMP", "").strip().lower()
+    if not raw:
+        return True
+    return raw not in {"0", "false", "no", "off"}
+
+
+def format_duration(seconds: int | None) -> str:
+    if seconds is None:
+        return "(first message)"
+    if seconds < 0:
+        seconds = 0
+    hours, remainder = divmod(seconds, 3600)
+    minutes, secs = divmod(remainder, 60)
+    parts: list[str] = []
+    if hours:
+        parts.append(f"{hours}h")
+    if minutes or hours:
+        parts.append(f"{minutes}m")
+    parts.append(f"{secs}s")
+    return " ".join(parts)
+
+
+def remember_session_start(agent: str, now_epoch: int | None = None) -> None:
+    if not agent_timestamp_enabled(agent):
+        return
+    now_epoch = now_epoch or int(datetime.now(timezone.utc).timestamp())
+    state = load_timestamp_state(agent)
+    changed = False
+    if "session_started_at" not in state:
+        state["session_started_at"] = now_epoch
+        changed = True
+    if changed:
+        save_timestamp_state(agent, state)
+
+
+def prompt_timestamp_context(agent: str, now: datetime | None = None) -> str:
+    now_dt = now or datetime.now().astimezone()
+    now_epoch = int(now_dt.timestamp())
+    state = load_timestamp_state(agent)
+    session_started_at = state.get("session_started_at", now_epoch)
+    last_prompt_at = state.get("last_prompt_at")
+    context = (
+        "<timestamp>\n"
+        f"now: {now_dt.strftime('%Y-%m-%d %H:%M:%S %Z (%a)')}\n"
+        f"since_last: {format_duration(None if last_prompt_at is None else now_epoch - last_prompt_at)}\n"
+        f"session_age: {format_duration(now_epoch - session_started_at)}\n"
+        "</timestamp>"
+    )
+    state["session_started_at"] = session_started_at
+    state["last_prompt_at"] = now_epoch
+    save_timestamp_state(agent, state)
+    return context
 
 
 def session_start_context(agent: str) -> str:

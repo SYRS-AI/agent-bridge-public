@@ -100,6 +100,7 @@ fi
 
 export PATH="$HOME/.local/bin:$HOME/.nix-profile/bin:/usr/local/bin:$PATH"
 export BRIDGE_AGENT_ID="$AGENT"
+export BRIDGE_AGENT_INJECT_TIMESTAMP="$(bridge_agent_inject_timestamp "$AGENT")"
 
 mkdir -p "$BRIDGE_LOG_DIR" "$BRIDGE_SHARED_DIR"
 cd "$WORK_DIR" || bridge_die "$WORK_DIR 디렉토리가 없습니다."

@@ -96,10 +96,10 @@ bridge_ensure_claude_session_start_hook() {
 bridge_ensure_claude_prompt_hook() {
   local workdir="$1"
   if [[ "$(bridge_claude_settings_mode "$workdir")" == "shared" ]]; then
-    bridge_hooks_python ensure-prompt-hook --settings-file "$(bridge_hook_shared_settings_file)" --bridge-home "$BRIDGE_HOME" --bash-bin "$BRIDGE_BASH_BIN" >/dev/null
+    bridge_hooks_python ensure-prompt-hook --settings-file "$(bridge_hook_shared_settings_file)" --bridge-home "$BRIDGE_HOME" --bash-bin "$BRIDGE_BASH_BIN" --python-bin "$(command -v python3)" >/dev/null
     bridge_link_claude_settings_to_shared "$workdir"
   else
-    bridge_hooks_python ensure-prompt-hook --workdir "$workdir" --bridge-home "$BRIDGE_HOME" --bash-bin "$BRIDGE_BASH_BIN"
+    bridge_hooks_python ensure-prompt-hook --workdir "$workdir" --bridge-home "$BRIDGE_HOME" --bash-bin "$BRIDGE_BASH_BIN" --python-bin "$(command -v python3)"
   fi
 }
 

@@ -49,6 +49,14 @@ def prompt_hook_command(bridge_home: Path, bash_bin: str) -> str:
     return shlex.join([bash_bin, str(hook_path)])
 
 
+def prompt_timestamp_hook_command(bridge_home: Path, python_bin: str, fmt: str = "text") -> str:
+    hook_path = bridge_home / "hooks" / "prompt_timestamp.py"
+    command = [python_bin, str(hook_path)]
+    if fmt != "text":
+        command.extend(["--format", fmt])
+    return shlex.join(command)
+
+
 def codex_session_start_hook_command(bridge_home: Path, python_bin: str) -> str:
     hook_path = bridge_home / "hooks" / "codex-session-start.py"
     return shlex.join([python_bin, str(hook_path)])
@@ -103,6 +111,10 @@ def is_clear_idle_hook(command: str) -> bool:
     return "clear-idle.sh" in str(command)
 
 
+def is_prompt_timestamp_hook(command: str) -> bool:
+    return "prompt_timestamp.py" in str(command)
+
+
 def is_codex_session_start_hook(command: str) -> bool:
     return is_session_start_hook(command)
 
@@ -110,6 +122,10 @@ def is_codex_session_start_hook(command: str) -> bool:
 def is_codex_stop_hook(command: str) -> bool:
     command = str(command)
     return "check-inbox.py" in command or "codex-stop.py" in command
+
+
+def is_codex_prompt_hook(command: str) -> bool:
+    return is_prompt_timestamp_hook(command)
 
 
 def find_command_hook(
@@ -307,23 +323,30 @@ def cmd_status_prompt_hook(args: argparse.Namespace) -> int:
     settings_path = resolve_settings_path(args)
     settings = ensure_settings_root(settings_path)
     prompt_hooks = hooks_list(settings, "UserPromptSubmit")
-    _group, hook = find_command_hook(prompt_hooks, is_clear_idle_hook)
-    command = str(hook.get("command") or "") if hook else ""
+    _clear_group, clear_hook = find_command_hook(prompt_hooks, is_clear_idle_hook)
+    _timestamp_group, timestamp_hook = find_command_hook(prompt_hooks, is_prompt_timestamp_hook)
+    command = str(clear_hook.get("command") or "") if clear_hook else ""
     payload = {
         "HOOK_SETTINGS_FILE": str(settings_path),
-        "HOOK_STATUS": "present" if hook else "missing",
+        "HOOK_STATUS": "present" if clear_hook and timestamp_hook else "missing",
         "HOOK_STOP_HOOK": "",
-        "HOOK_PROMPT_HOOK": "present" if hook else "missing",
+        "HOOK_PROMPT_HOOK": "present" if clear_hook else "missing",
         "HOOK_COMMAND": command,
+        "HOOK_ADDITIONAL_CONTEXT": "true" if timestamp_hook and bool(timestamp_hook.get("additionalContext")) else "false",
     }
     print_payload(payload, args.format)
-    return 0 if hook else 1
+    if args.format != "shell":
+        print(f"timestamp_hook: {'present' if timestamp_hook else 'missing'}")
+        if timestamp_hook:
+            print(f"timestamp_command: {str(timestamp_hook.get('command') or '')}")
+    return 0 if clear_hook and timestamp_hook else 1
 
 
 def cmd_ensure_prompt_hook(args: argparse.Namespace) -> int:
     bridge_home = Path(args.bridge_home).expanduser()
     settings_path = resolve_settings_path(args)
     desired_command = prompt_hook_command(bridge_home, args.bash_bin)
+    timestamp_command = prompt_timestamp_hook_command(bridge_home, args.python_bin, "text")
     changed = ensure_command_hook(
         settings_path,
         "UserPromptSubmit",
@@ -331,6 +354,14 @@ def cmd_ensure_prompt_hook(args: argparse.Namespace) -> int:
         is_clear_idle_hook,
         timeout=3,
     )
+    changed = ensure_command_hook(
+        settings_path,
+        "UserPromptSubmit",
+        timestamp_command,
+        is_prompt_timestamp_hook,
+        timeout=3,
+        additional_context=True,
+    ) or changed
 
     payload = {
         "HOOK_SETTINGS_FILE": str(settings_path),
@@ -338,8 +369,12 @@ def cmd_ensure_prompt_hook(args: argparse.Namespace) -> int:
         "HOOK_STOP_HOOK": "",
         "HOOK_PROMPT_HOOK": "present",
         "HOOK_COMMAND": desired_command,
+        "HOOK_ADDITIONAL_CONTEXT": "true",
     }
     print_payload(payload, args.format)
+    if args.format != "shell":
+        print("timestamp_hook: present")
+        print(f"timestamp_command: {timestamp_command}")
     return 0
 
 
@@ -360,8 +395,11 @@ def print_codex_payload(data: dict[str, str], fmt: str) -> None:
     print(f"status: {data['CODEX_HOOK_STATUS']}")
     print(f"session_start_hook: {data['CODEX_SESSION_START_HOOK']}")
     print(f"stop_hook: {data['CODEX_STOP_HOOK']}")
+    print(f"prompt_hook: {data.get('CODEX_PROMPT_HOOK', 'missing')}")
     print(f"session_start_command: {data['CODEX_SESSION_START_COMMAND']}")
     print(f"stop_command: {data['CODEX_STOP_COMMAND']}")
+    if data.get("CODEX_PROMPT_COMMAND"):
+        print(f"prompt_command: {data['CODEX_PROMPT_COMMAND']}")
     print("feature_flag: launch_cli_override")
 
 
@@ -370,18 +408,26 @@ def cmd_status_codex_hooks(args: argparse.Namespace) -> int:
     settings = ensure_settings_root(hooks_path)
     session_hooks = hooks_list(settings, "SessionStart")
     stop_hooks = hooks_list(settings, "Stop")
+    prompt_hooks = hooks_list(settings, "UserPromptSubmit")
     _session_group, session_hook = find_command_hook(session_hooks, is_codex_session_start_hook)
     _stop_group, stop_hook = find_command_hook(stop_hooks, is_codex_stop_hook)
+    _prompt_group, prompt_hook = find_command_hook(prompt_hooks, is_codex_prompt_hook)
     payload = {
         "CODEX_HOOKS_FILE": str(hooks_path),
-        "CODEX_HOOK_STATUS": "present" if session_hook and stop_hook else "missing",
+        "CODEX_HOOK_STATUS": "present" if session_hook and stop_hook and prompt_hook else "missing",
         "CODEX_SESSION_START_HOOK": "present" if session_hook else "missing",
         "CODEX_STOP_HOOK": "present" if stop_hook else "missing",
+        "CODEX_PROMPT_HOOK": "present" if prompt_hook else "missing",
         "CODEX_SESSION_START_COMMAND": str(session_hook.get("command") or "") if session_hook else "",
         "CODEX_STOP_COMMAND": str(stop_hook.get("command") or "") if stop_hook else "",
+        "CODEX_PROMPT_COMMAND": str(prompt_hook.get("command") or "") if prompt_hook else "",
     }
     print_codex_payload(payload, args.format)
-    return 0 if session_hook and stop_hook else 1
+    if args.format != "shell":
+        print(f"prompt_hook: {'present' if prompt_hook else 'missing'}")
+        if prompt_hook:
+            print(f"prompt_command: {str(prompt_hook.get('command') or '')}")
+    return 0 if session_hook and stop_hook and prompt_hook else 1
 
 
 def cmd_ensure_codex_hooks(args: argparse.Namespace) -> int:
@@ -390,6 +436,7 @@ def cmd_ensure_codex_hooks(args: argparse.Namespace) -> int:
     hooks_path.parent.mkdir(parents=True, exist_ok=True)
     session_command = session_start_hook_command(bridge_home, args.python_bin, "codex")
     stop_command = codex_stop_hook_command(bridge_home, args.python_bin)
+    prompt_command = prompt_timestamp_hook_command(bridge_home, args.python_bin, "codex")
     changed = False
     changed = ensure_command_hook(
         hooks_path,
@@ -408,16 +455,29 @@ def cmd_ensure_codex_hooks(args: argparse.Namespace) -> int:
         timeout=3,
         status_message="Checking Agent Bridge inbox",
     ) or changed
+    changed = ensure_command_hook(
+        hooks_path,
+        "UserPromptSubmit",
+        prompt_command,
+        is_codex_prompt_hook,
+        timeout=3,
+        status_message="Injecting Agent Bridge timestamp context",
+    ) or changed
 
     payload = {
         "CODEX_HOOKS_FILE": str(hooks_path),
         "CODEX_HOOK_STATUS": "updated" if changed else "unchanged",
         "CODEX_SESSION_START_HOOK": "present",
         "CODEX_STOP_HOOK": "present",
+        "CODEX_PROMPT_HOOK": "present",
         "CODEX_SESSION_START_COMMAND": session_command,
         "CODEX_STOP_COMMAND": stop_command,
+        "CODEX_PROMPT_COMMAND": prompt_command,
     }
     print_codex_payload(payload, args.format)
+    if args.format != "shell":
+        print("prompt_hook: present")
+        print(f"prompt_command: {prompt_command}")
     return 0
 
 
@@ -583,6 +643,7 @@ def build_parser() -> argparse.ArgumentParser:
     ensure_prompt_parser.add_argument("--settings-file")
     ensure_prompt_parser.add_argument("--bridge-home", required=True)
     ensure_prompt_parser.add_argument("--bash-bin", required=True)
+    ensure_prompt_parser.add_argument("--python-bin", required=True)
     ensure_prompt_parser.add_argument("--format", choices=("text", "shell"), default="text")
     ensure_prompt_parser.set_defaults(handler=cmd_ensure_prompt_hook)
 

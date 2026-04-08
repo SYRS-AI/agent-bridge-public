@@ -937,6 +937,11 @@ bridge_agent_memory_daily_refresh_enabled() {
   return 0
 }
 
+bridge_agent_inject_timestamp() {
+  local agent="$1"
+  printf '%s' "${BRIDGE_AGENT_INJECT_TIMESTAMP[$agent]-1}"
+}
+
 bridge_list_actions() {
   local agent="$1"
   local key
