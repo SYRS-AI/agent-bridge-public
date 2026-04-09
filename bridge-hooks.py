@@ -43,40 +43,56 @@ def merge_settings(base: Any, overlay: Any) -> Any:
     return overlay
 
 
+def shell_path(path: Path) -> str:
+    expanded = path.expanduser()
+    home = Path.home().expanduser()
+    try:
+        rel = expanded.relative_to(home)
+    except ValueError:
+        return str(expanded)
+    if str(rel) == ".":
+        return "~"
+    return f"~/{rel.as_posix()}"
+
+
+def shell_command(program: str, path_str: str, *extra: str) -> str:
+    parts = [shlex.quote(program), path_str]
+    parts.extend(shlex.quote(str(item)) for item in extra)
+    return " ".join(parts)
+
+
 def stop_hook_command(bridge_home: Path, bash_bin: str) -> str:
     hook_path = bridge_home / "hooks" / "mark-idle.sh"
-    return shlex.join([bash_bin, str(hook_path)])
+    return shell_command(bash_bin, shell_path(hook_path))
 
 
 def session_start_hook_command(bridge_home: Path, python_bin: str, fmt: str = "text") -> str:
     hook_path = bridge_home / "hooks" / "session-start.py"
-    command = [python_bin, str(hook_path)]
     if fmt != "text":
-        command.extend(["--format", fmt])
-    return shlex.join(command)
+        return shell_command(python_bin, shell_path(hook_path), "--format", fmt)
+    return shell_command(python_bin, shell_path(hook_path))
 
 
 def prompt_hook_command(bridge_home: Path, bash_bin: str) -> str:
     hook_path = bridge_home / "hooks" / "clear-idle.sh"
-    return shlex.join([bash_bin, str(hook_path)])
+    return shell_command(bash_bin, shell_path(hook_path))
 
 
 def prompt_timestamp_hook_command(bridge_home: Path, python_bin: str, fmt: str = "text") -> str:
     hook_path = bridge_home / "hooks" / "prompt_timestamp.py"
-    command = [python_bin, str(hook_path)]
     if fmt != "text":
-        command.extend(["--format", fmt])
-    return shlex.join(command)
+        return shell_command(python_bin, shell_path(hook_path), "--format", fmt)
+    return shell_command(python_bin, shell_path(hook_path))
 
 
 def codex_session_start_hook_command(bridge_home: Path, python_bin: str) -> str:
     hook_path = bridge_home / "hooks" / "codex-session-start.py"
-    return shlex.join([python_bin, str(hook_path)])
+    return shell_command(python_bin, shell_path(hook_path))
 
 
 def codex_stop_hook_command(bridge_home: Path, python_bin: str) -> str:
     hook_path = bridge_home / "hooks" / "check-inbox.py"
-    return shlex.join([python_bin, str(hook_path), "--format", "codex"])
+    return shell_command(python_bin, shell_path(hook_path), "--format", "codex")
 
 
 def resolve_settings_path(args: argparse.Namespace) -> Path:
