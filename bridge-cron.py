@@ -5,6 +5,7 @@ import os
 import re
 import secrets
 import shlex
+import sqlite3
 import sys
 import tempfile
 from collections import Counter, defaultdict
@@ -1177,6 +1178,90 @@ def run_native_import(args):
     return 0
 
 
+def run_reconcile_run_state(args):
+    tasks_db = Path(args.tasks_db).expanduser().resolve()
+    runs_dir = Path(args.runs_dir).expanduser().resolve()
+    repaired = []
+    scanned = 0
+
+    if not tasks_db.is_file() or not runs_dir.is_dir():
+        payload = {
+            "status": "ok",
+            "scanned_runs": 0,
+            "repaired_runs": 0,
+        }
+        if args.json:
+            print(json.dumps(payload, ensure_ascii=False, indent=2))
+        else:
+            print("status: ok")
+            print("scanned_runs: 0")
+            print("repaired_runs: 0")
+        return 0
+
+    with sqlite3.connect(tasks_db) as conn:
+        conn.row_factory = sqlite3.Row
+        for request_path in sorted(runs_dir.glob("*/request.json")):
+            scanned += 1
+            try:
+                request = json.loads(request_path.read_text(encoding="utf-8"))
+            except Exception:
+                continue
+
+            dispatch_task_id = request.get("dispatch_task_id")
+            try:
+                dispatch_task_id = int(dispatch_task_id)
+            except (TypeError, ValueError):
+                continue
+
+            row = conn.execute("SELECT status FROM tasks WHERE id = ?", (dispatch_task_id,)).fetchone()
+            if row is None or row["status"] != "cancelled":
+                continue
+
+            status_path = Path(str(request.get("status_file") or request_path.parent / "status.json")).expanduser()
+            status = {}
+            if status_path.is_file():
+                try:
+                    status = json.loads(status_path.read_text(encoding="utf-8"))
+                except Exception:
+                    status = {}
+
+            if str(status.get("state") or "") in {"cancelled", "success", "error"}:
+                continue
+
+            payload = {
+                "run_id": str(request.get("run_id") or request_path.parent.name),
+                "state": "cancelled",
+                "engine": str(status.get("engine") or request.get("target_engine") or ""),
+                "updated_at": datetime.now(timezone.utc).astimezone().isoformat(timespec="seconds"),
+                "request_file": str(status.get("request_file") or request.get("request_file") or request_path),
+                "result_file": str(status.get("result_file") or request.get("result_file") or request_path.parent / "result.json"),
+                "error": "cancelled via queue reconciliation",
+            }
+            status_path.parent.mkdir(parents=True, exist_ok=True)
+            status_path.write_text(json.dumps(payload, ensure_ascii=True, indent=2) + "\n", encoding="utf-8")
+            repaired.append(
+                {
+                    "run_id": payload["run_id"],
+                    "task_id": dispatch_task_id,
+                    "status_file": str(status_path),
+                }
+            )
+
+    payload = {
+        "status": "ok",
+        "scanned_runs": scanned,
+        "repaired_runs": len(repaired),
+        "repaired": repaired,
+    }
+    if args.json:
+        print(json.dumps(payload, ensure_ascii=False, indent=2))
+    else:
+        print("status: ok")
+        print(f"scanned_runs: {scanned}")
+        print(f"repaired_runs: {len(repaired)}")
+    return 0
+
+
 def run_cleanup_prune(args, raw_payload, records):
     candidates = sorted(cleanup_candidates(records, args.mode), key=record_sort_key)
     candidate_ids = {record["id"] for record in candidates}
@@ -1494,6 +1579,11 @@ def build_parser():
     native_finalize_parser.add_argument("--jobs-file", required=True)
     native_finalize_parser.add_argument("--request-file", required=True)
     native_finalize_parser.add_argument("--json", action="store_true")
+
+    reconcile_parser = subparsers.add_parser("reconcile-run-state", help="Repair cron run state from queue state.")
+    reconcile_parser.add_argument("--tasks-db", required=True)
+    reconcile_parser.add_argument("--runs-dir", required=True)
+    reconcile_parser.add_argument("--json", action="store_true")
     return parser
 
 
@@ -1566,6 +1656,13 @@ def main():
         except FileNotFoundError as exc:
             print(f"error: {exc}", file=sys.stderr)
             return 2
+        except ValueError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 2
+
+    if args.command == "reconcile-run-state":
+        try:
+            return run_reconcile_run_state(args)
         except ValueError as exc:
             print(f"error: {exc}", file=sys.stderr)
             return 2

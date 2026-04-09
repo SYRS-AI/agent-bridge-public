@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import json
 import os
 import shlex
 import sqlite3
@@ -45,6 +46,14 @@ def get_db_path() -> Path:
     db_path = Path(os.environ.get("BRIDGE_TASK_DB", str(state_dir / "tasks.db")))
     db_path.parent.mkdir(parents=True, exist_ok=True)
     return db_path
+
+
+def get_cron_state_dir() -> Path:
+    bridge_home = Path(os.environ.get("BRIDGE_HOME", str(Path.home() / ".agent-bridge")))
+    state_dir = Path(os.environ.get("BRIDGE_STATE_DIR", str(bridge_home / "state")))
+    cron_dir = Path(os.environ.get("BRIDGE_CRON_STATE_DIR", str(state_dir / "cron")))
+    cron_dir.mkdir(parents=True, exist_ok=True)
+    return cron_dir
 
 
 def classify_family(name: str) -> str:
@@ -297,7 +306,49 @@ def print_summary(rows: list[sqlite3.Row], fmt: str) -> None:
         print(
             f"{row['agent']:<10} {row['queued_count']:>6}  {row['claimed_count']:>7}  "
             f"{row['blocked_count']:>7}  {row['active']:>6}  {idle_label:>5}  {row['session'] or '-'}"
-        )
+    )
+
+
+def maybe_cancel_cron_run(task: sqlite3.Row, current_ts: int) -> None:
+    title = str(task["title"] or "")
+    body_path_text = str(task["body_path"] or "").strip()
+    if "[cron-dispatch]" not in title and "cron-dispatch" not in body_path_text:
+        return
+
+    run_id = Path(body_path_text).stem
+    if not run_id:
+        return
+
+    run_dir = get_cron_state_dir() / "runs" / run_id
+    request_path = run_dir / "request.json"
+    result_path = run_dir / "result.json"
+    status_path = run_dir / "status.json"
+
+    request: dict[str, object] = {}
+    status: dict[str, object] = {}
+    if request_path.is_file():
+        try:
+            request = json.loads(request_path.read_text(encoding="utf-8"))
+        except Exception:
+            request = {}
+    if status_path.is_file():
+        try:
+            status = json.loads(status_path.read_text(encoding="utf-8"))
+        except Exception:
+            status = {}
+
+    payload = {
+        "run_id": run_id,
+        "state": "cancelled",
+        "engine": str(status.get("engine") or request.get("target_engine") or ""),
+        "updated_at": datetime.fromtimestamp(current_ts, tz=timezone.utc).astimezone().isoformat(timespec="seconds"),
+        "request_file": str(status.get("request_file") or request.get("request_file") or request_path),
+        "result_file": str(status.get("result_file") or request.get("result_file") or result_path),
+        "error": "cancelled via task queue",
+    }
+
+    status_path.parent.mkdir(parents=True, exist_ok=True)
+    status_path.write_text(json.dumps(payload, ensure_ascii=True, indent=2) + "\n", encoding="utf-8")
 
 
 def cmd_create(args: argparse.Namespace) -> int:
@@ -612,6 +663,7 @@ def cmd_cancel(args: argparse.Namespace) -> int:
             """,
             (current_ts, current_ts, args.task_id),
         )
+        maybe_cancel_cron_run(task, current_ts)
         emit_event(
             conn,
             args.task_id,

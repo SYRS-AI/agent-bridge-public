@@ -634,9 +634,10 @@ run_sync() {
   local json_output=0
   local since=""
   local now=""
-  local legacy_state_file="$BRIDGE_CRON_STATE_DIR/legacy-scheduler-state.json"
-  local native_state_file="$BRIDGE_CRON_STATE_DIR/native-scheduler-state.json"
+  local native_state_file=""
+  local compat_native_state_file="$BRIDGE_CRON_STATE_DIR/native-scheduler-state.json"
   local tmp_dir=""
+  local reconcile_json=""
   local legacy_json=""
   local native_json=""
   local cleanup_json=""
@@ -677,8 +678,20 @@ run_sync() {
     return 0
   fi
 
+  native_state_file="$(bridge_cron_scheduler_state_file)"
+
   tmp_dir="$(mktemp -d)"
   trap 'rm -rf "$tmp_dir"' RETURN
+
+  if [[ $dry_run -eq 0 ]]; then
+    if ! bridge_cron_python reconcile-run-state \
+      --tasks-db "$BRIDGE_TASK_DB" \
+      --runs-dir "$BRIDGE_CRON_STATE_DIR/runs" \
+      --json >"$tmp_dir/reconcile.json"; then
+      status=1
+    fi
+    reconcile_json="$tmp_dir/reconcile.json"
+  fi
 
   if [[ -f "$BRIDGE_NATIVE_CRON_JOBS_FILE" ]]; then
     local native_args=(
@@ -704,6 +717,10 @@ run_sync() {
     fi
     native_json="$tmp_dir/native.json"
 
+    if [[ $dry_run -eq 0 && -f "$native_state_file" && "$compat_native_state_file" != "$native_state_file" ]]; then
+      cp "$native_state_file" "$compat_native_state_file"
+    fi
+
     if [[ $dry_run -eq 0 ]]; then
       if ! bridge_cron_python cleanup-prune \
         --jobs-file "$BRIDGE_NATIVE_CRON_JOBS_FILE" \
@@ -716,12 +733,12 @@ run_sync() {
   fi
 
   bridge_require_python
-  python3 - "$legacy_json" "$native_json" "$cleanup_json" "$json_output" <<'PY'
+  python3 - "$legacy_json" "$native_json" "$cleanup_json" "$reconcile_json" "$json_output" <<'PY'
 import json
 import sys
 from pathlib import Path
 
-legacy_path, native_path, cleanup_path, json_output = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4] == "1"
+legacy_path, native_path, cleanup_path, reconcile_path, json_output = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4], sys.argv[5] == "1"
 
 def load(path_value):
     if not path_value:
@@ -737,6 +754,7 @@ for name, path_value in (("legacy", legacy_path), ("native", native_path)):
     if payload is not None:
         sources[name] = payload
 cleanup_payload = load(cleanup_path)
+reconcile_payload = load(reconcile_path)
 
 if not sources:
     payload = {"status": "skipped", "reason": "no_sources"}
@@ -754,6 +772,7 @@ totals = {
     "already_enqueued": 0,
     "errors": 0,
     "cleanup_deleted_jobs": 0,
+    "reconciled_cancelled_runs": 0,
 }
 statuses = []
 for source_payload in sources.values():
@@ -766,6 +785,8 @@ for source_payload in sources.values():
     statuses.append(source_payload.get("status", "ok"))
 if cleanup_payload is not None:
     totals["cleanup_deleted_jobs"] = int(cleanup_payload.get("deleted_jobs", 0))
+if reconcile_payload is not None:
+    totals["reconciled_cancelled_runs"] = int(reconcile_payload.get("repaired_runs", 0))
 
 if any(status == "error" for status in statuses) or totals["errors"] > 0:
     status_value = "error"
@@ -778,6 +799,7 @@ payload = {
     "status": status_value,
     "sources": sources,
     "cleanup": cleanup_payload,
+    "reconcile": reconcile_payload,
     "totals": totals,
 }
 
@@ -806,6 +828,8 @@ else:
     print(f"errors: {totals['errors']}")
     if cleanup_payload is not None:
         print(f"cleanup_deleted_jobs: {totals['cleanup_deleted_jobs']}")
+    if reconcile_payload is not None:
+        print(f"reconciled_cancelled_runs: {totals['reconciled_cancelled_runs']}")
 PY
   return "$status"
 }

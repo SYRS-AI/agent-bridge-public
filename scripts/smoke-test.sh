@@ -2192,6 +2192,8 @@ with open(path, "w", encoding="utf-8") as fh:
 PY
 CRON_CLEANUP_SYNC_JSON="$("$REPO_ROOT/agent-bridge" cron sync --json --since '2026-04-05T08:29:00+00:00' --now '2026-04-05T09:00:00+00:00')"
 assert_contains "$CRON_CLEANUP_SYNC_JSON" "\"cleanup_deleted_jobs\": 1"
+[[ -f "$BRIDGE_STATE_DIR/cron/scheduler-state.json" ]] || die "expected canonical scheduler-state.json after native sync"
+assert_contains "$(cat "$BRIDGE_STATE_DIR/cron/scheduler-state.json")" "\"last_sync_at\""
 python3 - <<PY
 import json, os
 path = os.path.join(os.environ["BRIDGE_HOME"], "cron", "jobs.json")
@@ -2636,6 +2638,44 @@ fi
 
 assert_contains "$SHOW_CRON_OUTPUT" "status: done"
 [[ -f "$RUN_DIR/result.json" ]] || die "cron worker did not write result artifact"
+
+log "syncing cron run state when a cron-dispatch task is cancelled through the queue"
+CANCEL_RUN_ID="smoke-cancel-run"
+CANCEL_RUN_DIR="$BRIDGE_STATE_DIR/cron/runs/$CANCEL_RUN_ID"
+CANCEL_DISPATCH_BODY="$BRIDGE_SHARED_DIR/cron-dispatch/$CANCEL_RUN_ID.md"
+mkdir -p "$CANCEL_RUN_DIR" "$(dirname "$CANCEL_DISPATCH_BODY")"
+cat >"$CANCEL_RUN_DIR/request.json" <<EOF
+{
+  "run_id": "$CANCEL_RUN_ID",
+  "job_id": "cancel-job",
+  "job_name": "cancel-job",
+  "target_agent": "$SMOKE_AGENT",
+  "target_engine": "claude",
+  "result_file": "$CANCEL_RUN_DIR/result.json",
+  "status_file": "$CANCEL_RUN_DIR/status.json",
+  "request_file": "$CANCEL_RUN_DIR/request.json"
+}
+EOF
+cat >"$CANCEL_RUN_DIR/status.json" <<EOF
+{
+  "run_id": "$CANCEL_RUN_ID",
+  "state": "queued",
+  "engine": "claude",
+  "request_file": "$CANCEL_RUN_DIR/request.json",
+  "result_file": "$CANCEL_RUN_DIR/result.json"
+}
+EOF
+cat >"$CANCEL_DISPATCH_BODY" <<EOF
+# [cron-dispatch] cancel-job
+
+- run_id: $CANCEL_RUN_ID
+EOF
+CANCEL_CREATE_OUTPUT="$(bash "$REPO_ROOT/bridge-task.sh" create --to "$SMOKE_AGENT" --title "[cron-dispatch] cancel-job (2026-04-05T11:00:00Z)" --body-file "$CANCEL_DISPATCH_BODY" --from smoke-test)"
+[[ "$CANCEL_CREATE_OUTPUT" =~ created\ task\ \#([0-9]+) ]] || die "could not parse cancel cron dispatch task id"
+CANCEL_TASK_ID="${BASH_REMATCH[1]}"
+bash "$REPO_ROOT/bridge-task.sh" cancel "$CANCEL_TASK_ID" --actor smoke-test --note "cancelled via smoke" >/dev/null
+assert_contains "$(bash "$REPO_ROOT/bridge-task.sh" show "$CANCEL_TASK_ID")" "status: cancelled"
+assert_contains "$(cat "$CANCEL_RUN_DIR/status.json")" "\"state\": \"cancelled\""
 
 log "reporting channel health misses to the admin role"
 cat >>"$BRIDGE_ROSTER_LOCAL_FILE" <<EOF
