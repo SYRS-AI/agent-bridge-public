@@ -48,6 +48,14 @@ def write_bytes(path: Path, data: bytes) -> None:
     path.write_bytes(data)
 
 
+def remove_path(path: Path) -> None:
+    if path.is_symlink() or path.is_file():
+        path.unlink(missing_ok=True)
+        return
+    if path.exists():
+        shutil.rmtree(path)
+
+
 def conflict_backup_path(live_path: Path) -> Path:
     return live_path.with_name(f"{live_path.name}.upgrade-conflict")
 
@@ -340,9 +348,74 @@ def cmd_migrate_agents(args: argparse.Namespace) -> int:
     return 0
 
 
-def copy_live_backup(target_root: Path, backup_root: Path) -> None:
+def conflict_backup_relpath(relpath: str) -> str:
+    return (Path(relpath).parent / conflict_backup_path(Path(relpath)).name).as_posix()
+
+
+def build_backup_entries(
+    target_root: Path,
+    analysis_payload: dict[str, Any],
+    migration_payload: dict[str, Any],
+) -> list[dict[str, str]]:
+    entries: dict[str, dict[str, str]] = {}
+
+    def remember(relpath: str, expected_kind: str = "file") -> None:
+        relpath = relpath.strip().lstrip("./")
+        if not relpath:
+            return
+        live_path = target_root / relpath
+        if live_path.exists() or live_path.is_symlink():
+            kind = "dir" if live_path.is_dir() and not live_path.is_symlink() else "file"
+            entries[relpath] = {"path": relpath, "state": "present", "kind": kind}
+            return
+        current = entries.get(relpath)
+        if current and current.get("state") == "present":
+            return
+        entries[relpath] = {"path": relpath, "state": "absent", "kind": expected_kind}
+
+    for item in analysis_payload.get("files", []):
+        strategy = str(item.get("strategy") or "")
+        relpath = str(item.get("path") or "")
+        if strategy not in {"deploy_upstream", "manual_merge"}:
+            continue
+        remember(relpath, "file")
+        if str(item.get("classification") or "") == "merge_required":
+            remember(conflict_backup_relpath(relpath), "file")
+
+    for agent_payload in migration_payload.get("agents", []):
+        agent = str(agent_payload.get("agent") or "").strip()
+        if not agent:
+            continue
+        prefix = f"agents/{agent}"
+        for relpath in agent_payload.get("updated_files", []):
+            remember(f"{prefix}/{relpath}", "file")
+        for relpath in agent_payload.get("added_files", []):
+            remember(f"{prefix}/{relpath}", "file")
+        for relpath in agent_payload.get("created_dirs", []):
+            remember(f"{prefix}/{relpath}", "dir")
+
+    remember("state/upgrade/last-upgrade.json", "file")
+    return [entries[key] for key in sorted(entries)]
+
+
+def copy_live_backup(target_root: Path, backup_root: Path, entries: list[dict[str, str]] | None = None) -> None:
     backup_live = backup_root / "live"
     backup_live.mkdir(parents=True, exist_ok=True)
+    if entries:
+        for entry in entries:
+            if entry.get("state") != "present":
+                continue
+            relpath = str(entry["path"])
+            src = target_root / relpath
+            dst = backup_live / relpath
+            if not src.exists() and not src.is_symlink():
+                continue
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            if src.is_dir() and not src.is_symlink():
+                shutil.copytree(src, dst, symlinks=True, dirs_exist_ok=True)
+            else:
+                shutil.copy2(src, dst, follow_symlinks=False)
+        return
     for child in sorted(target_root.iterdir()):
         if child.name == "backups":
             continue
@@ -370,6 +443,34 @@ def restore_live_backup(target_root: Path, backup_root: Path) -> int:
     backup_live = backup_root / "live"
     if not backup_live.exists():
         raise FileNotFoundError(f"backup snapshot missing: {backup_live}")
+    manifest = load_json(backup_root / "manifest.json", {})
+    entries = manifest.get("entries") or []
+    if entries:
+        removed = 0
+        for entry in entries:
+            if entry.get("state") != "present":
+                continue
+            relpath = str(entry["path"])
+            src = backup_live / relpath
+            dst = target_root / relpath
+            if not src.exists() and not src.is_symlink():
+                continue
+            remove_path(dst)
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            if src.is_dir() and not src.is_symlink():
+                shutil.copytree(src, dst, symlinks=True, dirs_exist_ok=True)
+            else:
+                shutil.copy2(src, dst, follow_symlinks=False)
+        for entry in sorted(
+            (item for item in entries if item.get("state") == "absent"),
+            key=lambda item: str(item.get("path") or "").count("/"),
+            reverse=True,
+        ):
+            dst = target_root / str(entry["path"])
+            if dst.exists() or dst.is_symlink():
+                remove_path(dst)
+                removed += 1
+        return removed
     removed = remove_existing_target_children(target_root)
     for child in sorted(backup_live.iterdir()):
         dst = target_root / child.name
@@ -648,22 +749,29 @@ def cmd_backup_live(args: argparse.Namespace) -> int:
     target_root = Path(args.target_root).expanduser()
     backup_root = Path(args.backup_root).expanduser()
     source_root = Path(args.source_root).expanduser() if args.source_root else None
+    analysis_payload = json.loads(args.analysis_json) if args.analysis_json else {}
+    migration_payload = json.loads(args.migration_json) if args.migration_json else {}
+    entries = build_backup_entries(target_root, analysis_payload, migration_payload) if (analysis_payload or migration_payload) else []
     payload = {
         "target_root": str(target_root),
         "backup_root": str(backup_root),
         "exists": target_root.exists(),
         "created": False,
         "manifest_path": str(backup_root / "manifest.json"),
+        "snapshot_mode": "targeted" if entries else "full",
+        "entry_count": len(entries),
     }
     if source_root is not None:
         payload["source_head"] = git_head(source_root)
     if target_root.exists() and not args.dry_run:
-        copy_live_backup(target_root, backup_root)
+        copy_live_backup(target_root, backup_root, entries or None)
         manifest = {
             "created_at": now_iso(),
             "target_root": str(target_root),
             "source_root": str(source_root) if source_root is not None else "",
             "source_head": payload.get("source_head", ""),
+            "snapshot_mode": payload["snapshot_mode"],
+            "entries": entries,
         }
         save_json(backup_root / "manifest.json", manifest)
         payload["created"] = True
@@ -731,6 +839,8 @@ def build_parser() -> argparse.ArgumentParser:
     backup.add_argument("--target-root", required=True)
     backup.add_argument("--backup-root", required=True)
     backup.add_argument("--source-root")
+    backup.add_argument("--analysis-json", default="")
+    backup.add_argument("--migration-json", default="")
     backup.add_argument("--dry-run", action="store_true")
     backup.set_defaults(handler=cmd_backup_live)
 

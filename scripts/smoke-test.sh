@@ -2022,6 +2022,8 @@ assert_contains "$UPGRADE_JSON" "\"analysis\""
 
 log "upgrade backs up live install and migrates missing agent files"
 rm -f "$BRIDGE_AGENT_HOME_ROOT/$CREATED_AGENT/MEMORY-SCHEMA.md"
+mkdir -p "$BRIDGE_AGENT_HOME_ROOT/$CREATED_AGENT/output"
+printf 'generated-report\n' >"$BRIDGE_AGENT_HOME_ROOT/$CREATED_AGENT/output/generated.txt"
 python3 - <<'PY' "$BRIDGE_AGENT_HOME_ROOT/$CREATED_AGENT/CLAUDE.md"
 from pathlib import Path
 import sys
@@ -2045,6 +2047,7 @@ print(json.loads(sys.argv[1])["backup_root"])
 PY
 )"
 [[ -d "$UPGRADE_BACKUP_ROOT/live" ]] || die "upgrade did not create live backup snapshot"
+[[ ! -e "$UPGRADE_BACKUP_ROOT/live/agents/$CREATED_AGENT/output/generated.txt" ]] || die "upgrade backup should skip generated agent output"
 [[ -f "$BRIDGE_HOME/state/upgrade/last-upgrade.json" ]] || die "upgrade did not write last-upgrade state"
 UPGRADE_ANALYZE_JSON="$("$REPO_ROOT/agent-bridge" upgrade analyze --target "$BRIDGE_HOME" --json)"
 assert_contains "$UPGRADE_ANALYZE_JSON" "\"mode\": \"upgrade-analyze\""

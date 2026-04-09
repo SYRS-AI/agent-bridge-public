@@ -128,6 +128,7 @@ fi
 ADMIN_AGENT_ID=""
 BACKUP_JSON='{}'
 MIGRATION_JSON='{}'
+MIGRATION_PREVIEW_JSON='{}'
 APPLY_JSON='{}'
 
 git -C "$SOURCE_ROOT" rev-parse --show-toplevel >/dev/null 2>&1 || bridge_die "git repo가 아닙니다: $SOURCE_ROOT"
@@ -206,8 +207,22 @@ if [[ -f "$TARGET_ROOT/agent-roster.local.sh" ]]; then
   fi
 fi
 
+if [[ $MIGRATE_AGENTS -eq 1 ]]; then
+  MIGRATION_PREVIEW_JSON="$(python3 "$SOURCE_ROOT/bridge-upgrade.py" migrate-agents --source-root "$SOURCE_ROOT" --target-root "$TARGET_ROOT" --admin-agent "$ADMIN_AGENT_ID" --dry-run)"
+fi
+
 if [[ $BACKUP -eq 1 ]]; then
-  BACKUP_JSON="$(python3 "$SOURCE_ROOT/bridge-upgrade.py" backup-live --target-root "$TARGET_ROOT" --backup-root "$BACKUP_ROOT" --source-root "$SOURCE_ROOT" $([[ $DRY_RUN -eq 1 ]] && printf '%s' '--dry-run'))"
+  backup_args=(backup-live --target-root "$TARGET_ROOT" --backup-root "$BACKUP_ROOT" --source-root "$SOURCE_ROOT")
+  if [[ "$ANALYSIS_JSON" != "{}" ]]; then
+    backup_args+=(--analysis-json "$ANALYSIS_JSON")
+  fi
+  if [[ "$MIGRATION_PREVIEW_JSON" != "{}" ]]; then
+    backup_args+=(--migration-json "$MIGRATION_PREVIEW_JSON")
+  fi
+  if [[ $DRY_RUN -eq 1 ]]; then
+    backup_args+=(--dry-run)
+  fi
+  BACKUP_JSON="$(python3 "$SOURCE_ROOT/bridge-upgrade.py" "${backup_args[@]}")"
 fi
 
 BASE_REF="$(python3 - "$ANALYSIS_JSON" <<'PY'
@@ -230,7 +245,11 @@ fi
 APPLY_JSON="$(python3 "$SOURCE_ROOT/bridge-upgrade.py" "${apply_args[@]}")"
 
 if [[ $MIGRATE_AGENTS -eq 1 ]]; then
-  MIGRATION_JSON="$(python3 "$SOURCE_ROOT/bridge-upgrade.py" migrate-agents --source-root "$SOURCE_ROOT" --target-root "$TARGET_ROOT" --admin-agent "$ADMIN_AGENT_ID" $([[ $DRY_RUN -eq 1 ]] && printf '%s' '--dry-run'))"
+  if [[ $DRY_RUN -eq 1 ]]; then
+    MIGRATION_JSON="$MIGRATION_PREVIEW_JSON"
+  else
+    MIGRATION_JSON="$(python3 "$SOURCE_ROOT/bridge-upgrade.py" migrate-agents --source-root "$SOURCE_ROOT" --target-root "$TARGET_ROOT" --admin-agent "$ADMIN_AGENT_ID")"
+  fi
   "$BRIDGE_BASH_BIN" -lc '
     set -euo pipefail
     export BRIDGE_HOME="$1"
