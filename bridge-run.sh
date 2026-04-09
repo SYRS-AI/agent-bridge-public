@@ -147,6 +147,7 @@ while true; do
     fi
     FAIL_COUNT=$((FAIL_COUNT + 1))
     if [[ $FAIL_COUNT -eq 5 || $(( FAIL_COUNT % 10 )) -eq 0 ]]; then
+      bridge_agent_write_crash_report "$AGENT" "$ENGINE" "$FAIL_COUNT" "$EXIT_CODE" "$ERRFILE" "$LAUNCH_CMD"
       bridge_audit_log daemon crash_loop_detected "$AGENT" \
         --detail engine="$ENGINE" \
         --detail fail_count="$FAIL_COUNT" \
@@ -162,6 +163,7 @@ while true; do
     fi
   else
     if [[ $FAIL_COUNT -gt 0 ]]; then
+      bridge_agent_clear_crash_report "$AGENT"
       bridge_audit_log daemon crash_loop_recovered "$AGENT" \
         --detail engine="$ENGINE" \
         --detail previous_fail_count="$FAIL_COUNT"

@@ -616,7 +616,13 @@ bridge_load_roster() {
   : "${BRIDGE_HEALTH_WARN_SECONDS:=3600}"
   : "${BRIDGE_HEALTH_CRITICAL_SECONDS:=14400}"
   : "${BRIDGE_CHANNEL_HEALTH_REPORT_COOLDOWN_SECONDS:=1800}"
+  : "${BRIDGE_CRASH_REPORT_COOLDOWN_SECONDS:=1800}"
+  : "${BRIDGE_DAEMON_NOTIFY_DRY_RUN:=0}"
   : "${BRIDGE_ON_DEMAND_IDLE_SECONDS:=0}"
+  : "${BRIDGE_USAGE_WARN_PERCENT:=90}"
+  : "${BRIDGE_USAGE_CRITICAL_PERCENT:=100}"
+  : "${BRIDGE_USAGE_MONITOR_INTERVAL_SECONDS:=300}"
+  : "${BRIDGE_USAGE_MONITOR_STATE_FILE:=$BRIDGE_STATE_DIR/usage/monitor-state.json}"
   : "${BRIDGE_ADMIN_AGENT_ID:=}"
   : "${BRIDGE_CRON_SYNC_ENABLED:=${BRIDGE_LEGACY_CRON_SYNC_ENABLED:-${BRIDGE_OPENCLAW_CRON_SYNC_ENABLED:-0}}}"
   : "${BRIDGE_DISCORD_RELAY_ENABLED:=1}"
@@ -719,6 +725,64 @@ bridge_agent_manual_stop_file() {
 bridge_agent_memory_daily_refresh_file() {
   local agent="$1"
   printf '%s/session-refresh/%s.env' "$BRIDGE_STATE_DIR" "$agent"
+}
+
+bridge_agent_crash_report_file() {
+  local agent="$1"
+  printf '%s/crash-report/%s.env' "$BRIDGE_STATE_DIR" "$agent"
+}
+
+bridge_agent_crash_tail_file() {
+  local agent="$1"
+  printf '%s/crash-report/%s.tail.log' "$BRIDGE_STATE_DIR" "$agent"
+}
+
+bridge_agent_crash_state_file() {
+  local agent="$1"
+  printf '%s/crash-report/%s.state.env' "$BRIDGE_STATE_DIR" "$agent"
+}
+
+bridge_agent_write_crash_report() {
+  local agent="$1"
+  local engine="$2"
+  local fail_count="$3"
+  local exit_code="$4"
+  local stderr_file="$5"
+  local launch_cmd="$6"
+  local report_file=""
+  local tail_file=""
+  local error_hash=""
+  local stderr_tail=""
+
+  report_file="$(bridge_agent_crash_report_file "$agent")"
+  tail_file="$(bridge_agent_crash_tail_file "$agent")"
+  mkdir -p "$(dirname "$report_file")"
+  if [[ -f "$stderr_file" ]]; then
+    tail -n 50 "$stderr_file" >"$tail_file" 2>/dev/null || true
+    stderr_tail="$(cat "$tail_file" 2>/dev/null || true)"
+  else
+    : >"$tail_file"
+  fi
+  error_hash="$(bridge_sha1 "${exit_code}|${stderr_tail}")"
+  cat >"$report_file" <<EOF
+CRASH_AGENT=$(printf '%q' "$agent")
+CRASH_ENGINE=$(printf '%q' "$engine")
+CRASH_FAIL_COUNT=$(printf '%q' "$fail_count")
+CRASH_EXIT_CODE=$(printf '%q' "$exit_code")
+CRASH_STDERR_FILE=$(printf '%q' "$stderr_file")
+CRASH_TAIL_FILE=$(printf '%q' "$tail_file")
+CRASH_LAUNCH_CMD=$(printf '%q' "$launch_cmd")
+CRASH_ERROR_HASH=$(printf '%q' "$error_hash")
+CRASH_REPORTED_AT=$(printf '%q' "$(bridge_now_iso)")
+EOF
+}
+
+bridge_agent_clear_crash_report() {
+  local agent="$1"
+  rm -f \
+    "$(bridge_agent_crash_report_file "$agent")" \
+    "$(bridge_agent_crash_tail_file "$agent")" \
+    "$(bridge_agent_crash_state_file "$agent")"
 }
 
 bridge_agent_memory_daily_refresh_pending() {

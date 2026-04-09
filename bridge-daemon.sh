@@ -192,6 +192,154 @@ bridge_watchdog_report_file() {
   printf '%s/watchdog/latest.md' "$BRIDGE_SHARED_DIR"
 }
 
+bridge_usage_poll_state_file() {
+  printf '%s/usage/poll.env' "$BRIDGE_STATE_DIR"
+}
+
+bridge_usage_due() {
+  local interval="${BRIDGE_USAGE_MONITOR_INTERVAL_SECONDS:-300}"
+  local file=""
+  local now=0
+  local next_ts=0
+
+  [[ "$interval" =~ ^[0-9]+$ ]] || interval=300
+  (( interval > 0 )) || return 0
+  file="$(bridge_usage_poll_state_file)"
+  [[ -f "$file" ]] || return 0
+  # shellcheck source=/dev/null
+  source "$file"
+  [[ "${USAGE_NEXT_TS:-0}" =~ ^[0-9]+$ ]] || return 0
+  now="$(date +%s)"
+  next_ts="${USAGE_NEXT_TS:-0}"
+  (( now >= next_ts ))
+}
+
+bridge_note_usage_poll() {
+  local interval="${BRIDGE_USAGE_MONITOR_INTERVAL_SECONDS:-300}"
+  local file=""
+  local now=0
+  local next_ts=0
+
+  [[ "$interval" =~ ^[0-9]+$ ]] || interval=300
+  (( interval > 0 )) || interval=300
+  file="$(bridge_usage_poll_state_file)"
+  mkdir -p "$(dirname "$file")"
+  now="$(date +%s)"
+  next_ts=$(( now + interval ))
+  cat >"$file" <<EOF
+USAGE_UPDATED_TS=$now
+USAGE_NEXT_TS=$next_ts
+EOF
+}
+
+bridge_write_usage_alert_body() {
+  local file="$1"
+  local title="$2"
+  local provider="$3"
+  local account="$4"
+  local window="$5"
+  local bucket="$6"
+  local used_percent="$7"
+  local reset_at="$8"
+  local source="$9"
+
+  mkdir -p "$(dirname "$file")"
+  cat >"$file" <<EOF
+# ${title}
+
+- provider: ${provider}
+- account: ${account:--}
+- window: ${window}
+- bucket: ${bucket}
+- used_percent: ${used_percent}
+- reset_at: ${reset_at}
+- source: ${source}
+- detected_at: $(bridge_now_iso)
+EOF
+}
+
+process_usage_monitor() {
+  local admin_agent="${BRIDGE_ADMIN_AGENT_ID:-}"
+  local monitor_json=""
+  local alert_rows=""
+  local alert_count=0
+  local priority=""
+  local title=""
+  local body=""
+  local provider=""
+  local account=""
+  local window=""
+  local bucket=""
+  local used_percent=""
+  local reset_at=""
+  local source=""
+  local body_file=""
+
+  [[ -n "$admin_agent" ]] || return 1
+  bridge_agent_exists "$admin_agent" || return 1
+  bridge_usage_due || return 1
+
+  if ! monitor_json="$("$BRIDGE_BASH_BIN" "$SCRIPT_DIR/bridge-usage.sh" monitor --json 2>/dev/null)"; then
+    bridge_note_usage_poll
+    return 1
+  fi
+
+  alert_rows="$(python3 - "$monitor_json" <<'PY'
+import json, sys
+
+try:
+    payload = json.loads(sys.argv[1])
+except Exception:
+    raise SystemExit(1)
+
+for alert in payload.get("alerts", []):
+    print(
+        "\t".join(
+            [
+                str(alert.get("provider", "")),
+                str(alert.get("account", "")),
+                str(alert.get("window", "")),
+                str(alert.get("bucket", "")),
+                str(alert.get("used_percent", "")),
+                str(alert.get("reset_at", "")),
+                str(alert.get("source", "")),
+                str(alert.get("message", "")),
+            ]
+        )
+    )
+PY
+)" || {
+    bridge_note_usage_poll
+    return 1
+  }
+
+  while IFS=$'\t' read -r provider account window bucket used_percent reset_at source body; do
+    [[ -z "$provider" || -z "$window" || -z "$bucket" ]] && continue
+    if [[ "$bucket" == "crit" ]]; then
+      priority="urgent"
+      title="$(printf '%s usage critical' "$provider")"
+    else
+      priority="high"
+      title="$(printf '%s usage warning' "$provider")"
+    fi
+    if bridge_agent_has_notify_transport "$admin_agent"; then
+      bridge_notify_send "$admin_agent" "$title" "$body" "" "$priority" "${BRIDGE_DAEMON_NOTIFY_DRY_RUN:-0}" >/dev/null 2>&1 || true
+    fi
+    bridge_audit_log daemon usage_alert "$admin_agent" \
+      --detail provider="$provider" \
+      --detail account="$account" \
+      --detail window="$window" \
+      --detail bucket="$bucket" \
+      --detail used_percent="$used_percent" \
+      --detail reset_at="$reset_at" \
+      --detail source="$source"
+    alert_count=$((alert_count + 1))
+  done <<<"$alert_rows"
+
+  bridge_note_usage_poll
+  (( alert_count > 0 ))
+}
+
 bridge_watchdog_problem_key() {
   local report_json="$1"
   python3 - "$report_json" <<'PY'
@@ -330,6 +478,184 @@ PY
 
   bridge_note_watchdog_scan "$last_key" "$last_report_ts"
   return 1
+}
+
+bridge_crash_report_body_file() {
+  local agent="$1"
+  printf '%s/crash-reports/%s.md' "$BRIDGE_SHARED_DIR" "$agent"
+}
+
+bridge_clear_crash_report_state() {
+  local agent="$1"
+  rm -f "$(bridge_agent_crash_state_file "$agent")"
+}
+
+bridge_write_crash_report_body() {
+  local agent="$1"
+  local body_file="$2"
+  local fail_count="$3"
+  local exit_code="$4"
+  local engine="$5"
+  local stderr_file="$6"
+  local tail_file="$7"
+  local launch_cmd="$8"
+
+  mkdir -p "$(dirname "$body_file")"
+  {
+    echo "# Crash Loop Report"
+    echo
+    echo "- agent: $agent"
+    echo "- engine: $engine"
+    echo "- fail_count: $fail_count"
+    echo "- exit_code: $exit_code"
+    echo "- stderr_file: ${stderr_file:--}"
+    echo "- tail_file: ${tail_file:--}"
+    echo "- detected_at: $(bridge_now_iso)"
+    echo
+    echo "## Launch Command"
+    echo
+    echo '```bash'
+    printf '%s\n' "$launch_cmd"
+    echo '```'
+    echo
+    echo "## Stderr Tail"
+    echo
+    echo '```text'
+    if [[ -f "$tail_file" ]]; then
+      cat "$tail_file"
+    elif [[ -f "$stderr_file" ]]; then
+      tail -n 50 "$stderr_file" 2>/dev/null || true
+    fi
+    echo '```'
+  } >"$body_file"
+}
+
+process_crash_reports() {
+  local admin_agent="${BRIDGE_ADMIN_AGENT_ID:-}"
+  local report_file=""
+  local agent=""
+  local fail_count=0
+  local exit_code=0
+  local engine=""
+  local stderr_file=""
+  local tail_file=""
+  local launch_cmd=""
+  local error_hash=""
+  local reported_at=""
+  local state_file=""
+  local last_hash=""
+  local last_report_ts=0
+  local now_ts=0
+  local cooldown="${BRIDGE_CRASH_REPORT_COOLDOWN_SECONDS:-1800}"
+  local body_file=""
+  local title=""
+  local title_prefix=""
+  local existing_id=""
+  local create_output=""
+  local reported=1
+  local changed=1
+
+  [[ -n "$admin_agent" ]] || return 1
+  bridge_agent_exists "$admin_agent" || return 1
+  [[ "$cooldown" =~ ^[0-9]+$ ]] || cooldown=1800
+
+  shopt -s nullglob
+  for report_file in "$BRIDGE_STATE_DIR"/crash-report/*.env; do
+    agent=""
+    fail_count=0
+    exit_code=0
+    engine=""
+    stderr_file=""
+    tail_file=""
+    launch_cmd=""
+    error_hash=""
+    reported_at=""
+    # shellcheck source=/dev/null
+    source "$report_file"
+    agent="${CRASH_AGENT:-}"
+    [[ -n "$agent" ]] || continue
+    if ! bridge_agent_exists "$agent"; then
+      bridge_agent_clear_crash_report "$agent"
+      continue
+    fi
+    state_file="$(bridge_agent_crash_state_file "$agent")"
+    last_hash=""
+    last_report_ts=0
+    if [[ -f "$state_file" ]]; then
+      # shellcheck source=/dev/null
+      source "$state_file"
+      last_hash="${CRASH_LAST_HASH:-}"
+      last_report_ts="${CRASH_LAST_REPORT_TS:-0}"
+    fi
+    [[ "$last_report_ts" =~ ^[0-9]+$ ]] || last_report_ts=0
+    now_ts="$(date +%s)"
+    fail_count="${CRASH_FAIL_COUNT:-0}"
+    exit_code="${CRASH_EXIT_CODE:-0}"
+    engine="${CRASH_ENGINE:-}"
+    stderr_file="${CRASH_STDERR_FILE:-}"
+    tail_file="${CRASH_TAIL_FILE:-}"
+    launch_cmd="${CRASH_LAUNCH_CMD:-}"
+    error_hash="${CRASH_ERROR_HASH:-}"
+    reported=0
+
+    if [[ "$agent" == "$admin_agent" ]]; then
+      if [[ "$error_hash" != "$last_hash" || $(( now_ts - last_report_ts )) -ge "$cooldown" ]]; then
+        body="Admin agent crash loop: ${agent} failed ${fail_count} times (exit ${exit_code}). Manual intervention may be required."
+        if bridge_agent_has_notify_transport "$admin_agent"; then
+          bridge_notify_send "$admin_agent" "Admin crash loop detected" "$body" "" urgent "${BRIDGE_DAEMON_NOTIFY_DRY_RUN:-0}" >/dev/null 2>&1 || true
+        fi
+        bridge_audit_log daemon crash_loop_admin_alert "$admin_agent" \
+          --detail agent="$agent" \
+          --detail engine="$engine" \
+          --detail fail_count="$fail_count" \
+          --detail exit_code="$exit_code" \
+          --detail error_hash="$error_hash"
+        reported=1
+      fi
+    else
+      body_file="$(bridge_crash_report_body_file "$agent")"
+      bridge_write_crash_report_body "$agent" "$body_file" "$fail_count" "$exit_code" "$engine" "$stderr_file" "$tail_file" "$launch_cmd"
+      title="[crash-loop] ${agent} (${fail_count} failures)"
+      title_prefix="[crash-loop] ${agent} "
+      existing_id="$(bridge_queue_cli find-open --agent "$admin_agent" --title-prefix "$title_prefix" 2>/dev/null || true)"
+      if [[ "$existing_id" =~ ^[0-9]+$ ]]; then
+        bridge_queue_cli update "$existing_id" --actor daemon --title "$title" --priority urgent --body-file "$body_file" >/dev/null 2>&1 || true
+        bridge_audit_log daemon crash_loop_report "$admin_agent" \
+          --detail agent="$agent" \
+          --detail mode=refresh \
+          --detail fail_count="$fail_count" \
+          --detail exit_code="$exit_code" \
+          --detail error_hash="$error_hash" \
+          --detail body_file="$body_file"
+        reported=1
+      elif [[ "$error_hash" != "$last_hash" || $(( now_ts - last_report_ts )) -ge "$cooldown" ]]; then
+        create_output="$(bridge_queue_cli create --to "$admin_agent" --from daemon --priority urgent --title "$title" --body-file "$body_file" 2>/dev/null || true)"
+        if [[ "$create_output" =~ created\ task\ \#([0-9]+) ]]; then
+          bridge_audit_log daemon crash_loop_report "$admin_agent" \
+            --detail agent="$agent" \
+            --detail mode=create \
+            --detail task_id="${BASH_REMATCH[1]}" \
+            --detail fail_count="$fail_count" \
+            --detail exit_code="$exit_code" \
+            --detail error_hash="$error_hash" \
+            --detail body_file="$body_file"
+          reported=1
+        fi
+      fi
+    fi
+
+    if (( reported == 1 )); then
+      mkdir -p "$(dirname "$state_file")"
+      cat >"$state_file" <<EOF
+CRASH_LAST_HASH=$(printf '%q' "$error_hash")
+CRASH_LAST_REPORT_TS=$(printf '%q' "$now_ts")
+EOF
+      changed=0
+    fi
+  done
+  shopt -u nullglob
+
+  return "$changed"
 }
 
 bridge_daemon_autostart_state_file() {
@@ -1242,6 +1568,12 @@ cmd_sync_cycle() {
     changed=0
   fi
   if process_watchdog_report; then
+    changed=0
+  fi
+  if process_crash_reports; then
+    changed=0
+  fi
+  if process_usage_monitor; then
     changed=0
   fi
   if [[ -n "$summary_output" ]] && process_on_demand_agents "$summary_output"; then

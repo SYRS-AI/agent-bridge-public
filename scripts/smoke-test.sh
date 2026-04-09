@@ -2708,4 +2708,105 @@ BRIDGE_WATCHDOG_INTERVAL_SECONDS=1 BRIDGE_WATCHDOG_COOLDOWN_SECONDS=3600 bash "$
 WATCHDOG_OPEN_ID_AGAIN="$(python3 "$REPO_ROOT/bridge-queue.py" find-open --agent "$SMOKE_AGENT" --title-prefix "[watchdog] " 2>/dev/null || true)"
 [[ -z "$WATCHDOG_OPEN_ID_AGAIN" ]] || die "watchdog alert should be deduped while drift hash is unchanged"
 
+log "monitoring usage thresholds and deduping alerts"
+FAKE_USAGE_ROOT="$(mktemp -d)"
+FAKE_CLAUDE_USAGE="$FAKE_USAGE_ROOT/claude-usage.json"
+FAKE_CODEX_SESSIONS="$FAKE_USAGE_ROOT/codex-sessions"
+FAKE_USAGE_MONITOR_STATE="$FAKE_USAGE_ROOT/usage-monitor-state.json"
+FAKE_USAGE_DAEMON_AUDIT="$FAKE_USAGE_ROOT/usage-daemon-audit.jsonl"
+FAKE_USAGE_DAEMON_STATE="$FAKE_USAGE_ROOT/usage-daemon-state.json"
+mkdir -p "$FAKE_CODEX_SESSIONS/2026/04/09"
+cat >"$FAKE_CLAUDE_USAGE" <<'EOF'
+{
+  "data": {
+    "planName": "Max",
+    "fiveHour": 91,
+    "sevenDay": 22,
+    "fiveHourResetAt": "2026-04-09T13:00:00+00:00",
+    "sevenDayResetAt": "2026-04-15T17:00:00+00:00"
+  }
+}
+EOF
+cat >"$FAKE_CODEX_SESSIONS/2026/04/09/usage.jsonl" <<'EOF'
+{"timestamp":"2026-04-09T10:00:00Z","type":"event_msg","payload":{"type":"token_count","rate_limits":{"limit_id":"codex","primary":{"used_percent":92.0,"window_minutes":300,"resets_at":1775734470},"secondary":{"used_percent":17.0,"window_minutes":10080,"resets_at":1776209770},"plan_type":"pro"}}}
+EOF
+USAGE_STATUS_JSON="$(BRIDGE_CLAUDE_USAGE_CACHE="$FAKE_CLAUDE_USAGE" BRIDGE_CODEX_SESSIONS_DIR="$FAKE_CODEX_SESSIONS" "$REPO_ROOT/agent-bridge" usage status --json)"
+python3 - "$USAGE_STATUS_JSON" <<'PY'
+import json, sys
+payload = json.loads(sys.argv[1])
+snapshots = payload["snapshots"]
+assert any(row["provider"] == "claude" and row["window"] == "5h" for row in snapshots)
+assert any(row["provider"] == "codex" and row["window"] == "5h" for row in snapshots)
+PY
+USAGE_MONITOR_FIRST="$(python3 "$REPO_ROOT/bridge-usage.py" monitor --claude-usage-cache "$FAKE_CLAUDE_USAGE" --codex-sessions-dir "$FAKE_CODEX_SESSIONS" --state-file "$FAKE_USAGE_MONITOR_STATE" --json)"
+python3 - "$USAGE_MONITOR_FIRST" <<'PY'
+import json, sys
+payload = json.loads(sys.argv[1])
+alerts = payload["alerts"]
+assert len(alerts) == 2, alerts
+assert any(row["provider"] == "claude" and row["window"] == "5h" for row in alerts)
+assert any(row["provider"] == "codex" and row["window"] == "5h" for row in alerts)
+PY
+USAGE_MONITOR_SECOND="$(python3 "$REPO_ROOT/bridge-usage.py" monitor --claude-usage-cache "$FAKE_CLAUDE_USAGE" --codex-sessions-dir "$FAKE_CODEX_SESSIONS" --state-file "$FAKE_USAGE_MONITOR_STATE" --json)"
+python3 - "$USAGE_MONITOR_SECOND" <<'PY'
+import json, sys
+payload = json.loads(sys.argv[1])
+assert payload["alerts"] == [], payload["alerts"]
+PY
+BRIDGE_USAGE_MONITOR_INTERVAL_SECONDS=0 \
+BRIDGE_DAEMON_NOTIFY_DRY_RUN=1 \
+BRIDGE_AUDIT_LOG="$FAKE_USAGE_DAEMON_AUDIT" \
+BRIDGE_CLAUDE_USAGE_CACHE="$FAKE_CLAUDE_USAGE" \
+BRIDGE_CODEX_SESSIONS_DIR="$FAKE_CODEX_SESSIONS" \
+BRIDGE_USAGE_MONITOR_STATE_FILE="$FAKE_USAGE_DAEMON_STATE" \
+bash "$REPO_ROOT/bridge-daemon.sh" sync >/dev/null
+POST_USAGE_ALERTS="$(BRIDGE_AUDIT_LOG="$FAKE_USAGE_DAEMON_AUDIT" "$REPO_ROOT/agent-bridge" usage alerts --json)"
+python3 - "$POST_USAGE_ALERTS" <<'PY'
+import json, sys
+alerts = json.loads(sys.argv[1])
+assert any(row["detail"]["provider"] == "claude" and row["detail"]["window"] == "5h" for row in alerts), alerts
+assert any(row["detail"]["provider"] == "codex" and row["detail"]["window"] == "5h" for row in alerts), alerts
+PY
+
+log "escalating crash-loop reports to the admin role"
+CRASH_ERRFILE="$TMP_ROOT/crash-loop.err"
+cat >"$CRASH_ERRFILE" <<'EOF'
+fatal: token expired
+unable to open runtime config
+EOF
+"$BASH4_BIN" -lc "source \"$REPO_ROOT/bridge-lib.sh\"; bridge_load_roster; bridge_agent_write_crash_report \"$BROKEN_CHANNEL_AGENT\" \"claude\" \"5\" \"1\" \"$CRASH_ERRFILE\" 'claude --dangerously-skip-permissions'"
+bash "$REPO_ROOT/bridge-daemon.sh" sync >/dev/null
+CRASH_OPEN_ID="$(python3 "$REPO_ROOT/bridge-queue.py" find-open --agent "$SMOKE_AGENT" --title-prefix "[crash-loop] $BROKEN_CHANNEL_AGENT " 2>/dev/null || true)"
+[[ "$CRASH_OPEN_ID" =~ ^[0-9]+$ ]] || die "expected crash-loop task for $BROKEN_CHANNEL_AGENT"
+bash "$REPO_ROOT/bridge-task.sh" done "$CRASH_OPEN_ID" --agent "$SMOKE_AGENT" --note "crash report handled" >/dev/null
+bash "$REPO_ROOT/bridge-daemon.sh" sync >/dev/null
+CRASH_OPEN_ID_AGAIN="$(python3 "$REPO_ROOT/bridge-queue.py" find-open --agent "$SMOKE_AGENT" --title-prefix "[crash-loop] $BROKEN_CHANNEL_AGENT " 2>/dev/null || true)"
+[[ -z "$CRASH_OPEN_ID_AGAIN" ]] || die "crash-loop report should be deduped while error hash is unchanged"
+"$BASH4_BIN" -lc "source \"$REPO_ROOT/bridge-lib.sh\"; bridge_load_roster; bridge_agent_clear_crash_report \"$BROKEN_CHANNEL_AGENT\""
+
+log "directly alerting on admin crash loops"
+ADMIN_CRASH_ERRFILE="$TMP_ROOT/admin-crash-loop.err"
+cat >"$ADMIN_CRASH_ERRFILE" <<'EOF'
+admin fatal: runtime auth missing
+EOF
+"$BASH4_BIN" -lc "source \"$REPO_ROOT/bridge-lib.sh\"; bridge_load_roster; bridge_agent_write_crash_report \"$SMOKE_AGENT\" \"codex\" \"5\" \"2\" \"$ADMIN_CRASH_ERRFILE\" 'codex --dangerously-bypass-approvals-and-sandbox --no-alt-screen'"
+PRE_ADMIN_CRASH_ALERTS="$("$REPO_ROOT/agent-bridge" audit --action crash_loop_admin_alert --limit 20 --json)"
+BRIDGE_DAEMON_NOTIFY_DRY_RUN=1 bash "$REPO_ROOT/bridge-daemon.sh" sync >/dev/null
+POST_ADMIN_CRASH_ALERTS="$("$REPO_ROOT/agent-bridge" audit --action crash_loop_admin_alert --limit 20 --json)"
+python3 - "$PRE_ADMIN_CRASH_ALERTS" "$POST_ADMIN_CRASH_ALERTS" <<'PY'
+import json, sys
+before = json.loads(sys.argv[1])
+after = json.loads(sys.argv[2])
+assert len(after) >= len(before) + 1
+PY
+BRIDGE_DAEMON_NOTIFY_DRY_RUN=1 bash "$REPO_ROOT/bridge-daemon.sh" sync >/dev/null
+POST_ADMIN_CRASH_ALERTS_DEDUPED="$("$REPO_ROOT/agent-bridge" audit --action crash_loop_admin_alert --limit 20 --json)"
+python3 - "$POST_ADMIN_CRASH_ALERTS" "$POST_ADMIN_CRASH_ALERTS_DEDUPED" <<'PY'
+import json, sys
+before = json.loads(sys.argv[1])
+after = json.loads(sys.argv[2])
+assert len(after) == len(before)
+PY
+"$BASH4_BIN" -lc "source \"$REPO_ROOT/bridge-lib.sh\"; bridge_load_roster; bridge_agent_clear_crash_report \"$SMOKE_AGENT\""
+
 log "smoke test passed"

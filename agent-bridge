@@ -31,6 +31,7 @@ Usage:
   $CLI_NAME cron <inventory|show|import|list|create|update|delete|rebalance-memory-daily|enqueue|sync|run-subagent|errors|cleanup> ...
   $CLI_NAME memory <init|capture|ingest|promote|remember|lint|search|rebuild-index|query> ...
   $CLI_NAME audit [--agent <name>] [--action <type>] [--since <datetime>] [--limit N] [--json]
+  $CLI_NAME usage <status|monitor|alerts> ...
   $CLI_NAME watchdog scan [agent...] [--json]
   $CLI_NAME discord <status|sync>
   $CLI_NAME migrate runtime inventory [--json] [--report <path>]
@@ -134,6 +135,8 @@ Examples:
   $CLI_NAME memory rebuild-index --agent assistant
   $CLI_NAME memory query --agent assistant --user owner --query "morning updates"
   $CLI_NAME audit --agent patch --limit 20
+  $CLI_NAME usage status --json
+  $CLI_NAME usage alerts --json
   $CLI_NAME setup discord tester
   $CLI_NAME setup telegram tester --allow-from 123456789
   $CLI_NAME setup agent tester
@@ -425,6 +428,10 @@ if [[ $# -gt 0 ]]; then
     audit)
       shift
       exec "$BRIDGE_BASH_BIN" "$SCRIPT_DIR/bridge-audit.sh" "$@"
+      ;;
+    usage)
+      shift
+      exec "$BRIDGE_BASH_BIN" "$SCRIPT_DIR/bridge-usage.sh" "$@"
       ;;
     watchdog)
       shift
