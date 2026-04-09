@@ -1675,13 +1675,22 @@ assert_contains "$PROMPT_TIMESTAMP_TEXT" "<question_escalation>"
 assert_contains "$PROMPT_TIMESTAMP_TEXT" "agent-bridge escalate question"
 
 log "ensuring shared Claude settings symlink for bridge-owned agent homes"
+cat >"$BRIDGE_HOME/agents/.claude/settings.local.json" <<'EOF'
+{
+  "enabledPlugins": {
+    "local-test@example": true
+  }
+}
+EOF
 SHARED_HOOK_OUTPUT="$("$BASH4_BIN" -lc "source \"$REPO_ROOT/bridge-lib.sh\"; bridge_load_roster; bridge_ensure_claude_stop_hook \"$CLAUDE_STATIC_WORKDIR\"")"
 assert_contains "$SHARED_HOOK_OUTPUT" "settings_file: $CLAUDE_STATIC_WORKDIR/.claude/settings.json"
-assert_contains "$SHARED_HOOK_OUTPUT" "command: $BRIDGE_HOME/agents/.claude/settings.json"
+assert_contains "$SHARED_HOOK_OUTPUT" "command: $BRIDGE_HOME/agents/.claude/settings.effective.json"
 [[ -L "$CLAUDE_STATIC_WORKDIR/.claude/settings.json" ]] || die "expected shared Claude settings symlink"
 SHARED_SYMLINK_TARGET="$(readlink "$CLAUDE_STATIC_WORKDIR/.claude/settings.json")"
-assert_contains "$SHARED_SYMLINK_TARGET" "../../.claude/settings.json"
-assert_contains "$(cat "$BRIDGE_HOME/agents/.claude/settings.json")" "\"additionalContext\": true"
+assert_contains "$SHARED_SYMLINK_TARGET" "../../.claude/settings.effective.json"
+assert_contains "$(cat "$BRIDGE_HOME/agents/.claude/settings.effective.json")" "\"additionalContext\": true"
+assert_contains "$(cat "$BRIDGE_HOME/agents/.claude/settings.effective.json")" "\"enabledPlugins\""
+assert_contains "$(cat "$BRIDGE_HOME/agents/.claude/settings.effective.json")" "local-test@example"
 
 log "ensuring shared Claude runtime skills for bridge-owned agent homes"
 "$BASH4_BIN" -lc "source \"$REPO_ROOT/bridge-lib.sh\"; bridge_load_roster; bridge_bootstrap_claude_shared_skills \"$CLAUDE_STATIC_WORKDIR\""

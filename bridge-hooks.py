@@ -31,6 +31,18 @@ def save_json(path: Path, payload: Any) -> None:
     os.chmod(path, 0o600)
 
 
+def merge_settings(base: Any, overlay: Any) -> Any:
+    if isinstance(base, dict) and isinstance(overlay, dict):
+        merged = dict(base)
+        for key, value in overlay.items():
+            if key in merged:
+                merged[key] = merge_settings(merged[key], value)
+            else:
+                merged[key] = value
+        return merged
+    return overlay
+
+
 def stop_hook_command(bridge_home: Path, bash_bin: str) -> str:
     hook_path = bridge_home / "hooks" / "mark-idle.sh"
     return shlex.join([bash_bin, str(hook_path)])
@@ -491,6 +503,39 @@ def next_backup_path(path: Path) -> Path:
     return candidate
 
 
+def cmd_render_shared_settings(args: argparse.Namespace) -> int:
+    base_path = Path(args.base_settings_file).expanduser()
+    overlay_path = Path(args.overlay_settings_file).expanduser()
+    effective_path = Path(args.effective_settings_file).expanduser()
+
+    base_payload = ensure_settings_root(base_path)
+    overlay_payload = load_json(overlay_path)
+    if overlay_payload in (None, ""):
+        overlay_payload = {}
+    if not isinstance(overlay_payload, dict):
+        raise SystemExit(f"shared settings overlay must be a JSON object: {overlay_path}")
+
+    merged = merge_settings(base_payload, overlay_payload)
+    save_json(effective_path, merged)
+
+    payload = {
+        "base_settings_file": str(base_path),
+        "overlay_settings_file": str(overlay_path),
+        "effective_settings_file": str(effective_path),
+        "overlay_present": "true" if overlay_path.exists() else "false",
+    }
+    if args.format == "shell":
+        for key, value in payload.items():
+            print(shell_line(key.upper(), value))
+        return 0
+
+    print(f"base_settings_file: {payload['base_settings_file']}")
+    print(f"overlay_settings_file: {payload['overlay_settings_file']}")
+    print(f"effective_settings_file: {payload['effective_settings_file']}")
+    print(f"overlay_present: {payload['overlay_present']}")
+    return 0
+
+
 def cmd_link_shared_settings(args: argparse.Namespace) -> int:
     settings_path = Path(args.workdir).expanduser() / ".claude" / "settings.json"
     shared_path = Path(args.shared_settings_file).expanduser()
@@ -672,6 +717,13 @@ def build_parser() -> argparse.ArgumentParser:
     link_shared_parser.add_argument("--shared-settings-file", required=True)
     link_shared_parser.add_argument("--format", choices=("text", "shell"), default="text")
     link_shared_parser.set_defaults(handler=cmd_link_shared_settings)
+
+    render_shared_parser = subparsers.add_parser("render-shared-settings")
+    render_shared_parser.add_argument("--base-settings-file", required=True)
+    render_shared_parser.add_argument("--overlay-settings-file", required=True)
+    render_shared_parser.add_argument("--effective-settings-file", required=True)
+    render_shared_parser.add_argument("--format", choices=("text", "shell"), default="text")
+    render_shared_parser.set_defaults(handler=cmd_render_shared_settings)
 
     trust_parser = subparsers.add_parser("ensure-project-trust")
     trust_parser.add_argument("--workdir", required=True)

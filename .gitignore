@@ -23,3 +23,5 @@ agents/*/.claude/
 # Shared agent settings (symlink target) is tracked
 !agents/.claude/
 !agents/.claude/settings.json
+agents/.claude/settings.local.json
+agents/.claude/settings.effective.json

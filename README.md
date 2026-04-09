@@ -3,246 +3,323 @@
 [![CI](https://github.com/SYRS-AI/agent-bridge/actions/workflows/ci.yml/badge.svg)](https://github.com/SYRS-AI/agent-bridge/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](./LICENSE)
 
-Agent Bridge는 Claude Code와 Codex를 함께 운영하기 위한 `tmux` 기반 로컬 orchestration layer입니다. 핵심 UX는 단순합니다. 사람은 관리자 에이전트에게 자연어로 요청하고, 에이전트 실행, 작업 큐 전달, 상태 확인, worktree 분리, 채널 온보딩 같은 운영 작업은 Agent Bridge가 맡습니다.
+**AI 에이전트 팀을 만들어서 회사 업무를 자동화하세요.**
 
-이 프로젝트는 신뢰된 로컬 작업 환경을 전제로 합니다. 즉, Claude Code 또는 Codex에게 현재 디렉토리 접근 권한을 의도적으로 주는 흐름을 기본 가정으로 합니다.
+Agent Bridge는 Claude Code와 Codex 같은 AI 코딩 에이전트를 "직원"처럼 여러 명 동시에 띄워서, 각자 맡은 업무를 수행하게 하는 로컬 오케스트레이션 플랫폼입니다.
 
-> 대부분의 사용자는 설치 후 `agb admin`만 알면 충분합니다.
+> 3명이 하던 일을 에이전트 20명이 대신합니다.
+> 설정부터 유지보수까지 전부 자연어로.
+
+---
+
+## 실제 사용 사례
+
+일본에서 D2C 브랜드를 운영하는 3인 스타트업이 Agent Bridge로 20개 이상의 에이전트를 운영하고 있습니다:
+
+- **커머스 에이전트** — Shopify 주문 처리, 재고 관리, 테마 배포
+- **물류 에이전트** — 3PL 창고 배송 추적, 포장 지시, 주문 상태 모니터링
+- **회계 에이전트** — 회계 시스템 연동, 거래 분류, 세금계산서 관리
+- **광고 에이전트** — Facebook/Instagram 광고 성과 모니터링, 예산 추적
+- **CS 에이전트** — 고객 문의 응대, 리뷰 모니터링
+- **마케팅 에이전트** — 리뷰 분석, 인플루언서 시딩 관리
+- **비서 에이전트** — 대표의 일정, 이메일, 브리핑, 저녁 다이제스트
+- **관리자 에이전트** — 시스템 전체를 관리하는 주치의
+
+각 에이전트는 Discord 채널에 상주하며, 담당자가 채널에 말을 걸면 응답합니다. 에이전트끼리 일감을 주고받고, 문제가 생기면 사람에게 보고합니다.
+
+**이 모든 것이 Mac mini 한 대에서 돌아갑니다.**
+
+---
 
 ## 한눈에 보기
 
 ```mermaid
 flowchart TD
-  U["사용자"] -->|설치 요청| I["Claude Code 설치 세션"]
-  I -->|bootstrap| B["Agent Bridge"]
-  B --> A["관리자 역할"]
-  U -->|일상 사용| C["agb admin"]
-  C --> A
-  A --> Q["작업 큐 / 상태 / 역할 관리"]
-  Q --> W["Claude Code / Codex 워커"]
-  D["Daemon"] -->|idle 감지 / 주기 작업| W
+    U["사용자"] -->|Discord / Telegram| CH["채널"]
+    CH --> A1["커머스<br/>(Shopify)"]
+    CH --> A2["물류<br/>(Warehouse)"]
+    CH --> A3["회계<br/>(Finance)"]
+    CH --> A4["CS<br/>(Support)"]
+    CH --> A5["..."]
+
+    U -->|"agb admin"| PATCH["관리자<br/>(Admin)"]
+    PATCH -->|에이전트 생성/설정| A1
+    PATCH -->|에이전트 생성/설정| A2
+    PATCH -->|상태 모니터링| DAEMON
+
+    A1 <-->|task queue| Q["메시지 큐<br/>(SQLite)"]
+    A2 <-->|task queue| Q
+    A3 <-->|task queue| Q
+    A4 <-->|task queue| Q
+    PATCH <-->|task queue| Q
+
+    DAEMON["데몬"] -->|생애주기 관리| A1
+    DAEMON -->|idle 감지 / 재시작| A2
+    DAEMON -->|크론 스케줄링| A3
+    DAEMON -->|상태 대시보드| Q
+
+    subgraph tmux ["tmux (동시 세션)"]
+        A1
+        A2
+        A3
+        A4
+        A5
+        PATCH
+    end
 ```
 
-## 이 프로젝트가 푸는 문제
+---
 
-- Claude Code와 Codex를 같은 로컬 환경에서 같이 굴리고 싶다.
-- 여러 에이전트에게 일을 나눠주되, 누가 무엇을 처리 중인지 한눈에 보고 싶다.
-- 일반 작업은 큐로 안전하게 넘기고, 진짜 급할 때만 인터럽트하고 싶다.
-- 같은 저장소에서 동시에 여러 에이전트가 수정해야 할 때 충돌을 줄이고 싶다.
-- 설치와 운영은 가능하면 사람 대신 관리자 에이전트가 맡았으면 좋겠다.
+## 이 프로젝트가 풀고자 하는 문제
 
-## 기본 원칙
+### 최소 인력으로 운영되는 AI 네이티브 조직
 
-- 사람은 저수준 명령보다 `agb admin`과 자연어 요청을 우선합니다.
-- 일반 협업은 queue-first로 처리합니다.
-- 긴급 인터럽트는 예외 상황에만 씁니다.
-- 같은 저장소에서 동시 쓰기가 필요하면 worktree를 분리합니다.
-- 새 설치는 비어 있는 정적 역할에서 시작하고, bootstrap이 관리자 역할부터 만듭니다.
+스타트업이나 소규모 팀이 마케팅, CS, 물류, 회계, 개발을 한두 명이 다 맡고 있다면 — 각 영역에 전문 AI 에이전트를 배치해서 사람은 의사결정에 집중할 수 있습니다.
 
-## 설치 방법
+### 구체적으로 이런 것이 가능합니다
 
-### 권장: Claude Code에게 설치 맡기기
+- **24시간 고객 응대** — Discord/Telegram에 에이전트가 상주하며 고객 문의를 즉시 처리
+- **자동 업무 체인** — 주문이 들어오면 Shopify 에이전트가 확인 → 물류 에이전트가 출고 지시 → 완료되면 CS 에이전트가 배송 안내
+- **정기 보고** — 매일 아침 브리핑, 매주 매출 분석, 매월 결산을 크론으로 자동 생성
+- **에이전트 간 협업** — 광고팀 에이전트가 "이번 주 광고비가 예산 초과"라고 보고하면 회계 에이전트가 확인하고 사람에게 알림
+- **자연어 유지보수** — "커머스 에이전트한테 매일 아침 9시에 재고 리포트 보내게 해줘" → 관리자 에이전트가 크론 설정까지 처리
 
-가장 권장하는 방식은 Claude Code에게 이 저장소 설치를 맡기는 것입니다. 목표는 설치가 끝난 뒤 사람이 `agb admin`만 실행하면 되도록 만드는 것입니다.
+### 왜 기존 도구로는 안 되나요?
 
-Claude Code에게 아래처럼 요청하면 됩니다.
+| 도구 | 한계 |
+|------|------|
+| **Claude Code / Codex 단독** | 한 번에 하나의 세션만 가능. 여러 업무를 동시에 처리 못함. |
+| **LangChain / CrewAI 등** | 자체 에이전트 런타임을 구축해야 함. 모델이 업데이트될 때마다 래퍼 코드를 다시 맞춰야 함. 프론티어 모델 제작사의 속도를 커뮤니티 프레임워크가 따라가기 어려움. |
+| **OpenClaw 등 자체 게이트웨이 방식** | 게이트웨이, 세션 관리, A2A 프로토콜, 메모리 시스템을 직접 구현해야 하고, 유지보수 부담이 큼. Claude Code가 hooks, channels, MCP 같은 기능을 네이티브로 추가해도, 자체 런타임이 감싸고 있어서 활용할 수 없음. 에이전트 간 통신 경로가 복잡하고(게이트웨이 경유 필수), 크론이 에이전트 세션에 묶여 컨텍스트가 오염되며, 메모리가 자체 벡터 DB 전용이라 Claude Code의 auto memory/auto dream 같은 네이티브 영속 메모리와 경쟁력이 떨어짐. 세션 crash 복구도 불안정해서 watchdog, rescue 스킬 등을 자체 구축해야 했음. 업데이트할 때마다 소스 패치 20여 개를 재적용해야 하는 운영 부담도 큼. |
+| **Agent Bridge** | Claude Code와 Codex를 그대로 사용. 별도 에이전트 런타임 없이, 이미 검증된 도구 위에 협업 레이어만 추가. 모델 제작사의 네이티브 기능(MCP 플러그인, 채널 연동, hooks, auto memory)을 즉시 활용 가능. 에이전트 간 통신은 단일 task queue로 단순화, 크론은 독립 disposable worker로 세션 오염 없이 실행, 세션 crash 시 daemon이 자동 복구. |
+
+---
+
+## 설계 철학
+
+Agent Bridge는 **가능한 한 적게 만들고, 빨리 사라지는 것**이 목표입니다.
+
+Anthropic과 OpenAI는 빠른 속도로 자사 에이전트 하네스에 기능을 추가하고 있습니다. 멀티에이전트 오케스트레이션, 메모리, 도구 연동 같은 기능이 결국 Claude Code와 Codex에 네이티브로 들어올 것입니다.
+
+그때까지 필요한 최소한의 접착제 — 그것이 Agent Bridge입니다.
+
+- **자체 에이전트 런타임을 만들지 않습니다.** Claude Code와 Codex가 에이전트 그 자체입니다.
+- **모델 제작사의 로드맵을 따릅니다.** 자체 구현보다 업스트림 기능을 우선 사용합니다.
+- **궁극적으로는 흡수될 것을 전제합니다.** Agent Bridge가 필요 없어지는 날이 오면, 그것이 성공입니다.
+
+---
+
+## 시작하기
+
+### 필요한 것
+
+- macOS 또는 Linux
+- [Claude Code](https://docs.claude.com/en/docs/claude-code) 설치 (메인 에이전트 엔진)
+- 선택: [Codex CLI](https://github.com/openai/codex) (보조 에이전트용)
+
+Claude Code를 메인으로 사용하는 이유: Discord/Telegram 등 외부 채널 연결을 네이티브 플러그인으로 지원하기 때문입니다. Codex도 에이전트 엔진으로 완전히 지원하지만, 채널 연동이 필요한 에이전트에는 Claude Code를 사용합니다.
+
+### 설치
+
+Claude Code에게 맡기세요.
+
+```bash
+claude
+```
+
+Claude Code가 열리면 이렇게 말합니다:
 
 ```text
 https://github.com/SYRS-AI/agent-bridge 를 설치해줘.
-
-README를 읽고 AI-native bootstrap 흐름으로 진행해.
-실행 전에 OS와 필수 도구를 점검해.
-
-macOS라면:
-- Homebrew가 없으면 먼저 설치해
-- bash, tmux, python3, git, shellcheck를 설치하거나 업그레이드해
-- PATH에서 Homebrew bin이 먼저 오게 해
-- `bash --version`이 4 이상이 아니면 진행하지 마
-
-Linux라면:
-- bash, tmux, python3, git, shellcheck를 패키지 매니저로 준비해
-
-관리자 역할은 Claude Code 기반으로 하나 만들어줘.
-shell integration, bootstrap, daemon setup까지 마치고 마지막 안내는 `agb admin`만 남겨줘.
-
-Telegram 또는 Discord 자격 증명이 없으면 초보자도 따라할 수 있게 단계별로 설명한 뒤 설치를 이어가.
-토큰, 채널 ID, 로그인 승인, 2FA가 필요한 경우를 제외하면 내가 bridge 하위 명령을 직접 입력하지 않게 해줘.
+README를 읽고 bootstrap 해.
 ```
 
-설치가 끝나면 보통 순서는 이렇습니다.
-
-1. 설치용 Claude Code 세션을 닫습니다.
-2. 현재 셸이 아직 갱신되지 않았다면 새 셸을 엽니다.
-3. `agb admin`을 실행합니다.
-
-### 수동 설치
-
-직접 설치해야 한다면, 저수준 `bridge-*.sh`를 조합하지 말고 `bootstrap` 하나로 끝내는 방향을 권장합니다.
-
-필수 요구 사항:
-
-- Bash 4+
-- `tmux`
-- `python3`
-- `git`
-- 최소 하나의 에이전트 CLI
-- `claude` 또는 `codex`
-
-macOS에서는 기본 `/bin/bash`가 `3.2`라서 그대로는 부족합니다. Homebrew Bash가 `PATH` 앞에 오도록 먼저 맞춰야 합니다.
-
-macOS 예시:
-
-```bash
-brew install bash tmux python shellcheck git
-echo 'export PATH="$(brew --prefix)/bin:$PATH"' >> ~/.zshrc
-exec zsh
-bash --version
-```
-
-Linux 예시:
-
-```bash
-sudo apt update
-sudo apt install -y bash tmux python3 shellcheck git
-bash --version
-```
-
-그 다음 저장소를 가져오고 bootstrap을 실행합니다.
-
-```bash
-gh repo clone SYRS-AI/agent-bridge ~/agent-bridge
-cd ~/agent-bridge
-./agb bootstrap --admin manager --engine claude
-```
-
-`gh`가 없다면:
-
-```bash
-git clone https://github.com/SYRS-AI/agent-bridge.git ~/agent-bridge
-cd ~/agent-bridge
-./agb bootstrap --admin manager --engine claude
-```
-
-설치 계획만 먼저 보고 싶다면:
-
-```bash
-./agb bootstrap --admin manager --engine claude --dry-run --json
-```
-
-bootstrap은 shell integration, 관리자 역할 생성, daemon setup, 지원되는 macOS 환경의 LaunchAgent 등록까지 함께 처리합니다. 설치 후에는 새 셸을 열고 `agb admin`으로 들어가면 됩니다.
-
-## 일상 사용법
-
-### 사람 기준 기본 흐름
-
-사람이 기억해야 하는 핵심 명령은 사실상 이것 하나입니다.
+설치가 끝나면:
 
 ```bash
 agb admin
 ```
 
-이후에는 관리자 에이전트에게 자연어로 요청하면 됩니다. 예시:
+이것만 기억하면 됩니다. 이후 모든 것은 관리자 에이전트(패치)에게 자연어로 요청하면 됩니다.
 
-- "현재 열려 있는 에이전트와 대기 중인 작업을 보여줘."
-- "Codex 워커 하나 더 띄워서 이 리포 작업 분산해줘."
-- "이 수정 사항을 tester에게 큐로 넘기고 재확인 받게 해줘."
-- "동시 편집 충돌이 나지 않게 worktree로 별도 워커를 만들어줘."
-- "Telegram 연결까지 마저 진행해줘."
-- "업데이트 가능한지 확인하고 필요하면 브리지 업그레이드해줘."
+---
 
-### 사람이 직접 쓸 최소 명령
+## Discord 연결하기
 
-운영 중에 사람이 직접 칠 가능성이 있는 명령은 보통 이 정도면 충분합니다.
+에이전트가 Discord에서 일하려면 Discord 봇이 필요합니다. 패치와 함께 설정합니다.
+
+### 1. Discord 봇 만들기
+
+[Discord Developer Portal](https://discord.com/developers/applications)에서:
+
+1. **New Application** → 이름 입력 (예: "SYRS Bot")
+2. **Bot** 탭 → **Reset Token** → 토큰 복사
+3. **Privileged Gateway Intents** → **Message Content Intent** 켜기
+4. **OAuth2 > URL Generator** → scopes: `bot`, permissions: `Send Messages`, `Read Message History` → 생성된 URL로 서버에 초대
+
+### 2. 패치에게 설정 맡기기
 
 ```bash
 agb admin
+```
+
+```text
+Discord 봇을 연결해줘.
+토큰은 [복사한 토큰]이야.
+커머스 에이전트를 #shopify 채널에 연결해줘.
+```
+
+관리자 에이전트가 토큰 저장, 채널 매핑, 에이전트 재시작까지 처리합니다.
+
+### 지원 채널
+
+| 채널 | 상태 | 권장 |
+|------|------|------|
+| **Discord** | 완전 지원 | **메인으로 권장** — 채널별 에이전트 분리, 팀 협업에 최적 |
+| **Telegram** | 완전 지원 | 개인 비서 용도에 적합 |
+
+Discord를 메인으로 추천하는 이유: 서버 내 채널별로 에이전트를 배치할 수 있어서 팀 운영에 자연스럽습니다.
+
+---
+
+## 에이전트 종류
+
+### 스태틱 에이전트 (Static)
+
+Discord에 상주하며 영속적 메모리를 가지고 지속 근무하는 에이전트입니다. 패치에게 요청해서 만듭니다.
+
+```text
+"물류 담당 에이전트를 만들어줘. 이름은 warehouse, Discord #warehouse 채널에 연결해줘."
+```
+
+스태틱 에이전트에는 두 가지 모드가 있습니다:
+
+#### Always-On (상시 가동)
+
+세션이 항상 떠있습니다. 메시지에 즉시 응답하고 부팅 대기 시간이 없습니다.
+
+- **장점**: 응답 지연 0초, 대화 컨텍스트 유지
+- **단점**: 메모리를 항상 점유
+- **용도**: 고객 응대(CS), 개인 비서 등 즉시 응답이 중요한 역할
+
+#### Timeout (유휴 시 자동 종료)
+
+일정 시간 idle 상태면 자동으로 세션이 내려갑니다. 새 메시지가 오면 자동으로 다시 올라옵니다.
+
+- **장점**: 메모리 절약 (Mac mini 8GB 같은 환경에서 필수)
+- **단점**: 첫 응답에 10~20초 부팅 시간
+- **용도**: 회계, 분석, 모니터링 등 항상 즉시 응답하지 않아도 되는 역할
+
+> **참고**: 제작자의 환경(Mac mini 8GB)에서는 20개 이상의 에이전트를 돌리기 위해 대부분을 timeout 모드로 운영합니다. 메모리가 넉넉하다면 전부 always-on으로 돌려도 됩니다 — 부팅 시간 없이 더 쾌적합니다.
+
+### 다이나믹 에이전트 (Dynamic)
+
+사용자가 직접 만들어서 쓰고 버리는 임시 에이전트입니다.
+
+```bash
+# Claude Code 기반 다이나믹 에이전트
+agb --claude --name my-worker
+
+# Codex 기반 다이나믹 에이전트
+agb --codex --name my-coder
+
+# --loop: crash/종료 시 5초 내 자동 재시작 (영속 세션)
+agb --claude --name my-worker --loop
+
+# --loop 없음: 한 번 실행 후 종료
+agb --claude --name one-shot-task
+```
+
+**--loop의 차이**:
+- `--loop` 있음: 에이전트가 crash하거나 `/exit`으로 종료되어도 **5초 내 자동 재시작**. 스태틱 에이전트와 동일한 영속 운영 모드. 장시간 작업하면서 세션이 끊겨도 자동 복구되어야 할 때.
+- `--loop` 없음: 주어진 작업만 하고 세션 종료. 일회성 작업에 적합.
+
+> 참고: 스태틱 에이전트는 기본적으로 `--loop`이 켜져 있습니다. crash가 나도 5초 후 자동 재시작되며, 10회 연속 실패 시에는 60초 대기 후 재시도합니다.
+
+**다이나믹 에이전트는 이런 때 씁니다**:
+- 잠깐 작업하고 버릴 워커가 필요할 때 (크론/서브에이전트와 달리 사용자가 실시간으로 조종 가능)
+- 서브 프로젝트를 별도 폴더에서 진행하면서 기존 에이전트들과 소통할 때
+- 특정 코드베이스를 탐색하거나 실험할 때
+
+---
+
+## 핵심 구조
+
+### 메시지 큐
+
+에이전트들은 SQLite 기반 task queue를 통해 일감을 주고받습니다.
+
+- **일반 작업**: 큐에 넣으면 상대 에이전트가 여유 있을 때 처리
+- **긴급 작업**: 즉시 인터럽트 — 상대 에이전트의 현재 작업을 중단시키고 처리
+- **핸드오프**: 작업을 다른 에이전트에게 넘김
+- 세션이 꺼졌다 켜져도 상태 유지
+
+### 데몬
+
+백그라운드에서 항상 돌면서 전체 시스템을 관리합니다:
+
+- **에이전트 생애주기**: idle 감지, 자동 종료, 자동 재시작
+- **메시지 라우팅**: 큐에 들어온 작업을 해당 에이전트에게 전달
+- **크론 스케줄링**: 매일 아침 브리핑, 주간 리포트 같은 반복 작업 실행
+- **상태 모니터링**: 에이전트 health check, stale 감지, 알림
+
+### 상태 대시보드
+
+```bash
 agb status
-agb list
-agb upgrade --pull --restart-daemon
 ```
 
-설명:
+모든 에이전트의 현재 상태, 큐 적체, idle 시간, 채널 연결 상태를 한눈에 보여줍니다.
 
-- `agb admin`: 관리자 역할에 붙습니다.
-- `agb status`: 전체 상태 대시보드를 봅니다.
-- `agb list`: 현재 활성 에이전트를 간단히 봅니다.
-- `agb upgrade --pull --restart-daemon`: 저장소 기준 최신 코드로 라이브 설치를 갱신합니다.
+---
 
-### 사람이 굳이 외울 필요 없는 것
+## 명령어 요약
 
-CLI 표면은 넓지만, 다음 명령은 주로 관리자 에이전트나 유지보수자가 다룹니다.
+대부분의 작업은 `agb admin`에서 자연어로 처리합니다. 직접 사용할 수도 있는 주요 명령:
 
-- `agb task ...`
-- `agb setup ...`
-- `agb cron ...`
-- `agb memory ...`
-- `agb profile ...`
-- `agb agent ...`
-- 저장소 루트의 `bridge-*.sh` 스크립트들
+### 사용자가 자주 쓰는 것
 
-README도 의도적으로 이 명령들을 사람용 주 흐름으로 밀지 않습니다. 보통은 `agb admin`으로 들어가 자연어로 부탁하는 편이 맞습니다.
+| 명령 | 설명 |
+|------|------|
+| `agb admin` | 관리자 에이전트(패치)에 접속 |
+| `agb status` | 전체 상태 대시보드 |
+| `agb attach <name>` | 특정 에이전트 세션에 직접 접속 |
+| `agb --claude --name <name>` | Claude Code 다이나믹 에이전트 생성 |
+| `agb --codex --name <name>` | Codex 다이나믹 에이전트 생성 |
+| `agb upgrade --pull --restart-daemon` | 최신 버전으로 업그레이드 |
 
-## 주요 기능
+### 관리자 에이전트가 주로 쓰는 것
 
-### 1. 관리자 에이전트 중심 운영
+| 명령 | 설명 |
+|------|------|
+| `agb agent create <name>` | 스태틱 에이전트 생성 |
+| `agb agent start/stop/restart <name>` | 에이전트 시작/중지/재시작 |
+| `agb task create --to <agent>` | 에이전트에게 작업 전달 |
+| `agb urgent <agent> "메시지"` | 긴급 인터럽트 |
+| `agb inbox <agent>` | 에이전트의 수신함 확인 |
+| `agb cron create ...` | 반복 작업 등록 |
+| `agb setup discord <agent>` | Discord 채널 연결 |
+| `agb memory remember ...` | 에이전트 기억 저장 |
 
-bootstrap은 먼저 장기 실행용 관리자 역할을 만듭니다. 설치가 끝난 뒤 사람은 관리자 에이전트에게 자연어로 요청하고, 관리자 에이전트가 나머지 역할 생성과 운영을 이어받습니다.
-
-### 2. Queue-first 협업
-
-일반 작업 전달은 durable SQLite task queue를 중심으로 처리합니다. 작업 생성, 확인, claim, 완료, handoff가 모두 큐를 중심으로 돌아가며, `tmux` 세션이 꺼졌다 켜져도 상태를 유지합니다.
-
-### 3. 정적 역할과 동적 에이전트
-
-- 정적 역할은 장기 운영용 이름 있는 역할입니다.
-- 동적 에이전트는 현재 디렉토리에서 즉시 띄우는 온디맨드 워커입니다.
-
-새 설치는 정적 역할이 비어 있는 상태에서 시작합니다. 필요할 때 관리자 역할이 장기 역할을 추가하거나, 즉석 워커를 띄우는 식으로 운영하면 됩니다.
-
-### 4. 상태 대시보드와 daemon
-
-`agb status`는 큐 적체, 활성 세션, stale 상태 같은 운영 정보를 한 번에 보여줍니다. daemon은 live roster 동기화, heartbeat, idle 에이전트 nudge, 반복 작업 처리 같은 배경 동작을 맡습니다.
-
-일반 사용자는 daemon을 직접 만지기보다 bootstrap과 관리자 에이전트에 맡기는 흐름을 권장합니다.
-
-### 5. Git worktree 격리
-
-같은 저장소에서 여러 에이전트가 동시에 수정해야 하면 worktree 기반 격리 워커를 만들 수 있습니다. 공유 체크아웃 하나를 억지로 같이 쓰는 것보다 안전하고, 충돌 가능성을 줄이기 좋습니다.
-
-### 6. 채널 연동
-
-Telegram, Discord 같은 채널 연동을 지원합니다. 다만 이 README는 사람이 `setup` 하위 명령을 외우도록 설계하지 않습니다. 설치나 온보딩이 필요하면 관리자 에이전트에게 맡기는 흐름을 기본으로 둡니다.
-
-### 7. Cron과 Memory
-
-반복 작업과 메모리 위키/검색도 포함되어 있습니다. 다만 이 둘은 운영 자동화나 고급 워크플로우에 가까운 기능입니다. 대부분의 사용자는 직접 명령을 치기보다 관리자 에이전트에게 "이 작업을 매일 돌려줘" 또는 "이 선호를 기억해줘"라고 말하는 쪽이 자연스럽습니다.
+---
 
 ## 전제와 보안
 
 - Agent Bridge는 trusted local project 전용입니다.
 - 에이전트에게 현재 디렉토리 접근을 의도적으로 주는 상황을 가정합니다.
-- 멀티테넌트 서버 오케스트레이션이나 미승인 원격 환경 제어를 목표로 하지 않습니다.
+- 멀티테넌트 서버나 미승인 원격 환경을 목표로 하지 않습니다.
+- 보안 정책에 대한 자세한 내용은 [SECURITY.md](./SECURITY.md)를 참고하세요.
 
-## 프로젝트 구성
-
-- `agb`: 짧은 사용자 진입점
-- `agent-bridge`: 전체 CLI 엔트리포인트
-- `lib/`: 공용 Bash 구현
-- `bridge-queue.py`: 큐와 daemon 측 상태 저장
-- `agents/_template/`: 공개용 장기 역할 템플릿
-- `shared/`: 사람이나 에이전트가 넘겨보는 handoff 메모
-- `state/`, `logs/`: 런타임 산출물
-
-공개 저장소는 private agent profile을 그대로 싣지 않습니다. 장기 역할 프로필은 템플릿을 기반으로 별도 로컬 환경이나 private companion repo에서 관리하는 흐름을 권장합니다.
+---
 
 ## 추가 문서
 
-- [ARCHITECTURE.md](./ARCHITECTURE.md)
-- [OPERATIONS.md](./OPERATIONS.md)
-- [KNOWN_ISSUES.md](./KNOWN_ISSUES.md)
-- [agents/README.md](./agents/README.md)
-- [CONTRIBUTING.md](./CONTRIBUTING.md)
-- [SECURITY.md](./SECURITY.md)
+- [ARCHITECTURE.md](./ARCHITECTURE.md) — 내부 아키텍처
+- [OPERATIONS.md](./OPERATIONS.md) — 운영 가이드
+- [KNOWN_ISSUES.md](./KNOWN_ISSUES.md) — 알려진 이슈
+- [CONTRIBUTING.md](./CONTRIBUTING.md) — 기여 가이드
+
+---
 
 ## 라이선스
 

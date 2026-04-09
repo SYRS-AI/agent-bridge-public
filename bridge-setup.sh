@@ -609,7 +609,8 @@ run_agent() {
     settings_mode="$(bridge_claude_settings_mode "$workdir")"
     printf 'settings_mode: %s\n' "$settings_mode"
     if [[ "$settings_mode" == "shared" ]]; then
-      printf 'shared_settings_file: %s\n' "$(bridge_hook_shared_settings_file)"
+      printf 'shared_settings_base_file: %s\n' "$(bridge_hook_shared_settings_base_file)"
+      printf 'shared_settings_effective_file: %s\n' "$(bridge_hook_shared_settings_effective_file)"
     fi
     if hook_output="$(bridge_ensure_claude_stop_hook "$workdir" 2>&1)"; then
       echo "$hook_output"
