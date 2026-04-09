@@ -18,6 +18,7 @@ Usage:
   $CLI_NAME bootstrap [bootstrap options...] [init options...]
   $CLI_NAME init [--admin <agent>] [--engine claude|codex] [--session <name>] [--channels <csv>] [--dry-run] [--json]
   $CLI_NAME upgrade [--pull] [--restart-daemon] [--dry-run] [--json]
+  $CLI_NAME escalate question --agent <agent> --question "<text>" [--context "<text>"] [--wait-seconds <seconds>] [--json]
   $CLI_NAME agent <create|list|show|start|stop|restart|attach> ...
   $CLI_NAME kill <number|all>
   $CLI_NAME attach [number|name]
@@ -25,7 +26,7 @@ Usage:
   $CLI_NAME task <create|inbox|show|claim|done|update|handoff|summary> ...
   $CLI_NAME profile <status|diff|deploy> ...
   $CLI_NAME setup <discord|telegram|agent|admin> ...
-  $CLI_NAME cron <inventory|show|import|list|create|update|delete|enqueue|sync|run-subagent|errors|cleanup> ...
+  $CLI_NAME cron <inventory|show|import|list|create|update|delete|rebalance-memory-daily|enqueue|sync|run-subagent|errors|cleanup> ...
   $CLI_NAME memory <init|capture|ingest|promote|remember|lint|search|rebuild-index|query> ...
   $CLI_NAME watchdog scan [agent...] [--json]
   $CLI_NAME discord <status|sync>
@@ -94,6 +95,7 @@ Examples:
   $CLI_NAME bootstrap --admin manager --engine claude --channels plugin:telegram@claude-plugins-official
   $CLI_NAME init --admin manager --engine claude --channels plugin:telegram@claude-plugins-official
   $CLI_NAME upgrade --pull --restart-daemon
+  $CLI_NAME escalate question --agent reviewer --question "Should I ship this now?" --context "Second ask without a user reply."
   $CLI_NAME list
   $CLI_NAME kill 1
   $CLI_NAME kill all
@@ -110,6 +112,7 @@ Examples:
   $CLI_NAME cron import --dry-run
   $CLI_NAME cron list --agent <agent>
   $CLI_NAME cron create --agent <agent> --schedule "0 9 * * *" --title "일일 모니터링"
+  $CLI_NAME cron rebalance-memory-daily --dry-run
   $CLI_NAME cron enqueue <memory-daily-job-id> --slot 2026-04-05 --dry-run
   $CLI_NAME cron sync --dry-run
   $CLI_NAME cron run-subagent <run-id> --dry-run
@@ -323,6 +326,10 @@ if [[ $# -gt 0 ]]; then
     upgrade)
       shift
       exec "$BRIDGE_BASH_BIN" "$SCRIPT_DIR/bridge-upgrade.sh" "$@"
+      ;;
+    escalate)
+      shift
+      exec "$BRIDGE_BASH_BIN" "$SCRIPT_DIR/bridge-escalate.sh" "$@"
       ;;
     list)
       if [[ $# -ne 1 ]]; then

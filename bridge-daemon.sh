@@ -674,17 +674,25 @@ cron_worker_running_count() {
 
 cron_ready_rows_with_retry() {
   local limit="$1"
+  local status_snapshot="${2:-}"
   local attempts="${BRIDGE_QUEUE_RETRY_ATTEMPTS:-5}"
   local delay="${BRIDGE_QUEUE_RETRY_DELAY_SECONDS:-0.2}"
+  local defer_seconds="${BRIDGE_MEMORY_DAILY_MAX_DEFER_SECONDS:-10800}"
   local output=""
   local status=0
   local try
+  local args=()
 
   [[ "$attempts" =~ ^[0-9]+$ ]] || attempts=5
   (( attempts > 0 )) || attempts=1
+  [[ "$defer_seconds" =~ ^[0-9]+$ ]] || defer_seconds=10800
+  args=(cron-ready --limit "$limit" --format tsv --memory-daily-defer-seconds "$defer_seconds")
+  if [[ -n "$status_snapshot" ]]; then
+    args+=(--status-snapshot "$status_snapshot")
+  fi
 
   for try in $(seq 1 "$attempts"); do
-    if output="$(bridge_queue_cli cron-ready --limit "$limit" --format tsv 2>/dev/null)"; then
+    if output="$(bridge_queue_cli "${args[@]}" 2>/dev/null)"; then
       printf '%s' "$output"
       return 0
     fi
@@ -746,6 +754,7 @@ start_cron_dispatch_workers() {
   local max_parallel="${BRIDGE_CRON_DISPATCH_MAX_PARALLEL:-0}"
   local running_count
   local ready_rows=""
+  local status_snapshot_file=""
   local task_id
   local agent
   local _priority
@@ -759,7 +768,10 @@ start_cron_dispatch_workers() {
   running_count="$(cron_worker_running_count)"
   (( running_count < max_parallel )) || return 0
 
-  ready_rows="$(cron_ready_rows_with_retry "$max_parallel" || true)"
+  status_snapshot_file="$(mktemp)"
+  bridge_write_roster_status_snapshot "$status_snapshot_file"
+  ready_rows="$(cron_ready_rows_with_retry "$max_parallel" "$status_snapshot_file" || true)"
+  rm -f "$status_snapshot_file"
   [[ -n "$ready_rows" ]] || return 0
 
   while IFS=$'\t' read -r task_id agent _priority _title _body_path; do

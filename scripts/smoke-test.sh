@@ -421,6 +421,16 @@ for _ in $(seq 1 50); do
 done
 [[ -f "$FAKE_DISCORD_PORT_FILE" ]] || die "fake Discord API failed to start"
 FAKE_DISCORD_API_BASE="http://127.0.0.1:$(cat "$FAKE_DISCORD_PORT_FILE")"
+python3 - "$TMP_ROOT/openclaw.json" "$FAKE_DISCORD_API_BASE" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+payload = json.loads(path.read_text(encoding="utf-8"))
+payload.setdefault("channels", {}).setdefault("discord", {}).setdefault("accounts", {}).setdefault("smoke", {})["apiBaseUrl"] = sys.argv[2]
+path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+PY
 
 log "starting fake Telegram API"
 python3 -u - "$FAKE_TELEGRAM_PORT_FILE" "$FAKE_TELEGRAM_REQUESTS" <<'PY' >/dev/null 2>&1 &
@@ -472,6 +482,16 @@ for _ in $(seq 1 50); do
 done
 [[ -f "$FAKE_TELEGRAM_PORT_FILE" ]] || die "fake Telegram API failed to start"
 FAKE_TELEGRAM_API_BASE="http://127.0.0.1:$(cat "$FAKE_TELEGRAM_PORT_FILE")"
+python3 - "$TMP_ROOT/openclaw.json" "$FAKE_TELEGRAM_API_BASE" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+payload = json.loads(path.read_text(encoding="utf-8"))
+payload.setdefault("channels", {}).setdefault("telegram", {}).setdefault("accounts", {}).setdefault("smoke", {})["apiBaseUrl"] = sys.argv[2]
+path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+PY
 
 log "verifying empty runtime starts clean"
 BRIDGE_ROSTER_LOCAL_FILE=/nonexistent bash "$REPO_ROOT/bridge-start.sh" --list >/dev/null
@@ -762,6 +782,7 @@ assert_contains "$SETUP_DISCORD_OUTPUT" "channel 123456789012345678: read=ok sen
 [[ -f "$WORKDIR/.discord/.env" ]] || die "setup discord did not create .env"
 [[ -f "$WORKDIR/.discord/access.json" ]] || die "setup discord did not create access.json"
 assert_contains "$(cat "$WORKDIR/.discord/.env")" "DISCORD_BOT_TOKEN=smoke-token"
+assert_contains "$(cat "$BRIDGE_ROSTER_LOCAL_FILE")" "BRIDGE_AGENT_NOTIFY_ACCOUNT[\"$SMOKE_AGENT\"]=\"smoke\""
 assert_contains "$(cat "$FAKE_DISCORD_REQUESTS")" "[Agent Bridge setup]"
 
 log "running broader agent preflight"
@@ -1475,6 +1496,35 @@ fi
 ADMIN_REPLACE_OUTPUT="$("$REPO_ROOT/agent-bridge" admin --replace --no-continue --no-attach 2>&1)"
 assert_contains "$ADMIN_REPLACE_OUTPUT" "세션 '$SESSION_NAME' 시작 완료"
 
+log "escalating a repeated unanswered question through the admin channel"
+ESCALATE_DRY_RUN_JSON="$("$REPO_ROOT/agent-bridge" escalate question --agent "$CREATED_AGENT" --question "Should I deploy now?" --context "Second ask without a user reply." --wait-seconds 120 --json --dry-run)"
+python3 - "$ESCALATE_DRY_RUN_JSON" "$SMOKE_AGENT" <<'PY'
+import json
+import sys
+
+payload = json.loads(sys.argv[1])
+admin_agent = sys.argv[2]
+
+assert payload["agent"]
+assert payload["admin_agent"] == admin_agent
+assert payload["dry_run"] is True
+assert payload["notify"]["target"]
+PY
+
+ESCALATE_JSON="$("$REPO_ROOT/agent-bridge" escalate question --agent "$CREATED_AGENT" --question "Should I deploy now?" --context "Second ask without a user reply." --wait-seconds 120 --json)"
+python3 - "$ESCALATE_JSON" "$SMOKE_AGENT" <<'PY'
+import json
+import sys
+
+payload = json.loads(sys.argv[1])
+admin_agent = sys.argv[2]
+
+assert payload["admin_agent"] == admin_agent
+assert payload["task_id"]
+assert payload["notify"]["status"] == "sent"
+PY
+assert_contains "$(cat "$FAKE_DISCORD_REQUESTS")" "Should I deploy now?"
+
 STATIC_START_DRY_RUN="$("$REPO_ROOT/bridge-start.sh" "$SMOKE_AGENT" --dry-run --no-continue 2>&1 || true)"
 
 log "ensuring Claude Stop hook settings merge"
@@ -1528,6 +1578,8 @@ PROMPT_TIMESTAMP_TEXT="$(BRIDGE_AGENT_ID="$SMOKE_AGENT" BRIDGE_HOME="$BRIDGE_HOM
 assert_contains "$PROMPT_TIMESTAMP_TEXT" "<timestamp>"
 assert_contains "$PROMPT_TIMESTAMP_TEXT" "now:"
 assert_contains "$PROMPT_TIMESTAMP_TEXT" "since_last:"
+assert_contains "$PROMPT_TIMESTAMP_TEXT" "<question_escalation>"
+assert_contains "$PROMPT_TIMESTAMP_TEXT" "agent-bridge escalate question"
 
 log "ensuring shared Claude settings symlink for bridge-owned agent homes"
 SHARED_HOOK_OUTPUT="$("$BASH4_BIN" -lc "source \"$REPO_ROOT/bridge-lib.sh\"; bridge_load_roster; bridge_ensure_claude_stop_hook \"$CLAUDE_STATIC_WORKDIR\"")"
@@ -1724,6 +1776,67 @@ assert_contains "$SYNC_DRY_RUN_OUTPUT" "due=1"
 
 NATIVE_DELETE_OUTPUT="$("$REPO_ROOT/agent-bridge" cron delete "$NATIVE_JOB_ID")"
 assert_contains "$NATIVE_DELETE_OUTPUT" "deleted native cron job"
+
+log "rebalancing memory-daily jobs onto 03:00 KST"
+MEMORY_REBALANCE_JOBS="$TMP_ROOT/memory-daily-jobs.json"
+python3 - <<'PY' "$MEMORY_REBALANCE_JOBS" "$SMOKE_AGENT"
+import json
+import sys
+
+jobs_path, agent = sys.argv[1], sys.argv[2]
+payload = {
+    "format": "agent-bridge-cron-v1",
+    "updatedAt": "2026-04-09T00:00:00+09:00",
+    "jobs": [
+        {
+            "id": "memory-daily-1",
+            "name": "memory-daily smoke",
+            "agentId": agent,
+            "enabled": True,
+            "schedule": {"kind": "cron", "expr": "45 23 * * *", "tz": "Asia/Seoul"},
+            "payload": {"kind": "text", "text": "daily memory"},
+            "state": {},
+            "metadata": {"source": "bridge-native"},
+        },
+        {
+            "id": "briefing-1",
+            "name": "morning-briefing smoke",
+            "agentId": agent,
+            "enabled": True,
+            "schedule": {"kind": "cron", "expr": "0 9 * * *", "tz": "Asia/Seoul"},
+            "payload": {"kind": "text", "text": "briefing"},
+            "state": {},
+            "metadata": {"source": "bridge-native"},
+        },
+    ],
+}
+with open(jobs_path, "w", encoding="utf-8") as handle:
+    json.dump(payload, handle, ensure_ascii=False, indent=2)
+    handle.write("\n")
+PY
+MEMORY_REBALANCE_DRY_RUN="$("$REPO_ROOT/agent-bridge" cron rebalance-memory-daily --jobs-file "$MEMORY_REBALANCE_JOBS" --dry-run --json)"
+python3 - "$MEMORY_REBALANCE_DRY_RUN" <<'PY'
+import json
+import sys
+
+payload = json.loads(sys.argv[1])
+assert payload["dry_run"] is True
+assert payload["changed_count"] == 1
+assert payload["changed_jobs"][0]["after"]["expr"] == "0 3 * * *"
+assert payload["changed_jobs"][0]["after"]["tz"] == "Asia/Seoul"
+PY
+"$REPO_ROOT/agent-bridge" cron rebalance-memory-daily --jobs-file "$MEMORY_REBALANCE_JOBS" >/dev/null
+python3 - <<'PY' "$MEMORY_REBALANCE_JOBS"
+import json
+import sys
+
+jobs = json.load(open(sys.argv[1], encoding="utf-8"))["jobs"]
+memory_job = next(job for job in jobs if job["id"] == "memory-daily-1")
+briefing_job = next(job for job in jobs if job["id"] == "briefing-1")
+assert memory_job["schedule"]["expr"] == "0 3 * * *"
+assert memory_job["schedule"]["tz"] == "Asia/Seoul"
+assert briefing_job["schedule"]["expr"] == "0 9 * * *"
+PY
 
 log "creating a one-shot bridge-native cron job"
 NATIVE_ONESHOT_OUTPUT="$("$REPO_ROOT/agent-bridge" cron create --agent "$SMOKE_AGENT" --at '2026-04-08T10:15:00+09:00' --title 'native smoke one-shot' --payload 'Run once.' --delete-after-run)"
@@ -2282,6 +2395,55 @@ grep -q 'agent-bridge setup agent' "$BRIDGE_HOME/runtime/skills/agent-factory/sc
 grep -q 'agent-bridge task create' "$BRIDGE_HOME/runtime/scripts/email-webhook-handler.py" || die "expected queue handoff in email webhook handler"
 grep -q 'queue-dispatch' "$BRIDGE_HOME/runtime/scripts/webhook_utils.py" || die "expected bridge-native one-shot cron helper in webhook utils"
 grep -q 'gws_api' "$BRIDGE_HOME/runtime/skills/agent-db/scripts/email-sync.py" || die "expected gws-backed email sync script"
+
+log "prioritizing idle memory-daily dispatch over busy sessions"
+MEMORY_DAILY_READY_OUTPUT="$("$BASH4_BIN" -lc '
+  set -euo pipefail
+  export BRIDGE_HOME="'"$BRIDGE_HOME"'"
+  export BRIDGE_STATE_DIR="'"$BRIDGE_STATE_DIR"'"
+  export BRIDGE_TASK_DB="'"$TMP_ROOT"'/cron-ready-test.db"
+  source "'"$REPO_ROOT"'/bridge-lib.sh"
+  bridge_load_roster
+  python3 "'"$REPO_ROOT"'/bridge-queue.py" init >/dev/null
+  status_file="'"$TMP_ROOT"'/cron-ready-status.tsv"
+  cat >"$status_file" <<EOF
+agent	engine	session	workdir	source	loop	active	wake	channels	activity_state
+claude-static	claude	'"$CLAUDE_STATIC_SESSION"'	'"$CLAUDE_STATIC_WORKDIR"'	static	1	1	ok	ok	working
+'"$CREATED_AGENT"'	claude	'"$CREATED_SESSION"'	'"$BRIDGE_AGENT_HOME_ROOT/$CREATED_AGENT"'	static	1	1	ok	ok	idle
+EOF
+  busy_body="'"$TMP_ROOT"'/cron-ready-busy.md"
+  other_body="'"$TMP_ROOT"'/cron-ready-other.md"
+  idle_body="'"$TMP_ROOT"'/cron-ready-idle.md"
+  cat >"$busy_body" <<EOF
+# [cron-dispatch] memory-daily busy
+
+- family: memory-daily
+EOF
+  cat >"$other_body" <<EOF
+# [cron-dispatch] briefing
+
+- family: morning-briefing
+EOF
+  cat >"$idle_body" <<EOF
+# [cron-dispatch] memory-daily idle
+
+- family: memory-daily
+EOF
+  bash "'"$REPO_ROOT"'/bridge-task.sh" create --to claude-static --title "[cron-dispatch] memory-daily busy" --body-file "$busy_body" --from smoke >/dev/null
+  bash "'"$REPO_ROOT"'/bridge-task.sh" create --to claude-static --title "[cron-dispatch] briefing" --body-file "$other_body" --from smoke >/dev/null
+  bash "'"$REPO_ROOT"'/bridge-task.sh" create --to "'"$CREATED_AGENT"'" --title "[cron-dispatch] memory-daily idle" --body-file "$idle_body" --from smoke >/dev/null
+  python3 "'"$REPO_ROOT"'/bridge-queue.py" cron-ready --format tsv --status-snapshot "$status_file" --memory-daily-defer-seconds 3600
+')"
+python3 - <<'PY' "$MEMORY_DAILY_READY_OUTPUT" "$CREATED_AGENT"
+import sys
+
+output = [line for line in sys.argv[1].splitlines() if line.strip()]
+created_agent = sys.argv[2]
+assert len(output) == 2
+assert output[0].split("\t", 3)[1] == created_agent
+assert "briefing" in output[1]
+assert all("memory-daily busy" not in line for line in output)
+PY
 
 log "stopping background daemon before deterministic cron-dispatch tail"
 bash "$REPO_ROOT/bridge-daemon.sh" stop >/dev/null

@@ -907,6 +907,98 @@ def run_native_delete(args):
     return 0
 
 
+def run_native_rebalance_memory_daily(args):
+    raw_payload, jobs = load_native_jobs_payload(args.jobs_file)
+    updated_jobs = []
+    changed = []
+    unchanged = []
+    actor = args.actor or os.environ.get("USER", "unknown")
+    schedule_expr = validate_cron_expr(args.schedule)
+    tz_name = args.tz or "Asia/Seoul"
+    now_ms_value = now_epoch_ms()
+
+    for job in jobs:
+        name = str(job.get("name") or "")
+        if classify_family(name) != "memory-daily":
+            unchanged.append({"id": job.get("id"), "name": name})
+            updated_jobs.append(job)
+            continue
+
+        schedule = dict(job.get("schedule") or {})
+        before = {
+            "kind": schedule.get("kind") or "",
+            "expr": schedule.get("expr") or "",
+            "tz": schedule.get("tz") or "",
+        }
+        after = {
+            "kind": "cron",
+            "expr": schedule_expr,
+            "tz": tz_name,
+        }
+        if before == after:
+            unchanged.append({"id": job.get("id"), "name": name})
+            updated_jobs.append(job)
+            continue
+
+        updated = dict(job)
+        updated["schedule"] = after
+        updated["updatedAtMs"] = now_ms_value
+        metadata = dict(updated.get("metadata") or {})
+        metadata["updatedBy"] = actor
+        updated["metadata"] = metadata
+        updated_jobs.append(updated)
+        changed.append(
+            {
+                "id": updated.get("id"),
+                "name": name,
+                "agent": updated.get("agentId") or updated.get("agent"),
+                "before": before,
+                "after": after,
+            }
+        )
+
+    payload = {
+        "jobs_file": str(Path(args.jobs_file).expanduser()),
+        "schedule": schedule_expr,
+        "tz": tz_name,
+        "changed_jobs": changed,
+        "changed_count": len(changed),
+        "unchanged_count": len(unchanged),
+        "dry_run": bool(args.dry_run),
+    }
+
+    if not args.dry_run and changed:
+        raw_payload["jobs"] = updated_jobs
+        raw_payload["updatedAt"] = datetime.now().astimezone().isoformat()
+        atomic_write_jobs(Path(args.jobs_file).expanduser(), raw_payload)
+
+    if args.json:
+        print(json.dumps(payload, ensure_ascii=False, indent=2))
+        return 0
+
+    print(f"jobs_file: {payload['jobs_file']}")
+    print(f"schedule: {schedule_expr} {tz_name}")
+    print(f"changed_count: {len(changed)}")
+    print(f"unchanged_count: {len(unchanged)}")
+    if changed:
+        print("changed_jobs:")
+        for item in changed:
+            before = item["before"]
+            print(
+                "  - {job_id} {name} ({agent}): {kind} {expr} {tz} -> cron {new_expr} {new_tz}".format(
+                    job_id=item["id"],
+                    name=item["name"],
+                    agent=item["agent"],
+                    kind=before["kind"] or "-",
+                    expr=before["expr"] or "-",
+                    tz=before["tz"] or "-",
+                    new_expr=schedule_expr,
+                    new_tz=tz_name,
+                )
+            )
+    return 0
+
+
 def run_native_finalize(args):
     jobs_path = Path(args.jobs_file).expanduser().resolve()
     request_path = Path(args.request_file).expanduser().resolve()
@@ -1385,6 +1477,14 @@ def build_parser():
     native_delete_parser.add_argument("--jobs-file", required=True)
     native_delete_parser.add_argument("job_ref")
 
+    native_rebalance_parser = subparsers.add_parser("native-rebalance-memory-daily", help="Rebalance memory-daily jobs onto a shared overnight schedule.")
+    native_rebalance_parser.add_argument("--jobs-file", required=True)
+    native_rebalance_parser.add_argument("--schedule", default="0 3 * * *")
+    native_rebalance_parser.add_argument("--tz", default="Asia/Seoul")
+    native_rebalance_parser.add_argument("--actor")
+    native_rebalance_parser.add_argument("--dry-run", action="store_true")
+    native_rebalance_parser.add_argument("--json", action="store_true")
+
     native_import_parser = subparsers.add_parser("native-import", help="Import cron jobs into the bridge-native store.")
     native_import_parser.add_argument("--jobs-file", required=True)
     native_import_parser.add_argument("--source-jobs-file", required=True)
@@ -1436,6 +1536,16 @@ def main():
     if args.command == "native-delete":
         try:
             return run_native_delete(args)
+        except ValueError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 2
+
+    if args.command == "native-rebalance-memory-daily":
+        try:
+            return run_native_rebalance_memory_daily(args)
+        except FileNotFoundError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 2
         except ValueError as exc:
             print(f"error: {exc}", file=sys.stderr)
             return 2

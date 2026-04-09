@@ -46,6 +46,14 @@ def load_account_token(account_cfg: dict[str, Any]) -> str:
     raise SystemExit("channel account token is missing")
 
 
+def load_account_api_base(account_cfg: dict[str, Any], default: str) -> str:
+    for key in ("apiBaseUrl", "api_base_url", "api_base"):
+        value = str(account_cfg.get(key) or "").strip()
+        if value:
+            return value.rstrip("/")
+    return default.rstrip("/")
+
+
 def normalize_target(kind: str, target: str) -> str:
     value = str(target).strip()
     if kind == "telegram" and value.startswith("agent:"):
@@ -73,10 +81,10 @@ def build_message(title: str, message: str, task_id: str, priority: str) -> str:
     return "\n".join(parts)
 
 
-def send_discord(token: str, channel_id: str, text: str) -> None:
+def send_discord(token: str, channel_id: str, text: str, api_base_url: str) -> None:
     payload = json.dumps({"content": text}).encode("utf-8")
     req = Request(
-        f"https://discord.com/api/v10/channels/{channel_id}/messages",
+        f"{api_base_url.rstrip('/')}/channels/{channel_id}/messages",
         data=payload,
         headers={
             "Authorization": f"Bot {token}",
@@ -106,7 +114,7 @@ def send_discord_webhook(webhook_url: str, text: str, username: str) -> None:
         return
 
 
-def send_telegram(token: str, chat_id: str, text: str) -> None:
+def send_telegram(token: str, chat_id: str, text: str, api_base_url: str) -> None:
     payload = urlencode(
         {
             "chat_id": chat_id,
@@ -115,7 +123,7 @@ def send_telegram(token: str, chat_id: str, text: str) -> None:
         }
     ).encode("utf-8")
     req = Request(
-        f"https://api.telegram.org/bot{token}/sendMessage",
+        f"{api_base_url.rstrip('/')}/bot{token}/sendMessage",
         data=payload,
         headers={
             "Content-Type": "application/x-www-form-urlencoded",
@@ -151,13 +159,15 @@ def cmd_send(args: argparse.Namespace) -> int:
         if kind == "discord":
             account_cfg = load_account_config(Path(args.runtime_config), kind, account)
             token = load_account_token(account_cfg)
-            send_discord(token, target, text)
+            api_base_url = load_account_api_base(account_cfg, "https://discord.com/api/v10")
+            send_discord(token, target, text, api_base_url)
         elif kind == "discord-webhook":
             send_discord_webhook(target, text, args.agent or "Agent Bridge")
         elif kind == "telegram":
             account_cfg = load_account_config(Path(args.runtime_config), kind, account)
             token = load_account_token(account_cfg)
-            send_telegram(token, target, text)
+            api_base_url = load_account_api_base(account_cfg, "https://api.telegram.org")
+            send_telegram(token, target, text, api_base_url)
         else:
             raise SystemExit(f"unsupported notify kind: {kind}")
     except HTTPError as exc:

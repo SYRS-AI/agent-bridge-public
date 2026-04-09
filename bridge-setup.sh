@@ -219,12 +219,108 @@ print(f"{key}={value}")
 PY
 }
 
+bridge_setup_write_local_assoc() {
+  local key="$1"
+  local assoc_key="$2"
+  local value="$3"
+
+  bridge_require_python
+  python3 - "$BRIDGE_ROSTER_LOCAL_FILE" "$key" "$assoc_key" "$value" <<'PY'
+from pathlib import Path
+import re
+import sys
+
+path = Path(sys.argv[1])
+key = sys.argv[2]
+assoc_key = sys.argv[3]
+value = sys.argv[4]
+line = f'{key}["{assoc_key}"]="{value}"'
+
+if path.exists():
+    text = path.read_text(encoding="utf-8")
+else:
+    text = "#!/usr/bin/env bash\n# shellcheck shell=bash disable=SC2034\n"
+
+pattern = re.compile(rf'(?m)^[ \t]*{re.escape(key)}\["{re.escape(assoc_key)}"\]=.*$')
+if pattern.search(text):
+    text = pattern.sub(line, text, count=1)
+else:
+    if text and not text.endswith("\n"):
+        text += "\n"
+    if text and not text.endswith("\n\n"):
+        text += "\n"
+    text += line + "\n"
+
+path.parent.mkdir(parents=True, exist_ok=True)
+path.write_text(text, encoding="utf-8")
+print(f"updated: {path}")
+print(f'{key}["{assoc_key}"]={value}')
+PY
+}
+
+bridge_setup_sync_runtime_account() {
+  local source_config="$1"
+  local target_config="$2"
+  local kind="$3"
+  local account="$4"
+
+  [[ -n "$source_config" && -n "$target_config" && -n "$kind" && -n "$account" ]] || return 0
+  if [[ "$source_config" == "$target_config" ]]; then
+    return 0
+  fi
+
+  bridge_require_python
+  python3 - "$source_config" "$target_config" "$kind" "$account" <<'PY'
+from pathlib import Path
+import json
+import sys
+
+source_path = Path(sys.argv[1]).expanduser()
+target_path = Path(sys.argv[2]).expanduser()
+kind = sys.argv[3]
+account = sys.argv[4]
+
+if not source_path.exists():
+    raise SystemExit(0)
+
+with source_path.open("r", encoding="utf-8") as handle:
+    source_payload = json.load(handle)
+
+account_cfg = (((source_payload.get("channels") or {}).get(kind) or {}).get("accounts") or {}).get(account)
+if not isinstance(account_cfg, dict):
+    raise SystemExit(0)
+
+if target_path.exists():
+    with target_path.open("r", encoding="utf-8") as handle:
+        target_payload = json.load(handle)
+else:
+    target_payload = {}
+
+channels = target_payload.setdefault("channels", {})
+channel_cfg = channels.setdefault(kind, {})
+accounts = channel_cfg.setdefault("accounts", {})
+accounts[account] = account_cfg
+
+target_path.parent.mkdir(parents=True, exist_ok=True)
+tmp = target_path.with_suffix(target_path.suffix + ".tmp")
+with tmp.open("w", encoding="utf-8") as handle:
+    json.dump(target_payload, handle, ensure_ascii=False, indent=2)
+    handle.write("\n")
+tmp.chmod(0o600)
+tmp.replace(target_path)
+target_path.chmod(0o600)
+PY
+}
+
 run_discord() {
   local agent="${1:-}"
   local workdir=""
   local discord_dir=""
   local suggested_channel=""
   local runtime_config=""
+  local compat_config=""
+  local channel_account=""
+  local dry_run=0
   local py_args=()
   local base_args=()
 
@@ -236,11 +332,15 @@ run_discord() {
   [[ -n "$agent" ]] || bridge_die "Usage: $(basename "$0") discord <agent> [...]"
   bridge_require_agent "$agent"
   runtime_config="$(bridge_compat_config_file)"
+  compat_config="$(bridge_compat_config_file)"
 
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --token|--channel-account|--openclaw-account|--runtime-config|--openclaw-config|--channel|--allow-from|--api-base-url)
         [[ $# -ge 2 ]] || bridge_die "옵션 값이 필요합니다: $1"
+        if [[ "$1" == "--channel-account" || "$1" == "--openclaw-account" ]]; then
+          channel_account="$2"
+        fi
         if [[ "$1" == "--runtime-config" || "$1" == "--openclaw-config" ]]; then
           runtime_config="$2"
         fi
@@ -248,6 +348,7 @@ run_discord() {
         shift 2
         ;;
       --require-mention|--skip-validate|--skip-send-test|--yes|--dry-run)
+        [[ "$1" == "--dry-run" ]] && dry_run=1
         py_args+=("$1")
         shift
         ;;
@@ -271,6 +372,10 @@ run_discord() {
   fi
 
   bridge_setup_python "${base_args[@]}" "${py_args[@]}"
+  if [[ $dry_run -eq 0 && -n "$channel_account" ]]; then
+    bridge_setup_sync_runtime_account "$runtime_config" "$compat_config" "discord" "$channel_account"
+    bridge_setup_write_local_assoc "BRIDGE_AGENT_NOTIFY_ACCOUNT" "$agent" "$channel_account" >/dev/null
+  fi
 }
 
 run_telegram() {
@@ -278,6 +383,9 @@ run_telegram() {
   local workdir=""
   local telegram_dir=""
   local runtime_config=""
+  local compat_config=""
+  local channel_account=""
+  local dry_run=0
   local py_args=()
   local base_args=()
 
@@ -289,11 +397,15 @@ run_telegram() {
   [[ -n "$agent" ]] || bridge_die "Usage: $(basename "$0") telegram <agent> [...]"
   bridge_require_agent "$agent"
   runtime_config="$(bridge_compat_config_file)"
+  compat_config="$(bridge_compat_config_file)"
 
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --token|--channel-account|--openclaw-account|--runtime-config|--openclaw-config|--allow-from|--default-chat|--test-chat|--api-base-url)
         [[ $# -ge 2 ]] || bridge_die "옵션 값이 필요합니다: $1"
+        if [[ "$1" == "--channel-account" || "$1" == "--openclaw-account" ]]; then
+          channel_account="$2"
+        fi
         if [[ "$1" == "--runtime-config" || "$1" == "--openclaw-config" ]]; then
           runtime_config="$2"
         fi
@@ -301,6 +413,7 @@ run_telegram() {
         shift 2
         ;;
       --skip-validate|--skip-send-test|--yes|--dry-run)
+        [[ "$1" == "--dry-run" ]] && dry_run=1
         py_args+=("$1")
         shift
         ;;
@@ -320,6 +433,10 @@ run_telegram() {
   )
 
   bridge_setup_python "${base_args[@]}" "${py_args[@]}"
+  if [[ $dry_run -eq 0 && -n "$channel_account" ]]; then
+    bridge_setup_sync_runtime_account "$runtime_config" "$compat_config" "telegram" "$channel_account"
+    bridge_setup_write_local_assoc "BRIDGE_AGENT_NOTIFY_ACCOUNT" "$agent" "$channel_account" >/dev/null
+  fi
 }
 
 run_agent() {

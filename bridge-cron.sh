@@ -17,6 +17,7 @@ Usage:
   $(basename "$0") create --agent <bridge-agent> (--schedule "<cron-expr>" | --at "<iso-datetime>") --title "<title>" [--payload "<text>" | --payload-file <path>] [--tz <iana-tz>] [--delete-after-run]
   $(basename "$0") update <job-id> [--agent <bridge-agent>] [--schedule "<cron-expr>" | --at "<iso-datetime>"] [--title "<title>"] [--payload "<text>" | --payload-file <path>] [--tz <iana-tz>] [--enable|--disable] [--delete-after-run|--keep-after-run]
   $(basename "$0") delete <job-id>
+  $(basename "$0") rebalance-memory-daily [--jobs-file <path>] [--schedule "<cron-expr>"] [--tz <iana-tz>] [--dry-run] [--json]
   $(basename "$0") enqueue <job-name-or-id> [--slot <slot-key>] [--target <bridge-agent>] [--from <actor>] [--priority normal|high] [--dry-run]
   $(basename "$0") sync [--dry-run] [--json] [--since <iso-datetime>] [--now <iso-datetime>]
   $(basename "$0") run-subagent <run-id> [--dry-run]
@@ -231,6 +232,39 @@ run_delete() {
   shift || true
   [[ $# -eq 0 ]] || bridge_die "지원하지 않는 delete 옵션입니다: $1"
   bridge_cron_python native-delete --jobs-file "$BRIDGE_NATIVE_CRON_JOBS_FILE" "$job_ref"
+}
+
+run_rebalance_memory_daily() {
+  local jobs_file="$BRIDGE_NATIVE_CRON_JOBS_FILE"
+  local py_args=(native-rebalance-memory-daily)
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --jobs-file|--schedule|--tz|--actor)
+        [[ $# -lt 2 ]] && bridge_die "$1 뒤에 값을 지정하세요."
+        if [[ "$1" == "--jobs-file" ]]; then
+          jobs_file="$2"
+        else
+          py_args+=("$1" "$2")
+        fi
+        shift 2
+        ;;
+      --dry-run|--json)
+        py_args+=("$1")
+        shift
+        ;;
+      -h|--help)
+        usage
+        exit 0
+        ;;
+      *)
+        bridge_die "지원하지 않는 rebalance-memory-daily 옵션입니다: $1"
+        ;;
+    esac
+  done
+
+  py_args+=(--jobs-file "$jobs_file")
+  bridge_cron_python "${py_args[@]}"
 }
 
 write_materialized_payload() {
@@ -911,6 +945,9 @@ case "$subcommand" in
     ;;
   delete)
     run_delete "$@"
+    ;;
+  rebalance-memory-daily)
+    run_rebalance_memory_daily "$@"
     ;;
   enqueue)
     run_enqueue "$@"

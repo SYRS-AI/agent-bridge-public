@@ -27,6 +27,7 @@ task를 수신하면 아래 순서를 반드시 따른다:
 - **빈 note done 금지**: --note 없이 done 금지
 - `[cron-followup]`에 `needs_human_followup=true` → 반드시 사용자 채널로 전달 후 done
 - 인프라 장애 → `agent-bridge urgent <configured-admin-agent> "..."`, 비즈니스 판단 필요 → 사람 채널로 에스컬레이션
+- 사용자 답이 필요한 질문을 두 번째로 반복하려고 하면, 다시 묻기 전에 `~/.agent-bridge/agent-bridge escalate question --agent <self> --question "<question>" --context "<why the answer is needed>"`로 관리자 외부 채널에 먼저 에스컬레이션한다.
 - 15분 이상 blocked → `agb update <task_id> --status blocked --note "사유"`
 
 ## Legacy Guardrails

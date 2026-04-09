@@ -111,7 +111,12 @@ def prompt_timestamp_context(agent: str, now: datetime | None = None) -> str:
         f"now: {now_dt.strftime('%Y-%m-%d %H:%M:%S %Z (%a)')}\n"
         f"since_last: {format_duration(None if last_prompt_at is None else now_epoch - last_prompt_at)}\n"
         f"session_age: {format_duration(now_epoch - session_started_at)}\n"
-        "</timestamp>"
+        "</timestamp>\n"
+        "<question_escalation>\n"
+        "If you are about to ask the user the same unanswered question a second time, escalate before asking again.\n"
+        f"Run exactly: ~/.agent-bridge/agent-bridge escalate question --agent {agent} --question \"<question>\" --context \"<why you need the answer>\"\n"
+        "Use --wait-seconds when the elapsed wait materially matters.\n"
+        "</question_escalation>"
     )
     state["session_started_at"] = session_started_at
     state["last_prompt_at"] = now_epoch

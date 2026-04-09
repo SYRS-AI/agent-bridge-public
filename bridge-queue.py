@@ -19,6 +19,14 @@ from typing import Iterable
 OPEN_STATUSES = ("queued", "claimed", "blocked")
 PRIORITY_CHOICES = ("low", "normal", "high", "urgent")
 STATUS_CHOICES = ("queued", "claimed", "blocked", "done", "cancelled")
+FAMILY_RULES = (
+    "memory-daily",
+    "monthly-highlights",
+    "morning-briefing",
+    "evening-digest",
+    "event-reminder",
+    "weekly-review",
+)
 
 
 def now_ts() -> int:
@@ -37,6 +45,13 @@ def get_db_path() -> Path:
     db_path = Path(os.environ.get("BRIDGE_TASK_DB", str(state_dir / "tasks.db")))
     db_path.parent.mkdir(parents=True, exist_ok=True)
     return db_path
+
+
+def classify_family(name: str) -> str:
+    for rule in FAMILY_RULES:
+        if name.startswith(rule) or rule in name:
+            return rule
+    return name
 
 
 def connect() -> sqlite3.Connection:
@@ -713,7 +728,7 @@ def cmd_summary(args: argparse.Namespace) -> int:
 
 def cmd_cron_ready(args: argparse.Namespace) -> int:
     sql = """
-        SELECT id, assigned_to, priority, title, body_path
+        SELECT id, assigned_to, priority, title, body_path, created_ts
         FROM tasks
         WHERE status = 'queued'
           AND title LIKE '[cron-dispatch]%'
@@ -723,6 +738,30 @@ def cmd_cron_ready(args: argparse.Namespace) -> int:
 
     with closing(connect()) as conn:
         rows = conn.execute(sql, (int(args.limit),)).fetchall()
+
+    status_by_agent = load_roster_status(args.status_snapshot) if args.status_snapshot else {}
+    defer_seconds = max(0, int(args.memory_daily_defer_seconds))
+    current_ts = now_ts()
+    ranked_rows = []
+    for row in rows:
+        family = dispatch_task_family(row)
+        agent_state = status_by_agent.get(str(row["assigned_to"]), {})
+        active = str(agent_state.get("active") or "0") == "1"
+        activity_state = str(agent_state.get("activity_state") or ("idle" if not active else "working")).strip() or (
+            "idle" if not active else "working"
+        )
+        created_ts = int(row["created_ts"] or current_ts)
+        age_seconds = max(0, current_ts - created_ts)
+
+        if family == "memory-daily" and active and activity_state == "working" and age_seconds < defer_seconds:
+            continue
+
+        rank = 1
+        if family == "memory-daily":
+            rank = 0 if (not active or activity_state != "working") else 2
+        ranked_rows.append((rank, int(row["id"]), row))
+
+    rows = [row for _, _, row in sorted(ranked_rows, key=lambda item: (item[0], item[1]))]
 
     if args.format == "tsv":
         for row in rows:
@@ -759,6 +798,32 @@ def load_snapshot(path: str) -> list[dict[str, str]]:
             if row.get("agent"):
                 rows.append(row)
     return rows
+
+
+def load_roster_status(path: str) -> dict[str, dict[str, str]]:
+    rows: dict[str, dict[str, str]] = {}
+    with open(path, "r", encoding="utf-8") as handle:
+        reader = csv.DictReader(handle, delimiter="\t")
+        for row in reader:
+            agent = str(row.get("agent") or "").strip()
+            if agent:
+                rows[agent] = row
+    return rows
+
+
+def dispatch_task_family(row: sqlite3.Row) -> str:
+    body_path = str(row["body_path"] or "").strip()
+    if body_path and os.path.isfile(body_path):
+        try:
+            with open(body_path, "r", encoding="utf-8", errors="replace") as handle:
+                for _index, line in enumerate(handle):
+                    if _index > 40:
+                        break
+                    if line.startswith("- family:"):
+                        return line.split(":", 1)[1].strip()
+        except OSError:
+            pass
+    return classify_family(str(row["title"] or ""))
 
 
 def load_ready_agents(path: str | None) -> set[str]:
@@ -1250,6 +1315,8 @@ def build_parser() -> argparse.ArgumentParser:
     cron_ready_parser = subparsers.add_parser("cron-ready")
     cron_ready_parser.add_argument("--limit", type=int, default=50)
     cron_ready_parser.add_argument("--format", choices=("text", "tsv"), default="tsv")
+    cron_ready_parser.add_argument("--status-snapshot")
+    cron_ready_parser.add_argument("--memory-daily-defer-seconds", type=int, default=10800)
     cron_ready_parser.set_defaults(handler=cmd_cron_ready)
 
     daemon_parser = subparsers.add_parser("daemon-step")
