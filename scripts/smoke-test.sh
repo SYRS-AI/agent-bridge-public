@@ -1027,6 +1027,58 @@ assert_contains "$MEMORY_REFRESH_OUTPUT" "FINAL_PENDING=no"
 assert_contains "$MEMORY_REFRESH_OUTPUT" "FINAL_SENDS=1"
 assert_contains "$MEMORY_REFRESH_OUTPUT" "$CLAUDE_STATIC_SESSION|claude|/new"
 
+log "skipping memory-daily refresh while the target session is attached"
+ATTACHED_REFRESH_OUTPUT="$("$BASH4_BIN" -lc '
+  set -euo pipefail
+  tmp_daemon="'"$TMP_ROOT"'/daemon-memory-refresh-attached.sh"
+  {
+    printf "%s\n" "set -euo pipefail"
+    printf "SCRIPT_DIR=%q\n" "'"$REPO_ROOT"'"
+    printf "%s\n" "source \"\$SCRIPT_DIR/bridge-lib.sh\""
+    printf "%s\n" "bridge_load_roster"
+    printf "%s\n" "daemon_info() { :; }"
+    sed -n '"'"'/^bridge_report_channel_health_miss()/,/^process_channel_health()/p'"'"' "'"$REPO_ROOT"'/bridge-daemon.sh" | sed '"'"'$d'"'"'
+  } >"$tmp_daemon"
+  source "$tmp_daemon"
+  send_log="'"$TMP_ROOT"'/memory-refresh-attached.log"
+  bridge_tmux_send_and_submit() {
+    printf "%s|%s|%s\n" "$1" "$2" "$3" >>"'"$TMP_ROOT"'/memory-refresh-attached.log"
+    return 0
+  }
+  bridge_tmux_session_attached_count() { printf "1\n"; }
+  tmux kill-session -t "'"$CLAUDE_STATIC_SESSION"'" >/dev/null 2>&1 || true
+  tmux new-session -d -s "'"$CLAUDE_STATIC_SESSION"'" "sleep 30"
+  bridge_agent_note_memory_daily_refresh "claude-static" "run-attached" "2026-04-08"
+  process_memory_daily_refresh_requests || true
+  if bridge_agent_memory_daily_refresh_pending "claude-static"; then
+    echo "ATTACHED_PENDING=yes"
+  else
+    echo "ATTACHED_PENDING=no"
+  fi
+  if [[ -f "$send_log" ]]; then
+    send_count=0
+    while IFS= read -r _line || [[ -n "$_line" ]]; do
+      send_count=$((send_count + 1))
+    done <"$send_log"
+    echo "ATTACHED_SENDS=$send_count"
+  else
+    echo "ATTACHED_SENDS=0"
+  fi
+')"
+assert_contains "$ATTACHED_REFRESH_OUTPUT" "ATTACHED_PENDING=yes"
+assert_contains "$ATTACHED_REFRESH_OUTPUT" "ATTACHED_SENDS=0"
+
+log "writing and querying the audit log"
+AUDIT_OUTPUT="$("$BASH4_BIN" -lc '
+  source "'"$REPO_ROOT"'/bridge-lib.sh"
+  bridge_load_roster
+  bridge_audit_log daemon smoke_audit claude-static --detail agent=claude-static --detail sample=yes
+  "'"$REPO_ROOT"'/agent-bridge" audit --agent claude-static --action smoke_audit --limit 5 --json
+')"
+assert_contains "$AUDIT_OUTPUT" "\"action\": \"smoke_audit\""
+assert_contains "$AUDIT_OUTPUT" "\"target\": \"claude-static\""
+assert_contains "$AUDIT_OUTPUT" "\"sample\": \"yes\""
+
 log "falling back when a dynamic Claude resume session id is stale"
 STALE_RESUME_OUTPUT="$("$BASH4_BIN" -lc '
   source "'"$REPO_ROOT"'/bridge-lib.sh"

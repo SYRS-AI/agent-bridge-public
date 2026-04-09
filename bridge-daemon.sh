@@ -319,6 +319,10 @@ PY
   fi
 
   if (( reported == 1 )); then
+    bridge_audit_log daemon watchdog_report "$admin_agent" \
+      --detail agent="$admin_agent" \
+      --detail problem_count="$problem_count" \
+      --detail report_file="$report_file"
     bridge_note_watchdog_scan "$current_key" "$now_ts"
     daemon_info "watchdog reported ${problem_count} agent profile issue(s)"
     return 0
@@ -569,9 +573,20 @@ bridge_report_channel_health_miss() {
   existing_id="$(bridge_queue_cli find-open --agent "$admin_agent" --title-prefix "$title_prefix" 2>/dev/null || true)"
   if [[ "$existing_id" =~ ^[0-9]+$ ]]; then
     bridge_queue_cli update "$existing_id" --actor "daemon" --title "$title" --priority urgent --body-file "$body_file" >/dev/null 2>&1 || true
+    bridge_audit_log daemon channel_health_report "$agent" \
+      --detail admin_agent="$admin_agent" \
+      --detail mode=refresh \
+      --detail body_file="$body_file" \
+      --detail reason="$reason"
   elif [[ "$key" != "$last_key" || $(( now_ts - last_report_ts )) -ge ${BRIDGE_CHANNEL_HEALTH_REPORT_COOLDOWN_SECONDS:-1800} ]]; then
     create_output="$(bridge_queue_cli create --to "$admin_agent" --title "$title" --from daemon --priority urgent --body-file "$body_file" 2>/dev/null || true)"
     if [[ "$create_output" =~ created\ task\ \#([0-9]+) ]]; then
+      bridge_audit_log daemon channel_health_report "$agent" \
+        --detail admin_agent="$admin_agent" \
+        --detail mode=create \
+        --detail task_id="${BASH_REMATCH[1]}" \
+        --detail body_file="$body_file" \
+        --detail reason="$reason"
       daemon_info "reported channel-health miss for ${agent} -> ${admin_agent} (#${BASH_REMATCH[1]})"
     fi
   else
@@ -593,6 +608,7 @@ process_memory_daily_refresh_requests() {
   local queued=0
   local claimed=0
   local blocked=0
+  local attached=0
   local changed=1
 
   for agent in "${BRIDGE_AGENT_IDS[@]}"; do
@@ -630,8 +646,15 @@ process_memory_daily_refresh_requests() {
       continue
     fi
 
+    attached="$(bridge_tmux_session_attached_count "$session")"
+    [[ "$attached" =~ ^[0-9]+$ ]] || attached=0
+    (( attached == 0 )) || continue
+
     if bridge_tmux_send_and_submit "$session" "claude" "/new" >/dev/null 2>&1; then
       bridge_agent_clear_memory_daily_refresh "$agent"
+      bridge_audit_log daemon session_refresh_sent "$agent" \
+        --detail session="$session" \
+        --detail source=memory-daily
       daemon_info "refreshed ${agent} after memory-daily"
       changed=0
     fi
@@ -911,6 +934,10 @@ cmd_run_cron_worker() {
   if [[ "${CRON_FAMILY:-}" == "memory-daily" && "${CRON_RUN_STATE:-}" == "success" && "${CRON_RESULT_STATUS:-}" != "error" ]]; then
     if bridge_agent_memory_daily_refresh_enabled "$TASK_ASSIGNED_TO"; then
       bridge_agent_note_memory_daily_refresh "$TASK_ASSIGNED_TO" "$run_id" "${CRON_SLOT:-}"
+      bridge_audit_log daemon session_refresh_queued "$TASK_ASSIGNED_TO" \
+        --detail run_id="$run_id" \
+        --detail slot="${CRON_SLOT:-}" \
+        --detail source=memory-daily
       daemon_info "queued memory-daily session refresh for ${TASK_ASSIGNED_TO} run_id=${run_id}"
     fi
   fi
@@ -918,6 +945,13 @@ cmd_run_cron_worker() {
   done_note_file="$(bridge_cron_dispatch_completion_note_file_by_id "$run_id")"
   bridge_cron_write_completion_note "$run_id" "$done_note_file" "$followup_task_id"
   bridge_queue_cli done "$task_id" --agent "$TASK_ASSIGNED_TO" --note-file "$done_note_file" >/dev/null
+  bridge_audit_log daemon cron_worker_complete "$TASK_ASSIGNED_TO" \
+    --detail run_id="$run_id" \
+    --detail task_id="$task_id" \
+    --detail state="${CRON_RUN_STATE:-unknown}" \
+    --detail followup_task_id="${followup_task_id:-0}" \
+    --detail job_name="${CRON_JOB_NAME:-$run_id}" \
+    --detail slot="${CRON_SLOT:-}"
   daemon_info "completed cron worker task #${task_id} run_id=${run_id} state=${CRON_RUN_STATE:-unknown} followup=${followup_task_id:-0}"
 }
 

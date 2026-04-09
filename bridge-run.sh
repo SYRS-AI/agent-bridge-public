@@ -146,6 +146,13 @@ while true; do
       log_line "stderr captured: ${ERRFILE}"
     fi
     FAIL_COUNT=$((FAIL_COUNT + 1))
+    if [[ $FAIL_COUNT -eq 5 || $(( FAIL_COUNT % 10 )) -eq 0 ]]; then
+      bridge_audit_log daemon crash_loop_detected "$AGENT" \
+        --detail engine="$ENGINE" \
+        --detail fail_count="$FAIL_COUNT" \
+        --detail exit_code="$EXIT_CODE" \
+        --detail stderr_file="$ERRFILE"
+    fi
     log_line "비정상 종료 (코드: ${EXIT_CODE}, 연속실패: ${FAIL_COUNT}회). 5초 후 재시작..."
     if [[ $FAIL_COUNT -ge 10 ]]; then
       log_line "연속 ${FAIL_COUNT}회 실패. 60초 대기..."
@@ -154,6 +161,11 @@ while true; do
       sleep 5
     fi
   else
+    if [[ $FAIL_COUNT -gt 0 ]]; then
+      bridge_audit_log daemon crash_loop_recovered "$AGENT" \
+        --detail engine="$ENGINE" \
+        --detail previous_fail_count="$FAIL_COUNT"
+    fi
     FAIL_COUNT=0
     log_line "정상 종료. 5초 후 재시작..."
     sleep 5

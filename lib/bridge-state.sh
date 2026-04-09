@@ -605,6 +605,7 @@ bridge_load_roster() {
   fi
 
   : "${BRIDGE_LOG_DIR:=$BRIDGE_HOME/logs}"
+  : "${BRIDGE_AUDIT_LOG:=$BRIDGE_LOG_DIR/audit.jsonl}"
   : "${BRIDGE_SHARED_DIR:=$BRIDGE_HOME/shared}"
   : "${BRIDGE_MAX_MESSAGE_LEN:=500}"
   : "${BRIDGE_TASK_NOTE_DIR:=$BRIDGE_SHARED_DIR/tasks}"
@@ -638,6 +639,16 @@ bridge_load_roster() {
     bridge_load_static_histories
     bridge_restore_dynamic_agents_from_history
   fi
+}
+
+bridge_audit_log() {
+  local actor="$1"
+  local action="$2"
+  local target="$3"
+  shift 3 || true
+
+  bridge_require_python
+  python3 "$BRIDGE_SCRIPT_DIR/bridge-audit.py" write --file "$BRIDGE_AUDIT_LOG" --actor "$actor" --action "$action" --target "$target" "$@" >/dev/null
 }
 
 bridge_dynamic_agent_ids() {
