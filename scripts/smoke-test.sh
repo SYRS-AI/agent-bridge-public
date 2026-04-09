@@ -1925,6 +1925,7 @@ assert_contains "$UPGRADE_JSON" "\"mode\": \"upgrade\""
 assert_contains "$UPGRADE_JSON" "\"preserved_paths\""
 assert_contains "$UPGRADE_JSON" "\"backup_enabled\": true"
 assert_contains "$UPGRADE_JSON" "\"agent_migration\""
+assert_contains "$UPGRADE_JSON" "\"analysis\""
 
 log "upgrade backs up live install and migrates missing agent files"
 rm -f "$BRIDGE_AGENT_HOME_ROOT/$CREATED_AGENT/MEMORY-SCHEMA.md"
@@ -1939,6 +1940,70 @@ print(json.loads(sys.argv[1])["backup_root"])
 PY
 )"
 [[ -d "$UPGRADE_BACKUP_ROOT/live" ]] || die "upgrade did not create live backup snapshot"
+[[ -f "$BRIDGE_HOME/state/upgrade/last-upgrade.json" ]] || die "upgrade did not write last-upgrade state"
+UPGRADE_ANALYZE_JSON="$("$REPO_ROOT/agent-bridge" upgrade analyze --target "$BRIDGE_HOME" --json)"
+assert_contains "$UPGRADE_ANALYZE_JSON" "\"mode\": \"upgrade-analyze\""
+assert_contains "$UPGRADE_ANALYZE_JSON" "\"base_ref\""
+
+log "rolling back from an upgrade backup snapshot"
+ROLLBACK_ROOT="$TMP_ROOT/rollback-root"
+mkdir -p "$ROLLBACK_ROOT"
+cp "$REPO_ROOT/bridge-task.sh" "$ROLLBACK_ROOT/bridge-task.sh"
+ROLLBACK_BACKUP_ROOT="$TMP_ROOT/rollback-backup"
+python3 "$REPO_ROOT/bridge-upgrade.py" backup-live --target-root "$ROLLBACK_ROOT" --backup-root "$ROLLBACK_BACKUP_ROOT" --source-root "$REPO_ROOT" >/dev/null
+printf '\n# rollback smoke drift\n' >>"$ROLLBACK_ROOT/bridge-task.sh"
+ROLLBACK_JSON="$("$REPO_ROOT/agent-bridge" upgrade rollback --target "$ROLLBACK_ROOT" --backup-root "$ROLLBACK_BACKUP_ROOT" --no-restart-daemon --json)"
+assert_contains "$ROLLBACK_JSON" "\"mode\": \"upgrade-rollback\""
+assert_not_contains "$(cat "$ROLLBACK_ROOT/bridge-task.sh")" "rollback smoke drift"
+
+log "smart upgrade clean-merges text drift"
+UPGRADE_SIM_REPO="$TMP_ROOT/upgrade-sim-repo"
+mkdir -p "$UPGRADE_SIM_REPO"
+git -C "$UPGRADE_SIM_REPO" init -q
+git -C "$UPGRADE_SIM_REPO" config user.email smoke@example.com
+git -C "$UPGRADE_SIM_REPO" config user.name "Bridge Smoke"
+cat >"$UPGRADE_SIM_REPO/sample.txt" <<'EOF'
+alpha
+beta
+EOF
+git -C "$UPGRADE_SIM_REPO" add sample.txt
+git -C "$UPGRADE_SIM_REPO" commit -qm "base sample"
+UPGRADE_SIM_BASE="$(git -C "$UPGRADE_SIM_REPO" rev-parse HEAD)"
+cat >"$UPGRADE_SIM_REPO/sample.txt" <<'EOF'
+alpha-upstream
+beta
+EOF
+MERGE_ROOT="$TMP_ROOT/upgrade-merge-root"
+mkdir -p "$MERGE_ROOT"
+git -C "$UPGRADE_SIM_REPO" show "$UPGRADE_SIM_BASE:sample.txt" >"$MERGE_ROOT/sample.txt"
+printf 'live-note\n' >>"$MERGE_ROOT/sample.txt"
+MERGE_JSON="$(python3 "$REPO_ROOT/bridge-upgrade.py" apply-live --source-root "$UPGRADE_SIM_REPO" --target-root "$MERGE_ROOT" --base-ref "$UPGRADE_SIM_BASE")"
+assert_contains "$MERGE_JSON" "\"files_merged_clean\": 1"
+assert_contains "$(cat "$MERGE_ROOT/sample.txt")" "alpha-upstream"
+assert_contains "$(cat "$MERGE_ROOT/sample.txt")" "live-note"
+
+log "smart upgrade backs up conflict and applies upstream by default"
+CONFLICT_ROOT="$TMP_ROOT/upgrade-conflict-root"
+mkdir -p "$CONFLICT_ROOT"
+printf 'alpha-live\nbeta\n' >"$CONFLICT_ROOT/sample.txt"
+CONFLICT_JSON="$(python3 "$REPO_ROOT/bridge-upgrade.py" apply-live --source-root "$UPGRADE_SIM_REPO" --target-root "$CONFLICT_ROOT" --base-ref "$UPGRADE_SIM_BASE")"
+assert_contains "$CONFLICT_JSON" "\"files_merged_conflict\": 1"
+assert_contains "$(cat "$CONFLICT_ROOT/sample.txt")" "alpha-upstream"
+[[ -f "$CONFLICT_ROOT/sample.txt.upgrade-conflict" ]] || die "upgrade did not write conflict backup file"
+assert_contains "$(cat "$CONFLICT_ROOT/sample.txt.upgrade-conflict")" "<<<<<<<"
+
+log "strict merge aborts on conflict without touching live file"
+STRICT_ROOT="$TMP_ROOT/upgrade-strict-root"
+mkdir -p "$STRICT_ROOT"
+printf 'alpha-live\nbeta\n' >"$STRICT_ROOT/sample.txt"
+set +e
+STRICT_JSON="$(python3 "$REPO_ROOT/bridge-upgrade.py" apply-live --source-root "$UPGRADE_SIM_REPO" --target-root "$STRICT_ROOT" --base-ref "$UPGRADE_SIM_BASE" --strict-merge)"
+STRICT_EXIT=$?
+set -e
+[[ "$STRICT_EXIT" -eq 2 ]] || die "strict merge should abort with exit 2, got $STRICT_EXIT"
+assert_contains "$STRICT_JSON" "\"aborted\": true"
+assert_contains "$(cat "$STRICT_ROOT/sample.txt")" "alpha-live"
+assert_not_contains "$(cat "$STRICT_ROOT/sample.txt")" "alpha-upstream"
 
 log "inventorying legacy runtime references"
 LEGACY_ROOT="$TMP_ROOT/legacy-runtime"

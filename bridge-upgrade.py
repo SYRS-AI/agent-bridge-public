@@ -4,12 +4,122 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import re
 import shutil
+import subprocess
 from dataclasses import asdict, dataclass
+from datetime import datetime, timezone
 from pathlib import Path
+import tempfile
+from typing import Any
+
+
+def now_iso() -> str:
+    return datetime.now(timezone.utc).astimezone().isoformat(timespec="seconds")
+
+
+def load_json(path: Path, default: Any) -> Any:
+    try:
+        with path.open("r", encoding="utf-8") as handle:
+            return json.load(handle)
+    except FileNotFoundError:
+        return default
+
+
+def save_json(path: Path, payload: Any) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    with tmp.open("w", encoding="utf-8") as handle:
+        json.dump(payload, handle, ensure_ascii=False, indent=2)
+        handle.write("\n")
+    os.chmod(tmp, 0o600)
+    tmp.replace(path)
+    os.chmod(path, 0o600)
+
+
+def write_bytes(path: Path, data: bytes) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(data)
+
+
+def conflict_backup_path(live_path: Path) -> Path:
+    return live_path.with_name(f"{live_path.name}.upgrade-conflict")
+
+
+def git_head(source_root: Path) -> str:
+    return (
+        subprocess.check_output(["git", "-C", str(source_root), "rev-parse", "HEAD"], text=True).strip()
+    )
+
+
+def git_file_bytes(source_root: Path, ref: str, relpath: str) -> bytes | None:
+    proc = subprocess.run(
+        ["git", "-C", str(source_root), "show", f"{ref}:{relpath}"],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+        check=False,
+    )
+    if proc.returncode != 0:
+        return None
+    return proc.stdout
+
+
+def sha256_bytes(data: bytes | None) -> str:
+    if data is None:
+        return ""
+    return hashlib.sha256(data).hexdigest()
+
+
+def is_text_bytes(data: bytes | None) -> bool:
+    if data is None:
+        return True
+    if b"\x00" in data:
+        return False
+    try:
+        data.decode("utf-8")
+        return True
+    except UnicodeDecodeError:
+        return False
+
+
+def tracked_files(source_root: Path) -> list[str]:
+    proc = subprocess.run(
+        ["git", "-C", str(source_root), "ls-files", "-z"],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=True,
+    )
+    return [item for item in proc.stdout.decode("utf-8").split("\x00") if item]
+
+
+def should_skip_relpath(relpath: str) -> bool:
+    if relpath in {"agent-roster.local.sh"}:
+        return True
+    for prefix in ("logs/", "shared/", "state/", "backups/", "worktrees/"):
+        if relpath.startswith(prefix):
+            return True
+    if relpath in {"logs", "shared", "state", "backups", "worktrees"}:
+        return True
+    if relpath.startswith("agents/"):
+        allowed_prefixes = (
+            "agents/_template/",
+            "agents/.claude/",
+        )
+        allowed_files = {
+            "agents/README.md",
+            "agents/SYNC-MODEL.md",
+            "agents/CUTOVER-WAVES.md",
+            "agents/WORKSPACE-MIGRATION-PLAN.md",
+        }
+        if relpath in allowed_files:
+            return False
+        if any(relpath.startswith(prefix) for prefix in allowed_prefixes):
+            return False
+        return True
+    return False
 
 
 def render_template(text: str, agent_id: str, display_name: str, role_text: str, engine: str, session_type: str) -> str:
@@ -186,18 +296,365 @@ def copy_live_backup(target_root: Path, backup_root: Path) -> None:
             shutil.copy2(child, dst, follow_symlinks=False)
 
 
+def remove_existing_target_children(target_root: Path) -> int:
+    removed = 0
+    for child in sorted(target_root.iterdir()):
+        if child.name == "backups":
+            continue
+        removed += 1
+        if child.is_symlink() or child.is_file():
+            child.unlink(missing_ok=True)
+        else:
+            shutil.rmtree(child)
+    return removed
+
+
+def restore_live_backup(target_root: Path, backup_root: Path) -> int:
+    backup_live = backup_root / "live"
+    if not backup_live.exists():
+        raise FileNotFoundError(f"backup snapshot missing: {backup_live}")
+    removed = remove_existing_target_children(target_root)
+    for child in sorted(backup_live.iterdir()):
+        dst = target_root / child.name
+        if child.is_dir():
+            shutil.copytree(child, dst, symlinks=True, dirs_exist_ok=True)
+        else:
+            shutil.copy2(child, dst, follow_symlinks=False)
+    return removed
+
+
+def upgrade_state_path(target_root: Path) -> Path:
+    return target_root / "state" / "upgrade" / "last-upgrade.json"
+
+
+def load_upgrade_state(target_root: Path) -> dict[str, Any]:
+    return load_json(upgrade_state_path(target_root), {})
+
+
+def latest_backup_root(target_root: Path) -> Path | None:
+    backups_dir = target_root / "backups"
+    if not backups_dir.exists():
+        return None
+    candidates = [path for path in backups_dir.iterdir() if path.is_dir() and path.name.startswith("upgrade-")]
+    if not candidates:
+        return None
+    return sorted(candidates)[-1]
+
+
+def latest_backup_manifest(target_root: Path) -> dict[str, Any]:
+    root = latest_backup_root(target_root)
+    if root is None:
+        return {}
+    return load_json(root / "manifest.json", {})
+
+
+def resolve_base_ref(target_root: Path, explicit_ref: str) -> str:
+    if explicit_ref:
+        return explicit_ref
+    state = load_upgrade_state(target_root)
+    base_ref = str(state.get("source_head") or "").strip()
+    if base_ref:
+        return base_ref
+    manifest = latest_backup_manifest(target_root)
+    return str(manifest.get("source_head") or "").strip()
+
+
+def analyze_live(source_root: Path, target_root: Path, base_ref: str) -> dict[str, Any]:
+    files: list[dict[str, Any]] = []
+    counts = {
+        "missing_live": 0,
+        "unchanged": 0,
+        "upstream_only": 0,
+        "live_only": 0,
+        "merge_required": 0,
+        "unknown_base_live_diff": 0,
+    }
+
+    for relpath in tracked_files(source_root):
+        if should_skip_relpath(relpath):
+            continue
+        source_path = source_root / relpath
+        live_path = target_root / relpath
+        upstream = source_path.read_bytes()
+        live = live_path.read_bytes() if live_path.exists() else None
+        base = git_file_bytes(source_root, base_ref, relpath) if base_ref else None
+
+        if live is None:
+            classification = "missing_live"
+            strategy = "deploy_upstream"
+        elif upstream == live:
+            classification = "unchanged"
+            strategy = "noop"
+        elif not base_ref or base is None:
+            classification = "unknown_base_live_diff"
+            strategy = "keep_live"
+        elif base == live:
+            classification = "upstream_only"
+            strategy = "deploy_upstream"
+        elif base == upstream:
+            classification = "live_only"
+            strategy = "keep_live"
+        else:
+            classification = "merge_required"
+            strategy = "manual_merge"
+
+        counts[classification] += 1
+        if classification == "unchanged":
+            continue
+        files.append(
+            {
+                "path": relpath,
+                "classification": classification,
+                "strategy": strategy,
+                "base_ref": base_ref,
+                "base_exists": base is not None,
+                "live_exists": live is not None,
+                "text": is_text_bytes(upstream) and is_text_bytes(live) and (base is None or is_text_bytes(base)),
+                "hashes": {
+                    "upstream": sha256_bytes(upstream),
+                    "live": sha256_bytes(live),
+                    "base": sha256_bytes(base),
+                },
+            }
+        )
+
+    return {
+        "mode": "upgrade-analyze",
+        "source_root": str(source_root),
+        "target_root": str(target_root),
+        "base_ref": base_ref,
+        "counts": counts,
+        "files": files,
+    }
+
+
+def merge_text_versions(base: bytes, live: bytes, upstream: bytes) -> tuple[str, bytes]:
+    with tempfile.TemporaryDirectory(prefix="bridge-upgrade-merge-") as tmpdir:
+        tmp_root = Path(tmpdir)
+        live_path = tmp_root / "live"
+        base_path = tmp_root / "base"
+        upstream_path = tmp_root / "upstream"
+        live_path.write_bytes(live)
+        base_path.write_bytes(base)
+        upstream_path.write_bytes(upstream)
+        proc = subprocess.run(
+            ["git", "merge-file", "-p", "--diff3", str(live_path), str(base_path), str(upstream_path)],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=False,
+        )
+        if proc.returncode == 0:
+            return ("clean", proc.stdout)
+        if proc.returncode == 1:
+            return ("conflict", proc.stdout)
+        raise RuntimeError(proc.stderr.decode("utf-8", errors="replace").strip() or "git merge-file failed")
+
+
+def apply_live(source_root: Path, target_root: Path, base_ref: str, dry_run: bool, strict_merge: bool) -> dict[str, Any]:
+    analysis = analyze_live(source_root, target_root, base_ref)
+    actions: list[dict[str, Any]] = []
+    counts = {
+        "files_copied": 0,
+        "files_merged_clean": 0,
+        "files_merged_conflict": 0,
+        "files_preserved_live": 0,
+        "files_skipped_noop": analysis["counts"].get("unchanged", 0),
+    }
+    conflicts: list[str] = []
+    conflict_backups: list[str] = []
+
+    for item in analysis["files"]:
+        relpath = str(item["path"])
+        classification = str(item["classification"])
+        live_path = target_root / relpath
+        upstream = (source_root / relpath).read_bytes()
+        live = live_path.read_bytes() if live_path.exists() else None
+        base = git_file_bytes(source_root, base_ref, relpath) if base_ref else None
+
+        if classification in {"missing_live", "upstream_only"}:
+            counts["files_copied"] += 1
+            actions.append(
+                {
+                    "path": relpath,
+                    "action": "deploy_upstream",
+                    "bytes": upstream,
+                }
+            )
+            continue
+
+        if classification in {"live_only", "unknown_base_live_diff"}:
+            counts["files_preserved_live"] += 1
+            actions.append({"path": relpath, "action": "keep_live"})
+            continue
+
+        if classification != "merge_required":
+            actions.append({"path": relpath, "action": "noop"})
+            continue
+
+        if item.get("text") and base is not None and live is not None:
+            merge_kind, merged = merge_text_versions(base, live, upstream)
+            if merge_kind == "clean":
+                counts["files_merged_clean"] += 1
+                actions.append(
+                    {
+                        "path": relpath,
+                        "action": "merge_clean",
+                        "bytes": merged,
+                    }
+                )
+                continue
+            counts["files_merged_conflict"] += 1
+            conflicts.append(relpath)
+            backup_path = conflict_backup_path(live_path)
+            conflict_backups.append(str(backup_path))
+            actions.append(
+                {
+                    "path": relpath,
+                    "action": "merge_conflict",
+                    "bytes": upstream,
+                    "conflict_bytes": merged,
+                    "conflict_backup_path": str(backup_path),
+                }
+            )
+            continue
+
+        counts["files_merged_conflict"] += 1
+        conflicts.append(relpath)
+        backup_path = conflict_backup_path(live_path)
+        conflict_backups.append(str(backup_path))
+        actions.append(
+            {
+                "path": relpath,
+                "action": "merge_conflict",
+                "bytes": upstream,
+                "conflict_bytes": live if live is not None else upstream,
+                "conflict_backup_path": str(backup_path),
+            }
+        )
+
+    payload = {
+        "mode": "upgrade-apply",
+        "source_root": str(source_root),
+        "target_root": str(target_root),
+        "base_ref": base_ref,
+        "dry_run": dry_run,
+        "strict_merge": strict_merge,
+        "analysis": analysis,
+        "counts": counts,
+        "conflicts": conflicts,
+        "conflict_backups": conflict_backups,
+        "actions": [
+            {
+                "path": action["path"],
+                "action": action["action"],
+                **(
+                    {"conflict_backup_path": action["conflict_backup_path"]}
+                    if "conflict_backup_path" in action
+                    else {}
+                ),
+            }
+            for action in actions
+        ],
+        "applied": False,
+        "aborted": False,
+    }
+
+    if conflicts and strict_merge:
+        payload["aborted"] = True
+        return payload
+
+    if dry_run:
+        return payload
+
+    for action in actions:
+        kind = action["action"]
+        if kind in {"noop", "keep_live"}:
+            continue
+        live_path = target_root / action["path"]
+        if kind == "merge_conflict":
+            write_bytes(Path(action["conflict_backup_path"]), action["conflict_bytes"])
+        write_bytes(live_path, action["bytes"])
+
+    payload["applied"] = True
+    return payload
+
+
+def cmd_analyze_live(args: argparse.Namespace) -> int:
+    source_root = Path(args.source_root).expanduser()
+    target_root = Path(args.target_root).expanduser()
+    payload = analyze_live(source_root, target_root, resolve_base_ref(target_root, args.base_ref or ""))
+    print(json.dumps(payload, ensure_ascii=False, indent=2))
+    return 0
+
+
 def cmd_backup_live(args: argparse.Namespace) -> int:
     target_root = Path(args.target_root).expanduser()
     backup_root = Path(args.backup_root).expanduser()
+    source_root = Path(args.source_root).expanduser() if args.source_root else None
     payload = {
         "target_root": str(target_root),
         "backup_root": str(backup_root),
         "exists": target_root.exists(),
         "created": False,
+        "manifest_path": str(backup_root / "manifest.json"),
     }
+    if source_root is not None:
+        payload["source_head"] = git_head(source_root)
     if target_root.exists() and not args.dry_run:
         copy_live_backup(target_root, backup_root)
+        manifest = {
+            "created_at": now_iso(),
+            "target_root": str(target_root),
+            "source_root": str(source_root) if source_root is not None else "",
+            "source_head": payload.get("source_head", ""),
+        }
+        save_json(backup_root / "manifest.json", manifest)
         payload["created"] = True
+    print(json.dumps(payload, ensure_ascii=False, indent=2))
+    return 0
+
+
+def cmd_apply_live(args: argparse.Namespace) -> int:
+    source_root = Path(args.source_root).expanduser()
+    target_root = Path(args.target_root).expanduser()
+    base_ref = resolve_base_ref(target_root, args.base_ref or "")
+    payload = apply_live(source_root, target_root, base_ref, bool(args.dry_run), bool(args.strict_merge))
+    print(json.dumps(payload, ensure_ascii=False, indent=2))
+    return 2 if payload.get("aborted") else 0
+
+
+def cmd_write_state(args: argparse.Namespace) -> int:
+    target_root = Path(args.target_root).expanduser()
+    source_root = Path(args.source_root).expanduser()
+    payload = {
+        "updated_at": now_iso(),
+        "source_root": str(source_root),
+        "source_head": git_head(source_root),
+        "backup_root": str(Path(args.backup_root).expanduser()) if args.backup_root else "",
+    }
+    if args.analysis_json:
+        payload["analysis"] = json.loads(args.analysis_json)
+    save_json(upgrade_state_path(target_root), payload)
+    print(json.dumps(payload, ensure_ascii=False, indent=2))
+    return 0
+
+
+def cmd_rollback_live(args: argparse.Namespace) -> int:
+    target_root = Path(args.target_root).expanduser()
+    backup_root = Path(args.backup_root).expanduser() if args.backup_root else latest_backup_root(target_root)
+    if backup_root is None:
+        raise SystemExit("no upgrade backup found")
+    payload = {
+        "mode": "upgrade-rollback",
+        "target_root": str(target_root),
+        "backup_root": str(backup_root),
+        "dry_run": bool(args.dry_run),
+        "restored": False,
+        "removed_entries": 0,
+    }
+    if not args.dry_run:
+        payload["removed_entries"] = restore_live_backup(target_root, backup_root)
+        payload["restored"] = True
     print(json.dumps(payload, ensure_ascii=False, indent=2))
     return 0
 
@@ -216,8 +673,36 @@ def build_parser() -> argparse.ArgumentParser:
     backup = subparsers.add_parser("backup-live")
     backup.add_argument("--target-root", required=True)
     backup.add_argument("--backup-root", required=True)
+    backup.add_argument("--source-root")
     backup.add_argument("--dry-run", action="store_true")
     backup.set_defaults(handler=cmd_backup_live)
+
+    apply_live_parser = subparsers.add_parser("apply-live")
+    apply_live_parser.add_argument("--source-root", required=True)
+    apply_live_parser.add_argument("--target-root", required=True)
+    apply_live_parser.add_argument("--base-ref", default="")
+    apply_live_parser.add_argument("--dry-run", action="store_true")
+    apply_live_parser.add_argument("--strict-merge", action="store_true")
+    apply_live_parser.set_defaults(handler=cmd_apply_live)
+
+    analyze = subparsers.add_parser("analyze-live")
+    analyze.add_argument("--source-root", required=True)
+    analyze.add_argument("--target-root", required=True)
+    analyze.add_argument("--base-ref", default="")
+    analyze.set_defaults(handler=cmd_analyze_live)
+
+    write_state = subparsers.add_parser("write-state")
+    write_state.add_argument("--source-root", required=True)
+    write_state.add_argument("--target-root", required=True)
+    write_state.add_argument("--backup-root", default="")
+    write_state.add_argument("--analysis-json", default="")
+    write_state.set_defaults(handler=cmd_write_state)
+
+    rollback = subparsers.add_parser("rollback-live")
+    rollback.add_argument("--target-root", required=True)
+    rollback.add_argument("--backup-root", default="")
+    rollback.add_argument("--dry-run", action="store_true")
+    rollback.set_defaults(handler=cmd_rollback_live)
 
     return parser
 

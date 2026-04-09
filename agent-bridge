@@ -17,7 +17,9 @@ Usage:
   $CLI_NAME admin [--replace] [--continue|--no-continue] [--no-attach] [--no-project-skill]
   $CLI_NAME bootstrap [bootstrap options...] [init options...]
   $CLI_NAME init [--admin <agent>] [--engine claude|codex] [--session <name>] [--channels <csv>] [--dry-run] [--json]
-  $CLI_NAME upgrade [--pull] [--restart-daemon] [--dry-run] [--json]
+  $CLI_NAME upgrade [--pull] [--restart-daemon] [--dry-run] [--json] [--strict-merge]
+  $CLI_NAME upgrade analyze [--target <bridge-home>] [--json]
+  $CLI_NAME upgrade rollback [--target <bridge-home>] [--backup-root <dir>] [--json]
   $CLI_NAME escalate question --agent <agent> --question "<text>" [--context "<text>"] [--wait-seconds <seconds>] [--json]
   $CLI_NAME agent <create|list|show|start|stop|restart|attach> ...
   $CLI_NAME kill <number|all>
@@ -95,6 +97,9 @@ Examples:
   $CLI_NAME bootstrap --admin manager --engine claude --channels plugin:telegram@claude-plugins-official
   $CLI_NAME init --admin manager --engine claude --channels plugin:telegram@claude-plugins-official
   $CLI_NAME upgrade --pull --restart-daemon
+  $CLI_NAME upgrade --strict-merge --json
+  $CLI_NAME upgrade analyze --json
+  $CLI_NAME upgrade rollback --json
   $CLI_NAME escalate question --agent reviewer --question "Should I ship this now?" --context "Second ask without a user reply."
   $CLI_NAME list
   $CLI_NAME kill 1
