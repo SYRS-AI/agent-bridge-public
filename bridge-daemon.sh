@@ -192,6 +192,29 @@ bridge_watchdog_report_file() {
   printf '%s/watchdog/latest.md' "$BRIDGE_SHARED_DIR"
 }
 
+bridge_watchdog_problem_key() {
+  local report_json="$1"
+  python3 - "$report_json" <<'PY'
+import hashlib
+import json
+import sys
+
+raw = sys.argv[1]
+try:
+    payload = json.loads(raw)
+except Exception:
+    print(hashlib.sha256(raw.encode("utf-8")).hexdigest() if raw else "")
+    raise SystemExit(0)
+
+canonical = json.dumps(
+    payload.get("agents", []),
+    sort_keys=True,
+    separators=(",", ":"),
+)
+print(hashlib.sha256(canonical.encode("utf-8")).hexdigest() if canonical else "")
+PY
+}
+
 bridge_watchdog_due() {
   local interval="${BRIDGE_WATCHDOG_INTERVAL_SECONDS:-1800}"
   local file=""
@@ -215,6 +238,8 @@ bridge_note_watchdog_scan() {
   local file=""
   local now=0
   local next_ts=0
+  local last_key="${1:-}"
+  local last_report_ts="${2:-0}"
 
   [[ "$interval" =~ ^[0-9]+$ ]] || interval=1800
   (( interval > 0 )) || interval=1800
@@ -225,6 +250,8 @@ bridge_note_watchdog_scan() {
   cat >"$file" <<EOF
 WATCHDOG_UPDATED_TS=$now
 WATCHDOG_NEXT_TS=$next_ts
+WATCHDOG_LAST_KEY=$(printf '%q' "$last_key")
+WATCHDOG_LAST_REPORT_TS=$(printf '%q' "$last_report_ts")
 EOF
 }
 
@@ -236,6 +263,12 @@ process_watchdog_report() {
   local report_json=""
   local problem_count=0
   local existing_id=""
+  local current_key=""
+  local last_key=""
+  local last_report_ts=0
+  local cooldown=0
+  local now_ts=0
+  local reported=0
 
   [[ "${BRIDGE_WATCHDOG_ENABLED:-1}" == "1" ]] || return 1
   [[ -n "$admin_agent" ]] || return 1
@@ -260,19 +293,39 @@ except Exception:
 PY
 )"
   [[ "$problem_count" =~ ^[0-9]+$ ]] || problem_count=0
-  bridge_note_watchdog_scan
+  current_key="$(bridge_watchdog_problem_key "$report_json")"
+  cooldown="${BRIDGE_WATCHDOG_COOLDOWN_SECONDS:-86400}"
+  [[ "$cooldown" =~ ^[0-9]+$ ]] || cooldown=86400
+  now_ts="$(date +%s)"
+  if [[ -f "$(bridge_watchdog_state_file)" ]]; then
+    # shellcheck source=/dev/null
+    source "$(bridge_watchdog_state_file)"
+    last_key="${WATCHDOG_LAST_KEY:-}"
+    last_report_ts="${WATCHDOG_LAST_REPORT_TS:-0}"
+  fi
+  [[ "$last_report_ts" =~ ^[0-9]+$ ]] || last_report_ts=0
   if (( problem_count == 0 )); then
+    bridge_note_watchdog_scan "" 0
     return 1
   fi
 
   existing_id="$(bridge_queue_cli find-open --agent "$admin_agent" --title-prefix "$title_prefix" 2>/dev/null || true)"
   if [[ "$existing_id" =~ ^[0-9]+$ ]]; then
-    bridge_queue_cli update "$existing_id" --actor "daemon" --title "$title" --priority high --body-file "$report_file" >/dev/null 2>&1 || true
-  else
-    bridge_queue_cli create --to "$admin_agent" --from "daemon" --priority high --title "$title" --body-file "$report_file" >/dev/null 2>&1 || true
+    if [[ "$current_key" != "$last_key" ]]; then
+      bridge_queue_cli update "$existing_id" --actor "daemon" --title "$title" --priority high --body-file "$report_file" >/dev/null 2>&1 && reported=1
+    fi
+  elif [[ "$current_key" != "$last_key" || $(( now_ts - last_report_ts )) -ge "$cooldown" ]]; then
+    bridge_queue_cli create --to "$admin_agent" --from "daemon" --priority high --title "$title" --body-file "$report_file" >/dev/null 2>&1 && reported=1
   fi
-  daemon_info "watchdog reported ${problem_count} agent profile issue(s)"
-  return 0
+
+  if (( reported == 1 )); then
+    bridge_note_watchdog_scan "$current_key" "$now_ts"
+    daemon_info "watchdog reported ${problem_count} agent profile issue(s)"
+    return 0
+  fi
+
+  bridge_note_watchdog_scan "$last_key" "$last_report_ts"
+  return 1
 }
 
 bridge_daemon_autostart_state_file() {
