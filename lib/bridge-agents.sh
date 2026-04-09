@@ -217,6 +217,8 @@ bridge_infer_current_agent() {
   local agent
   local match=""
 
+  declare -p BRIDGE_AGENT_IDS >/dev/null 2>&1 || return 1
+
   if [[ -n "${BRIDGE_AGENT_ID:-}" ]] && bridge_agent_exists "$BRIDGE_AGENT_ID"; then
     printf '%s' "$BRIDGE_AGENT_ID"
     return 0
@@ -272,6 +274,7 @@ bridge_admin_agent_id() {
 
 bridge_agent_exists() {
   local agent="$1"
+  declare -p BRIDGE_AGENT_SESSION >/dev/null 2>&1 || return 1
   [[ -n "${BRIDGE_AGENT_SESSION[$agent]+x}" ]]
 }
 
@@ -981,6 +984,11 @@ bridge_list_agents() {
   local agent
   local actions
   local active
+
+  declare -p BRIDGE_AGENT_IDS >/dev/null 2>&1 || {
+    echo "  (등록된 정적 에이전트 없음)"
+    return 0
+  }
 
   if [[ ${#BRIDGE_AGENT_IDS[@]} -eq 0 ]]; then
     echo "  (등록된 정적 에이전트 없음)"

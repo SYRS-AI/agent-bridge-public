@@ -1170,6 +1170,58 @@ MEMORY_REMEMBER_JSON="$("$REPO_ROOT/agent-bridge" memory remember --agent "$CREA
 assert_contains "$MEMORY_REMEMBER_JSON" "\"capture_id\":"
 assert_contains "$MEMORY_REMEMBER_JSON" "\"kind\": \"user\""
 assert_contains "$(cat "$BRIDGE_AGENT_HOME_ROOT/$CREATED_AGENT/users/owner/MEMORY.md")" "weekly summary digests"
+MEMORY_PROJECT_REMEMBER_JSON="$("$REPO_ROOT/agent-bridge" memory remember --agent "$CREATED_AGENT" --user owner --source chat --title "Derm Roadmap" --text $'Weekly derm roadmap check-in every Tuesday.\nTrack dermatologist feedback separately in the project page.' --kind project --page derm-roadmap --summary "Weekly derm roadmap follow-up cadence." --json)"
+assert_contains "$MEMORY_PROJECT_REMEMBER_JSON" "\"kind\": \"project\""
+assert_contains "$(cat "$BRIDGE_AGENT_HOME_ROOT/$CREATED_AGENT/memory/projects/derm-roadmap.md")" "Weekly derm roadmap follow-up cadence."
+assert_contains "$(cat "$BRIDGE_AGENT_HOME_ROOT/$CREATED_AGENT/memory/projects/derm-roadmap.md")" "Track dermatologist feedback separately in the project page."
+
+LEGACY_MEMORY_DB="$TMP_ROOT/legacy-memory-index.sqlite"
+python3 - "$LEGACY_MEMORY_DB" <<'PY'
+import sqlite3
+import sys
+
+conn = sqlite3.connect(sys.argv[1])
+conn.executescript(
+    """
+    CREATE TABLE IF NOT EXISTS meta (
+        key TEXT PRIMARY KEY,
+        value TEXT NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS documents (
+        path TEXT PRIMARY KEY,
+        kind TEXT NOT NULL,
+        user_id TEXT NOT NULL DEFAULT '',
+        format TEXT NOT NULL,
+        sha256 TEXT NOT NULL,
+        size_bytes INTEGER NOT NULL,
+        indexed_at TEXT NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS chunks (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        path TEXT NOT NULL,
+        source TEXT NOT NULL,
+        model TEXT NOT NULL DEFAULT 'bridge-wiki-fts-v1',
+        kind TEXT NOT NULL,
+        user_id TEXT NOT NULL DEFAULT '',
+        start_line INTEGER NOT NULL,
+        end_line INTEGER NOT NULL,
+        text TEXT NOT NULL,
+        embedding TEXT NOT NULL DEFAULT '[]'
+    );
+    CREATE VIRTUAL TABLE IF NOT EXISTS chunks_fts USING fts5(
+        text,
+        path UNINDEXED,
+        source UNINDEXED,
+        model UNINDEXED,
+        content='chunks',
+        content_rowid='id'
+    );
+    """
+)
+conn.close()
+PY
+LEGACY_MEMORY_INDEX_JSON="$("$REPO_ROOT/agent-bridge" memory rebuild-index --agent "$CREATED_AGENT" --db-path "$LEGACY_MEMORY_DB" --json)"
+assert_contains "$LEGACY_MEMORY_INDEX_JSON" "\"chunk_count\":"
 SETUP_TELEGRAM_OUTPUT="$("$REPO_ROOT/agent-bridge" setup telegram "$CREATED_AGENT" --channel-account smoke --runtime-config "$TMP_ROOT/openclaw.json" --allow-from 123456789 --default-chat 123456789 --api-base-url "$FAKE_TELEGRAM_API_BASE" --yes)"
 assert_contains "$SETUP_TELEGRAM_OUTPUT" "telegram_dir: $BRIDGE_AGENT_HOME_ROOT/$CREATED_AGENT/.telegram"
 assert_contains "$SETUP_TELEGRAM_OUTPUT" "validation: ok"

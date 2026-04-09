@@ -441,6 +441,28 @@ def ensure_page(path: Path, title: str, dry_run: bool) -> None:
     write_text(path, f"# {title}\n\n## Notes\n", dry_run)
 
 
+def build_page_promotion_block(
+    created_at: str,
+    title: str,
+    summary: str,
+    capture: dict | None,
+) -> str:
+    lines = [f"### {created_at} — {title}", "", summary]
+    detail_text = (capture or {}).get("text", "").strip()
+    if detail_text and detail_text != summary.strip():
+        lines.extend(["", "#### Details", "", detail_text])
+    if capture:
+        lines.extend(["", "#### Source"])
+        lines.append(f"- Capture: `{capture['capture_id']}`")
+        if capture.get("source"):
+            lines.append(f"- Source: {capture['source']}")
+        if capture.get("author"):
+            lines.append(f"- Author: {capture['author']}")
+        if capture.get("channel"):
+            lines.append(f"- Channel: {capture['channel']}")
+    return "\n".join(lines).rstrip() + "\n"
+
+
 def cmd_promote(args: argparse.Namespace) -> int:
     home = Path(args.home)
     template_root = Path(args.template_root)
@@ -484,7 +506,12 @@ def cmd_promote(args: argparse.Namespace) -> int:
         else:
             die(f"unsupported promote kind: {kind}")
         ensure_page(target_path, page_title_from_slug(page_slug), args.dry_run)
-        append_under_section(target_path, "Notes", block, args.dry_run)
+        append_under_section(
+            target_path,
+            "Notes",
+            build_page_promotion_block(created_at, title, summary, capture),
+            args.dry_run,
+        )
 
     log_line = f"- {created_at} promoted `{kind}` -> `{target_path.relative_to(home)}`"
     if capture:
@@ -994,7 +1021,18 @@ def ensure_index_schema(conn: sqlite3.Connection) -> None:
             text TEXT NOT NULL,
             embedding TEXT NOT NULL DEFAULT '[]'
         );
-        CREATE VIRTUAL TABLE IF NOT EXISTS chunks_fts USING fts5(
+        """
+    )
+
+
+def recreate_index_fts(conn: sqlite3.Connection) -> None:
+    conn.executescript(
+        """
+        DROP TRIGGER IF EXISTS chunks_ai;
+        DROP TRIGGER IF EXISTS chunks_ad;
+        DROP TRIGGER IF EXISTS chunks_au;
+        DROP TABLE IF EXISTS chunks_fts;
+        CREATE VIRTUAL TABLE chunks_fts USING fts5(
             text,
             path UNINDEXED,
             source UNINDEXED,
@@ -1004,15 +1042,15 @@ def ensure_index_schema(conn: sqlite3.Connection) -> None:
             content='chunks',
             content_rowid='id'
         );
-        CREATE TRIGGER IF NOT EXISTS chunks_ai AFTER INSERT ON chunks BEGIN
+        CREATE TRIGGER chunks_ai AFTER INSERT ON chunks BEGIN
           INSERT INTO chunks_fts(rowid, text, path, source, model, kind, user_id)
           VALUES (new.id, new.text, new.path, new.source, new.model, new.kind, new.user_id);
         END;
-        CREATE TRIGGER IF NOT EXISTS chunks_ad AFTER DELETE ON chunks BEGIN
+        CREATE TRIGGER chunks_ad AFTER DELETE ON chunks BEGIN
           INSERT INTO chunks_fts(chunks_fts, rowid, text, path, source, model, kind, user_id)
           VALUES ('delete', old.id, old.text, old.path, old.source, old.model, old.kind, old.user_id);
         END;
-        CREATE TRIGGER IF NOT EXISTS chunks_au AFTER UPDATE ON chunks BEGIN
+        CREATE TRIGGER chunks_au AFTER UPDATE ON chunks BEGIN
           INSERT INTO chunks_fts(chunks_fts, rowid, text, path, source, model, kind, user_id)
           VALUES ('delete', old.id, old.text, old.path, old.source, old.model, old.kind, old.user_id);
           INSERT INTO chunks_fts(rowid, text, path, source, model, kind, user_id)
@@ -1047,6 +1085,7 @@ def cmd_rebuild_index(args: argparse.Namespace) -> int:
         conn = sqlite3.connect(db_path)
         try:
             ensure_index_schema(conn)
+            recreate_index_fts(conn)
             conn.execute("DELETE FROM chunks")
             conn.execute("DELETE FROM documents")
             conn.execute("DELETE FROM meta")

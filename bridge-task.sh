@@ -6,7 +6,15 @@ set -euo pipefail
 SCRIPT_DIR="$(cd -P "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 # shellcheck source=/dev/null
 source "$SCRIPT_DIR/bridge-lib.sh"
-bridge_load_roster
+
+BRIDGE_TASK_ROSTER_LOADED=0
+
+ensure_roster_loaded() {
+  if [[ "${BRIDGE_TASK_ROSTER_LOADED:-0}" -eq 0 ]]; then
+    bridge_load_roster
+    BRIDGE_TASK_ROSTER_LOADED=1
+  fi
+}
 
 usage() {
   cat <<EOF
@@ -31,6 +39,7 @@ infer_actor_if_possible() {
     return 0
   fi
 
+  ensure_roster_loaded
   if actor="$(bridge_infer_current_agent 2>/dev/null)"; then
     printf '%s' "$actor"
     return 0
@@ -67,6 +76,7 @@ notify_task_requester() {
   local ORIG_TASK_TITLE=""
   local ORIG_TASK_PRIORITY=""
 
+  ensure_roster_loaded
   # shellcheck disable=SC1090
   source <(bridge_queue_cli show "$task_id" --format shell)
 
@@ -162,6 +172,7 @@ cmd_create() {
 
   [[ -z "$target" ]] && bridge_die "--to는 필수입니다."
   [[ -z "$title" ]] && bridge_die "--title은 필수입니다."
+  ensure_roster_loaded
   bridge_require_agent "$target"
   explicit_actor="$actor"
   actor="$(infer_actor_if_possible "$actor")"
@@ -217,6 +228,7 @@ cmd_inbox() {
     esac
   done
 
+  ensure_roster_loaded
   agent="$(bridge_resolve_agent "$agent")"
   args=(inbox --agent "$agent")
   if [[ $all_statuses -eq 1 ]]; then
@@ -265,6 +277,7 @@ cmd_claim() {
   done
 
   [[ -z "$task_id" ]] && bridge_die "task id가 필요합니다."
+  ensure_roster_loaded
   agent="$(bridge_resolve_agent "$agent")"
   args=(claim "$task_id" --agent "$agent")
   if [[ -n "$lease" ]]; then
@@ -314,6 +327,7 @@ cmd_done() {
   done
 
   [[ -z "$task_id" ]] && bridge_die "task id가 필요합니다."
+  ensure_roster_loaded
   agent="$(bridge_resolve_agent "$agent")"
   args=("done" "$task_id" --agent "$agent")
   if [[ -n "$note" ]]; then
@@ -439,6 +453,7 @@ cmd_handoff() {
 
   [[ -z "$task_id" ]] && bridge_die "task id가 필요합니다."
   [[ -z "$target" ]] && bridge_die "--to는 필수입니다."
+  ensure_roster_loaded
   bridge_require_agent "$target"
   actor="$(infer_actor_if_possible "$actor")"
 
@@ -456,6 +471,7 @@ cmd_summary() {
   local args=(summary)
   local agent
 
+  ensure_roster_loaded
   for agent in "$@"; do
     bridge_require_agent "$agent"
     args+=(--agent "$agent")
