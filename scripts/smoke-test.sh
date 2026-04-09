@@ -498,15 +498,21 @@ BRIDGE_ROSTER_LOCAL_FILE=/nonexistent bash "$REPO_ROOT/bridge-start.sh" --list >
 
 log "starting isolated daemon"
 bash "$REPO_ROOT/bridge-daemon.sh" ensure >/dev/null
-DAEMON_STATUS="$(bash "$REPO_ROOT/bridge-daemon.sh" status)"
+DAEMON_STATUS=""
+for _ in {1..20}; do
+  DAEMON_STATUS="$(bash "$REPO_ROOT/bridge-daemon.sh" status || true)"
+  if [[ "$DAEMON_STATUS" == *"running pid="* ]]; then
+    break
+  fi
+  sleep 0.2
+done
 assert_contains "$DAEMON_STATUS" "running pid="
 
 log "starting isolated tmux role"
 bash "$REPO_ROOT/bridge-start.sh" "$SMOKE_AGENT" >/dev/null
 bash "$REPO_ROOT/bridge-start.sh" "$REQUESTER_AGENT" >/dev/null
-sleep 1
-tmux has-session -t "$SESSION_NAME" >/dev/null 2>&1 || die "smoke tmux session was not created"
-tmux has-session -t "$REQUESTER_SESSION" >/dev/null 2>&1 || die "requester tmux session was not created"
+wait_for_tmux_session "$SESSION_NAME" up 20 0.2 || die "smoke tmux session was not created"
+wait_for_tmux_session "$REQUESTER_SESSION" up 20 0.2 || die "requester tmux session was not created"
 
 log "syncing live roster"
 bash "$REPO_ROOT/bridge-daemon.sh" sync >/dev/null
@@ -1078,6 +1084,23 @@ AUDIT_OUTPUT="$("$BASH4_BIN" -lc '
 assert_contains "$AUDIT_OUTPUT" "\"action\": \"smoke_audit\""
 assert_contains "$AUDIT_OUTPUT" "\"target\": \"claude-static\""
 assert_contains "$AUDIT_OUTPUT" "\"sample\": \"yes\""
+AUDIT_ROTATE_FILE="$TMP_ROOT/audit-rotate.jsonl"
+AUDIT_ROTATE_OUTPUT="$("$BASH4_BIN" -lc '
+  export BRIDGE_AUDIT_LOG="'"$AUDIT_ROTATE_FILE"'"
+  export BRIDGE_AUDIT_ROTATE_BYTES=1
+  source "'"$REPO_ROOT"'/bridge-lib.sh"
+  bridge_load_roster
+  bridge_audit_log daemon smoke_rotate first --detail marker=alpha
+  bridge_audit_log queue smoke_rotate second --detail marker=beta
+  bridge_notify_send "'"$SMOKE_AGENT"'" "Smoke notify" "dry-run" "" normal 1 >/dev/null
+  "'"$REPO_ROOT"'/agent-bridge" audit --actor queue --contains beta --limit 5 --json
+')"
+assert_contains "$AUDIT_ROTATE_OUTPUT" "\"actor\": \"queue\""
+assert_contains "$AUDIT_ROTATE_OUTPUT" "\"marker\": \"beta\""
+ROTATED_AUDIT_COUNT="$(find "$TMP_ROOT" -maxdepth 1 -name 'audit-rotate.*.jsonl' | wc -l | tr -d ' ')"
+[[ "${ROTATED_AUDIT_COUNT:-0}" -ge 1 ]] || die "expected rotated audit files"
+NOTIFY_AUDIT_OUTPUT="$(BRIDGE_AUDIT_LOG="$AUDIT_ROTATE_FILE" "$REPO_ROOT/agent-bridge" audit --action external_channel_send --limit 5 --json)"
+assert_contains "$NOTIFY_AUDIT_OUTPUT" "\"action\": \"external_channel_send\""
 
 log "falling back when a dynamic Claude resume session id is stale"
 STALE_RESUME_OUTPUT="$("$BASH4_BIN" -lc '
@@ -1415,6 +1438,7 @@ assert payload["shell_integration"]["shell"] == "zsh"
 assert payload["shell_integration"]["rcfile"] == rcfile
 assert payload["daemon"]["status"] == "skipped"
 assert payload["launchagent"]["status"] == "skipped"
+assert payload["systemd"]["status"] == "unsupported"
 assert payload["next_command"] == "agb admin"
 assert payload["init"]["admin"] == agent
 assert payload["init"]["session"] == session
@@ -1428,6 +1452,7 @@ assert_contains "$BOOTSTRAP_OUTPUT" "admin_agent: $BOOTSTRAP_AGENT"
 assert_contains "$BOOTSTRAP_OUTPUT" "shell_integration: applied"
 assert_contains "$BOOTSTRAP_OUTPUT" "daemon: skipped"
 assert_contains "$BOOTSTRAP_OUTPUT" "launchagent: skipped"
+assert_contains "$BOOTSTRAP_OUTPUT" "systemd: unsupported"
 assert_contains "$BOOTSTRAP_OUTPUT" "3. Run: agb admin"
 [[ -f "$BOOTSTRAP_RCFILE" ]] || die "bootstrap did not create shell rc file"
 assert_contains "$(cat "$BOOTSTRAP_RCFILE")" "source \"$REPO_ROOT/shell/agent-bridge.zsh\""
@@ -1442,6 +1467,22 @@ agent = sys.argv[2]
 assert payload["agent"] == agent
 assert payload["engine"] == "claude"
 assert payload["channels"]["required"] == "plugin:telegram@claude-plugins-official"
+PY
+
+log "rendering a Linux systemd user unit and bootstrap dry-run"
+SYSTEMD_UNIT_OUTPUT="$("$REPO_ROOT/scripts/install-daemon-systemd.sh" --bridge-home "$BRIDGE_HOME")"
+assert_contains "$SYSTEMD_UNIT_OUTPUT" "[Service]"
+assert_contains "$SYSTEMD_UNIT_OUTPUT" "ExecStart="
+assert_contains "$SYSTEMD_UNIT_OUTPUT" "service_path:"
+BOOTSTRAP_LINUX_JSON="$(BRIDGE_BOOTSTRAP_OS=Linux "$REPO_ROOT/agent-bridge" bootstrap --admin bootstrap-linux --engine claude --session bootstrap-linux --channels plugin:telegram --allow-from 123456789 --default-chat 123456789 --channel-account smoke --runtime-config "$TMP_ROOT/openclaw.json" --api-base-url "$FAKE_TELEGRAM_API_BASE" --rcfile "$TMP_ROOT/bootstrap-linux.rc" --skip-daemon --skip-launchagent --dry-run --json 2>&1)" || die "linux bootstrap dry-run failed: $BOOTSTRAP_LINUX_JSON"
+python3 - "$BOOTSTRAP_LINUX_JSON" <<'PY'
+import json
+import sys
+
+payload = json.loads(sys.argv[1])
+assert payload["mode"] == "bootstrap"
+assert payload["launchagent"]["status"] == "skipped"
+assert payload["systemd"]["status"] == "planned"
 PY
 
 log "surfacing bootstrap failure output and parsing tokenFile dotenv values"
@@ -1981,11 +2022,23 @@ assert_contains "$UPGRADE_JSON" "\"analysis\""
 
 log "upgrade backs up live install and migrates missing agent files"
 rm -f "$BRIDGE_AGENT_HOME_ROOT/$CREATED_AGENT/MEMORY-SCHEMA.md"
+python3 - <<'PY' "$BRIDGE_AGENT_HOME_ROOT/$CREATED_AGENT/CLAUDE.md"
+from pathlib import Path
+import sys
+
+path = Path(sys.argv[1])
+text = path.read_text(encoding="utf-8")
+text = text.replace("## Queue & Delivery", "## Queue & Delivery\n- STALE-UPGRADE-MARKER", 1)
+path.write_text(text, encoding="utf-8")
+PY
 UPGRADE_APPLY_JSON="$("$REPO_ROOT/agent-bridge" upgrade --target "$BRIDGE_HOME" --no-restart-daemon --allow-dirty --json)"
 assert_contains "$UPGRADE_APPLY_JSON" "\"backup_enabled\": true"
 assert_contains "$UPGRADE_APPLY_JSON" "\"migrate_agents\": true"
 assert_contains "$UPGRADE_APPLY_JSON" "\"added_files\""
+assert_contains "$UPGRADE_APPLY_JSON" "\"updated_files\""
 [[ -f "$BRIDGE_AGENT_HOME_ROOT/$CREATED_AGENT/MEMORY-SCHEMA.md" ]] || die "upgrade did not restore missing agent template file"
+assert_not_contains "$(cat "$BRIDGE_AGENT_HOME_ROOT/$CREATED_AGENT/CLAUDE.md")" "STALE-UPGRADE-MARKER"
+assert_contains "$(cat "$BRIDGE_AGENT_HOME_ROOT/$CREATED_AGENT/CLAUDE.md")" "## Autonomy & Anti-Stall"
 UPGRADE_BACKUP_ROOT="$(python3 - <<'PY' "$UPGRADE_APPLY_JSON"
 import json, sys
 print(json.loads(sys.argv[1])["backup_root"])
@@ -2012,7 +2065,7 @@ log "smart upgrade clean-merges text drift"
 UPGRADE_SIM_REPO="$TMP_ROOT/upgrade-sim-repo"
 mkdir -p "$UPGRADE_SIM_REPO"
 git -C "$UPGRADE_SIM_REPO" init -q
-git -C "$UPGRADE_SIM_REPO" config user.email smoke@example.com
+git -C "$UPGRADE_SIM_REPO" config user.email smoke-test
 git -C "$UPGRADE_SIM_REPO" config user.name "Bridge Smoke"
 cat >"$UPGRADE_SIM_REPO/sample.txt" <<'EOF'
 alpha
@@ -2056,6 +2109,25 @@ set -e
 assert_contains "$STRICT_JSON" "\"aborted\": true"
 assert_contains "$(cat "$STRICT_ROOT/sample.txt")" "alpha-live"
 assert_not_contains "$(cat "$STRICT_ROOT/sample.txt")" "alpha-upstream"
+
+log "exporting a clean public snapshot from the current ref"
+PUBLIC_EXPORT_DIR="$TMP_ROOT/public-export"
+PUBLIC_EXPORT_JSON="$("$REPO_ROOT/scripts/export-public-snapshot.sh" --dest "$PUBLIC_EXPORT_DIR" --init-git --dry-run --json)"
+python3 - "$PUBLIC_EXPORT_JSON" <<'PY'
+import json
+import sys
+
+payload = json.loads(sys.argv[1])
+assert payload["mode"] == "export-public-snapshot"
+assert payload["init_git"] is True
+assert payload["push"] is False
+assert payload["dry_run"] is True
+PY
+"$REPO_ROOT/scripts/export-public-snapshot.sh" --dest "$PUBLIC_EXPORT_DIR" --init-git >/dev/null
+[[ -f "$PUBLIC_EXPORT_DIR/README.md" ]] || die "public export missing README.md"
+[[ -d "$PUBLIC_EXPORT_DIR/.git" ]] || die "public export did not initialize git"
+[[ ! -e "$PUBLIC_EXPORT_DIR/HEARTBEAT.md" ]] || die "public export should not include untracked HEARTBEAT.md"
+git -C "$PUBLIC_EXPORT_DIR" rev-parse --verify HEAD >/dev/null 2>&1 || die "public export missing initial commit"
 
 log "inventorying legacy runtime references"
 LEGACY_ROOT="$TMP_ROOT/legacy-runtime"
@@ -2676,6 +2748,12 @@ CANCEL_TASK_ID="${BASH_REMATCH[1]}"
 bash "$REPO_ROOT/bridge-task.sh" cancel "$CANCEL_TASK_ID" --actor smoke-test --note "cancelled via smoke" >/dev/null
 assert_contains "$(bash "$REPO_ROOT/bridge-task.sh" show "$CANCEL_TASK_ID")" "status: cancelled"
 assert_contains "$(cat "$CANCEL_RUN_DIR/status.json")" "\"state\": \"cancelled\""
+python3 - "$("$REPO_ROOT/agent-bridge" audit --action cron_dispatch_cancelled --limit 20 --json)" "$CANCEL_TASK_ID" <<'PY'
+import json, sys
+rows = json.loads(sys.argv[1])
+task_id = sys.argv[2]
+assert any(str(row.get("detail", {}).get("task_id")) == task_id for row in rows), rows
+PY
 
 log "reporting channel health misses to the admin role"
 cat >>"$BRIDGE_ROSTER_LOCAL_FILE" <<EOF
@@ -2808,5 +2886,155 @@ after = json.loads(sys.argv[2])
 assert len(after) == len(before)
 PY
 "$BASH4_BIN" -lc "source \"$REPO_ROOT/bridge-lib.sh\"; bridge_load_roster; bridge_agent_clear_crash_report \"$SMOKE_AGENT\""
+
+log "detecting and recovering stalled sessions"
+STALL_RATE_AGENT="stall-rate-$SESSION_NAME"
+STALL_AUTH_AGENT="stall-auth-$SESSION_NAME"
+STALL_UNKNOWN_AGENT="stall-unknown-$SESSION_NAME"
+STALL_RATE_WORKDIR="$TMP_ROOT/$STALL_RATE_AGENT"
+STALL_AUTH_WORKDIR="$TMP_ROOT/$STALL_AUTH_AGENT"
+STALL_UNKNOWN_WORKDIR="$TMP_ROOT/$STALL_UNKNOWN_AGENT"
+mkdir -p "$STALL_RATE_WORKDIR" "$STALL_AUTH_WORKDIR" "$STALL_UNKNOWN_WORKDIR"
+cat >>"$BRIDGE_ROSTER_LOCAL_FILE" <<EOF
+
+bridge_add_agent_id_if_missing "$STALL_RATE_AGENT"
+BRIDGE_AGENT_DESC["$STALL_RATE_AGENT"]="Stall rate-limit role"
+BRIDGE_AGENT_ENGINE["$STALL_RATE_AGENT"]="claude"
+BRIDGE_AGENT_SESSION["$STALL_RATE_AGENT"]="$STALL_RATE_AGENT"
+BRIDGE_AGENT_WORKDIR["$STALL_RATE_AGENT"]="$STALL_RATE_WORKDIR"
+BRIDGE_AGENT_LAUNCH_CMD["$STALL_RATE_AGENT"]='claude --dangerously-skip-permissions'
+
+bridge_add_agent_id_if_missing "$STALL_AUTH_AGENT"
+BRIDGE_AGENT_DESC["$STALL_AUTH_AGENT"]="Stall auth role"
+BRIDGE_AGENT_ENGINE["$STALL_AUTH_AGENT"]="claude"
+BRIDGE_AGENT_SESSION["$STALL_AUTH_AGENT"]="$STALL_AUTH_AGENT"
+BRIDGE_AGENT_WORKDIR["$STALL_AUTH_AGENT"]="$STALL_AUTH_WORKDIR"
+BRIDGE_AGENT_LAUNCH_CMD["$STALL_AUTH_AGENT"]='claude --dangerously-skip-permissions'
+
+bridge_add_agent_id_if_missing "$STALL_UNKNOWN_AGENT"
+BRIDGE_AGENT_DESC["$STALL_UNKNOWN_AGENT"]="Stall unknown role"
+BRIDGE_AGENT_ENGINE["$STALL_UNKNOWN_AGENT"]="claude"
+BRIDGE_AGENT_SESSION["$STALL_UNKNOWN_AGENT"]="$STALL_UNKNOWN_AGENT"
+BRIDGE_AGENT_WORKDIR["$STALL_UNKNOWN_AGENT"]="$STALL_UNKNOWN_WORKDIR"
+BRIDGE_AGENT_LAUNCH_CMD["$STALL_UNKNOWN_AGENT"]='claude --dangerously-skip-permissions'
+EOF
+
+STALL_RATE_INPUT_LOG="$TMP_ROOT/stall-rate-input.log"
+STALL_AUTH_INPUT_LOG="$TMP_ROOT/stall-auth-input.log"
+STALL_UNKNOWN_INPUT_LOG="$TMP_ROOT/stall-unknown-input.log"
+STALL_RATE_SCRIPT="$TMP_ROOT/stall-rate.py"
+STALL_AUTH_SCRIPT="$TMP_ROOT/stall-auth.py"
+STALL_UNKNOWN_SCRIPT="$TMP_ROOT/stall-unknown.py"
+cat >"$STALL_RATE_SCRIPT" <<'PY'
+#!/usr/bin/env python3
+import sys
+print("You've hit your limit")
+print("❯ ")
+sys.stdout.flush()
+for _ in sys.stdin:
+    pass
+PY
+cat >"$STALL_AUTH_SCRIPT" <<'PY'
+#!/usr/bin/env python3
+import sys
+print("session expired")
+print("❯ ")
+sys.stdout.flush()
+for _ in sys.stdin:
+    pass
+PY
+cat >"$STALL_UNKNOWN_SCRIPT" <<'PY'
+#!/usr/bin/env python3
+import sys
+print("still thinking")
+print("❯ ")
+sys.stdout.flush()
+for _ in sys.stdin:
+    pass
+PY
+chmod +x "$STALL_RATE_SCRIPT" "$STALL_AUTH_SCRIPT" "$STALL_UNKNOWN_SCRIPT"
+tmux new-session -d -s "$STALL_RATE_AGENT" "$STALL_RATE_SCRIPT"
+tmux new-session -d -s "$STALL_AUTH_AGENT" "$STALL_AUTH_SCRIPT"
+tmux new-session -d -s "$STALL_UNKNOWN_AGENT" "$STALL_UNKNOWN_SCRIPT"
+sleep 1
+bash "$REPO_ROOT/bridge-sync.sh" >/dev/null
+
+STALL_RATE_CREATE_OUTPUT="$("$REPO_ROOT/agent-bridge" task create --to "$STALL_RATE_AGENT" --title "stall rate" --body "smoke" --from smoke)"
+STALL_RATE_TASK_ID="$(printf '%s\n' "$STALL_RATE_CREATE_OUTPUT" | sed -n 's/^created task #\([0-9][0-9]*\).*/\1/p' | head -n1)"
+[[ "$STALL_RATE_TASK_ID" =~ ^[0-9]+$ ]] || die "expected rate stall task id"
+python3 "$REPO_ROOT/bridge-queue.py" claim "$STALL_RATE_TASK_ID" --agent "$STALL_RATE_AGENT" >/dev/null
+BRIDGE_STALL_SCAN_INTERVAL_SECONDS=0 \
+BRIDGE_STALL_EXPLICIT_IDLE_SECONDS=0 \
+BRIDGE_STALL_RATE_LIMIT_RETRY_SECONDS=0 \
+BRIDGE_STALL_ESCALATE_AFTER_SECONDS=0 \
+BRIDGE_STALL_MAX_NUDGES=2 \
+bash "$REPO_ROOT/bridge-daemon.sh" sync >/dev/null
+BRIDGE_STALL_SCAN_INTERVAL_SECONDS=0 \
+BRIDGE_STALL_EXPLICIT_IDLE_SECONDS=0 \
+BRIDGE_STALL_RATE_LIMIT_RETRY_SECONDS=0 \
+BRIDGE_STALL_ESCALATE_AFTER_SECONDS=0 \
+BRIDGE_STALL_MAX_NUDGES=2 \
+bash "$REPO_ROOT/bridge-daemon.sh" sync >/dev/null
+RATE_LIMIT_STALL_TASK_ID="$(python3 "$REPO_ROOT/bridge-queue.py" find-open --agent "$SMOKE_AGENT" --title-prefix "[STALL/RATE_LIMIT] $STALL_RATE_AGENT " 2>/dev/null || true)"
+[[ "$RATE_LIMIT_STALL_TASK_ID" =~ ^[0-9]+$ ]] || die "expected rate-limit stall escalation"
+BRIDGE_STALL_SCAN_INTERVAL_SECONDS=0 \
+BRIDGE_STALL_EXPLICIT_IDLE_SECONDS=0 \
+BRIDGE_STALL_RATE_LIMIT_RETRY_SECONDS=0 \
+BRIDGE_STALL_ESCALATE_AFTER_SECONDS=0 \
+BRIDGE_STALL_MAX_NUDGES=2 \
+bash "$REPO_ROOT/bridge-daemon.sh" sync >/dev/null
+RATE_LIMIT_STALL_TASK_ID_AGAIN="$(python3 "$REPO_ROOT/bridge-queue.py" find-open --agent "$SMOKE_AGENT" --title-prefix "[STALL/RATE_LIMIT] $STALL_RATE_AGENT " 2>/dev/null || true)"
+[[ "$RATE_LIMIT_STALL_TASK_ID_AGAIN" == "$RATE_LIMIT_STALL_TASK_ID" ]] || die "expected deduped rate-limit stall escalation"
+RATE_NUDGE_COUNT="$(python3 - "$BRIDGE_HOME/logs/audit.jsonl" "$STALL_RATE_AGENT" <<'PY'
+import json, sys
+count = 0
+for raw in open(sys.argv[1], encoding="utf-8"):
+    item = json.loads(raw)
+    if item.get("action") == "stall_nudge_sent" and item.get("target") == sys.argv[2]:
+        count += 1
+print(count)
+PY
+)"
+[[ "$RATE_NUDGE_COUNT" == "2" ]] || die "expected exactly two stall nudges before rate-limit escalation"
+
+STALL_AUTH_CREATE_OUTPUT="$("$REPO_ROOT/agent-bridge" task create --to "$STALL_AUTH_AGENT" --title "stall auth" --body "smoke" --from smoke)"
+STALL_AUTH_TASK_ID="$(printf '%s\n' "$STALL_AUTH_CREATE_OUTPUT" | sed -n 's/^created task #\([0-9][0-9]*\).*/\1/p' | head -n1)"
+[[ "$STALL_AUTH_TASK_ID" =~ ^[0-9]+$ ]] || die "expected auth stall task id"
+python3 "$REPO_ROOT/bridge-queue.py" claim "$STALL_AUTH_TASK_ID" --agent "$STALL_AUTH_AGENT" >/dev/null
+BRIDGE_STALL_SCAN_INTERVAL_SECONDS=0 \
+BRIDGE_STALL_EXPLICIT_IDLE_SECONDS=0 \
+bash "$REPO_ROOT/bridge-daemon.sh" sync >/dev/null
+AUTH_STALL_TASK_ID="$(python3 "$REPO_ROOT/bridge-queue.py" find-open --agent "$SMOKE_AGENT" --title-prefix "[STALL/AUTH] $STALL_AUTH_AGENT " 2>/dev/null || true)"
+[[ "$AUTH_STALL_TASK_ID" =~ ^[0-9]+$ ]] || die "expected auth stall escalation"
+
+STALL_UNKNOWN_CREATE_OUTPUT="$("$REPO_ROOT/agent-bridge" task create --to "$STALL_UNKNOWN_AGENT" --title "stall unknown" --body "smoke" --from smoke)"
+STALL_UNKNOWN_TASK_ID="$(printf '%s\n' "$STALL_UNKNOWN_CREATE_OUTPUT" | sed -n 's/^created task #\([0-9][0-9]*\).*/\1/p' | head -n1)"
+[[ "$STALL_UNKNOWN_TASK_ID" =~ ^[0-9]+$ ]] || die "expected unknown stall task id"
+python3 "$REPO_ROOT/bridge-queue.py" claim "$STALL_UNKNOWN_TASK_ID" --agent "$STALL_UNKNOWN_AGENT" >/dev/null
+BRIDGE_STALL_SCAN_INTERVAL_SECONDS=0 \
+BRIDGE_STALL_UNKNOWN_IDLE_SECONDS=0 \
+BRIDGE_STALL_UNKNOWN_RETRY_SECONDS=0 \
+BRIDGE_STALL_UNKNOWN_ESCALATE_SECONDS=0 \
+BRIDGE_STALL_MAX_NUDGES=2 \
+bash "$REPO_ROOT/bridge-daemon.sh" sync >/dev/null
+BRIDGE_STALL_SCAN_INTERVAL_SECONDS=0 \
+BRIDGE_STALL_UNKNOWN_IDLE_SECONDS=0 \
+BRIDGE_STALL_UNKNOWN_RETRY_SECONDS=0 \
+BRIDGE_STALL_UNKNOWN_ESCALATE_SECONDS=0 \
+BRIDGE_STALL_MAX_NUDGES=2 \
+bash "$REPO_ROOT/bridge-daemon.sh" sync >/dev/null
+UNKNOWN_STALL_TASK_ID="$(python3 "$REPO_ROOT/bridge-queue.py" find-open --agent "$SMOKE_AGENT" --title-prefix "[STALL/UNKNOWN] $STALL_UNKNOWN_AGENT " 2>/dev/null || true)"
+[[ "$UNKNOWN_STALL_TASK_ID" =~ ^[0-9]+$ ]] || die "expected unknown stall escalation"
+
+tmux kill-session -t "$STALL_RATE_AGENT" >/dev/null 2>&1 || true
+BRIDGE_STALL_SCAN_INTERVAL_SECONDS=0 \
+BRIDGE_STALL_EXPLICIT_IDLE_SECONDS=0 \
+bash "$REPO_ROOT/bridge-daemon.sh" sync >/dev/null
+STALL_RECOVERED_JSON="$("$REPO_ROOT/agent-bridge" audit --action stall_recovered --limit 20 --json)"
+python3 - "$STALL_RECOVERED_JSON" "$STALL_RATE_AGENT" <<'PY'
+import json, sys
+rows = json.loads(sys.argv[1])
+assert any(row.get("target") == sys.argv[2] for row in rows), rows
+PY
 
 log "smoke test passed"

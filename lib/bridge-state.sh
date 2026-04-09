@@ -623,6 +623,18 @@ bridge_load_roster() {
   : "${BRIDGE_USAGE_CRITICAL_PERCENT:=100}"
   : "${BRIDGE_USAGE_MONITOR_INTERVAL_SECONDS:=300}"
   : "${BRIDGE_USAGE_MONITOR_STATE_FILE:=$BRIDGE_STATE_DIR/usage/monitor-state.json}"
+  : "${BRIDGE_STALL_SCAN_ENABLED:=1}"
+  : "${BRIDGE_STALL_SCAN_INTERVAL_SECONDS:=30}"
+  : "${BRIDGE_STALL_CAPTURE_LINES:=120}"
+  : "${BRIDGE_STALL_EXPLICIT_IDLE_SECONDS:=30}"
+  : "${BRIDGE_STALL_UNKNOWN_IDLE_SECONDS:=900}"
+  : "${BRIDGE_STALL_MAX_NUDGES:=2}"
+  : "${BRIDGE_STALL_ESCALATE_AFTER_SECONDS:=300}"
+  : "${BRIDGE_STALL_RATE_LIMIT_RETRY_SECONDS:=30}"
+  : "${BRIDGE_STALL_NETWORK_RETRY_SECONDS:=60}"
+  : "${BRIDGE_STALL_UNKNOWN_RETRY_SECONDS:=300}"
+  : "${BRIDGE_STALL_NETWORK_ESCALATE_SECONDS:=600}"
+  : "${BRIDGE_STALL_UNKNOWN_ESCALATE_SECONDS:=600}"
   : "${BRIDGE_ADMIN_AGENT_ID:=}"
   : "${BRIDGE_CRON_SYNC_ENABLED:=${BRIDGE_LEGACY_CRON_SYNC_ENABLED:-${BRIDGE_OPENCLAW_CRON_SYNC_ENABLED:-0}}}"
   : "${BRIDGE_DISCORD_RELAY_ENABLED:=1}"
@@ -740,6 +752,17 @@ bridge_agent_crash_tail_file() {
 bridge_agent_crash_state_file() {
   local agent="$1"
   printf '%s/crash-report/%s.state.env' "$BRIDGE_STATE_DIR" "$agent"
+}
+
+bridge_agent_stall_state_file() {
+  local agent="$1"
+  printf '%s/stall/%s.env' "$BRIDGE_STATE_DIR" "$agent"
+}
+
+bridge_agent_stall_report_file() {
+  local agent="$1"
+  local classification="${2:-unknown}"
+  printf '%s/stall/%s-%s.md' "$BRIDGE_SHARED_DIR" "$agent" "$classification"
 }
 
 bridge_agent_write_crash_report() {

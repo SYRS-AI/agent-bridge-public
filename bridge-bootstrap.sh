@@ -18,6 +18,7 @@ Bootstrap options:
   --skip-shell-integration
   --skip-daemon
   --skip-launchagent      Do not install/load the macOS LaunchAgent
+  --skip-systemd          Do not install/enable the Linux systemd user unit
   --dry-run
   --json
 
@@ -35,6 +36,7 @@ bootstrap_rcfile=""
 skip_shell_integration=0
 skip_daemon=0
 skip_launchagent=0
+skip_systemd=0
 dry_run=0
 json_mode=0
 init_args=()
@@ -61,6 +63,10 @@ while [[ $# -gt 0 ]]; do
       ;;
     --skip-launchagent)
       skip_launchagent=1
+      shift
+      ;;
+    --skip-systemd)
+      skip_systemd=1
       shift
       ;;
     --dry-run)
@@ -95,7 +101,9 @@ bridge_require_python
 shell_status="skipped"
 daemon_status="skipped"
 launchagent_status="skipped"
+systemd_status="skipped"
 next_command="agb admin"
+bootstrap_os="${BRIDGE_BOOTSTRAP_OS:-$(uname -s)}"
 
 if [[ $skip_shell_integration -eq 0 ]]; then
   shell_status="planned"
@@ -118,7 +126,7 @@ if [[ $skip_daemon -eq 0 ]]; then
 fi
 
 if [[ $skip_launchagent -eq 0 ]]; then
-  if [[ "$(uname -s)" == "Darwin" ]]; then
+  if [[ "$bootstrap_os" == "Darwin" ]]; then
     launchagent_status="planned"
     if [[ $dry_run -eq 0 ]]; then
       "$BRIDGE_BASH_BIN" "$SCRIPT_DIR/scripts/install-daemon-launchagent.sh" --apply --load >/dev/null
@@ -129,8 +137,20 @@ if [[ $skip_launchagent -eq 0 ]]; then
   fi
 fi
 
+if [[ $skip_systemd -eq 0 ]]; then
+  if [[ "$bootstrap_os" == "Linux" ]]; then
+    systemd_status="planned"
+    if [[ $dry_run -eq 0 ]]; then
+      "$BRIDGE_BASH_BIN" "$SCRIPT_DIR/scripts/install-daemon-systemd.sh" --apply --enable >/dev/null
+      systemd_status="enabled"
+    fi
+  else
+    systemd_status="unsupported"
+  fi
+fi
+
 if [[ $json_mode -eq 1 ]]; then
-  python3 - "$init_json" "$shell_status" "$bootstrap_shell" "$bootstrap_rcfile" "$daemon_status" "$launchagent_status" "$next_command" <<'PY'
+  python3 - "$init_json" "$shell_status" "$bootstrap_shell" "$bootstrap_rcfile" "$daemon_status" "$launchagent_status" "$systemd_status" "$next_command" <<'PY'
 import json
 import sys
 
@@ -145,11 +165,12 @@ payload = {
     "init": init_payload,
     "daemon": {"status": sys.argv[5]},
     "launchagent": {"status": sys.argv[6]},
-    "next_command": sys.argv[7],
+    "systemd": {"status": sys.argv[7]},
+    "next_command": sys.argv[8],
     "handoff_steps": [
         "Close the temporary installer session.",
         "Open a fresh shell if needed so the shell integration is loaded.",
-        f"Run `{sys.argv[7]}`.",
+        f"Run `{sys.argv[8]}`.",
         "Let the admin agent guide the rest of the onboarding.",
     ],
 }
@@ -169,6 +190,7 @@ printf 'admin_agent: %s\n' "$admin_agent"
 printf 'shell_integration: %s\n' "$shell_status"
 printf 'daemon: %s\n' "$daemon_status"
 printf 'launchagent: %s\n' "$launchagent_status"
+printf 'systemd: %s\n' "$systemd_status"
 echo
 echo "handoff:"
 echo "1. Close the temporary installer session."

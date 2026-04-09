@@ -51,6 +51,14 @@ bridge_notify_send() {
     args+=(--dry-run)
   fi
 
+  bridge_audit_log notify external_channel_send "$agent" \
+    --detail kind="$kind" \
+    --detail transport_target="$target" \
+    --detail account="$account" \
+    --detail priority="$priority" \
+    --detail dry_run="$dry_run" \
+    --detail title="$title"
+
   bridge_notify_python "${args[@]}"
 }
 

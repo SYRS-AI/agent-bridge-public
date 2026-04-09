@@ -13,6 +13,28 @@ from pathlib import Path
 from typing import Any
 
 
+def rotation_limit_bytes() -> int:
+    raw = os.environ.get("BRIDGE_AUDIT_ROTATE_BYTES", "").strip()
+    if not raw:
+        return 5 * 1024 * 1024
+    try:
+        value = int(raw)
+    except ValueError:
+        return 5 * 1024 * 1024
+    return max(0, value)
+
+
+def rotation_keep_files() -> int:
+    raw = os.environ.get("BRIDGE_AUDIT_KEEP_FILES", "").strip()
+    if not raw:
+        return 30
+    try:
+        value = int(raw)
+    except ValueError:
+        return 30
+    return max(1, value)
+
+
 def now_iso() -> str:
     return datetime.now(timezone.utc).astimezone().isoformat(timespec="seconds")
 
@@ -39,8 +61,40 @@ def parse_detail(items: list[str], detail_json: str | None) -> dict[str, Any]:
     return detail
 
 
+def rotate_path(path: Path) -> None:
+    limit = rotation_limit_bytes()
+    if limit <= 0 or not path.exists():
+        return
+    try:
+        current_size = path.stat().st_size
+    except OSError:
+        return
+    if current_size < limit:
+        return
+    timestamp = datetime.now(timezone.utc).astimezone().strftime("%Y%m%d-%H%M%S")
+    rotated = path.with_name(f"{path.stem}.{timestamp}{path.suffix}")
+    try:
+        path.rename(rotated)
+    except OSError:
+        return
+    rotated_files = sorted(
+        path.parent.glob(f"{path.stem}.*{path.suffix}"),
+        key=lambda item: item.name,
+    )
+    keep = rotation_keep_files()
+    if keep <= 0:
+        return
+    excess = len(rotated_files) - keep
+    for candidate in rotated_files[: max(0, excess)]:
+        try:
+            candidate.unlink()
+        except OSError:
+            continue
+
+
 def append_record(path: Path, payload: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
+    rotate_path(path)
     with path.open("a", encoding="utf-8") as fh:
         fh.write(json.dumps(payload, ensure_ascii=True) + "\n")
 
@@ -71,21 +125,32 @@ def parse_since(text: str | None) -> datetime | None:
     return datetime.fromisoformat(raw)
 
 
+def candidate_paths(path: Path) -> list[Path]:
+    paths: list[Path] = []
+    rotated = sorted(
+        path.parent.glob(f"{path.stem}.*{path.suffix}"),
+        key=lambda item: item.name,
+    )
+    paths.extend(rotated)
+    if path.is_file():
+        paths.append(path)
+    return paths
+
+
 def load_records(path: Path) -> list[dict[str, Any]]:
-    if not path.is_file():
-        return []
     records: list[dict[str, Any]] = []
-    with path.open("r", encoding="utf-8") as fh:
-        for line in fh:
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                payload = json.loads(line)
-            except json.JSONDecodeError:
-                continue
-            if isinstance(payload, dict):
-                records.append(payload)
+    for candidate in candidate_paths(path):
+        with candidate.open("r", encoding="utf-8") as fh:
+            for line in fh:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    payload = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if isinstance(payload, dict):
+                    records.append(payload)
     return records
 
 
@@ -110,6 +175,10 @@ def cmd_list(args: argparse.Namespace) -> int:
     for record in records:
         if args.action and record.get("action") != args.action:
             continue
+        if args.actor and record.get("actor") != args.actor:
+            continue
+        if args.target and record.get("target") != args.target:
+            continue
         if args.agent and not matches_agent(record, args.agent):
             continue
         if since_dt is not None:
@@ -121,6 +190,10 @@ def cmd_list(args: argparse.Namespace) -> int:
             except Exception:
                 continue
             if ts_dt is None or ts_dt < since_dt:
+                continue
+        if args.contains:
+            haystack = json.dumps(record, ensure_ascii=True, sort_keys=True)
+            if args.contains not in haystack:
                 continue
         filtered.append(record)
 
@@ -168,6 +241,9 @@ def build_parser() -> argparse.ArgumentParser:
     list_parser.add_argument("--file", required=True)
     list_parser.add_argument("--agent")
     list_parser.add_argument("--action")
+    list_parser.add_argument("--actor")
+    list_parser.add_argument("--target")
+    list_parser.add_argument("--contains")
     list_parser.add_argument("--since")
     list_parser.add_argument("--limit", type=int, default=20)
     list_parser.add_argument("--json", action="store_true")

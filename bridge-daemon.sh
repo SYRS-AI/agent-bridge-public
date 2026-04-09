@@ -340,6 +340,528 @@ PY
   (( alert_count > 0 ))
 }
 
+bridge_stall_retry_seconds() {
+  local classification="$1"
+  case "$classification" in
+    rate_limit)
+      printf '%s' "${BRIDGE_STALL_RATE_LIMIT_RETRY_SECONDS:-30}"
+      ;;
+    network)
+      printf '%s' "${BRIDGE_STALL_NETWORK_RETRY_SECONDS:-60}"
+      ;;
+    unknown)
+      printf '%s' "${BRIDGE_STALL_UNKNOWN_RETRY_SECONDS:-300}"
+      ;;
+    *)
+      printf '%s' "0"
+      ;;
+  esac
+}
+
+bridge_stall_escalate_after_seconds() {
+  local classification="$1"
+  case "$classification" in
+    auth)
+      printf '%s' "0"
+      ;;
+    network)
+      printf '%s' "${BRIDGE_STALL_NETWORK_ESCALATE_SECONDS:-600}"
+      ;;
+    unknown)
+      printf '%s' "${BRIDGE_STALL_UNKNOWN_ESCALATE_SECONDS:-600}"
+      ;;
+    *)
+      printf '%s' "${BRIDGE_STALL_ESCALATE_AFTER_SECONDS:-300}"
+      ;;
+  esac
+}
+
+bridge_stall_title_prefix() {
+  local classification="$1"
+  local agent="$2"
+  printf '[STALL/%s] %s ' "${classification^^}" "$agent"
+}
+
+bridge_stall_title() {
+  local classification="$1"
+  local agent="$2"
+  case "$classification" in
+    rate_limit)
+      printf '[STALL/RATE_LIMIT] %s retry failed' "$agent"
+      ;;
+    auth)
+      printf '[STALL/AUTH] %s requires re-authentication' "$agent"
+      ;;
+    network)
+      printf '[STALL/NETWORK] %s retry failed' "$agent"
+      ;;
+    *)
+      printf '[STALL/UNKNOWN] %s appears stuck' "$agent"
+      ;;
+  esac
+}
+
+bridge_stall_nudge_message() {
+  local classification="$1"
+  case "$classification" in
+    rate_limit)
+      printf '%s' "A rate-limit or capacity error was detected. Retry the current task now and continue from the current state."
+      ;;
+    network)
+      printf '%s' "A transient network or provider error was detected. Retry the current task and continue if the connection is healthy now."
+      ;;
+    *)
+      printf '%s' "The current task appears stalled. Check the current state, summarize what is blocking progress, and continue if work can proceed."
+      ;;
+  esac
+}
+
+bridge_stall_reason_label() {
+  local classification="$1"
+  case "$classification" in
+    rate_limit) printf '%s' "rate-limit/capacity" ;;
+    auth) printf '%s' "authentication/session" ;;
+    network) printf '%s' "network/provider" ;;
+    *) printf '%s' "unknown" ;;
+  esac
+}
+
+bridge_stall_decode_excerpt() {
+  local encoded="${1:-}"
+  python3 - "$encoded" <<'PY'
+import base64, sys
+payload = sys.argv[1]
+if not payload:
+    raise SystemExit(0)
+print(base64.b64decode(payload.encode("ascii")).decode("utf-8", errors="ignore"), end="")
+PY
+}
+
+bridge_stall_recent_audits_markdown() {
+  local agent="$1"
+  python3 - "$BRIDGE_AUDIT_LOG" "$agent" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+agent = sys.argv[2]
+rows = []
+if path.is_file():
+    for raw in path.read_text(encoding="utf-8", errors="ignore").splitlines():
+        raw = raw.strip()
+        if not raw:
+            continue
+        try:
+            item = json.loads(raw)
+        except Exception:
+            continue
+        detail = item.get("detail") or {}
+        target = str(item.get("target") or "")
+        if target == agent or str(detail.get("agent") or "") == agent:
+            rows.append(item)
+rows = rows[-2:]
+if not rows:
+    print("- none")
+else:
+    for item in rows:
+        ts = str(item.get("ts") or "")
+        action = str(item.get("action") or "unknown")
+        print(f"- {action} @ {ts}")
+PY
+}
+
+bridge_write_stall_report_body() {
+  local agent="$1"
+  local session="$2"
+  local classification="$3"
+  local idle="$4"
+  local claimed="$5"
+  local nudge_count="$6"
+  local first_detected_ts="$7"
+  local matched_pattern="$8"
+  local excerpt="$9"
+  local body_file="${10}"
+  local recommended="${11}"
+  local title_label=""
+  local audits=""
+  local first_detected_iso=""
+
+  title_label="$(bridge_stall_reason_label "$classification")"
+  audits="$(bridge_stall_recent_audits_markdown "$agent")"
+  first_detected_iso="$(python3 - "$first_detected_ts" <<'PY'
+from datetime import datetime, timezone
+import sys
+try:
+    ts = int(sys.argv[1])
+except Exception:
+    ts = 0
+if ts > 0:
+    print(datetime.fromtimestamp(ts, timezone.utc).astimezone().isoformat())
+PY
+)"
+  mkdir -p "$(dirname "$body_file")"
+  {
+    echo "# Stall Report"
+    echo
+    echo "- agent: $agent"
+    echo "- session: ${session:--}"
+    echo "- classification: $classification"
+    echo "- reason_label: $title_label"
+    echo "- idle_seconds: $idle"
+    echo "- claimed_count: $claimed"
+    echo "- nudge_count: $nudge_count"
+    echo "- first_detected_at: ${first_detected_iso:-$(bridge_now_iso)}"
+    echo "- detected_at: $(bridge_now_iso)"
+    if [[ -n "$matched_pattern" ]]; then
+      echo "- matched_pattern: $matched_pattern"
+    fi
+    echo
+    echo "## Recent Audit Events"
+    echo
+    printf '%s\n' "$audits"
+    echo
+    echo "## Recommended Next Action"
+    echo
+    echo "$recommended"
+    echo
+    echo "## Recent Output"
+    echo
+    echo '```text'
+    printf '%s\n' "$excerpt"
+    echo '```'
+  } >"$body_file"
+}
+
+bridge_clear_stall_state() {
+  local agent="$1"
+  rm -f "$(bridge_agent_stall_state_file "$agent")"
+}
+
+bridge_note_stall_state() {
+  local agent="$1"
+  local classification="$2"
+  local excerpt_hash="$3"
+  local first_detected_ts="$4"
+  local last_detected_ts="$5"
+  local last_scan_ts="$6"
+  local idle_seconds="$7"
+  local claimed_count="$8"
+  local nudge_count="$9"
+  local last_nudge_ts="${10}"
+  local escalated_ts="${11}"
+  local task_id="${12}"
+  local matched_pattern="${13:-}"
+  local state_file
+
+  state_file="$(bridge_agent_stall_state_file "$agent")"
+  mkdir -p "$(dirname "$state_file")"
+  cat >"$state_file" <<EOF
+STALL_ACTIVE_CLASSIFICATION=$(printf '%q' "$classification")
+STALL_ACTIVE_EXCERPT_HASH=$(printf '%q' "$excerpt_hash")
+STALL_FIRST_DETECTED_TS=$(printf '%q' "$first_detected_ts")
+STALL_LAST_DETECTED_TS=$(printf '%q' "$last_detected_ts")
+STALL_LAST_SCAN_TS=$(printf '%q' "$last_scan_ts")
+STALL_IDLE_SECONDS=$(printf '%q' "$idle_seconds")
+STALL_CLAIMED_COUNT=$(printf '%q' "$claimed_count")
+STALL_NUDGE_COUNT=$(printf '%q' "$nudge_count")
+STALL_LAST_NUDGE_TS=$(printf '%q' "$last_nudge_ts")
+STALL_ESCALATED_TS=$(printf '%q' "$escalated_ts")
+STALL_TASK_ID=$(printf '%q' "$task_id")
+STALL_MATCHED_PATTERN=$(printf '%q' "$matched_pattern")
+EOF
+}
+
+bridge_send_stall_nudge() {
+  local agent="$1"
+  local session="$2"
+  local engine="$3"
+  local classification="$4"
+  local text=""
+
+  text="$(bridge_notification_text "stall detected" "$(bridge_stall_nudge_message "$classification")" "" normal)"
+  bridge_tmux_send_and_submit "$session" "$engine" "$text"
+}
+
+process_stall_reports() {
+  local summary_output="${1:-}"
+  local admin_agent="${BRIDGE_ADMIN_AGENT_ID:-}"
+  local admin_available=0
+  local now_ts=0
+  local changed=1
+  local agent=""
+  local queued=0
+  local claimed=0
+  local blocked=0
+  local active=0
+  local idle=0
+  local last_seen=0
+  local last_nudge=0
+  local session=""
+  local engine=""
+  local workdir=""
+  local attached=0
+  local loop_mode="0"
+  local refresh_pending=0
+  local state_file=""
+  local had_state=0
+  local active_classification=""
+  local active_hash=""
+  local first_detected_ts=0
+  local last_detected_ts=0
+  local last_scan_ts=0
+  local nudge_count=0
+  local last_nudge_ts=0
+  local escalated_ts=0
+  local task_id=""
+  local matched_pattern=""
+  local scan_interval="${BRIDGE_STALL_SCAN_INTERVAL_SECONDS:-30}"
+  local explicit_idle="${BRIDGE_STALL_EXPLICIT_IDLE_SECONDS:-30}"
+  local unknown_idle="${BRIDGE_STALL_UNKNOWN_IDLE_SECONDS:-900}"
+  local max_nudges="${BRIDGE_STALL_MAX_NUDGES:-2}"
+  local capture=""
+  local analysis_shell=""
+  local classification=""
+  local excerpt_hash=""
+  local excerpt_b64=""
+  local excerpt=""
+  local trigger_stall=0
+  local retry_seconds=0
+  local escalate_after=0
+  local body_file=""
+  local title=""
+  local title_prefix=""
+  local existing_id=""
+  local create_output=""
+  local recommended=""
+
+  [[ "${BRIDGE_STALL_SCAN_ENABLED:-1}" == "1" ]] || return 1
+  if [[ -n "$admin_agent" ]] && bridge_agent_exists "$admin_agent"; then
+    admin_available=1
+  fi
+  [[ "$scan_interval" =~ ^[0-9]+$ ]] || scan_interval=30
+  [[ "$explicit_idle" =~ ^[0-9]+$ ]] || explicit_idle=30
+  [[ "$unknown_idle" =~ ^[0-9]+$ ]] || unknown_idle=900
+  [[ "$max_nudges" =~ ^[0-9]+$ ]] || max_nudges=2
+  now_ts="$(date +%s)"
+
+  while IFS=$'\t' read -r agent queued claimed blocked active idle last_seen last_nudge session engine workdir; do
+    [[ -n "$agent" ]] || continue
+    state_file="$(bridge_agent_stall_state_file "$agent")"
+    had_state=0
+    active_classification=""
+    active_hash=""
+    first_detected_ts=0
+    last_detected_ts=0
+    last_scan_ts=0
+    nudge_count=0
+    last_nudge_ts=0
+    escalated_ts=0
+    task_id=""
+    matched_pattern=""
+
+    if [[ -f "$state_file" ]]; then
+      had_state=1
+      # shellcheck source=/dev/null
+      source "$state_file"
+      active_classification="${STALL_ACTIVE_CLASSIFICATION:-}"
+      active_hash="${STALL_ACTIVE_EXCERPT_HASH:-}"
+      first_detected_ts="${STALL_FIRST_DETECTED_TS:-0}"
+      last_detected_ts="${STALL_LAST_DETECTED_TS:-0}"
+      last_scan_ts="${STALL_LAST_SCAN_TS:-0}"
+      nudge_count="${STALL_NUDGE_COUNT:-0}"
+      last_nudge_ts="${STALL_LAST_NUDGE_TS:-0}"
+      escalated_ts="${STALL_ESCALATED_TS:-0}"
+      task_id="${STALL_TASK_ID:-}"
+      matched_pattern="${STALL_MATCHED_PATTERN:-}"
+    fi
+    [[ "$first_detected_ts" =~ ^[0-9]+$ ]] || first_detected_ts=0
+    [[ "$last_detected_ts" =~ ^[0-9]+$ ]] || last_detected_ts=0
+    [[ "$last_scan_ts" =~ ^[0-9]+$ ]] || last_scan_ts=0
+    [[ "$nudge_count" =~ ^[0-9]+$ ]] || nudge_count=0
+    [[ "$last_nudge_ts" =~ ^[0-9]+$ ]] || last_nudge_ts=0
+    [[ "$escalated_ts" =~ ^[0-9]+$ ]] || escalated_ts=0
+
+    if (( scan_interval > 0 )) && (( last_scan_ts > 0 )) && (( now_ts - last_scan_ts < scan_interval )); then
+      continue
+    fi
+
+    [[ "$claimed" =~ ^[0-9]+$ ]] || claimed=0
+    [[ "$active" =~ ^[0-9]+$ ]] || active=0
+    [[ "$idle" =~ ^[0-9]+$ ]] || idle=0
+    refresh_pending=0
+    bridge_agent_memory_daily_refresh_pending "$agent" && refresh_pending=1
+    loop_mode="$(bridge_agent_loop "$agent")"
+
+    trigger_stall=0
+    classification=""
+    matched_pattern=""
+    excerpt_hash=""
+    excerpt_b64=""
+    excerpt=""
+
+    if [[ "$active" == "1" && -n "$session" ]] && bridge_tmux_session_exists "$session"; then
+      attached="$(bridge_tmux_session_attached_count "$session" 2>/dev/null || printf '0')"
+      [[ "$attached" =~ ^[0-9]+$ ]] || attached=0
+      if (( attached == 0 )) && [[ "$engine" == "claude" || "$engine" == "codex" ]]; then
+        if (( claimed > 0 || refresh_pending == 1 )) || [[ "$loop_mode" == "1" ]]; then
+          capture="$(bridge_capture_recent "$session" "${BRIDGE_STALL_CAPTURE_LINES:-120}" 2>/dev/null || true)"
+          if [[ -n "$capture" ]]; then
+            analysis_shell="$(printf '%s' "$capture" | python3 "$SCRIPT_DIR/bridge-stall.py" analyze --format shell 2>/dev/null || true)"
+            if [[ -n "$analysis_shell" ]]; then
+              STALL_CLASSIFICATION=""
+              STALL_MATCHED_PATTERN=""
+              STALL_EXCERPT_HASH=""
+              STALL_EXCERPT_B64=""
+              # shellcheck disable=SC1091
+              source /dev/stdin <<<"$analysis_shell"
+              classification="${STALL_CLASSIFICATION:-}"
+              matched_pattern="${STALL_MATCHED_PATTERN:-}"
+              excerpt_hash="${STALL_EXCERPT_HASH:-}"
+              excerpt_b64="${STALL_EXCERPT_B64:-}"
+              excerpt="$(bridge_stall_decode_excerpt "$excerpt_b64")"
+            fi
+          fi
+          if [[ -n "$classification" ]]; then
+            (( idle >= explicit_idle )) && trigger_stall=1
+          elif (( claimed > 0 )) && (( idle >= unknown_idle )) && [[ -n "$excerpt_hash" ]]; then
+            classification="unknown"
+            trigger_stall=1
+          fi
+        fi
+      fi
+    fi
+
+    if (( trigger_stall == 0 )); then
+      if (( had_state == 1 )); then
+        bridge_audit_log daemon stall_recovered "$agent" \
+          --detail classification="$active_classification" \
+          --detail idle_seconds="$idle" \
+          --detail claimed="$claimed"
+        bridge_clear_stall_state "$agent"
+        changed=0
+      fi
+      continue
+    fi
+
+    if [[ "$active_classification" != "$classification" || "$active_hash" != "$excerpt_hash" ]]; then
+      first_detected_ts="$now_ts"
+      nudge_count=0
+      last_nudge_ts=0
+      escalated_ts=0
+      task_id=""
+      bridge_audit_log daemon stall_detected "$agent" \
+        --detail classification="$classification" \
+        --detail idle_seconds="$idle" \
+        --detail claimed="$claimed" \
+        --detail excerpt_hash="$excerpt_hash"
+      changed=0
+    fi
+
+    last_detected_ts="$now_ts"
+    retry_seconds="$(bridge_stall_retry_seconds "$classification")"
+    [[ "$retry_seconds" =~ ^[0-9]+$ ]] || retry_seconds=0
+    escalate_after="$(bridge_stall_escalate_after_seconds "$classification")"
+    [[ "$escalate_after" =~ ^[0-9]+$ ]] || escalate_after=0
+
+    if [[ "$classification" == "auth" ]]; then
+      if (( escalated_ts == 0 )); then
+        title="$(bridge_stall_title "$classification" "$agent")"
+        title_prefix="$(bridge_stall_title_prefix "$classification" "$agent")"
+        recommended="Manual repair is required. Re-authenticate the agent and restart the session once credentials are healthy."
+        body_file="$(bridge_agent_stall_report_file "$agent" "$classification")"
+        bridge_write_stall_report_body "$agent" "$session" "$classification" "$idle" "$claimed" "$nudge_count" "$first_detected_ts" "$matched_pattern" "$excerpt" "$body_file" "$recommended"
+        if [[ "$agent" == "$admin_agent" ]] && bridge_agent_has_notify_transport "$admin_agent"; then
+          bridge_notify_send "$admin_agent" "$title" "Authentication/session stall detected for ${agent}. Manual re-login is required." "" urgent "${BRIDGE_DAEMON_NOTIFY_DRY_RUN:-0}" >/dev/null 2>&1 || true
+          escalated_ts="$now_ts"
+          bridge_audit_log daemon stall_escalated "$admin_agent" \
+            --detail agent="$agent" \
+            --detail classification="$classification" \
+            --detail mode=direct_notify
+          changed=0
+        elif (( admin_available == 1 )); then
+          existing_id="$(bridge_queue_cli find-open --agent "$admin_agent" --title-prefix "$title_prefix" 2>/dev/null || true)"
+          if [[ "$existing_id" =~ ^[0-9]+$ ]]; then
+            bridge_queue_cli update "$existing_id" --actor daemon --title "$title" --priority urgent --body-file "$body_file" >/dev/null 2>&1 || true
+            task_id="$existing_id"
+          else
+            create_output="$(bridge_queue_cli create --to "$admin_agent" --from daemon --priority urgent --title "$title" --body-file "$body_file" 2>/dev/null || true)"
+            if [[ "$create_output" =~ created\ task\ \#([0-9]+) ]]; then
+              task_id="${BASH_REMATCH[1]}"
+            fi
+          fi
+          if [[ -n "$task_id" ]]; then
+            escalated_ts="$now_ts"
+            bridge_audit_log daemon stall_escalated "$admin_agent" \
+              --detail agent="$agent" \
+              --detail classification="$classification" \
+              --detail task_id="$task_id"
+            changed=0
+          fi
+        fi
+      fi
+    else
+      if (( nudge_count < max_nudges )) && (( nudge_count == 0 || now_ts - last_nudge_ts >= retry_seconds )); then
+        if bridge_send_stall_nudge "$agent" "$session" "$engine" "$classification" >/dev/null 2>&1; then
+          nudge_count=$((nudge_count + 1))
+          last_nudge_ts="$now_ts"
+          bridge_audit_log daemon stall_nudge_sent "$agent" \
+            --detail classification="$classification" \
+            --detail nudge_count="$nudge_count" \
+            --detail idle_seconds="$idle"
+          changed=0
+        else
+          bridge_audit_log daemon stall_nudge_suppressed "$agent" \
+            --detail classification="$classification" \
+            --detail nudge_count="$nudge_count" \
+            --detail idle_seconds="$idle"
+          changed=0
+        fi
+      fi
+
+      if (( escalated_ts == 0 )) && (( nudge_count >= max_nudges )) && (( now_ts - first_detected_ts >= escalate_after )); then
+        title="$(bridge_stall_title "$classification" "$agent")"
+        title_prefix="$(bridge_stall_title_prefix "$classification" "$agent")"
+        recommended="Inspect the stalled session, repair the root cause, and requeue or restart the work only after confirming the session can proceed."
+        body_file="$(bridge_agent_stall_report_file "$agent" "$classification")"
+        bridge_write_stall_report_body "$agent" "$session" "$classification" "$idle" "$claimed" "$nudge_count" "$first_detected_ts" "$matched_pattern" "$excerpt" "$body_file" "$recommended"
+        if [[ "$agent" == "$admin_agent" ]] && bridge_agent_has_notify_transport "$admin_agent"; then
+          bridge_notify_send "$admin_agent" "$title" "Persistent ${classification} stall detected for ${agent}. Manual intervention is required." "" urgent "${BRIDGE_DAEMON_NOTIFY_DRY_RUN:-0}" >/dev/null 2>&1 || true
+          escalated_ts="$now_ts"
+          bridge_audit_log daemon stall_escalated "$admin_agent" \
+            --detail agent="$agent" \
+            --detail classification="$classification" \
+            --detail mode=direct_notify
+          changed=0
+        elif (( admin_available == 1 )); then
+          existing_id="$(bridge_queue_cli find-open --agent "$admin_agent" --title-prefix "$title_prefix" 2>/dev/null || true)"
+          if [[ "$existing_id" =~ ^[0-9]+$ ]]; then
+            bridge_queue_cli update "$existing_id" --actor daemon --title "$title" --priority urgent --body-file "$body_file" >/dev/null 2>&1 || true
+            task_id="$existing_id"
+          else
+            create_output="$(bridge_queue_cli create --to "$admin_agent" --from daemon --priority urgent --title "$title" --body-file "$body_file" 2>/dev/null || true)"
+            if [[ "$create_output" =~ created\ task\ \#([0-9]+) ]]; then
+              task_id="${BASH_REMATCH[1]}"
+            fi
+          fi
+          if [[ -n "$task_id" ]]; then
+            escalated_ts="$now_ts"
+            bridge_audit_log daemon stall_escalated "$admin_agent" \
+              --detail agent="$agent" \
+              --detail classification="$classification" \
+              --detail task_id="$task_id"
+            changed=0
+          fi
+        fi
+      fi
+    fi
+
+    bridge_note_stall_state "$agent" "$classification" "$excerpt_hash" "$first_detected_ts" "$last_detected_ts" "$now_ts" "$idle" "$claimed" "$nudge_count" "$last_nudge_ts" "$escalated_ts" "$task_id" "$matched_pattern"
+  done <<<"$summary_output"
+
+  return "$changed"
+}
+
 bridge_watchdog_problem_key() {
   local report_json="$1"
   python3 - "$report_json" <<'PY'
@@ -775,6 +1297,12 @@ nudge_agent_session() {
     return 1
   fi
   bridge_task_note_nudge "$agent" "$nudge_key" || true
+  bridge_audit_log daemon session_nudge_sent "$agent" \
+    --detail queued="$queued" \
+    --detail claimed="$claimed" \
+    --detail idle_seconds="$idle" \
+    --detail task_id="${task_id:-0}" \
+    --detail title="$title"
   daemon_info "nudged ${agent} (queued=${queued}, claimed=${claimed}, idle=${idle}s)"
 }
 
@@ -1564,6 +2092,9 @@ cmd_sync_cycle() {
   if process_memory_daily_refresh_requests; then
     changed=0
   fi
+  if [[ -n "$summary_output" ]] && process_stall_reports "$summary_output"; then
+    changed=0
+  fi
   if refresh_agent_heartbeats; then
     changed=0
   fi
@@ -1605,15 +2136,31 @@ cmd_sync_cycle() {
     fi
     if (( cron_sync_running == 0 )); then
       timeout_bin="$(command -v gtimeout 2>/dev/null || command -v timeout 2>/dev/null || true)"
+      bridge_audit_log daemon cron_sync_started "cron-sync" \
+        --detail timeout_seconds="$cron_sync_timeout"
       (
+        sync_started_ts="$(date +%s)"
+        sync_status=0
+        timed_out=0
         if [[ -n "$timeout_bin" ]]; then
-          "$timeout_bin" "$cron_sync_timeout" "$BRIDGE_BASH_BIN" "$SCRIPT_DIR/bridge-cron.sh" sync >/dev/null 2>&1
+          "$timeout_bin" "$cron_sync_timeout" "$BRIDGE_BASH_BIN" "$SCRIPT_DIR/bridge-cron.sh" sync >/dev/null 2>&1 || sync_status=$?
         else
-          "$BRIDGE_BASH_BIN" "$SCRIPT_DIR/bridge-cron.sh" sync >/dev/null 2>&1
+          "$BRIDGE_BASH_BIN" "$SCRIPT_DIR/bridge-cron.sh" sync >/dev/null 2>&1 || sync_status=$?
         fi
+        if [[ "$sync_status" == "124" || "$sync_status" == "137" ]]; then
+          timed_out=1
+        fi
+        bridge_audit_log daemon cron_sync_finished "cron-sync" \
+          --detail status="$sync_status" \
+          --detail timed_out="$timed_out" \
+          --detail duration_seconds="$(( $(date +%s) - sync_started_ts ))"
         rm -f "$cron_sync_pid_file"
       ) &
       echo "$!" >"$cron_sync_pid_file"
+    else
+      bridge_audit_log daemon cron_sync_skipped "cron-sync" \
+        --detail reason=already_running \
+        --detail pid="${prev_pid:-}"
     fi
   fi
 
@@ -1639,6 +2186,9 @@ cmd_start() {
   start_deadline=$(( $(date +%s) + BRIDGE_DAEMON_START_WAIT_SECONDS ))
   while (( $(date +%s) <= start_deadline )); do
     if bridge_daemon_is_running; then
+      bridge_audit_log daemon daemon_started daemon \
+        --detail pid="$(bridge_daemon_pid)" \
+        --detail interval_seconds="$BRIDGE_DAEMON_INTERVAL"
       daemon_info "bridge daemon started (pid=$(bridge_daemon_pid))"
       return 0
     fi
@@ -1687,7 +2237,8 @@ cmd_stop() {
   if kill -0 "$pid" 2>/dev/null; then
     kill "$pid"
     rm -f "$BRIDGE_DAEMON_PID_FILE"
-  daemon_info "bridge daemon stopped"
+    bridge_audit_log daemon daemon_stopped daemon --detail pid="$pid"
+    daemon_info "bridge daemon stopped"
     return 0
   fi
 

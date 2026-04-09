@@ -16,6 +16,9 @@ from pathlib import Path
 import tempfile
 from typing import Any
 
+MANAGED_CLAUDE_START = "<!-- BEGIN AGENT BRIDGE DOC MIGRATION -->"
+MANAGED_CLAUDE_END = "<!-- END AGENT BRIDGE DOC MIGRATION -->"
+
 
 def now_iso() -> str:
     return datetime.now(timezone.utc).astimezone().isoformat(timespec="seconds")
@@ -146,6 +149,41 @@ def render_template(text: str, agent_id: str, display_name: str, role_text: str,
     return text
 
 
+def extract_managed_claude_block(text: str) -> str:
+    match = re.search(
+        rf"{re.escape(MANAGED_CLAUDE_START)}.*?{re.escape(MANAGED_CLAUDE_END)}",
+        text,
+        re.S,
+    )
+    return match.group(0).strip() if match else ""
+
+
+def refresh_managed_claude_block(original: str, managed_block: str) -> str:
+    if not managed_block:
+        return original
+    block = managed_block.rstrip() + "\n"
+    pattern = re.compile(
+        rf"{re.escape(MANAGED_CLAUDE_START)}.*?{re.escape(MANAGED_CLAUDE_END)}\n*",
+        re.S,
+    )
+    if pattern.search(original):
+        updated = pattern.sub(block + "\n", original, count=1)
+        return updated if updated.endswith("\n") else updated + "\n"
+
+    normalized = original.rstrip()
+    if normalized.startswith("# "):
+        first, rest = normalized.split("\n", 1) if "\n" in normalized else (normalized, "")
+        rest = rest.lstrip()
+        updated = f"{first}\n\n{block}\n"
+        if rest:
+            updated += f"{rest}\n"
+        return updated
+
+    if normalized:
+        return f"{block}\n{normalized}\n"
+    return block
+
+
 def discover_agent_dirs(agent_root: Path) -> list[Path]:
     if not agent_root.exists():
         return []
@@ -214,6 +252,7 @@ class AgentMigrationResult:
     agent: str
     added_files: list[str]
     created_dirs: list[str]
+    updated_files: list[str]
     session_type: str
     engine: str
 
@@ -226,6 +265,7 @@ def migrate_agent_home(agent_dir: Path, template_root: Path, admin_agent: str, d
     role_text = detect_role_text(agent_dir)
     added_files: list[str] = []
     created_dirs: list[str] = []
+    updated_files: list[str] = []
 
     for path in sorted(template_root.rglob("*")):
         rel = path.relative_to(template_root)
@@ -237,6 +277,8 @@ def migrate_agent_home(agent_dir: Path, template_root: Path, admin_agent: str, d
                 created_dirs.append(rel.as_posix())
                 if not dry_run:
                     target.mkdir(parents=True, exist_ok=True)
+            continue
+        if rel.as_posix() == "CLAUDE.md" and target.exists():
             continue
         if target.exists():
             continue
@@ -258,10 +300,24 @@ def migrate_agent_home(agent_dir: Path, template_root: Path, admin_agent: str, d
                 encoding="utf-8",
             )
 
+    claude_template = template_root / "CLAUDE.md"
+    claude_target = agent_dir / "CLAUDE.md"
+    if claude_template.exists() and claude_target.exists():
+        rendered = render_template(claude_template.read_text(encoding="utf-8"), agent, display_name, role_text, engine, session_type)
+        managed_block = extract_managed_claude_block(rendered)
+        if managed_block:
+            original = claude_target.read_text(encoding="utf-8", errors="ignore")
+            refreshed = refresh_managed_claude_block(original, managed_block)
+            if refreshed != original:
+                updated_files.append("CLAUDE.md")
+                if not dry_run:
+                    claude_target.write_text(refreshed, encoding="utf-8")
+
     return AgentMigrationResult(
         agent=agent,
         added_files=added_files,
         created_dirs=created_dirs,
+        updated_files=updated_files,
         session_type=session_type,
         engine=engine,
     )
@@ -274,9 +330,10 @@ def cmd_migrate_agents(args: argparse.Namespace) -> int:
     results = [migrate_agent_home(path, template_root, admin_agent, args.dry_run) for path in discover_agent_dirs(agent_root)]
     payload = {
         "agent_count": len(results),
-        "agents_with_additions": sum(1 for item in results if item.added_files or item.created_dirs),
+        "agents_with_additions": sum(1 for item in results if item.added_files or item.created_dirs or item.updated_files),
         "added_files": sum(len(item.added_files) for item in results),
         "created_dirs": sum(len(item.created_dirs) for item in results),
+        "updated_files": sum(len(item.updated_files) for item in results),
         "agents": [asdict(item) for item in results],
     }
     print(json.dumps(payload, ensure_ascii=False, indent=2))

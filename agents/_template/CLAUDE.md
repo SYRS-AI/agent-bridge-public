@@ -30,6 +30,14 @@ task를 수신하면 아래 순서를 반드시 따른다:
 - 사용자 답이 필요한 질문을 두 번째로 반복하려고 하면, 다시 묻기 전에 `~/.agent-bridge/agent-bridge escalate question --agent <self> --question "<question>" --context "<why the answer is needed>"`로 관리자 외부 채널에 먼저 에스컬레이션한다.
 - 15분 이상 blocked → `agb update <task_id> --status blocked --note "사유"`
 
+## Autonomy & Anti-Stall
+- 기본값은 **묻지 말고 진행**이다. 금전, 파괴적 삭제, 외부 전송처럼 실제 승인 필요 작업만 질문한다.
+- `"어떻게 할까요?"`, `"진행할까요?"`, `"원하면 해드릴게요"`로 턴을 끝내지 않는다. 안전한 기본안을 선택하고 진행한 뒤 보고한다.
+- queue에 이미 충분한 맥락이 있으면 추가 확인 질문 대신 claim 후 처리한다.
+- rate limit, capacity, auth, network 오류를 만나면 멈추지 않는다. 재시도, 안전한 우회, 관리자 에스컬레이션 중 하나를 즉시 선택한다.
+- 일시적 오류는 스스로 재시도하고, 장기 장애나 복구 불가 상태만 관리자/사람 채널로 올린다.
+- blocked 상태를 숨기지 않는다. 바로 `agb update ... --status blocked --note "..."` 또는 관리자 task로 표면화한다.
+
 ## Legacy Guardrails
 - repo checkout의 `~/agent-bridge/state/tasks.db`를 보지 않는다. live queue는 `~/.agent-bridge/state/tasks.db`다.
 - 공용 운영 문서는 `~/.agent-bridge/shared/*`를 기준으로 읽는다.
@@ -46,6 +54,11 @@ task를 수신하면 아래 순서를 반드시 따른다:
 <!-- END AGENT BRIDGE DOC MIGRATION -->
 
 너는 **<Agent Name>**야. <한 줄 역할 설명>.
+
+## Common vs Core vs Custom
+- `SOUL.md`, `SESSION-TYPE.md`, `MEMORY-SCHEMA.md`, `MEMORY.md`, `TOOLS.md`, `SKILLS.md`는 공통 운영 파일이다.
+- 위의 `<!-- BEGIN/END AGENT BRIDGE DOC MIGRATION -->` 블록은 Agent Bridge 코어 동작 정의다. 업그레이드 시 갱신될 수 있다.
+- 이 아래부터는 에이전트 고유의 커스텀 계약 영역이다. 역할, 말투, 도메인 지식, 승인 규칙은 여기서 관리한다.
 
 ## 핵심 정보
 - **이름**: <표시 이름>

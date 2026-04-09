@@ -358,6 +358,12 @@ cmd_cancel() {
   local actor=""
   local note=""
   local note_file=""
+  local task_shell=""
+  local TASK_ID=""
+  local TASK_ASSIGNED_TO=""
+  local TASK_TITLE=""
+  local task_target=""
+  local task_title=""
 
   while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -394,7 +400,15 @@ cmd_cancel() {
   done
 
   [[ -z "$task_id" ]] && bridge_die "task id가 필요합니다."
+  ensure_roster_loaded
   actor="$(infer_actor_if_possible "$actor")"
+  task_shell="$(bridge_queue_cli show "$task_id" --format shell 2>/dev/null || true)"
+  if [[ -n "$task_shell" ]]; then
+    # shellcheck disable=SC1091
+    source /dev/stdin <<<"$task_shell"
+    task_target="${TASK_ASSIGNED_TO:-}"
+    task_title="${TASK_TITLE:-}"
+  fi
   args=("cancel" "$task_id" --actor "$actor")
   if [[ -n "$note" ]]; then
     args+=(--note "$note")
@@ -403,6 +417,18 @@ cmd_cancel() {
     args+=(--note-file "$note_file")
   fi
   bridge_queue_cli "${args[@]}"
+  if [[ -n "$task_target" ]]; then
+    bridge_audit_log queue task_cancelled "$task_target" \
+      --detail task_id="$task_id" \
+      --detail actor="$actor" \
+      --detail title="$task_title"
+    if [[ "$task_title" == \[cron-dispatch\]* ]]; then
+      bridge_audit_log queue cron_dispatch_cancelled "$task_target" \
+        --detail task_id="$task_id" \
+        --detail actor="$actor" \
+        --detail title="$task_title"
+    fi
+  fi
 }
 
 cmd_handoff() {
