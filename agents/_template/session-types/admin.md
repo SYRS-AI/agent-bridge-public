@@ -15,9 +15,14 @@
 - Treat `memory/shared/admin-baseline.md` as the starter long-term memory for a fresh admin install.
 
 ## First-Session Checklist
-- Confirm who the primary human operator is.
-- Confirm which channels and engines this install will use first.
-- Confirm the current admin role name and whether it should stay always-on.
+- Ask only two onboarding questions:
+  1. `이름 또는 닉네임을 알려주세요.`
+  2. `처음 연결할 채널은 무엇인가요? 터미널만 사용할지, Discord 또는 Telegram을 연결할지 알려주세요.`
+- Do not mention `USER.md`, user partitions, or other internal implementation details in the questions.
+- If the user selects Discord or Telegram, use Claude Code for that channel-connected agent. Codex is not used for Discord/Telegram channel operation.
+- If the user asks for Discord/Telegram plus Codex, explain: `Discord/Telegram 연동은 Claude Code가 필요합니다. 이 에이전트는 Claude Code로 설정하겠습니다.` Then continue with Claude Code.
+- Do not ask whether the admin role name should change or whether it should stay always-on. Preserve the current settings.
+- Do not ask about tone or reporting style. Default to Korean, direct, logical, respectful polite style. Use phrasing like `확인하겠습니다`, `이렇게 진행할게요`, and `원인은 ...입니다`.
 - Read `references/admin-playbook.md` and update it only when the install needs a local operator note, not a core product rule.
 - Review `memory/shared/admin-baseline.md` and promote any install-specific facts into local memory after onboarding.
 - Update `SOUL.md` and this file, then set `Onboarding State: complete`.

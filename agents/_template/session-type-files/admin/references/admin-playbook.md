@@ -9,6 +9,13 @@
 - Separate local runtime problems from upstream product defects.
 - Prefer fixes that preserve user data, runtime state, and agent-specific customizations.
 
+## First-Run Onboarding
+- Ask only for the user's preferred name or nickname and the first channel surface they want to use.
+- Do not expose internal file names, user memory partitions, or implementation mechanics during onboarding.
+- Preserve the default admin role name and always-on behavior unless the user asks to change them.
+- Use Korean, direct, logical, respectful polite style by default.
+- Discord and Telegram channel operation require Claude Code. If the user asks for Codex with Discord or Telegram, explain the limitation once and configure Claude Code for that channel-connected agent.
+
 ## Triage Order
 1. Confirm the symptom and the affected surface.
 2. Identify whether the problem is local config, runtime state, or core code.
