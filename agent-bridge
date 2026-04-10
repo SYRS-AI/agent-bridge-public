@@ -26,6 +26,7 @@ Usage:
   $CLI_NAME upgrade rollback [--target <bridge-home>] [--backup-root <dir>] [--json]
   $CLI_NAME escalate question --agent <agent> --question "<text>" [--context "<text>"] [--wait-seconds <seconds>] [--json]
   $CLI_NAME upstream <draft|propose|review> ...
+  $CLI_NAME review <policy|request|complete> ...
   $CLI_NAME user <set|show> ...
   $CLI_NAME knowledge <init|capture|promote|search|lint> ...
   $CLI_NAME agent <create|list|show|start|stop|restart|attach> ...
@@ -118,6 +119,7 @@ Examples:
   $CLI_NAME escalate question --agent reviewer --question "Should I ship this now?" --context "Second ask without a user reply."
   $CLI_NAME upstream draft --title "setup fails" --symptom "..." --why "..." --output /tmp/issue.md
   $CLI_NAME upstream propose --title "setup fails" --body-file /tmp/issue.md
+  $CLI_NAME review request --subject "release check" --reviewer reviewer --body-file /tmp/plan.md
   $CLI_NAME user set --name "Sean" --timezone Asia/Seoul
   $CLI_NAME user show --json
   $CLI_NAME knowledge init --team-name "Acme"
@@ -447,6 +449,10 @@ PY
     upstream)
       shift
       exec "$BRIDGE_BASH_BIN" "$SCRIPT_DIR/bridge-upstream.sh" "$@"
+      ;;
+    review)
+      shift
+      exec "$BRIDGE_BASH_BIN" "$SCRIPT_DIR/bridge-review.sh" "$@"
       ;;
     user)
       shift

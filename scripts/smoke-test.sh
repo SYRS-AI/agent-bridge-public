@@ -139,6 +139,7 @@ export BRIDGE_CLAUDE_USAGE_CACHE="$TMP_ROOT/claude-usage-empty.json"
 export BRIDGE_CODEX_SESSIONS_DIR="$TMP_ROOT/codex-sessions-empty"
 export BRIDGE_CLAUDE_INSTALLED_PLUGINS_FILE="$TMP_ROOT/installed_plugins.json"
 export BRIDGE_CLAUDE_CHANNELS_HOME="$TMP_ROOT/claude-channels"
+export BRIDGE_REVIEW_POLICY_FILE="$BRIDGE_HOME/review-policy.json"
 export BRIDGE_WEBHOOK_PORT_RANGE_START=9301
 export BRIDGE_WEBHOOK_PORT_RANGE_END=9399
 
@@ -1337,6 +1338,50 @@ KNOWLEDGE_SEARCH_JSON="$("$REPO_ROOT/agent-bridge" knowledge search --query "rel
 assert_contains "$KNOWLEDGE_SEARCH_JSON" "\"wiki/people.md\""
 KNOWLEDGE_LINT_JSON="$("$REPO_ROOT/agent-bridge" knowledge lint --json)"
 assert_contains "$KNOWLEDGE_LINT_JSON" "\"ok\": true"
+
+log "requesting and completing a queue-backed review gate"
+cat >"$BRIDGE_REVIEW_POLICY_FILE" <<EOF
+{
+  "defaults": {
+    "required": true,
+    "reviewer": "$REQUESTER_AGENT",
+    "priority": "high",
+    "bypass": ["trivial"]
+  },
+  "families": {
+    "release": {
+      "reviewer": "$REQUESTER_AGENT",
+      "priority": "urgent",
+      "bypass": ["trivial", "docs-only"]
+    }
+  }
+}
+EOF
+REVIEW_POLICY_JSON="$("$REPO_ROOT/agent-bridge" review policy --agent "$SMOKE_AGENT" --family release --json)"
+assert_contains "$REVIEW_POLICY_JSON" "\"required\": true"
+assert_contains "$REVIEW_POLICY_JSON" "\"reviewer\": \"$REQUESTER_AGENT\""
+assert_contains "$REVIEW_POLICY_JSON" "\"priority\": \"urgent\""
+REVIEW_REQUEST_OUTPUT="$("$REPO_ROOT/agent-bridge" review request --from "$SMOKE_AGENT" --agent "$SMOKE_AGENT" --family release --subject "release smoke" --body "please review release smoke")"
+assert_contains "$REVIEW_REQUEST_OUTPUT" "created review task #"
+REVIEW_TASK_ID="$(printf '%s\n' "$REVIEW_REQUEST_OUTPUT" | sed -n 's/^created review task #\([0-9][0-9]*\).*/\1/p' | head -1)"
+[[ -n "$REVIEW_TASK_ID" ]] || die "review request did not return task id"
+REVIEW_BODY_FILE="$(printf '%s\n' "$REVIEW_REQUEST_OUTPUT" | sed -n 's/^review_body_file: //p' | head -1)"
+[[ -f "$REVIEW_BODY_FILE" ]] || die "review request did not create body file"
+REVIEW_SHOW_OUTPUT="$(bash "$REPO_ROOT/bridge-task.sh" show "$REVIEW_TASK_ID")"
+assert_contains "$REVIEW_SHOW_OUTPUT" "task #$REVIEW_TASK_ID: [review-request] release smoke"
+assert_contains "$REVIEW_SHOW_OUTPUT" "assigned_to: $REQUESTER_AGENT"
+assert_contains "$(cat "$REVIEW_BODY_FILE")" "review_contract_version: 1"
+assert_contains "$(cat "$REVIEW_BODY_FILE")" "family: release"
+REVIEW_COMPLETE_OUTPUT="$("$REPO_ROOT/agent-bridge" review complete "$REVIEW_TASK_ID" --reviewer "$REQUESTER_AGENT" --decision approved --note "looks safe")"
+assert_contains "$REVIEW_COMPLETE_OUTPUT" "completed task #$REVIEW_TASK_ID as $REQUESTER_AGENT"
+REVIEW_DONE_SHOW_OUTPUT="$(bash "$REPO_ROOT/bridge-task.sh" show "$REVIEW_TASK_ID")"
+assert_contains "$REVIEW_DONE_SHOW_OUTPUT" "status: done"
+SMOKE_REVIEW_INBOX_OUTPUT="$(bash "$REPO_ROOT/bridge-task.sh" inbox "$SMOKE_AGENT" --all)"
+assert_contains "$SMOKE_REVIEW_INBOX_OUTPUT" "[task-complete] [review-request] release smoke"
+REVIEW_BYPASS_OUTPUT="$("$REPO_ROOT/agent-bridge" review request --from "$SMOKE_AGENT" --agent "$SMOKE_AGENT" --family release --subject "trivial docs" --body "typo" --bypass trivial)"
+assert_contains "$REVIEW_BYPASS_OUTPUT" "review_bypassed: yes"
+assert_contains "$REVIEW_BYPASS_OUTPUT" "reason: trivial"
+
 SHARED_USER_CREATE_JSON="$("$REPO_ROOT/agent-bridge" agent create "$SHARED_USER_AGENT" --engine claude --session "$SHARED_USER_SESSION" --dry-run --json)"
 assert_contains "$SHARED_USER_CREATE_JSON" "\"id\": \"owner\""
 SHARED_USER_CREATE_OUTPUT="$("$REPO_ROOT/agent-bridge" agent create "$SHARED_USER_AGENT" --engine claude --session "$SHARED_USER_SESSION")"

@@ -453,6 +453,16 @@ agb knowledge promote --kind people --summary "Sean is the primary operator."
 agb knowledge search --query "primary operator"
 ```
 
+### 리뷰 게이트
+
+릴리즈, 업그레이드, 위험한 코드 변경처럼 한 번 더 확인이 필요한 작업은 task queue로 리뷰를 요청할 수 있습니다. 리뷰 정책은 선택 사항이며 `review-policy.json`으로 agent별 또는 command family별 reviewer, priority, bypass 사유를 지정합니다.
+
+```bash
+agb review policy --agent patch --family release
+agb review request --subject "release 0.1.0" --reviewer reviewer --body-file /tmp/release-plan.md
+agb review complete <task-id> --reviewer reviewer --decision approved --note "No blockers."
+```
+
 ### 데몬
 
 백그라운드에서 항상 돌면서 전체 시스템을 관리합니다:
@@ -505,6 +515,8 @@ agb status
 | `agb task create --to <agent>` | 에이전트에게 작업 전달 |
 | `agb urgent <agent> "메시지"` | 긴급 인터럽트 |
 | `agb inbox <agent>` | 에이전트의 수신함 확인 |
+| `agb review request ...` | 큐 기반 교차 리뷰 요청 |
+| `agb review complete ...` | 리뷰 승인/변경 요청/코멘트 완료 |
 | `agb cron create ...` | 반복 작업 등록 |
 | `agb setup discord <agent>` | Discord 채널 연결 |
 | `agb setup telegram <agent>` | Telegram 채널 연결 |
