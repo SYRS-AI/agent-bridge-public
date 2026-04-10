@@ -155,6 +155,19 @@ PY
     if [[ "$SUBCOMMAND" == "apply" && $PULL_EXPLICIT -eq 0 ]]; then
       PULL=1
     fi
+  else
+    for CANDIDATE_SOURCE_ROOT in \
+      "$HOME/agent-bridge-public" \
+      "$HOME/agent-bridge"
+    do
+      if [[ -d "$CANDIDATE_SOURCE_ROOT/.git" ]]; then
+        SOURCE_ROOT="$(cd -P "$CANDIDATE_SOURCE_ROOT" && pwd -P)"
+        if [[ "$SUBCOMMAND" == "apply" && $PULL_EXPLICIT -eq 0 ]]; then
+          PULL=1
+        fi
+        break
+      fi
+    done
   fi
 fi
 
@@ -168,7 +181,14 @@ MIGRATION_JSON='{}'
 MIGRATION_PREVIEW_JSON='{}'
 APPLY_JSON='{}'
 
-git -C "$SOURCE_ROOT" rev-parse --show-toplevel >/dev/null 2>&1 || bridge_die "git repo가 아닙니다: $SOURCE_ROOT"
+if ! git -C "$SOURCE_ROOT" rev-parse --show-toplevel >/dev/null 2>&1; then
+  if [[ $SOURCE_EXPLICIT -eq 0 && "$SOURCE_ROOT" == "$TARGET_ROOT" ]]; then
+    bridge_die "live install은 git repo가 아니고 source checkout 기록도 없습니다: $TARGET_ROOT
+복구: git clone https://github.com/SYRS-AI/agent-bridge-public \"\$HOME/agent-bridge-public\" 후 다시 실행하거나,
+명시적으로 실행하세요: $TARGET_ROOT/agent-bridge upgrade --source \"\$HOME/agent-bridge-public\""
+  fi
+  bridge_die "git repo가 아닙니다: $SOURCE_ROOT"
+fi
 
 if [[ "$SUBCOMMAND" == "apply" && $ALLOW_DIRTY -eq 0 && $DRY_RUN -eq 0 ]]; then
   if [[ -n "$(git -C "$SOURCE_ROOT" status --short)" ]]; then

@@ -12,6 +12,7 @@ COPIED_COUNT=0
 VERIFIED_COUNT=0
 SKIPPED_COUNT=0
 DRIFT_COUNT=0
+UPGRADE_STATE_WRITTEN=0
 
 usage() {
   cat <<EOF
@@ -174,6 +175,11 @@ if [[ "$DRY_RUN" == "0" ]]; then
   while IFS= read -r -d '' relpath; do
     verify_tracked_file "$relpath"
   done < <(git -C "$SOURCE_ROOT" ls-files -z)
+
+  python3 "$SOURCE_ROOT/bridge-upgrade.py" write-state \
+    --source-root "$SOURCE_ROOT" \
+    --target-root "$TARGET_ROOT" >/dev/null
+  UPGRADE_STATE_WRITTEN=1
 fi
 
 if [[ "$RESTART_DAEMON" == "1" ]]; then
@@ -193,5 +199,6 @@ printf 'skipped_runtime_paths: %s\n' "$SKIPPED_COUNT"
 printf 'predeploy_live_drift: %s\n' "$DRIFT_COUNT"
 if [[ "$DRY_RUN" == "0" ]]; then
   printf 'verified_files: %s\n' "$VERIFIED_COUNT"
+  printf 'upgrade_state_written: %s\n' "$([[ "$UPGRADE_STATE_WRITTEN" == "1" ]] && printf yes || printf no)"
 fi
 printf 'daemon_restarted: %s\n' "$([[ "$RESTART_DAEMON" == "1" ]] && printf yes || printf no)"
