@@ -6,6 +6,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd -P "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 # shellcheck source=/dev/null
 source "$SCRIPT_DIR/bridge-lib.sh"
+ORIGINAL_ARGS=("$@")
 
 SOURCE_ROOT="$SCRIPT_DIR"
 TARGET_ROOT="$HOME/.agent-bridge"
@@ -170,6 +171,14 @@ PY
       fi
     done
   fi
+fi
+
+if [[ "${BRIDGE_UPGRADE_SOURCE_REEXEC:-0}" != "1" \
+  && "$SCRIPT_DIR" == "$TARGET_ROOT" \
+  && "$SOURCE_ROOT" != "$SCRIPT_DIR" \
+  && -f "$SOURCE_ROOT/bridge-upgrade.sh" ]]; then
+  export BRIDGE_UPGRADE_SOURCE_REEXEC=1
+  exec "$BRIDGE_BASH_BIN" "$SOURCE_ROOT/bridge-upgrade.sh" "${ORIGINAL_ARGS[@]}" --target "$TARGET_ROOT"
 fi
 
 TIMESTAMP="$(date '+%Y%m%d-%H%M%S')"
