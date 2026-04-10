@@ -66,6 +66,26 @@ def git_head(source_root: Path) -> str:
     )
 
 
+def git_ref(source_root: Path) -> str:
+    for command in (
+        ["git", "-C", str(source_root), "describe", "--tags", "--exact-match", "HEAD"],
+        ["git", "-C", str(source_root), "rev-parse", "--abbrev-ref", "HEAD"],
+    ):
+        proc = subprocess.run(command, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, check=False)
+        if proc.returncode == 0 and proc.stdout.strip():
+            return proc.stdout.strip()
+    return ""
+
+
+def read_source_version(source_root: Path) -> str:
+    version_path = source_root / "VERSION"
+    try:
+        version = version_path.read_text(encoding="utf-8").splitlines()[0].strip()
+    except (FileNotFoundError, IndexError):
+        return "0.0.0-dev"
+    return version or "0.0.0-dev"
+
+
 def git_file_bytes(source_root: Path, ref: str, relpath: str) -> bytes | None:
     proc = subprocess.run(
         ["git", "-C", str(source_root), "show", f"{ref}:{relpath}"],
@@ -763,6 +783,8 @@ def cmd_backup_live(args: argparse.Namespace) -> int:
     }
     if source_root is not None:
         payload["source_head"] = git_head(source_root)
+        payload["source_ref"] = git_ref(source_root)
+        payload["version"] = read_source_version(source_root)
     if target_root.exists() and not args.dry_run:
         copy_live_backup(target_root, backup_root, entries or None)
         manifest = {
@@ -770,6 +792,8 @@ def cmd_backup_live(args: argparse.Namespace) -> int:
             "target_root": str(target_root),
             "source_root": str(source_root) if source_root is not None else "",
             "source_head": payload.get("source_head", ""),
+            "source_ref": payload.get("source_ref", ""),
+            "version": payload.get("version", ""),
             "snapshot_mode": payload["snapshot_mode"],
             "entries": entries,
         }
@@ -794,7 +818,10 @@ def cmd_write_state(args: argparse.Namespace) -> int:
     payload = {
         "updated_at": now_iso(),
         "source_root": str(source_root),
+        "version": args.version or read_source_version(source_root),
+        "source_ref": args.source_ref or git_ref(source_root),
         "source_head": git_head(source_root),
+        "channel": args.channel or "",
         "backup_root": str(Path(args.backup_root).expanduser()) if args.backup_root else "",
     }
     if args.analysis_json:
@@ -863,6 +890,9 @@ def build_parser() -> argparse.ArgumentParser:
     write_state.add_argument("--target-root", required=True)
     write_state.add_argument("--backup-root", default="")
     write_state.add_argument("--analysis-json", default="")
+    write_state.add_argument("--version", default="")
+    write_state.add_argument("--source-ref", default="")
+    write_state.add_argument("--channel", default="")
     write_state.set_defaults(handler=cmd_write_state)
 
     rollback = subparsers.add_parser("rollback-live")

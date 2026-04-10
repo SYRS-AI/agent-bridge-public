@@ -14,6 +14,11 @@ SUBCOMMAND="apply"
 PULL=0
 PULL_EXPLICIT=0
 SOURCE_EXPLICIT=0
+CHANNEL="${AGENT_BRIDGE_UPGRADE_CHANNEL:-stable}"
+CHANNEL_EXPLICIT=0
+REQUESTED_VERSION=""
+REQUESTED_REF=""
+CHECK_ONLY=0
 DRY_RUN=0
 RESTART_DAEMON=1
 JSON=0
@@ -23,11 +28,17 @@ BACKUP=1
 MIGRATE_AGENTS=1
 BACKUP_ROOT=""
 ANALYSIS_JSON='{}'
+TARGET_REF=""
+TARGET_VERSION=""
+TARGET_HEAD=""
+SOURCE_VERSION=""
+SOURCE_REF=""
+SOURCE_HEAD=""
 
 usage() {
   cat <<EOF
 Usage:
-  $(basename "$0") [--source <repo-dir>] [--target <bridge-home>] [--pull|--no-pull] [--restart-daemon|--no-restart-daemon] [--dry-run] [--json] [--allow-dirty] [--strict-merge] [--no-backup] [--no-migrate-agents]
+  $(basename "$0") [--source <repo-dir>] [--target <bridge-home>] [--check] [--channel stable|dev|current] [--version <semver>] [--ref <git-ref>] [--pull|--no-pull] [--restart-daemon|--no-restart-daemon] [--dry-run] [--json] [--allow-dirty] [--strict-merge] [--no-backup] [--no-migrate-agents]
   $(basename "$0") analyze [--source <repo-dir>] [--target <bridge-home>] [--json]
   $(basename "$0") rollback [--target <bridge-home>] [--backup-root <dir>] [--restart-daemon|--no-restart-daemon] [--dry-run] [--json]
 
@@ -40,7 +51,85 @@ customizations such as:
 
 The repo checkout remains source of truth for core code. Live-only operator changes are preserved.
 When run from an installed live copy without --source, the last recorded source checkout is reused and pulled automatically.
+Default channel is stable: the latest vX.Y.Z tag is used when one exists. Use --channel dev to track main, or --channel current/--source to deploy the current checkout.
 EOF
+}
+
+bridge_upgrade_version_from_file() {
+  local root="$1"
+  if [[ -f "$root/VERSION" ]]; then
+    head -n 1 "$root/VERSION" | tr -d '[:space:]'
+    return 0
+  fi
+  printf '0.0.0-dev'
+}
+
+bridge_upgrade_current_ref() {
+  local root="$1"
+  git -C "$root" describe --tags --exact-match HEAD 2>/dev/null \
+    || git -C "$root" rev-parse --abbrev-ref HEAD 2>/dev/null \
+    || printf '-'
+}
+
+bridge_upgrade_latest_stable_tag() {
+  local root="$1"
+  local tags
+  tags="$(git -C "$root" tag --list 'v[0-9]*.[0-9]*.[0-9]*')"
+  python3 -c '
+import re
+import sys
+
+tags = [line.strip() for line in sys.stdin if re.fullmatch(r"v\d+\.\d+\.\d+", line.strip())]
+tags.sort(key=lambda tag: tuple(int(part) for part in tag[1:].split(".")))
+print(tags[-1] if tags else "")
+' <<<"$tags"
+}
+
+bridge_upgrade_normalize_version_tag() {
+  local version="$1"
+  version="${version#v}"
+  if [[ ! "$version" =~ ^[0-9]+[.][0-9]+[.][0-9]+$ ]]; then
+    bridge_die "--version 값은 semver 형식이어야 합니다. 예: 0.1.0"
+  fi
+  printf 'v%s' "$version"
+}
+
+bridge_upgrade_head_for_ref() {
+  local root="$1"
+  local ref="$2"
+  git -C "$root" rev-parse "${ref}^{commit}" 2>/dev/null || true
+}
+
+bridge_upgrade_version_at_ref() {
+  local root="$1"
+  local ref="$2"
+  local version=""
+  version="$(git -C "$root" show "${ref}:VERSION" 2>/dev/null | head -n 1 | tr -d '[:space:]' || true)"
+  if [[ -n "$version" ]]; then
+    printf '%s' "$version"
+  else
+    bridge_upgrade_version_from_file "$root"
+  fi
+}
+
+bridge_upgrade_installed_field() {
+  local target_root="$1"
+  local field="$2"
+  python3 - "$target_root/state/upgrade/last-upgrade.json" "$field" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+field = sys.argv[2]
+try:
+    payload = json.loads(path.read_text(encoding="utf-8"))
+except (FileNotFoundError, json.JSONDecodeError):
+    print("")
+    raise SystemExit(0)
+value = payload.get(field, "")
+print("" if value is None else str(value))
+PY
 }
 
 if [[ $# -gt 0 ]]; then
@@ -79,6 +168,32 @@ while [[ $# -gt 0 ]]; do
       PULL=0
       PULL_EXPLICIT=1
       shift
+      ;;
+    --check)
+      CHECK_ONLY=1
+      DRY_RUN=1
+      RESTART_DAEMON=0
+      shift
+      ;;
+    --channel)
+      [[ $# -lt 2 ]] && bridge_die "--channel 뒤에 stable|dev|current 중 하나를 지정하세요."
+      CHANNEL="$2"
+      CHANNEL_EXPLICIT=1
+      shift 2
+      ;;
+    --version)
+      [[ $# -lt 2 ]] && bridge_die "--version 뒤에 버전을 지정하세요."
+      REQUESTED_VERSION="$2"
+      CHANNEL="stable"
+      CHANNEL_EXPLICIT=1
+      shift 2
+      ;;
+    --ref)
+      [[ $# -lt 2 ]] && bridge_die "--ref 뒤에 git ref를 지정하세요."
+      REQUESTED_REF="$2"
+      CHANNEL="ref"
+      CHANNEL_EXPLICIT=1
+      shift 2
       ;;
     --restart-daemon)
       RESTART_DAEMON=1
@@ -200,14 +315,139 @@ if ! git -C "$SOURCE_ROOT" rev-parse --show-toplevel >/dev/null 2>&1; then
   bridge_die "git repo가 아닙니다: $SOURCE_ROOT"
 fi
 
-if [[ "$SUBCOMMAND" == "apply" && $ALLOW_DIRTY -eq 0 && $DRY_RUN -eq 0 ]]; then
-  if [[ -n "$(git -C "$SOURCE_ROOT" status --short)" ]]; then
-    bridge_die "working tree가 dirty 합니다. 먼저 커밋/정리하거나 --allow-dirty 를 사용하세요."
+if [[ $SOURCE_EXPLICIT -eq 1 && $CHANNEL_EXPLICIT -eq 0 ]]; then
+  CHANNEL="current"
+fi
+if [[ "$SUBCOMMAND" != "apply" && $CHANNEL_EXPLICIT -eq 0 ]]; then
+  CHANNEL="current"
+fi
+
+case "$CHANNEL" in
+  stable|dev|current|ref)
+    ;;
+  *)
+    bridge_die "--channel 값은 stable|dev|current 중 하나여야 합니다: $CHANNEL"
+    ;;
+esac
+
+if [[ "$SUBCOMMAND" == "apply" ]]; then
+  if [[ $PULL -eq 1 || $CHECK_ONLY -eq 1 || "$CHANNEL" != "current" ]]; then
+    if git -C "$SOURCE_ROOT" remote get-url origin >/dev/null 2>&1; then
+      git -C "$SOURCE_ROOT" fetch --tags --prune origin >/dev/null
+      if [[ "$CHANNEL" == "dev" ]]; then
+        git -C "$SOURCE_ROOT" fetch origin main >/dev/null 2>&1 || true
+      fi
+    fi
+  fi
+
+  case "$CHANNEL" in
+    current)
+      TARGET_REF=""
+      ;;
+    stable)
+      if [[ -n "$REQUESTED_VERSION" ]]; then
+        TARGET_REF="$(bridge_upgrade_normalize_version_tag "$REQUESTED_VERSION")"
+      else
+        TARGET_REF="$(bridge_upgrade_latest_stable_tag "$SOURCE_ROOT")"
+      fi
+      if [[ -n "$TARGET_REF" ]] && ! git -C "$SOURCE_ROOT" rev-parse --verify "${TARGET_REF}^{commit}" >/dev/null 2>&1; then
+        bridge_die "요청한 stable 릴리즈 태그를 찾을 수 없습니다: $TARGET_REF"
+      fi
+      ;;
+    dev)
+      if git -C "$SOURCE_ROOT" rev-parse --verify main >/dev/null 2>&1; then
+        TARGET_REF="main"
+      elif git -C "$SOURCE_ROOT" rev-parse --verify origin/main >/dev/null 2>&1; then
+        TARGET_REF="origin/main"
+      else
+        TARGET_REF=""
+      fi
+      ;;
+    ref)
+      TARGET_REF="$REQUESTED_REF"
+      if ! git -C "$SOURCE_ROOT" rev-parse --verify "${TARGET_REF}^{commit}" >/dev/null 2>&1; then
+        bridge_die "git ref를 찾을 수 없습니다: $TARGET_REF"
+      fi
+      ;;
+  esac
+
+  if [[ -n "$TARGET_REF" ]]; then
+    TARGET_VERSION="$(bridge_upgrade_version_at_ref "$SOURCE_ROOT" "$TARGET_REF")"
+    TARGET_HEAD="$(bridge_upgrade_head_for_ref "$SOURCE_ROOT" "$TARGET_REF")"
+  else
+    TARGET_VERSION="$(bridge_upgrade_version_from_file "$SOURCE_ROOT")"
+    TARGET_HEAD="$(git -C "$SOURCE_ROOT" rev-parse HEAD 2>/dev/null || true)"
+  fi
+
+  if [[ $CHECK_ONLY -eq 1 ]]; then
+    INSTALLED_VERSION="$(bridge_upgrade_installed_field "$TARGET_ROOT" version)"
+    INSTALLED_HEAD="$(bridge_upgrade_installed_field "$TARGET_ROOT" source_head)"
+    UPDATE_AVAILABLE=0
+    if [[ -z "$INSTALLED_VERSION" || "$INSTALLED_VERSION" != "$TARGET_VERSION" || -z "$INSTALLED_HEAD" || "$INSTALLED_HEAD" != "$TARGET_HEAD" ]]; then
+      UPDATE_AVAILABLE=1
+    fi
+
+    if [[ $JSON -eq 1 ]]; then
+      python3 - "$SOURCE_ROOT" "$TARGET_ROOT" "$CHANNEL" "$TARGET_REF" "$TARGET_VERSION" "$TARGET_HEAD" "$INSTALLED_VERSION" "$INSTALLED_HEAD" "$UPDATE_AVAILABLE" <<'PY'
+import json
+import sys
+
+source_root, target_root, channel, target_ref, target_version, target_head, installed_version, installed_head, update_available = sys.argv[1:]
+payload = {
+    "mode": "upgrade-check",
+    "source_root": source_root,
+    "target_root": target_root,
+    "channel": channel,
+    "target_ref": target_ref,
+    "target_version": target_version,
+    "target_head": target_head,
+    "installed_version": installed_version,
+    "installed_head": installed_head,
+    "update_available": update_available == "1",
+}
+print(json.dumps(payload, ensure_ascii=False, indent=2))
+PY
+    else
+      echo "== Agent Bridge upgrade check =="
+      echo "channel: $CHANNEL"
+      echo "target_ref: ${TARGET_REF:-current}"
+      echo "target_version: $TARGET_VERSION"
+      echo "installed_version: ${INSTALLED_VERSION:-unknown}"
+      echo "update_available: $([[ $UPDATE_AVAILABLE -eq 1 ]] && printf yes || printf no)"
+    fi
+    exit 0
+  fi
+
+  if [[ $ALLOW_DIRTY -eq 0 && $DRY_RUN -eq 0 ]]; then
+    if [[ -n "$(git -C "$SOURCE_ROOT" status --short)" ]]; then
+      bridge_die "working tree가 dirty 합니다. 먼저 커밋/정리하거나 --allow-dirty 를 사용하세요."
+    fi
+  fi
+
+  if [[ -n "$TARGET_REF" && $DRY_RUN -eq 0 ]]; then
+    git -C "$SOURCE_ROOT" checkout -q "$TARGET_REF"
+  fi
+
+  if [[ $PULL -eq 1 && $DRY_RUN -eq 0 ]]; then
+    if [[ "$CHANNEL" == "dev" ]]; then
+      if git -C "$SOURCE_ROOT" rev-parse --verify main >/dev/null 2>&1; then
+        git -C "$SOURCE_ROOT" checkout -q main
+      else
+        git -C "$SOURCE_ROOT" checkout -q -B main origin/main
+      fi
+      git -C "$SOURCE_ROOT" pull --ff-only origin main
+    elif [[ "$CHANNEL" == "current" ]]; then
+      git -C "$SOURCE_ROOT" pull --ff-only
+    fi
   fi
 fi
 
-if [[ $PULL -eq 1 && $DRY_RUN -eq 0 ]]; then
-  git -C "$SOURCE_ROOT" pull --ff-only
+SOURCE_VERSION="$(bridge_upgrade_version_from_file "$SOURCE_ROOT")"
+SOURCE_REF="$(bridge_upgrade_current_ref "$SOURCE_ROOT")"
+SOURCE_HEAD="$(git -C "$SOURCE_ROOT" rev-parse HEAD 2>/dev/null || true)"
+if [[ $DRY_RUN -eq 0 || -z "$TARGET_VERSION" ]]; then
+  TARGET_VERSION="$SOURCE_VERSION"
+  TARGET_HEAD="$SOURCE_HEAD"
 fi
 
 ANALYSIS_JSON="$(python3 "$SOURCE_ROOT/bridge-upgrade.py" analyze-live --source-root "$SOURCE_ROOT" --target-root "$TARGET_ROOT")"
@@ -336,21 +576,35 @@ if [[ $RESTART_DAEMON -eq 1 && $DRY_RUN -eq 0 ]]; then
 fi
 
 if [[ $DRY_RUN -eq 0 ]]; then
-  python3 "$SOURCE_ROOT/bridge-upgrade.py" write-state --source-root "$SOURCE_ROOT" --target-root "$TARGET_ROOT" --backup-root "$BACKUP_ROOT" --analysis-json "$ANALYSIS_JSON" >/dev/null
+  python3 "$SOURCE_ROOT/bridge-upgrade.py" write-state \
+    --source-root "$SOURCE_ROOT" \
+    --target-root "$TARGET_ROOT" \
+    --backup-root "$BACKUP_ROOT" \
+    --analysis-json "$ANALYSIS_JSON" \
+    --version "$SOURCE_VERSION" \
+    --source-ref "$SOURCE_REF" \
+    --channel "$CHANNEL" >/dev/null
 fi
 
 if [[ $JSON -eq 1 ]]; then
-  python3 - "$SOURCE_ROOT" "$TARGET_ROOT" "$PULL" "$DRY_RUN" "$RESTART_DAEMON" "$BACKUP" "$MIGRATE_AGENTS" "$BACKUP_ROOT" "$BACKUP_JSON" "$MIGRATION_JSON" "$APPLY_JSON" "$ANALYSIS_JSON" "$STRICT_MERGE" <<'PY'
+  python3 - "$SOURCE_ROOT" "$TARGET_ROOT" "$PULL" "$DRY_RUN" "$RESTART_DAEMON" "$BACKUP" "$MIGRATE_AGENTS" "$BACKUP_ROOT" "$BACKUP_JSON" "$MIGRATION_JSON" "$APPLY_JSON" "$ANALYSIS_JSON" "$STRICT_MERGE" "$CHANNEL" "$SOURCE_VERSION" "$SOURCE_REF" "$SOURCE_HEAD" "$TARGET_REF" "$TARGET_VERSION" "$TARGET_HEAD" <<'PY'
 import json, sys
-source_root, target_root, pull, dry_run, restart_daemon, backup_enabled, migrate_agents, backup_root, backup_json, migration_json, apply_json, analysis_json, strict_merge = sys.argv[1:]
+source_root, target_root, pull, dry_run, restart_daemon, backup_enabled, migrate_agents, backup_root, backup_json, migration_json, apply_json, analysis_json, strict_merge, channel, source_version, source_ref, source_head, target_ref, target_version, target_head = sys.argv[1:]
 backup_payload = json.loads(backup_json)
 migration_payload = json.loads(migration_json)
 apply_payload = json.loads(apply_json)
 analysis_payload = json.loads(analysis_json)
 payload = {
     "mode": "upgrade",
+    "version": source_version,
     "source_root": source_root,
+    "source_ref": source_ref,
+    "source_head": source_head,
     "target_root": target_root,
+    "channel": channel,
+    "target_ref": target_ref,
+    "target_version": target_version,
+    "target_head": target_head,
     "pull": pull == "1",
     "dry_run": dry_run == "1",
     "restart_daemon": restart_daemon == "1",
@@ -378,6 +632,11 @@ PY
 fi
 
 echo "== Agent Bridge upgrade =="
+echo "version: $SOURCE_VERSION"
+echo "channel: $CHANNEL"
+echo "source_ref: $SOURCE_REF"
+echo "source_head: ${SOURCE_HEAD:0:12}"
+echo "target_ref: ${TARGET_REF:-current}"
 echo "source_root: $SOURCE_ROOT"
 echo "target_root: $TARGET_ROOT"
 echo "preserved_customizations: agent-roster.local.sh, state/, logs/, shared/, backups/, worktrees/, agents/<agent>/"

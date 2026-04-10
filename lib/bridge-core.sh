@@ -14,6 +14,27 @@ bridge_info() {
   echo -e "${CYAN}$*${NC}"
 }
 
+bridge_version() {
+  local version_file="$BRIDGE_SCRIPT_DIR/VERSION"
+
+  if [[ -f "$version_file" ]]; then
+    head -n 1 "$version_file" | tr -d '[:space:]'
+    return 0
+  fi
+
+  printf '0.0.0-dev'
+}
+
+bridge_source_head() {
+  git -C "$BRIDGE_SCRIPT_DIR" rev-parse --short HEAD 2>/dev/null || printf '-'
+}
+
+bridge_source_ref() {
+  git -C "$BRIDGE_SCRIPT_DIR" describe --tags --exact-match HEAD 2>/dev/null \
+    || git -C "$BRIDGE_SCRIPT_DIR" rev-parse --abbrev-ref HEAD 2>/dev/null \
+    || printf '-'
+}
+
 bridge_init_dirs() {
   mkdir -p \
     "$BRIDGE_HOME" \

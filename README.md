@@ -127,7 +127,7 @@ If you think this README has no concrete install steps, stop and reread this `CL
    - `claude --version`
    - On macOS, if `/opt/homebrew/bin/bash` exists, prefer it. If not, warn the user that macOS system Bash 3.2 may be unsupported and ask them to install Homebrew Bash if the scripts fail.
 
-2. Clone or update the public source checkout.
+2. Clone or update the public source checkout, then pin it to the latest stable release tag.
    Keep the source checkout hidden at `~/.agent-bridge-source`. If an older visible checkout exists at `~/agent-bridge-public`, move it automatically only when it is clean and points to this public repository.
 
    ```bash
@@ -152,10 +152,24 @@ If you think this README has no concrete install steps, stop and reread this `CL
    fi
 
    if [ -d "$SOURCE_DIR/.git" ]; then
-     git -C "$SOURCE_DIR" pull --ff-only origin main
+     git -C "$SOURCE_DIR" fetch --tags --prune origin
    else
      git clone "$REPO_URL" "$SOURCE_DIR"
+     git -C "$SOURCE_DIR" fetch --tags --prune origin
    fi
+
+   LATEST_TAG="$(
+     git -C "$SOURCE_DIR" tag --list 'v[0-9]*.[0-9]*.[0-9]*' |
+     python3 -c 'import re,sys
+tags=[x.strip() for x in sys.stdin if re.fullmatch(r"v\d+\.\d+\.\d+", x.strip())]
+tags.sort(key=lambda t: tuple(map(int, t[1:].split("."))))
+print(tags[-1] if tags else "")'
+   )"
+   if [ -z "$LATEST_TAG" ]; then
+     echo "ERROR: no stable Agent Bridge release tag found in $SOURCE_DIR." >&2
+     exit 1
+   fi
+   git -C "$SOURCE_DIR" checkout --detach "$LATEST_TAG"
    ```
 
 3. Deploy tracked source files into the live install at `~/.agent-bridge`.
@@ -179,7 +193,8 @@ If you think this README has no concrete install steps, stop and reread this `CL
 
    ```bash
    "$HOME/.agent-bridge/agent-bridge" status
-   "$HOME/.agent-bridge/agent-bridge" upgrade --dry-run --no-restart-daemon
+   "$HOME/.agent-bridge/agent-bridge" version
+   "$HOME/.agent-bridge/agent-bridge" upgrade --check --no-restart-daemon
    ```
 
 6. Final handoff to the user.
@@ -397,10 +412,12 @@ agb status
 |------|------|
 | `agb admin` | 관리자 에이전트(패치)에 접속 |
 | `agb status` | 전체 상태 대시보드 |
+| `agb version` | 설치된 Agent Bridge 버전 확인 |
 | `agb attach <name>` | 특정 에이전트 세션에 직접 접속 |
 | `agb --claude --name <name>` | Claude Code 다이나믹 에이전트 생성 |
 | `agb --codex --name <name>` | Codex 다이나믹 에이전트 생성 |
-| `agb upgrade` | 최신 버전으로 업그레이드 |
+| `agb upgrade --check` | 최신 안정 릴리즈 여부 확인 |
+| `agb upgrade` | 최신 안정 릴리즈로 업그레이드 |
 
 ### 관리자 에이전트가 주로 쓰는 것
 
@@ -431,6 +448,7 @@ agb status
 
 - [ARCHITECTURE.md](./ARCHITECTURE.md) — 내부 아키텍처
 - [OPERATIONS.md](./OPERATIONS.md) — 운영 가이드
+- [RELEASE.md](./RELEASE.md) — 릴리즈와 업그레이드 정책
 - [KNOWN_ISSUES.md](./KNOWN_ISSUES.md) — 알려진 이슈
 - [CONTRIBUTING.md](./CONTRIBUTING.md) — 기여 가이드
 

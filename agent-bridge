@@ -6,18 +6,22 @@ set -euo pipefail
 SCRIPT_DIR="$(cd -P "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 # shellcheck source=/dev/null
 source "$SCRIPT_DIR/bridge-lib.sh"
-bridge_load_roster
 CLI_NAME="$(basename "$0")"
+
+if [[ "${1:-}" != "version" ]]; then
+  bridge_load_roster
+fi
 
 usage() {
   cat <<EOF
 Usage:
   $CLI_NAME status [--watch] [--refresh <seconds>] [--open-limit <count>] [--all-agents]
+  $CLI_NAME version [--json]
   $CLI_NAME list
   $CLI_NAME admin [--replace] [--continue|--no-continue] [--no-attach] [--no-project-skill]
   $CLI_NAME bootstrap [bootstrap options...] [init options...]
   $CLI_NAME init [--admin <agent>] [--engine claude|codex] [--session <name>] [--channels <csv>] [--dry-run] [--json]
-  $CLI_NAME upgrade [--pull|--no-pull] [--restart-daemon] [--dry-run] [--json] [--strict-merge]
+  $CLI_NAME upgrade [--check] [--channel stable|dev|current] [--version <semver>] [--ref <git-ref>] [--pull|--no-pull] [--restart-daemon] [--dry-run] [--json] [--strict-merge]
   $CLI_NAME upgrade analyze [--target <bridge-home>] [--json]
   $CLI_NAME upgrade rollback [--target <bridge-home>] [--backup-root <dir>] [--json]
   $CLI_NAME escalate question --agent <agent> --question "<text>" [--context "<text>"] [--wait-seconds <seconds>] [--json]
@@ -96,6 +100,7 @@ Usage:
 Examples:
   $CLI_NAME status
   $CLI_NAME status --watch
+  $CLI_NAME version
   $CLI_NAME admin
   $CLI_NAME bootstrap --admin manager --engine claude --channels plugin:telegram@claude-plugins-official
   $CLI_NAME init --admin manager --engine claude --channels plugin:telegram@claude-plugins-official
@@ -334,6 +339,88 @@ if [[ $# -gt 0 ]]; then
     init)
       shift
       exec "$BRIDGE_BASH_BIN" "$SCRIPT_DIR/bridge-init.sh" "$@"
+      ;;
+    version)
+      shift
+      VERSION_JSON=0
+      while [[ $# -gt 0 ]]; do
+        case "$1" in
+          --json)
+            VERSION_JSON=1
+            shift
+            ;;
+          -h|--help)
+            echo "Usage: $CLI_NAME version [--json]"
+            exit 0
+            ;;
+          *)
+            bridge_die "지원하지 않는 version 옵션입니다: $1"
+            ;;
+        esac
+      done
+
+      CURRENT_VERSION="$(bridge_version)"
+      SOURCE_HEAD="$(git -C "$SCRIPT_DIR" rev-parse HEAD 2>/dev/null || printf '')"
+      SOURCE_SHORT="$(git -C "$SCRIPT_DIR" rev-parse --short HEAD 2>/dev/null || printf '-')"
+      SOURCE_REF="$(bridge_source_ref)"
+      UPGRADE_STATE_FILE="$BRIDGE_HOME/state/upgrade/last-upgrade.json"
+
+      if [[ $VERSION_JSON -eq 1 ]]; then
+        bridge_require_python
+        python3 - "$CURRENT_VERSION" "$SCRIPT_DIR" "$SOURCE_REF" "$SOURCE_HEAD" "$UPGRADE_STATE_FILE" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+version, source_root, source_ref, source_head, state_file = sys.argv[1:]
+state_path = Path(state_file)
+try:
+    state = json.loads(state_path.read_text(encoding="utf-8"))
+except (FileNotFoundError, json.JSONDecodeError):
+    state = {}
+
+state_summary = {
+    key: state.get(key, "")
+    for key in ("version", "source_ref", "source_head", "source_root", "channel", "updated_at")
+    if key in state
+}
+payload = {
+    "version": version,
+    "source_root": source_root,
+    "source_ref": source_ref,
+    "source_head": source_head,
+    "installed": state_summary,
+}
+print(json.dumps(payload, ensure_ascii=False, indent=2))
+PY
+        exit 0
+      fi
+
+      echo "Agent Bridge $CURRENT_VERSION"
+      echo "source_root: $SCRIPT_DIR"
+      echo "source_ref: $SOURCE_REF"
+      echo "source_head: $SOURCE_SHORT"
+      if [[ -f "$UPGRADE_STATE_FILE" ]]; then
+        bridge_require_python
+        python3 - "$UPGRADE_STATE_FILE" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+try:
+    payload = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+except (FileNotFoundError, json.JSONDecodeError):
+    raise SystemExit(0)
+
+if payload.get("version"):
+    print(f"installed_version: {payload.get('version')}")
+if payload.get("source_ref"):
+    print(f"installed_ref: {payload.get('source_ref')}")
+if payload.get("source_head"):
+    print(f"installed_head: {str(payload.get('source_head'))[:12]}")
+PY
+      fi
+      exit 0
       ;;
     upgrade)
       shift

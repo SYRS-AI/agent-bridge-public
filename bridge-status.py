@@ -284,7 +284,10 @@ def render_dashboard(args: argparse.Namespace) -> str:
     visible_agents = len(roster)
 
     lines: list[str] = []
-    lines.append("Agent Bridge Status")
+    title = "Agent Bridge Status"
+    if args.version:
+        title += f" v{args.version}"
+    lines.append(title)
     lines.append(
         f"updated {iso_now()} | daemon {'running' if daemon_running else 'stopped'} pid={daemon_pid} | "
         f"active {full_active_count}/{full_total_agents} | shown {visible_agents} | "
@@ -372,6 +375,7 @@ def main() -> int:
     parser.add_argument("--roster-snapshot", required=True)
     parser.add_argument("--db", required=True)
     parser.add_argument("--daemon-pid-file", required=True)
+    parser.add_argument("--version", default="")
     parser.add_argument("--open-limit", type=int, default=8)
     parser.add_argument("--stale-warn-seconds", type=int, default=3600)
     parser.add_argument("--stale-critical-seconds", type=int, default=14400)

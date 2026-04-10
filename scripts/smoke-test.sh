@@ -2154,8 +2154,14 @@ PY
 python3 "$REPO_ROOT/bridge-queue.py" done "$NATIVE_ONESHOT_TASK_ID" --agent "$SMOKE_AGENT" --note "one-shot smoke cleaned up" >/dev/null
 
 log "dry-run upgrade preserves custom paths"
-UPGRADE_JSON="$("$REPO_ROOT/agent-bridge" upgrade --dry-run --json)"
+VERSION_OUTPUT="$("$REPO_ROOT/agent-bridge" version)"
+assert_contains "$VERSION_OUTPUT" "Agent Bridge 0.1.0"
+UPGRADE_CHECK_JSON="$("$REPO_ROOT/agent-bridge" upgrade --source "$REPO_ROOT" --target "$BRIDGE_HOME" --check --json)"
+assert_contains "$UPGRADE_CHECK_JSON" "\"mode\": \"upgrade-check\""
+assert_contains "$UPGRADE_CHECK_JSON" "\"target_version\": \"0.1.0\""
+UPGRADE_JSON="$("$REPO_ROOT/agent-bridge" upgrade --source "$REPO_ROOT" --target "$BRIDGE_HOME" --dry-run --json)"
 assert_contains "$UPGRADE_JSON" "\"mode\": \"upgrade\""
+assert_contains "$UPGRADE_JSON" "\"version\": \"0.1.0\""
 assert_contains "$UPGRADE_JSON" "\"preserved_paths\""
 assert_contains "$UPGRADE_JSON" "\"backup_enabled\": true"
 assert_contains "$UPGRADE_JSON" "\"agent_migration\""
@@ -2174,9 +2180,10 @@ text = path.read_text(encoding="utf-8")
 text = text.replace("## Queue & Delivery", "## Queue & Delivery\n- STALE-UPGRADE-MARKER", 1)
 path.write_text(text, encoding="utf-8")
 PY
-UPGRADE_APPLY_JSON="$("$REPO_ROOT/agent-bridge" upgrade --target "$BRIDGE_HOME" --no-restart-daemon --allow-dirty --json)"
+UPGRADE_APPLY_JSON="$("$REPO_ROOT/agent-bridge" upgrade --source "$REPO_ROOT" --target "$BRIDGE_HOME" --no-restart-daemon --allow-dirty --json)"
 assert_contains "$UPGRADE_APPLY_JSON" "\"backup_enabled\": true"
 assert_contains "$UPGRADE_APPLY_JSON" "\"migrate_agents\": true"
+assert_contains "$UPGRADE_APPLY_JSON" "\"version\": \"0.1.0\""
 assert_contains "$UPGRADE_APPLY_JSON" "\"added_files\""
 assert_contains "$UPGRADE_APPLY_JSON" "\"updated_files\""
 [[ -f "$BRIDGE_AGENT_HOME_ROOT/$CREATED_AGENT/MEMORY-SCHEMA.md" ]] || die "upgrade did not restore missing agent template file"
