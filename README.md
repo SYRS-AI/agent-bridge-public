@@ -138,20 +138,22 @@ agb admin
 ## Discord 연결하기
 
 에이전트가 Discord에서 일하려면 Discord 봇이 필요합니다. 패치를 디스코드에 연결해봅니다.
-
+1. 먼저 PC에서 디스코드를 실행하고 좌측 하단에 User Settings(기어 아이콘) -> Advanced -> Developer Mode 를 On 해주세요.
+2. Discord 를 실행하여 #Patch 라는 채널을 만들어 줍니다.
+3. 채널명에서 마우스 오른쪽 키를 클릭 후 Copy Channel ID를 합니다.
+   
 ### 1. Discord 봇 만들기
 
 [Discord Developer Portal](https://discord.com/developers/applications)에서:
 
-0. Discord 를 실행하여 #Patch 라는 채널을 만들어 줍니다.
 1. **New Application** → 이름 입력 (예: "Patch")
 2. installation 메뉴 -> Install Link -> None
 3. **Bot** 탭 → Username 설정, public bot 끄기
 4. **Privileged Gateway Intents** → Server Members Intent 켜기, **Message Content Intent** 켜기
 5. Bot permissions -> Administrator 체크(디스코드에 익숙한 경우 필요한 권한 만 주셔도 됩니다)
    || 패치가 아닌 일반 에이전트의 경우 View Channels, Send Messages, Manage Messages, Embed Links, Attach Files, Read Message History, Add Reactions 정도 권한을 주시면 됩니다.
-7. **Reset Token** 버튼 클릭 → 토큰 복사
-8. 제일 하단에 Permissions Integer 복사
+6. **Reset Token** 버튼 클릭 → 토큰 복사
+7. 제일 하단에 Permissions Integer 복사
 
 ### 2. 패치(터미널)에게 설정 맡기기
 
@@ -162,10 +164,12 @@ agb admin
 ```text
 Discord 봇을 연결해줘.
 토큰은 [복사한 토큰]이야. Permissions Integer는 [복사한 숫자]야.
-패치 에이전트를 #patch 채널에 연결해줘.
+패치 에이전트를 #patch 채널([복사한 채널 아이디 숫자])에 연결해줘.
+봇을 디스코드 서버에 초대하게 필요한 링크도 생성해서 출력해줘.
 ```
 
 관리자 에이전트가 토큰 저장, 채널 매핑, 에이전트 재시작까지 처리합니다.
+서버 초대용 링크를 눌러서 디스코드 서버에 봇을 넣어줍니다.
 
 ### 지원 채널
 
@@ -210,7 +214,7 @@ Discord에 상주하며 영속적 메모리를 가지고 지속 근무하는 에
 
 ### 다이나믹 에이전트 (Dynamic)
 
-사용자가 직접 만들어서 쓰고 버리는 임시 에이전트입니다.
+사용자가 직접 만들어서 쓰고 닫을수 있는 인스턴트 에이전트입니다. 기존 클로드코드나 코덱스 사용 경험을 생각하시면 됩니다.
 
 ```bash
 # Claude Code 기반 다이나믹 에이전트
@@ -234,7 +238,7 @@ agb --claude --name one-shot-task
 
 **다이나믹 에이전트는 이런 때 씁니다**:
 - 잠깐 작업하고 버릴 워커가 필요할 때 (크론/서브에이전트와 달리 사용자가 실시간으로 조종 가능)
-- 서브 프로젝트를 별도 폴더에서 진행하면서 기존 에이전트들과 소통할 때
+- 서브 프로젝트를 별도 폴더에서 진행하면서 기존 에이전트들과 소통이 필요할 때
 - 특정 코드베이스를 탐색하거나 실험할 때
 
 ---
@@ -282,7 +286,7 @@ agb status
 | `agb attach <name>` | 특정 에이전트 세션에 직접 접속 |
 | `agb --claude --name <name>` | Claude Code 다이나믹 에이전트 생성 |
 | `agb --codex --name <name>` | Codex 다이나믹 에이전트 생성 |
-| `agb upgrade --pull --restart-daemon` | 최신 버전으로 업그레이드 |
+| `agb upgrade` | 최신 버전으로 업그레이드 | <-- 션 메시지: 여기에 --pull --restart-daemon 옵션이 같이 붙어 있었는데 이런거 너무 복잡해 그냥 agb upgrade 로 알아서 다 돌아가게 변경해줘.
 
 ### 관리자 에이전트가 주로 쓰는 것
 
