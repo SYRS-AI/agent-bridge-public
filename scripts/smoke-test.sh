@@ -101,6 +101,7 @@ export BRIDGE_OPENCLAW_CRON_JOBS_FILE="$TMP_ROOT/openclaw-jobs.json"
 export BRIDGE_DAEMON_INTERVAL=1
 export BRIDGE_CRON_DISPATCH_MAX_PARALLEL=1
 export BRIDGE_DISCORD_RELAY_ENABLED=0
+export BRIDGE_STALL_SCAN_ENABLED=1
 export BRIDGE_ROSTER_FILE="$REPO_ROOT/agent-roster.sh"
 export BRIDGE_ROSTER_LOCAL_FILE="$BRIDGE_HOME/agent-roster.local.sh"
 export BRIDGE_AGENT_HOME_ROOT="$BRIDGE_HOME/agents"
@@ -1270,6 +1271,31 @@ assert_contains "$USER_SET_OUTPUT" "name: Owner"
 USER_SHOW_JSON="$("$REPO_ROOT/agent-bridge" user show --user owner --json)"
 assert_contains "$USER_SHOW_JSON" "\"name\": \"Owner\""
 assert_contains "$USER_SHOW_JSON" "\"timezone\": \"Asia/Seoul\""
+KNOWLEDGE_INIT_JSON="$("$REPO_ROOT/agent-bridge" knowledge init --team-name "Smoke Team" --json)"
+assert_contains "$KNOWLEDGE_INIT_JSON" "\"team_name\": \"Smoke Team\""
+[[ -f "$BRIDGE_SHARED_DIR/wiki/index.md" ]] || die "knowledge init did not create wiki index"
+[[ -f "$BRIDGE_SHARED_DIR/wiki/people.md" ]] || die "knowledge init did not create people registry"
+[[ -f "$BRIDGE_SHARED_DIR/wiki/data-sources.md" ]] || die "knowledge init did not create data source registry"
+KNOWLEDGE_CAPTURE_JSON="$("$REPO_ROOT/agent-bridge" knowledge capture --source chat --author Owner --title "Release Approver" --text "Owner is the release approver for smoke-test changes." --json)"
+KNOWLEDGE_CAPTURE_ID="$(python3 - "$KNOWLEDGE_CAPTURE_JSON" <<'PY'
+import json
+import sys
+print(json.loads(sys.argv[1])["capture_id"])
+PY
+)"
+[[ -f "$BRIDGE_SHARED_DIR/raw/captures/inbox/$KNOWLEDGE_CAPTURE_ID.json" ]] || die "knowledge capture did not create inbox capture"
+KNOWLEDGE_PROMOTE_JSON="$("$REPO_ROOT/agent-bridge" knowledge promote --kind people --capture "$KNOWLEDGE_CAPTURE_ID" --summary "Owner is the release approver for smoke-test changes." --json)"
+assert_contains "$KNOWLEDGE_PROMOTE_JSON" "\"kind\": \"people\""
+assert_contains "$KNOWLEDGE_PROMOTE_JSON" "\"wiki/people.md\""
+[[ -f "$BRIDGE_SHARED_DIR/raw/captures/promoted/$KNOWLEDGE_CAPTURE_ID.json" ]] || die "knowledge promote did not move capture to promoted"
+assert_contains "$(cat "$BRIDGE_SHARED_DIR/wiki/people.md")" "release approver"
+KNOWLEDGE_DS_OUTPUT="$("$REPO_ROOT/agent-bridge" knowledge promote --kind data-source --title "Smoke DB" --summary "Smoke DB is the canonical structured data source for smoke tests.")"
+assert_contains "$KNOWLEDGE_DS_OUTPUT" "kind: data-sources"
+assert_contains "$(cat "$BRIDGE_SHARED_DIR/wiki/data-sources.md")" "Smoke DB"
+KNOWLEDGE_SEARCH_JSON="$("$REPO_ROOT/agent-bridge" knowledge search --query "release approver" --json)"
+assert_contains "$KNOWLEDGE_SEARCH_JSON" "\"wiki/people.md\""
+KNOWLEDGE_LINT_JSON="$("$REPO_ROOT/agent-bridge" knowledge lint --json)"
+assert_contains "$KNOWLEDGE_LINT_JSON" "\"ok\": true"
 SHARED_USER_CREATE_JSON="$("$REPO_ROOT/agent-bridge" agent create "$SHARED_USER_AGENT" --engine claude --session "$SHARED_USER_SESSION" --dry-run --json)"
 assert_contains "$SHARED_USER_CREATE_JSON" "\"id\": \"owner\""
 SHARED_USER_CREATE_OUTPUT="$("$REPO_ROOT/agent-bridge" agent create "$SHARED_USER_AGENT" --engine claude --session "$SHARED_USER_SESSION")"
@@ -2809,6 +2835,21 @@ assert_contains "$RUNTIME_SYNC_OUTPUT" "item[scripts]"
 [[ -f "$BRIDGE_HOME/runtime/credentials/example.txt" ]] || die "expected runtime credentials copy"
 [[ -f "$BRIDGE_HOME/runtime/secrets/example.token" ]] || die "expected runtime secrets copy"
 [[ -f "$BRIDGE_HOME/runtime/bridge-config.json" ]] || die "expected runtime config copy"
+python3 - "$BRIDGE_HOME/runtime/credentials" "$BRIDGE_HOME/runtime/credentials/example.txt" "$BRIDGE_HOME/runtime/secrets" "$BRIDGE_HOME/runtime/secrets/example.token" <<'PY'
+import os
+import stat
+import sys
+
+expected = {
+    sys.argv[1]: 0o700,
+    sys.argv[2]: 0o600,
+    sys.argv[3]: 0o700,
+    sys.argv[4]: 0o600,
+}
+for path, mode in expected.items():
+    actual = stat.S_IMODE(os.stat(path).st_mode)
+    assert actual == mode, f"{path}: expected {oct(mode)}, got {oct(actual)}"
+PY
 
 log "linking configured runtime skills into managed Claude homes"
 "$BASH4_BIN" -lc "source \"$REPO_ROOT/bridge-lib.sh\"; bridge_load_roster; BRIDGE_AGENT_SKILLS[\"claude-static\"]='sample-skill'; bridge_bootstrap_claude_shared_skills 'claude-static' '$CLAUDE_STATIC_WORKDIR'"
@@ -2846,6 +2887,7 @@ grep -q "$BRIDGE_HOME/runtime/extensions/sample-ext" "$BRIDGE_HOME/runtime/bridg
 log "overlaying repo-managed runtime canonical templates"
 RUNTIME_CANON_OUTPUT="$("$REPO_ROOT/agent-bridge" migrate runtime canonicalize --runtime-root "$BRIDGE_HOME/runtime")"
 assert_contains "$RUNTIME_CANON_OUTPUT" "overlay[scripts/call-shopify.sh]"
+assert_contains "$RUNTIME_CANON_OUTPUT" "overlay[scripts/creds.py]"
 assert_contains "$RUNTIME_CANON_OUTPUT" "overlay[scripts/email-webhook-handler.py]"
 assert_contains "$RUNTIME_CANON_OUTPUT" "overlay[scripts/webhook_utils.py]"
 assert_contains "$RUNTIME_CANON_OUTPUT" "overlay[skills/agent-db/scripts/email-sync.py]"
@@ -2856,6 +2898,7 @@ grep -q 'queue-based A2A is the source of truth' "$BRIDGE_HOME/runtime/scripts/p
 grep -q 'agent-bridge setup agent' "$BRIDGE_HOME/runtime/skills/agent-factory/scripts/create-agent.sh" || die "expected bridge-native setup guidance in create-agent"
 grep -q 'agent-bridge task create' "$BRIDGE_HOME/runtime/scripts/email-webhook-handler.py" || die "expected queue handoff in email webhook handler"
 grep -q 'queue-dispatch' "$BRIDGE_HOME/runtime/scripts/webhook_utils.py" || die "expected bridge-native one-shot cron helper in webhook utils"
+grep -q 'BRIDGE_RUNTIME_CREDENTIALS_DIR' "$BRIDGE_HOME/runtime/scripts/creds.py" || die "expected bridge-native credential loader"
 grep -q 'gws_api' "$BRIDGE_HOME/runtime/skills/agent-db/scripts/email-sync.py" || die "expected gws-backed email sync script"
 
 log "prioritizing idle memory-daily dispatch over busy sessions"

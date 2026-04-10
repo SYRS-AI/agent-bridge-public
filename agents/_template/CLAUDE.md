@@ -8,6 +8,7 @@
 - `NEXT-SESSION.md`가 있으면 이전 세션에서 남긴 handoff다. 시작 직후 읽고 먼저 처리한다.
 - `MEMORY-SCHEMA.md`는 memory wiki를 어떻게 유지할지 정의한다.
 - `MEMORY.md`와 `memory/`는 작업 메모리이자 장기 기억 위키다. `HEARTBEAT.md`는 필요할 때만 읽는 운영 참고 문서다.
+- `~/.agent-bridge/shared/wiki/`가 있으면 팀 전체가 공유하는 knowledge SSOT다. `index.md`와 관련 페이지만 읽고, 필요하면 `agent-bridge knowledge search`로 찾는다.
 - `TOOLS.md`와 `SKILLS.md`는 현재 bridge-native runtime reference다.
 
 ## Queue & Delivery
@@ -65,7 +66,7 @@ task를 수신하면 아래 순서를 반드시 따른다:
 - 질문 2: `처음 연결할 채널은 무엇인가요? 터미널만 사용할지, Discord, Telegram, 또는 둘 다 연결할지 알려주세요.`
 - 첫 사용자 메시지에 이름/닉네임과 채널 선택이 이미 모두 포함되어 있으면 다시 묻지 말고 `이름: <값>, 채널: <값>으로 진행하겠습니다.`라고 확인한 뒤 바로 설정을 진행한다.
 - Onboarding State가 `pending`인 동안에는 두 질문을 물었거나 두 답을 저장하고 다음 설정 단계로 넘어간 경우가 아니면 턴을 끝내지 않는다.
-- 이름/닉네임을 받으면 `~/.agent-bridge/agent-bridge user set --name "<name>"`를 실행해 canonical shared user profile을 먼저 저장한다. 새 에이전트는 이 shared profile을 기본으로 읽는다.
+- 이름/닉네임을 받으면 `~/.agent-bridge/agent-bridge knowledge init`을 실행하고, `~/.agent-bridge/agent-bridge knowledge promote --kind people --title "Primary operator" --summary "<name> is the primary operator for this Agent Bridge install."`로 팀 people registry에 저장한다. 새 에이전트는 shared wiki를 공통 지식 기준으로 사용한다.
 - 내부 파일명, `USER.md`, 사용자 partition 같은 구현 세부사항은 질문 문구에 넣지 않는다.
 - Discord 또는 Telegram을 선택하면 해당 에이전트 엔진은 Claude Code로 설정한다. Codex는 현재 외부 채널 연동용 엔진으로 사용하지 않는다.
 - 사용자가 Discord/Telegram과 Codex를 함께 선택하면, "Discord/Telegram 연동은 Claude Code가 필요합니다. 이 에이전트는 Claude Code로 설정하겠습니다."라고 설명하고 Claude Code로 진행한다.
@@ -112,11 +113,12 @@ task를 수신하면 아래 순서를 반드시 따른다:
 2. 이 `CLAUDE.md` 읽기
 3. `SESSION-TYPE.md` 읽기
 4. `NEXT-SESSION.md`가 있으면 읽고 handoff 작업을 먼저 처리한다. 검증 명령을 실행한 뒤 첫 assistant turn에서 반드시 재개 요약, 검증 결과, 다음 행동/질문을 사용자에게 말한다.
-5. `MEMORY-SCHEMA.md` 읽기
-6. 현재 대화 상대의 `users/<user-id>/USER.md`와 최근 메모가 있으면 먼저 확인
-7. `MEMORY.md`와 `memory/` 확인
-8. `TOOLS.md`, `SKILLS.md` 확인
-9. 필요하면 `HEARTBEAT.md`와 로컬 `references/` 확인
+5. `~/.agent-bridge/shared/wiki/index.md`가 있으면 읽고, 현재 작업과 관련된 team wiki 페이지만 추가로 확인한다.
+6. `MEMORY-SCHEMA.md` 읽기
+7. 현재 대화 상대의 `users/<user-id>/USER.md`와 최근 메모가 있으면 먼저 확인
+8. `MEMORY.md`와 `memory/` 확인
+9. `TOOLS.md`, `SKILLS.md` 확인
+10. 필요하면 `HEARTBEAT.md`와 로컬 `references/` 확인
 
 ## First Session Onboarding
 - `SESSION-TYPE.md`에 `Onboarding State: pending`이 남아 있거나 템플릿 placeholder가 그대로 있으면, 일반 작업 전에 온보딩부터 수행한다.
@@ -128,6 +130,8 @@ task를 수신하면 아래 순서를 반드시 따른다:
 
 ## 메모리 관리
 - `memory/`는 markdown-first memory wiki다. raw source를 그대로 쌓는 곳이 아니라, 정리된 기억을 유지하는 곳이다.
+- 팀 전체가 공유해야 하는 사람, 에이전트, 운영 규칙, 도구, 데이터 소스, 결정, 프로젝트, 플레이북은 `~/.agent-bridge/shared/wiki/`에 기록한다.
+- 팀 공통 지식은 `agent-bridge knowledge capture|promote|search|lint`를 사용한다. 에이전트 개인 기억은 `agent-bridge memory ...`를 사용한다.
 - 사용자별 정보는 `users/<user-id>/...` 아래에서 관리한다. 다른 사람의 사실을 현재 사용자 메모리에 섞지 않는다.
 - 반복 가치가 있는 사실만 `MEMORY.md` 또는 사용자별 `MEMORY.md`로 승격한다.
 - 사람이 별도 명령을 외우지 않아도, 자연어 대화 중 장기적으로 유용한 사실이나 선호가 나오면 에이전트가 판단해서 `memory-wiki` skill을 따라 `agent-bridge memory remember` 또는 `capture -> ingest -> promote` 흐름으로 반영할 수 있다.

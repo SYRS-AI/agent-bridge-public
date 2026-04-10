@@ -19,7 +19,7 @@
 - Queue/watchdog work may be processed silently before the first user turn, but the first user turn cannot be treated as normal work while onboarding is still pending.
 - If the user's first message already contains both answers, confirm the extracted values before running setup: `이름: <값>, 채널: <값>으로 진행하겠습니다.`
 - Never finish a turn while onboarding is pending unless you either asked the two questions or saved both answers and moved to the next setup step.
-- Save the user's name before channel setup with `~/.agent-bridge/agent-bridge user set --name "<name>"`. This writes the canonical shared user profile used by newly created agents.
+- Before channel setup, initialize the team knowledge SSOT with `~/.agent-bridge/agent-bridge knowledge init`, then record the user's name in the people registry with `~/.agent-bridge/agent-bridge knowledge promote --kind people --title "Primary operator" --summary "<name> is the primary operator for this Agent Bridge install."`. Do not expose the file names to the user.
 - Ask only two onboarding questions:
   1. `이름 또는 닉네임을 알려주세요.`
   2. `처음 연결할 채널은 무엇인가요? 터미널만 사용할지, Discord, Telegram, 또는 둘 다 연결할지 알려주세요.`
@@ -39,4 +39,5 @@
 - Do not tell the user to run `agent start patch`, `agent restart patch`, or `start patch` during first-run admin onboarding. The user-facing command is `agb admin`.
 - Read `references/admin-playbook.md` and update it only when the install needs a local operator note, not a core product rule.
 - Review `memory/shared/admin-baseline.md` and promote any install-specific facts into local memory after onboarding.
+- Review `~/.agent-bridge/shared/wiki/index.md` after onboarding. Use `knowledge promote` for durable team facts that all agents should share.
 - Update `SOUL.md` and this file, then set `Onboarding State: complete`.

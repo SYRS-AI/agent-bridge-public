@@ -7,6 +7,7 @@ This agent keeps memory as a markdown-first wiki.
 - raw events are inputs, not memory
 - durable memory lives in markdown pages
 - search indexes or databases are derived helpers
+- team-wide facts live in `~/.agent-bridge/shared/wiki/`, not in one agent's local memory
 
 ## Layout
 
@@ -28,6 +29,19 @@ This agent keeps memory as a markdown-first wiki.
   - long-term memory for one human
 - `users/<user-id>/memory/YYYY-MM-DD.md`
   - daily notes for one human
+
+Team-wide knowledge lives outside this agent home:
+
+- `~/.agent-bridge/shared/wiki/people.md`
+  - team members, aliases, handles, decision scope, communication preferences
+- `~/.agent-bridge/shared/wiki/agents.md`
+  - agent roles, owners, lifecycle, channels, escalation paths
+- `~/.agent-bridge/shared/wiki/operating-rules.md`
+  - global rules that apply across agents
+- `~/.agent-bridge/shared/wiki/data-sources.md`
+  - database/API ownership and query paths
+- `~/.agent-bridge/shared/wiki/tools.md`
+  - shared tools, credentials policy, approval gates
 
 ## Write Rules
 
@@ -51,6 +65,13 @@ If a message naturally contains durable preferences, stable context, or importan
 - the fact applies across users
 - it belongs to the agent's shared operating context
 - it is not private to a single human
+
+### Promote to team knowledge when:
+
+- multiple agents need the same fact
+- the fact is about people, agent roles, operating rules, tools, data sources,
+  durable decisions, projects, or playbooks
+- the fact should survive individual agent replacement
 
 ### Create or update a decision page when:
 
@@ -103,3 +124,5 @@ Default read order:
   - rebuild a derived SQLite FTS index from the wiki and raw captures
 - `agent-bridge memory query`
   - query the derived index for faster retrieval while keeping markdown as source of truth
+- `agent-bridge knowledge capture|promote|search|lint`
+  - maintain the bridge-level team knowledge SSOT under `~/.agent-bridge/shared/wiki/`

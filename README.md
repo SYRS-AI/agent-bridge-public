@@ -387,6 +387,21 @@ agb --claude --name one-shot-task
 - **핸드오프**: 작업을 다른 에이전트에게 넘김
 - 세션이 꺼졌다 켜져도 상태 유지
 
+### 팀 지식 SSOT
+
+팀 전체가 공유해야 하는 사람, 에이전트 역할, 운영 규칙, 도구, 데이터 소스, 결정, 프로젝트, 플레이북은 `shared/wiki/`에 둡니다.
+
+- **Markdown wiki**: 사람이 읽고 에이전트가 관리하는 팀 지식의 원본
+- **PostgreSQL/외부 DB**: 고객, 주문, 광고, 재고 같은 정형 데이터의 원본
+- **SQLite/FTS/vector**: 검색을 빠르게 하기 위한 재생성 가능한 인덱스
+- **raw captures**: 채널 메시지나 크론 결과 같은 원천 기록, curated memory가 아님
+
+```bash
+agb knowledge init
+agb knowledge promote --kind people --summary "Sean is the primary operator."
+agb knowledge search --query "primary operator"
+```
+
 ### 데몬
 
 백그라운드에서 항상 돌면서 전체 시스템을 관리합니다:
@@ -435,8 +450,11 @@ agb status
 | `agb cron create ...` | 반복 작업 등록 |
 | `agb setup discord <agent>` | Discord 채널 연결 |
 | `agb setup telegram <agent>` | Telegram 채널 연결 |
-| `agb user set --name "<name>"` | 모든 에이전트가 공유할 기본 사용자 이름 저장 |
-| `agb user show` | 공유 사용자 프로필 확인 |
+| `agb user set --name "<name>"` | 에이전트별 사용자 메모리 호환용 기본 사용자 프로필 저장 |
+| `agb user show` | 사용자 프로필 확인 |
+| `agb knowledge init` | 팀 공통 지식 위키 생성 |
+| `agb knowledge promote ...` | 팀 공통 SSOT에 durable knowledge 반영 |
+| `agb knowledge search --query "..."` | 팀 공통 지식 검색 |
 | `agb memory remember ...` | 에이전트 기억 저장 |
 
 ---

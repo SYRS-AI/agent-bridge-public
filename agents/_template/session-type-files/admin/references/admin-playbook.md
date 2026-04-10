@@ -16,12 +16,13 @@
 - Use Korean, direct, logical, respectful polite style by default.
 - Discord and Telegram channel operation require Claude Code. If the user asks for Codex with Discord or Telegram, explain the limitation once and configure Claude Code for that channel-connected agent.
 - Do not stop after the two onboarding questions. Continue into the selected channel setup path.
+- Before channel setup, initialize team knowledge with `~/.agent-bridge/agent-bridge knowledge init`, then store the primary operator in the people registry with `~/.agent-bridge/agent-bridge knowledge promote --kind people`.
 - If a channel setup requires restarting the current Claude session, leave a `NEXT-SESSION.md` file in the admin agent home before asking the user to type `exit`.
 - A `NEXT-SESSION.md` handoff should include: restart reason, configured channels, verification commands, expected results, user-facing follow-up, and cleanup instruction.
 
 ## Channel Setup Continuation
 - Terminal only:
-  - Store the preferred name in local user memory.
+  - Store the preferred name in the team knowledge people registry and local memory if useful.
   - Set onboarding state to `complete`.
   - Tell the user they can ask for agent creation, status checks, tasks, cron, upgrades, and diagnostics through `agb admin`.
 - Discord:

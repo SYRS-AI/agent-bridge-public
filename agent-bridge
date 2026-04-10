@@ -27,6 +27,7 @@ Usage:
   $CLI_NAME escalate question --agent <agent> --question "<text>" [--context "<text>"] [--wait-seconds <seconds>] [--json]
   $CLI_NAME upstream <draft|propose|review> ...
   $CLI_NAME user <set|show> ...
+  $CLI_NAME knowledge <init|capture|promote|search|lint> ...
   $CLI_NAME agent <create|list|show|start|stop|restart|attach> ...
   $CLI_NAME kill <number|all>
   $CLI_NAME attach [number|name]
@@ -89,6 +90,10 @@ Usage:
   $CLI_NAME cron cleanup report [--mode expired-one-shot] [--json]
   $CLI_NAME cron cleanup prune [--mode expired-one-shot] [--dry-run]
   $CLI_NAME memory init --agent <agent> [--user <id[:display-name]>] [--json]
+  $CLI_NAME knowledge init [--team-name <name>] [--json]
+  $CLI_NAME knowledge capture --source chat --text "..."
+  $CLI_NAME knowledge promote --kind people --summary "..."
+  $CLI_NAME knowledge search --query "..."
   $CLI_NAME memory capture --agent <agent> --source discord --user owner --text "..."
   $CLI_NAME memory ingest --agent <agent> --latest
   $CLI_NAME memory promote --agent <agent> --kind shared --page personal-preferences --capture <id>
@@ -115,6 +120,9 @@ Examples:
   $CLI_NAME upstream propose --title "setup fails" --body-file /tmp/issue.md
   $CLI_NAME user set --name "Sean" --timezone Asia/Seoul
   $CLI_NAME user show --json
+  $CLI_NAME knowledge init --team-name "Acme"
+  $CLI_NAME knowledge promote --kind people --summary "Sean is the primary operator."
+  $CLI_NAME knowledge search --query "primary operator"
   $CLI_NAME list
   $CLI_NAME kill 1
   $CLI_NAME kill all
@@ -443,6 +451,10 @@ PY
     user)
       shift
       exec "$BRIDGE_BASH_BIN" "$SCRIPT_DIR/bridge-user.sh" "$@"
+      ;;
+    knowledge)
+      shift
+      exec "$BRIDGE_BASH_BIN" "$SCRIPT_DIR/bridge-knowledge.sh" "$@"
       ;;
     list)
       if [[ $# -ne 1 ]]; then
