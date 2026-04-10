@@ -125,6 +125,62 @@ https://github.com/SYRS-AI/agent-bridge-public 을 설치해줘.
 README를 읽고 bootstrap 해.
 ```
 
+<details>
+<summary>Claude Code installer instructions</summary>
+
+You are installing Agent Bridge for a non-technical user. Follow these steps exactly unless the user explicitly asks for a different install path.
+
+1. Verify prerequisites.
+   - `git --version`
+   - `python3 --version`
+   - `tmux -V`
+   - `claude --version`
+   - On macOS, if `/opt/homebrew/bin/bash` exists, prefer it. If not, warn the user that macOS system Bash 3.2 may be unsupported and ask them to install Homebrew Bash if the scripts fail.
+
+2. Clone or update the public source checkout.
+
+   ```bash
+   if [ -d "$HOME/agent-bridge-public/.git" ]; then
+     git -C "$HOME/agent-bridge-public" pull --ff-only origin main
+   else
+     git clone https://github.com/SYRS-AI/agent-bridge-public "$HOME/agent-bridge-public"
+   fi
+   ```
+
+3. Deploy tracked source files into the live install at `~/.agent-bridge`.
+   Runtime files, agent homes, queue state, logs, backups, and local roster files must be preserved.
+
+   ```bash
+   cd "$HOME/agent-bridge-public"
+   bash scripts/deploy-live-install.sh --target "$HOME/.agent-bridge" --restart-daemon
+   ```
+
+4. Bootstrap the live install.
+   Use Claude Code as the default admin engine. The default admin role is `patch`.
+
+   ```bash
+   cd "$HOME/.agent-bridge"
+   bash bridge-bootstrap.sh --admin patch --engine claude
+   ```
+
+5. Verify the install.
+
+   ```bash
+   "$HOME/.agent-bridge/agent-bridge" status
+   "$HOME/.agent-bridge/agent-bridge" upgrade --dry-run --no-restart-daemon
+   ```
+
+6. Final handoff to the user.
+   Tell the user to close the temporary installer Claude session, open a fresh terminal if needed, then run:
+
+   ```bash
+   agb admin
+   ```
+
+Do not ask the user to learn internal commands unless there is an error. If a command fails, show the failing command, summarize the cause, and continue with the safest fix.
+
+</details>
+
 설치가 끝나면:
 
 ```bash
