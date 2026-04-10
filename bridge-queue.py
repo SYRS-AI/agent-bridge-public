@@ -20,6 +20,13 @@ from typing import Iterable
 OPEN_STATUSES = ("queued", "claimed", "blocked")
 PRIORITY_CHOICES = ("low", "normal", "high", "urgent")
 STATUS_CHOICES = ("queued", "claimed", "blocked", "done", "cancelled")
+OPEN_STATUS_ALIASES = {
+    "in_progress": "claimed",
+    "in-progress": "claimed",
+    "progress": "claimed",
+    "working": "claimed",
+}
+UPDATE_STATUS_CHOICES = (*OPEN_STATUSES, *OPEN_STATUS_ALIASES.keys())
 FAMILY_RULES = (
     "memory-daily",
     "monthly-highlights",
@@ -151,6 +158,18 @@ def normalize_path(path_value: str | None) -> str | None:
     if not path.exists():
         raise SystemExit(f"file not found: {path_value}")
     return str(path.resolve())
+
+
+def normalize_open_status(status: str | None) -> str | None:
+    if status is None:
+        return None
+    normalized = OPEN_STATUS_ALIASES.get(status, status)
+    if normalized not in OPEN_STATUSES:
+        raise SystemExit(
+            f"invalid open task status: {status} "
+            f"(choose from {', '.join(OPEN_STATUSES)}; alias in_progress maps to claimed)"
+        )
+    return normalized
 
 
 def emit_event(
@@ -692,7 +711,7 @@ def cmd_update(args: argparse.Namespace) -> int:
 
         title = args.title.strip() if args.title is not None else task["title"]
         priority = args.priority or task["priority"]
-        status = args.status or task["status"]
+        status = normalize_open_status(args.status) or task["status"]
         body_text = task["body_text"]
         body_path = task["body_path"]
 
@@ -1342,7 +1361,7 @@ def build_parser() -> argparse.ArgumentParser:
     update_parser.add_argument("task_id", type=int)
     update_parser.add_argument("--actor")
     update_parser.add_argument("--title")
-    update_parser.add_argument("--status", choices=OPEN_STATUSES)
+    update_parser.add_argument("--status", choices=UPDATE_STATUS_CHOICES)
     update_parser.add_argument("--priority", choices=PRIORITY_CHOICES)
     update_parser.add_argument("--note")
     update_body_group = update_parser.add_mutually_exclusive_group()

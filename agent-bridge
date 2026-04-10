@@ -49,7 +49,7 @@ Usage:
   $CLI_NAME claim <task-id> [--agent <agent>] [--lease <seconds>]
   $CLI_NAME done <task-id> [--agent <agent>] [--note <text> | --note-file <path>]
   $CLI_NAME cancel <task-id> [--actor <name>] [--note <text> | --note-file <path>]
-  $CLI_NAME update <task-id> [--status queued|claimed|blocked] [--priority ...] [--note ...]
+  $CLI_NAME update <task-id> [--status queued|claimed|blocked|in_progress] [--priority ...] [--note ...]
   $CLI_NAME handoff <task-id> --to <agent> [--from <agent>] [--note <text> | --note-file <path>]
   $CLI_NAME summary [agent...]
   $CLI_NAME worktree list

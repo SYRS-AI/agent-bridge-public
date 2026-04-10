@@ -25,7 +25,7 @@ Usage:
   bash $SCRIPT_DIR/bridge-task.sh claim <task-id> [--agent <agent>] [--lease <seconds>]
   bash $SCRIPT_DIR/bridge-task.sh done <task-id> [--agent <agent>] [--note <text> | --note-file <path>]
   bash $SCRIPT_DIR/bridge-task.sh cancel <task-id> [--actor <name>] [--note <text> | --note-file <path>]
-  bash $SCRIPT_DIR/bridge-task.sh update <task-id> [--status queued|claimed|blocked] [--priority ...] [--title ...] [--note ...]
+  bash $SCRIPT_DIR/bridge-task.sh update <task-id> [--status queued|claimed|blocked|in_progress] [--priority ...] [--title ...] [--note ...]
   bash $SCRIPT_DIR/bridge-task.sh handoff <task-id> --to <agent> [--from <agent>] [--note <text> | --note-file <path>]
   bash $SCRIPT_DIR/bridge-task.sh summary [agent...]
 EOF

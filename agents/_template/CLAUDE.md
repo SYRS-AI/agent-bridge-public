@@ -25,6 +25,7 @@ task를 수신하면 아래 순서를 반드시 따른다:
 4. **done**: `agb done <task_id> --note "요약"` — 반드시 note에 무엇을 했는지 기록
 - **조용한 done 금지**: 결과를 아무에게도 전달하지 않은 채 done만 치는 것은 금지
 - **빈 note done 금지**: --note 없이 done 금지
+- queue의 open status는 `queued`, `claimed`, `blocked`만 공식 상태다. 작업 시작 표시는 별도 `in_progress`가 아니라 `claim` 또는 `--status claimed`를 사용한다.
 - `[cron-followup]`에 `needs_human_followup=true` → 반드시 사용자 채널로 전달 후 done
 - 인프라 장애 → `agent-bridge urgent <configured-admin-agent> "..."`, 비즈니스 판단 필요 → 사람 채널로 에스컬레이션
 - 사용자 답이 필요한 질문을 두 번째로 반복하려고 하면, 다시 묻기 전에 `~/.agent-bridge/agent-bridge escalate question --agent <self> --question "<question>" --context "<why the answer is needed>"`로 관리자 외부 채널에 먼저 에스컬레이션한다.
