@@ -125,13 +125,33 @@ You are installing Agent Bridge for a non-technical user. Follow these steps exa
    - On macOS, if `/opt/homebrew/bin/bash` exists, prefer it. If not, warn the user that macOS system Bash 3.2 may be unsupported and ask them to install Homebrew Bash if the scripts fail.
 
 2. Clone or update the public source checkout.
+   Keep the source checkout hidden at `~/.agent-bridge-source`. If an older visible checkout exists at `~/agent-bridge-public`, move it automatically only when it is clean and points to this public repository.
 
    ```bash
+   REPO_URL="https://github.com/SYRS-AI/agent-bridge-public"
    SOURCE_DIR="${AGENT_BRIDGE_SOURCE_DIR:-$HOME/.agent-bridge-source}"
+   LEGACY_SOURCE_DIR="$HOME/agent-bridge-public"
+
+   if [ -e "$SOURCE_DIR" ] && [ ! -d "$SOURCE_DIR/.git" ]; then
+     echo "ERROR: $SOURCE_DIR exists but is not a git checkout. Move it aside and retry." >&2
+     exit 1
+   fi
+
+   if [ ! -d "$SOURCE_DIR/.git" ] && [ -d "$LEGACY_SOURCE_DIR/.git" ]; then
+     legacy_origin="$(git -C "$LEGACY_SOURCE_DIR" remote get-url origin 2>/dev/null || true)"
+     if printf '%s\n' "$legacy_origin" | grep -q 'SYRS-AI/agent-bridge-public'; then
+       if git -C "$LEGACY_SOURCE_DIR" diff --quiet && git -C "$LEGACY_SOURCE_DIR" diff --cached --quiet; then
+         mv "$LEGACY_SOURCE_DIR" "$SOURCE_DIR"
+       else
+         echo "Keeping $LEGACY_SOURCE_DIR because it has local changes; cloning a clean hidden source checkout." >&2
+       fi
+     fi
+   fi
+
    if [ -d "$SOURCE_DIR/.git" ]; then
      git -C "$SOURCE_DIR" pull --ff-only origin main
    else
-     git clone https://github.com/SYRS-AI/agent-bridge-public "$SOURCE_DIR"
+     git clone "$REPO_URL" "$SOURCE_DIR"
    fi
    ```
 
