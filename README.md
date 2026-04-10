@@ -108,14 +108,17 @@ claude
 Claude Code가 열리면 이렇게 말합니다:
 
 ```text
-https://github.com/SYRS-AI/agent-bridge-public 을 설치해줘.
-README를 읽고 bootstrap 해.
+https://raw.githubusercontent.com/SYRS-AI/agent-bridge-public/main/README.md 를 읽고 Agent Bridge를 설치해줘.
+CLAUDE_INSTALLER_STEPS 블록을 찾아서 그 단계만 그대로 실행해.
+저장소 구조를 추측해서 설치하지 말고, README에 설치 단계가 없다고 판단하지 마.
 ```
 
+<!-- CLAUDE_INSTALLER_STEPS_BEGIN -->
 <details>
 <summary>Claude Code installer instructions</summary>
 
 You are installing Agent Bridge for a non-technical user. Follow these steps exactly unless the user explicitly asks for a different install path.
+If you think this README has no concrete install steps, stop and reread this `CLAUDE_INSTALLER_STEPS` block. Do not infer an install flow from repository structure.
 
 1. Verify prerequisites.
    - `git --version`
@@ -189,6 +192,7 @@ You are installing Agent Bridge for a non-technical user. Follow these steps exa
 Do not ask the user to learn internal commands unless there is an error. If a command fails, show the failing command, summarize the cause, and continue with the safest fix.
 
 </details>
+<!-- CLAUDE_INSTALLER_STEPS_END -->
 
 설치가 끝나면:
 
