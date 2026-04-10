@@ -74,7 +74,7 @@ kill_stale_smoke_tmux_sessions() {
   while IFS= read -r session; do
     [[ -n "$session" ]] || continue
     case "$session" in
-      bridge-smoke-*|bridge-requester-*|auto-start-session-*|always-on-session-*|static-session-*|claude-static-bridge-smoke-*|worker-reuse-*|late-dynamic-agent-*|created-session-*|bootstrap-session-*|bootstrap-wrapper-session-*|broken-channel-*|codex-cli-session-*|project-claude-session-bridge-smoke-*)
+      bridge-smoke-*|bridge-requester-*|auto-start-session-*|always-on-session-*|static-session-*|claude-static-bridge-smoke-*|worker-reuse-*|late-dynamic-agent-*|created-session-*|bootstrap-session-*|bootstrap-wrapper-session-*|broken-channel-*|context-pressure-bridge-smoke-*|codex-cli-session-*|project-claude-session-bridge-smoke-*)
         tmux_kill_session_exact "$session" || true
         ;;
     esac
@@ -3499,6 +3499,63 @@ BRIDGE_STALL_EXPLICIT_IDLE_SECONDS=0 \
 bash "$REPO_ROOT/bridge-daemon.sh" sync >/dev/null
 STALL_RECOVERED_JSON="$("$REPO_ROOT/agent-bridge" audit --action stall_recovered --limit 20 --json)"
 python3 - "$STALL_RECOVERED_JSON" "$STALL_RATE_AGENT" <<'PY'
+import json, sys
+rows = json.loads(sys.argv[1])
+assert any(row.get("target") == sys.argv[2] for row in rows), rows
+PY
+
+log "tracking context pressure separately from process health"
+CONTEXT_PRESSURE_AGENT="context-pressure-$SESSION_NAME"
+CONTEXT_PRESSURE_WORKDIR="$TMP_ROOT/$CONTEXT_PRESSURE_AGENT"
+CONTEXT_PRESSURE_SCRIPT="$TMP_ROOT/context-pressure.py"
+CONTEXT_PRESSURE_INPUT_LOG="$TMP_ROOT/context-pressure-input.log"
+mkdir -p "$CONTEXT_PRESSURE_WORKDIR"
+cat >>"$BRIDGE_ROSTER_LOCAL_FILE" <<EOF
+
+bridge_add_agent_id_if_missing "$CONTEXT_PRESSURE_AGENT"
+BRIDGE_AGENT_DESC["$CONTEXT_PRESSURE_AGENT"]="Context pressure role"
+BRIDGE_AGENT_ENGINE["$CONTEXT_PRESSURE_AGENT"]="claude"
+BRIDGE_AGENT_SESSION["$CONTEXT_PRESSURE_AGENT"]="$CONTEXT_PRESSURE_AGENT"
+BRIDGE_AGENT_WORKDIR["$CONTEXT_PRESSURE_AGENT"]="$CONTEXT_PRESSURE_WORKDIR"
+BRIDGE_AGENT_LAUNCH_CMD["$CONTEXT_PRESSURE_AGENT"]='claude --dangerously-skip-permissions'
+EOF
+cat >"$CONTEXT_PRESSURE_SCRIPT" <<'PY'
+#!/usr/bin/env python3
+import pathlib
+import sys
+
+path = pathlib.Path(sys.argv[1])
+print("Context remaining 8%. Please compact soon.")
+print("❯ ")
+sys.stdout.flush()
+for line in sys.stdin:
+    path.open("a", encoding="utf-8").write(line)
+PY
+chmod +x "$CONTEXT_PRESSURE_SCRIPT"
+: >"$CONTEXT_PRESSURE_INPUT_LOG"
+tmux new-session -d -s "$CONTEXT_PRESSURE_AGENT" "$CONTEXT_PRESSURE_SCRIPT '$CONTEXT_PRESSURE_INPUT_LOG'"
+sleep 1
+bash "$REPO_ROOT/bridge-sync.sh" >/dev/null
+BRIDGE_CONTEXT_PRESSURE_SCAN_INTERVAL_SECONDS=0 \
+bash "$REPO_ROOT/bridge-daemon.sh" sync >/dev/null
+CONTEXT_PRESSURE_TASK_ID="$(python3 "$REPO_ROOT/bridge-queue.py" find-open --agent "$SMOKE_AGENT" --title-prefix "[context-pressure] $CONTEXT_PRESSURE_AGENT " 2>/dev/null || true)"
+[[ "$CONTEXT_PRESSURE_TASK_ID" =~ ^[0-9]+$ ]] || die "expected context-pressure report task"
+CONTEXT_PRESSURE_BODY_FILE="$BRIDGE_SHARED_DIR/context-pressure/$CONTEXT_PRESSURE_AGENT-warning.md"
+[[ -f "$CONTEXT_PRESSURE_BODY_FILE" ]] || die "expected context-pressure report body"
+CONTEXT_PRESSURE_BODY="$(cat "$CONTEXT_PRESSURE_BODY_FILE")"
+assert_contains "$CONTEXT_PRESSURE_BODY" "# Context Pressure Report"
+assert_contains "$CONTEXT_PRESSURE_BODY" "severity: warning"
+assert_contains "$CONTEXT_PRESSURE_BODY" "Context remaining 8%"
+[[ ! -s "$CONTEXT_PRESSURE_INPUT_LOG" ]] || die "context pressure scanner must not inject messages into the active session"
+BRIDGE_CONTEXT_PRESSURE_SCAN_INTERVAL_SECONDS=0 \
+bash "$REPO_ROOT/bridge-daemon.sh" sync >/dev/null
+CONTEXT_PRESSURE_TASK_ID_AGAIN="$(python3 "$REPO_ROOT/bridge-queue.py" find-open --agent "$SMOKE_AGENT" --title-prefix "[context-pressure] $CONTEXT_PRESSURE_AGENT " 2>/dev/null || true)"
+[[ "$CONTEXT_PRESSURE_TASK_ID_AGAIN" == "$CONTEXT_PRESSURE_TASK_ID" ]] || die "expected deduped context-pressure report"
+tmux_kill_session_exact "$CONTEXT_PRESSURE_AGENT" || true
+BRIDGE_CONTEXT_PRESSURE_SCAN_INTERVAL_SECONDS=0 \
+bash "$REPO_ROOT/bridge-daemon.sh" sync >/dev/null
+CONTEXT_RECOVERED_JSON="$("$REPO_ROOT/agent-bridge" audit --action context_pressure_recovered --limit 20 --json)"
+python3 - "$CONTEXT_RECOVERED_JSON" "$CONTEXT_PRESSURE_AGENT" <<'PY'
 import json, sys
 rows = json.loads(sys.argv[1])
 assert any(row.get("target") == sys.argv[2] for row in rows), rows

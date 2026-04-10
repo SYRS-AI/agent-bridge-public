@@ -862,6 +862,317 @@ process_stall_reports() {
   return "$changed"
 }
 
+bridge_context_pressure_decode_excerpt() {
+  local encoded="${1:-}"
+  python3 - "$encoded" <<'PY'
+import base64, sys
+payload = sys.argv[1]
+if not payload:
+    raise SystemExit(0)
+print(base64.b64decode(payload.encode("ascii")).decode("utf-8", errors="ignore"), end="")
+PY
+}
+
+bridge_context_pressure_title_prefix() {
+  local agent="$1"
+  printf '[context-pressure] %s ' "$agent"
+}
+
+bridge_context_pressure_title() {
+  local agent="$1"
+  local severity="$2"
+  printf '[context-pressure] %s (%s)' "$agent" "$severity"
+}
+
+bridge_context_pressure_priority() {
+  local severity="$1"
+  case "$severity" in
+    critical)
+      printf '%s' "urgent"
+      ;;
+    *)
+      printf '%s' "high"
+      ;;
+  esac
+}
+
+bridge_write_context_pressure_report_body() {
+  local agent="$1"
+  local session="$2"
+  local severity="$3"
+  local idle="$4"
+  local first_detected_ts="$5"
+  local matched_pattern="$6"
+  local excerpt="$7"
+  local body_file="$8"
+  local first_detected_iso=""
+
+  first_detected_iso="$(python3 - "$first_detected_ts" <<'PY'
+from datetime import datetime, timezone
+import sys
+try:
+    ts = int(sys.argv[1])
+except Exception:
+    ts = 0
+if ts > 0:
+    print(datetime.fromtimestamp(ts, timezone.utc).astimezone().isoformat())
+PY
+)"
+  mkdir -p "$(dirname "$body_file")"
+  {
+    echo "# Context Pressure Report"
+    echo
+    echo "- agent: $agent"
+    echo "- session: ${session:--}"
+    echo "- severity: $severity"
+    echo "- idle_seconds: $idle"
+    echo "- first_detected_at: ${first_detected_iso:-$(bridge_now_iso)}"
+    echo "- detected_at: $(bridge_now_iso)"
+    if [[ -n "$matched_pattern" ]]; then
+      echo "- matched_pattern: $matched_pattern"
+    fi
+    echo
+    echo "## Recommended Next Action"
+    echo
+    echo "Ask the agent to compact, summarize, or restart with a NEXT-SESSION handoff before context pressure degrades task quality. Treat this separately from process liveness: the session can be running but still need context management."
+    echo
+    echo "## Recent Output"
+    echo
+    echo '```text'
+    printf '%s\n' "$excerpt"
+    echo '```'
+  } >"$body_file"
+}
+
+bridge_clear_context_pressure_state() {
+  local agent="$1"
+  rm -f "$(bridge_agent_context_pressure_state_file "$agent")"
+}
+
+bridge_note_context_pressure_state() {
+  local agent="$1"
+  local severity="$2"
+  local excerpt_hash="$3"
+  local first_detected_ts="$4"
+  local last_detected_ts="$5"
+  local last_scan_ts="$6"
+  local last_report_ts="$7"
+  local task_id="$8"
+  local matched_pattern="${9:-}"
+  local state_file=""
+
+  state_file="$(bridge_agent_context_pressure_state_file "$agent")"
+  mkdir -p "$(dirname "$state_file")"
+  cat >"$state_file" <<EOF
+CONTEXT_PRESSURE_SEVERITY=$(printf '%q' "$severity")
+CONTEXT_PRESSURE_EXCERPT_HASH=$(printf '%q' "$excerpt_hash")
+CONTEXT_PRESSURE_FIRST_DETECTED_TS=$(printf '%q' "$first_detected_ts")
+CONTEXT_PRESSURE_LAST_DETECTED_TS=$(printf '%q' "$last_detected_ts")
+CONTEXT_PRESSURE_LAST_SCAN_TS=$(printf '%q' "$last_scan_ts")
+CONTEXT_PRESSURE_LAST_REPORT_TS=$(printf '%q' "$last_report_ts")
+CONTEXT_PRESSURE_TASK_ID=$(printf '%q' "$task_id")
+CONTEXT_PRESSURE_MATCHED_PATTERN=$(printf '%q' "$matched_pattern")
+EOF
+}
+
+process_context_pressure_reports() {
+  local summary_output="${1:-}"
+  local admin_agent="${BRIDGE_ADMIN_AGENT_ID:-}"
+  local admin_available=0
+  local changed=1
+  local now_ts=0
+  local agent=""
+  local queued=0
+  local claimed=0
+  local blocked=0
+  local active=0
+  local idle=0
+  local last_seen=0
+  local last_nudge=0
+  local session=""
+  local engine=""
+  local workdir=""
+  local state_file=""
+  local had_state=0
+  local previous_severity=""
+  local previous_hash=""
+  local first_detected_ts=0
+  local last_detected_ts=0
+  local last_scan_ts=0
+  local last_report_ts=0
+  local task_id=""
+  local matched_pattern=""
+  local scan_interval="${BRIDGE_CONTEXT_PRESSURE_SCAN_INTERVAL_SECONDS:-60}"
+  local report_cooldown="${BRIDGE_CONTEXT_PRESSURE_REPORT_COOLDOWN_SECONDS:-1800}"
+  local capture=""
+  local analysis_shell=""
+  local severity=""
+  local excerpt_hash=""
+  local excerpt_b64=""
+  local excerpt=""
+  local body_file=""
+  local title=""
+  local title_prefix=""
+  local priority=""
+  local existing_id=""
+  local create_output=""
+  local inactive=0
+
+  [[ "${BRIDGE_CONTEXT_PRESSURE_SCAN_ENABLED:-1}" == "1" ]] || return 1
+  if [[ -n "$admin_agent" ]] && bridge_agent_exists "$admin_agent"; then
+    admin_available=1
+  fi
+  [[ "$scan_interval" =~ ^[0-9]+$ ]] || scan_interval=60
+  [[ "$report_cooldown" =~ ^[0-9]+$ ]] || report_cooldown=1800
+  now_ts="$(date +%s)"
+
+  while IFS=$'\t' read -r agent queued claimed blocked active idle last_seen last_nudge session engine workdir; do
+    [[ -n "$agent" ]] || continue
+    state_file="$(bridge_agent_context_pressure_state_file "$agent")"
+    had_state=0
+    previous_severity=""
+    previous_hash=""
+    first_detected_ts=0
+    last_detected_ts=0
+    last_scan_ts=0
+    last_report_ts=0
+    task_id=""
+    matched_pattern=""
+
+    if [[ -f "$state_file" ]]; then
+      had_state=1
+      # shellcheck source=/dev/null
+      source "$state_file"
+      previous_severity="${CONTEXT_PRESSURE_SEVERITY:-}"
+      previous_hash="${CONTEXT_PRESSURE_EXCERPT_HASH:-}"
+      first_detected_ts="${CONTEXT_PRESSURE_FIRST_DETECTED_TS:-0}"
+      last_detected_ts="${CONTEXT_PRESSURE_LAST_DETECTED_TS:-0}"
+      last_scan_ts="${CONTEXT_PRESSURE_LAST_SCAN_TS:-0}"
+      last_report_ts="${CONTEXT_PRESSURE_LAST_REPORT_TS:-0}"
+      task_id="${CONTEXT_PRESSURE_TASK_ID:-}"
+      matched_pattern="${CONTEXT_PRESSURE_MATCHED_PATTERN:-}"
+    fi
+    [[ "$first_detected_ts" =~ ^[0-9]+$ ]] || first_detected_ts=0
+    [[ "$last_detected_ts" =~ ^[0-9]+$ ]] || last_detected_ts=0
+    [[ "$last_scan_ts" =~ ^[0-9]+$ ]] || last_scan_ts=0
+    [[ "$last_report_ts" =~ ^[0-9]+$ ]] || last_report_ts=0
+    [[ "$active" =~ ^[0-9]+$ ]] || active=0
+    [[ "$idle" =~ ^[0-9]+$ ]] || idle=0
+
+    if (( scan_interval > 0 )) && (( last_scan_ts > 0 )) && (( now_ts - last_scan_ts < scan_interval )); then
+      continue
+    fi
+
+    inactive=0
+    if [[ "$active" != "1" || -z "$session" ]]; then
+      inactive=1
+    elif [[ "$engine" != "claude" && "$engine" != "codex" ]]; then
+      inactive=1
+    elif ! bridge_tmux_session_exists "$session"; then
+      inactive=1
+    fi
+
+    if (( inactive == 1 )); then
+      if (( had_state == 1 )); then
+        bridge_audit_log daemon context_pressure_recovered "$agent" \
+          --detail severity="$previous_severity" \
+          --detail reason=session_inactive
+        bridge_clear_context_pressure_state "$agent"
+        changed=0
+      fi
+      continue
+    fi
+
+    capture="$(bridge_capture_recent "$session" "${BRIDGE_CONTEXT_PRESSURE_CAPTURE_LINES:-160}" 2>/dev/null || true)"
+    analysis_shell=""
+    severity=""
+    matched_pattern=""
+    excerpt_hash=""
+    excerpt_b64=""
+    excerpt=""
+    if [[ -n "$capture" ]]; then
+      analysis_shell="$(printf '%s' "$capture" | python3 "$SCRIPT_DIR/bridge-context-pressure.py" analyze --format shell 2>/dev/null || true)"
+      if [[ -n "$analysis_shell" ]]; then
+        CONTEXT_PRESSURE_SEVERITY=""
+        CONTEXT_PRESSURE_MATCHED_PATTERN=""
+        CONTEXT_PRESSURE_EXCERPT_HASH=""
+        CONTEXT_PRESSURE_EXCERPT_B64=""
+        # shellcheck disable=SC1091
+        source /dev/stdin <<<"$analysis_shell"
+        severity="${CONTEXT_PRESSURE_SEVERITY:-}"
+        matched_pattern="${CONTEXT_PRESSURE_MATCHED_PATTERN:-}"
+        excerpt_hash="${CONTEXT_PRESSURE_EXCERPT_HASH:-}"
+        excerpt_b64="${CONTEXT_PRESSURE_EXCERPT_B64:-}"
+        excerpt="$(bridge_context_pressure_decode_excerpt "$excerpt_b64")"
+      fi
+    fi
+
+    if [[ -z "$severity" ]]; then
+      if (( had_state == 1 )); then
+        bridge_audit_log daemon context_pressure_recovered "$agent" \
+          --detail severity="$previous_severity" \
+          --detail reason=no_pattern
+        bridge_clear_context_pressure_state "$agent"
+        changed=0
+      fi
+      continue
+    fi
+
+    if [[ "$previous_severity" != "$severity" || "$previous_hash" != "$excerpt_hash" ]]; then
+      first_detected_ts="$now_ts"
+      last_report_ts=0
+      task_id=""
+      bridge_audit_log daemon context_pressure_detected "$agent" \
+        --detail severity="$severity" \
+        --detail excerpt_hash="$excerpt_hash"
+      changed=0
+    fi
+    last_detected_ts="$now_ts"
+    title="$(bridge_context_pressure_title "$agent" "$severity")"
+    title_prefix="$(bridge_context_pressure_title_prefix "$agent")"
+    priority="$(bridge_context_pressure_priority "$severity")"
+    body_file="$(bridge_agent_context_pressure_report_file "$agent" "$severity")"
+    bridge_write_context_pressure_report_body "$agent" "$session" "$severity" "$idle" "$first_detected_ts" "$matched_pattern" "$excerpt" "$body_file"
+
+    if [[ "$agent" == "$admin_agent" ]] && bridge_agent_has_notify_transport "$admin_agent"; then
+      if (( last_report_ts == 0 || now_ts - last_report_ts >= report_cooldown )); then
+        bridge_notify_send "$admin_agent" "$title" "Context pressure detected for ${agent}; compact or restart with handoff before quality degrades." "" "$priority" "${BRIDGE_DAEMON_NOTIFY_DRY_RUN:-0}" >/dev/null 2>&1 || true
+        last_report_ts="$now_ts"
+        bridge_audit_log daemon context_pressure_report "$admin_agent" \
+          --detail agent="$agent" \
+          --detail severity="$severity" \
+          --detail mode=direct_notify
+        changed=0
+      fi
+    elif (( admin_available == 1 )); then
+      existing_id="$(bridge_queue_cli find-open --agent "$admin_agent" --title-prefix "$title_prefix" 2>/dev/null || true)"
+      if [[ "$existing_id" =~ ^[0-9]+$ ]]; then
+        bridge_queue_cli update "$existing_id" --actor daemon --title "$title" --priority "$priority" --body-file "$body_file" >/dev/null 2>&1 || true
+        task_id="$existing_id"
+        last_report_ts="$now_ts"
+        changed=0
+      elif (( last_report_ts == 0 || now_ts - last_report_ts >= report_cooldown )); then
+        create_output="$(bridge_queue_cli create --to "$admin_agent" --from daemon --priority "$priority" --title "$title" --body-file "$body_file" 2>/dev/null || true)"
+        if [[ "$create_output" =~ created\ task\ \#([0-9]+) ]]; then
+          task_id="${BASH_REMATCH[1]}"
+          last_report_ts="$now_ts"
+          changed=0
+        fi
+      fi
+      if [[ -n "$task_id" ]]; then
+        bridge_audit_log daemon context_pressure_report "$admin_agent" \
+          --detail agent="$agent" \
+          --detail severity="$severity" \
+          --detail task_id="$task_id"
+      fi
+    fi
+
+    bridge_note_context_pressure_state "$agent" "$severity" "$excerpt_hash" "$first_detected_ts" "$last_detected_ts" "$now_ts" "$last_report_ts" "$task_id" "$matched_pattern"
+  done <<<"$summary_output"
+
+  return "$changed"
+}
+
 bridge_watchdog_problem_key() {
   local report_json="$1"
   python3 - "$report_json" <<'PY'
@@ -2101,6 +2412,9 @@ cmd_sync_cycle() {
     changed=0
   fi
   if [[ -n "$summary_output" ]] && process_stall_reports "$summary_output"; then
+    changed=0
+  fi
+  if [[ -n "$summary_output" ]] && process_context_pressure_reports "$summary_output"; then
     changed=0
   fi
   if refresh_agent_heartbeats; then

@@ -470,6 +470,12 @@ agb status
 
 모든 에이전트의 현재 상태, 큐 적체, idle 시간, 채널 연결 상태를 한눈에 보여줍니다.
 
+### 복원력 마커
+
+데몬은 에이전트가 살아 있는지와 별개로 여러 복원력 상태를 marker로 추적합니다. stall, crash-loop, 채널 health, context pressure는 서로 다른 상태로 기록되고, 필요한 경우 admin 큐나 외부 채널로 에스컬레이션됩니다.
+
+특히 context pressure는 프로세스 장애가 아닙니다. 세션이 정상 실행 중이어도 대화가 길어져 compaction, `NEXT-SESSION.md` handoff, 또는 재시작이 필요한 상태를 별도로 표시합니다.
+
 ---
 
 ## 명령어 요약

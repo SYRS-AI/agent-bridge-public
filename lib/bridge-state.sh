@@ -840,6 +840,17 @@ bridge_agent_stall_report_file() {
   printf '%s/stall/%s-%s.md' "$BRIDGE_SHARED_DIR" "$agent" "$classification"
 }
 
+bridge_agent_context_pressure_state_file() {
+  local agent="$1"
+  printf '%s/context-pressure/%s.env' "$BRIDGE_STATE_DIR" "$agent"
+}
+
+bridge_agent_context_pressure_report_file() {
+  local agent="$1"
+  local severity="${2:-warning}"
+  printf '%s/context-pressure/%s-%s.md' "$BRIDGE_SHARED_DIR" "$agent" "$severity"
+}
+
 bridge_agent_write_crash_report() {
   local agent="$1"
   local engine="$2"
