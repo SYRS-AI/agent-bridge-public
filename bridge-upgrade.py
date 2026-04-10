@@ -603,7 +603,7 @@ def merge_text_versions(base: bytes, live: bytes, upstream: bytes) -> tuple[str,
         )
         if proc.returncode == 0:
             return ("clean", proc.stdout)
-        if proc.returncode == 1:
+        if proc.returncode > 0 and proc.stdout:
             return ("conflict", proc.stdout)
         raise RuntimeError(proc.stderr.decode("utf-8", errors="replace").strip() or "git merge-file failed")
 

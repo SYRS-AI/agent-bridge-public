@@ -370,6 +370,12 @@ cat >"$BRIDGE_CLAUDE_INSTALLED_PLUGINS_FILE" <<'EOF'
   }
 }
 EOF
+cat >"$TMP_ROOT/missing-installed-plugins.json" <<'EOF'
+{
+  "version": 1,
+  "plugins": {}
+}
+EOF
 mkdir -p "$BRIDGE_CLAUDE_CHANNELS_HOME/telegram" "$BRIDGE_CLAUDE_CHANNELS_HOME/discord"
 cat >"$BRIDGE_CLAUDE_CHANNELS_HOME/telegram/.env" <<'EOF'
 TELEGRAM_BOT_TOKEN=plugin-telegram-token
@@ -1268,6 +1274,13 @@ MISSING_CHANNEL_SUPPRESSED_LAUNCH="$("$BASH4_BIN" -c '
   BRIDGE_AGENT_SUPPRESS_MISSING_CHANNELS=1 bridge_agent_launch_cmd "'"$CREATED_AGENT"'"
 ')"
 assert_not_contains "$MISSING_CHANNEL_SUPPRESSED_LAUNCH" "--channels plugin:telegram@claude-plugins-official"
+MISSING_CHANNEL_SUPPRESSED_PLUGIN_CHECK="$(BRIDGE_CLAUDE_INSTALLED_PLUGINS_FILE="$TMP_ROOT/missing-installed-plugins.json" "$BASH4_BIN" -c '
+  source "'"$REPO_ROOT"'/bridge-lib.sh"
+  bridge_load_roster
+  BRIDGE_AGENT_SUPPRESS_MISSING_CHANNELS=1 bridge_ensure_claude_launch_channel_plugins "'"$CREATED_AGENT"'"
+  printf ok
+')"
+assert_contains "$MISSING_CHANNEL_SUPPRESSED_PLUGIN_CHECK" "ok"
 MEMORY_CAPTURE_JSON="$("$REPO_ROOT/agent-bridge" memory capture --agent "$CREATED_AGENT" --user owner --source telegram --author "Owner" --channel "chat-1" --text "I prefer concise morning updates." --json)"
 MEMORY_CAPTURE_ID="$(python3 - "$MEMORY_CAPTURE_JSON" <<'PY'
 import json
@@ -1367,6 +1380,12 @@ SETUP_CREATED_AGENT_OUTPUT="$("$REPO_ROOT/agent-bridge" setup agent "$CREATED_AG
 assert_contains "$SETUP_CREATED_AGENT_OUTPUT" "telegram_dir: $BRIDGE_AGENT_HOME_ROOT/$CREATED_AGENT/.telegram"
 assert_contains "$SETUP_CREATED_AGENT_OUTPUT" "telegram_allow_from: 123456789"
 assert_contains "$SETUP_CREATED_AGENT_OUTPUT" "channel_status: ok"
+READY_CHANNEL_PLUGIN_CHECK="$(BRIDGE_CLAUDE_INSTALLED_PLUGINS_FILE="$TMP_ROOT/missing-installed-plugins.json" "$BASH4_BIN" -c '
+  source "'"$REPO_ROOT"'/bridge-lib.sh"
+  bridge_load_roster
+  bridge_ensure_claude_launch_channel_plugins "'"$CREATED_AGENT"'"
+' 2>&1 || true)"
+assert_contains "$READY_CHANNEL_PLUGIN_CHECK" "Claude plugin registry is missing 'telegram@claude-plugins-official' in test mode."
 CREATE_LIST_JSON="$("$REPO_ROOT/agent-bridge" agent list --json)"
 CREATE_SHOW_JSON="$("$REPO_ROOT/agent-bridge" agent show "$CREATED_AGENT" --json)"
 python3 - "$CREATE_LIST_JSON" "$CREATE_SHOW_JSON" "$CREATED_AGENT" "$SMOKE_AGENT" <<'PY'

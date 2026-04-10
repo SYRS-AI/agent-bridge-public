@@ -151,6 +151,10 @@ while true; do
   LAUNCH_CMD="$(bridge_agent_launch_cmd "$AGENT")"
   [[ -n "$LAUNCH_CMD" ]] || bridge_die "'$AGENT'의 launch command가 비어 있습니다."
 
+  if [[ "$ENGINE" == "claude" ]]; then
+    bridge_ensure_claude_launch_channel_plugins "$AGENT"
+  fi
+
   log_line "실행: ${LAUNCH_CMD}"
   if [[ -f "$ERRFILE" ]]; then
     local_err_size_before="$(wc -c <"$ERRFILE" 2>/dev/null || echo 0)"

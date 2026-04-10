@@ -29,6 +29,7 @@
   - If the user does not have them, explain the shortest path: Discord Developer Portal -> New Application -> Bot token -> Message Content Intent -> Bot Permissions integer -> copy channel ID with Developer Mode enabled.
   - Run `~/.agent-bridge/agent-bridge setup discord <admin-agent> --token <token> --channel <channel-id> --yes`.
   - Ensure local roster config contains the Discord plugin channel and primary Discord channel ID for the admin agent.
+  - Confirm `claude plugin list` shows `discord@claude-plugins-official` enabled if MCP plugin errors appear.
   - Provide the invite URL: `https://discord.com/oauth2/authorize?client_id=<application-id>&permissions=<permissions-integer>&scope=bot%20applications.commands`.
   - Write `NEXT-SESSION.md`, set `Onboarding State: complete`, and verify both files before asking for `exit`.
   - Tell the user: `현재 Claude 세션에는 새 설정이 아직 완전히 붙지 않을 수 있습니다. 이 세션에서 exit로 종료하면 바깥 쉘로 돌아가고, 온보딩 완료된 admin은 백그라운드에서 다시 뜹니다. 그 다음 바깥 쉘에서 agb admin을 다시 실행하세요.`
@@ -37,6 +38,7 @@
   - If the user does not have them, explain the shortest path: create a bot with BotFather, send the bot one message, then obtain IDs through `getUpdates` or a trusted Telegram ID helper bot.
   - Run `~/.agent-bridge/agent-bridge setup telegram <admin-agent> --token <token> --allow-from <user-id> --default-chat <chat-id> --yes`.
   - Ensure local roster config contains the Telegram plugin channel for the admin agent.
+  - Confirm `claude plugin list` shows `telegram@claude-plugins-official` enabled if MCP plugin errors appear.
   - Write `NEXT-SESSION.md`, set `Onboarding State: complete`, and verify both files before asking for `exit`.
   - Tell the user: `현재 Claude 세션에는 새 설정이 아직 완전히 붙지 않을 수 있습니다. 이 세션에서 exit로 종료하면 바깥 쉘로 돌아가고, 온보딩 완료된 admin은 백그라운드에서 다시 뜹니다. 그 다음 바깥 쉘에서 agb admin을 다시 실행하세요.`
 - During first-run admin onboarding, do not tell the user to run `agent start patch`, `agent restart patch`, or `start patch`. Keep the user-facing command consistent: `agb admin`.

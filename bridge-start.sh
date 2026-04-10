@@ -228,7 +228,11 @@ if [[ $DRY_RUN -eq 1 ]]; then
 fi
 
 if [[ "$ENGINE" == "claude" ]]; then
-  bridge_ensure_claude_channel_plugins "$AGENT"
+  if [[ $SUPPRESS_MISSING_CHANNELS -eq 1 ]]; then
+    BRIDGE_AGENT_SUPPRESS_MISSING_CHANNELS=1 bridge_ensure_claude_launch_channel_plugins "$AGENT"
+  else
+    bridge_ensure_claude_launch_channel_plugins "$AGENT"
+  fi
 fi
 
 bridge_agent_clear_idle_marker "$AGENT"

@@ -1058,12 +1058,9 @@ bridge_ensure_agent_bridge_claude_marketplace() {
   claude plugin marketplace add --scope user "$BRIDGE_SCRIPT_DIR" >/dev/null
 }
 
-bridge_ensure_claude_channel_plugins() {
-  local agent="$1"
-  local channels=""
+bridge_ensure_claude_channel_plugins_for_csv() {
+  local channels="$1"
 
-  [[ "$(bridge_agent_engine "$agent")" == "claude" ]] || return 0
-  channels="$(bridge_agent_channels_csv "$agent")"
   [[ -n "$channels" ]] || return 0
 
   if bridge_channel_csv_contains "$channels" "plugin:discord"; then
@@ -1076,6 +1073,20 @@ bridge_ensure_claude_channel_plugins() {
     bridge_ensure_agent_bridge_claude_marketplace
     bridge_ensure_claude_plugin_enabled "teams@agent-bridge"
   fi
+}
+
+bridge_ensure_claude_channel_plugins() {
+  local agent="$1"
+
+  [[ "$(bridge_agent_engine "$agent")" == "claude" ]] || return 0
+  bridge_ensure_claude_channel_plugins_for_csv "$(bridge_agent_channels_csv "$agent")"
+}
+
+bridge_ensure_claude_launch_channel_plugins() {
+  local agent="$1"
+
+  [[ "$(bridge_agent_engine "$agent")" == "claude" ]] || return 0
+  bridge_ensure_claude_channel_plugins_for_csv "$(bridge_agent_launch_channels_csv "$agent")"
 }
 
 bridge_agent_notify_kind() {
