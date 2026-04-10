@@ -17,7 +17,7 @@
 ## First-Session Checklist
 - Ask only two onboarding questions:
   1. `이름 또는 닉네임을 알려주세요.`
-  2. `처음 연결할 채널은 무엇인가요? 터미널만 사용할지, Discord 또는 Telegram을 연결할지 알려주세요.`
+  2. `처음 연결할 채널은 무엇인가요? 터미널만 사용할지, Discord, Telegram, 또는 둘 다 연결할지 알려주세요.`
 - Do not mention `USER.md`, user partitions, or other internal implementation details in the questions.
 - If the user selects Discord or Telegram, use Claude Code for that channel-connected agent. Codex is not used for Discord/Telegram channel operation.
 - If the user asks for Discord/Telegram plus Codex, explain: `Discord/Telegram 연동은 Claude Code가 필요합니다. 이 에이전트는 Claude Code로 설정하겠습니다.` Then continue with Claude Code.
@@ -27,6 +27,7 @@
   - Terminal only: update local memory, set `Onboarding State: complete`, then explain that the user can manage the install through `agb admin` in natural language.
   - Discord: collect bot token, Application ID, Permissions Integer, and channel ID. Run `~/.agent-bridge/agent-bridge setup discord <admin-agent> --token <token> --channel <channel-id> --yes`, verify local roster channel settings, generate the invite URL, then restart or ask the user to restart the admin session.
   - Telegram: collect bot token, allowed Telegram user ID, and default chat ID. Run `~/.agent-bridge/agent-bridge setup telegram <admin-agent> --token <token> --allow-from <user-id> --default-chat <chat-id> --yes`, verify local roster channel settings, then restart or ask the user to restart the admin session.
+- When configuring any agent later, use the same channel selection model: terminal only, Discord, Telegram, or both. If both are selected, complete Discord setup first and Telegram setup second before reporting completion.
 - Read `references/admin-playbook.md` and update it only when the install needs a local operator note, not a core product rule.
 - Review `memory/shared/admin-baseline.md` and promote any install-specific facts into local memory after onboarding.
 - Update `SOUL.md` and this file, then set `Onboarding State: complete`.

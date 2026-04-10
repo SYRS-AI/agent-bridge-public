@@ -55,7 +55,7 @@ task를 수신하면 아래 순서를 반드시 따른다:
 ## Admin First-Run Onboarding Defaults
 - `SESSION-TYPE.md`의 Session Type이 `admin`이고 Onboarding State가 `pending`이면, 사용자에게는 필요한 것만 짧게 묻는다.
 - 질문 1: `이름 또는 닉네임을 알려주세요.`
-- 질문 2: `처음 연결할 채널은 무엇인가요? 터미널만 사용할지, Discord 또는 Telegram을 연결할지 알려주세요.`
+- 질문 2: `처음 연결할 채널은 무엇인가요? 터미널만 사용할지, Discord, Telegram, 또는 둘 다 연결할지 알려주세요.`
 - 내부 파일명, `USER.md`, 사용자 partition 같은 구현 세부사항은 질문 문구에 넣지 않는다.
 - Discord 또는 Telegram을 선택하면 해당 에이전트 엔진은 Claude Code로 설정한다. Codex는 현재 외부 채널 연동용 엔진으로 사용하지 않는다.
 - 사용자가 Discord/Telegram과 Codex를 함께 선택하면, "Discord/Telegram 연동은 Claude Code가 필요합니다. 이 에이전트는 Claude Code로 설정하겠습니다."라고 설명하고 Claude Code로 진행한다.
@@ -65,6 +65,17 @@ task를 수신하면 아래 순서를 반드시 따른다:
 - 터미널만 선택한 경우: `SOUL.md`, `SESSION-TYPE.md`, 사용자 메모리를 갱신하고 `Onboarding State: complete`로 바꾼 뒤 `agb status`, `agb agent create`, `agb task create`, `agb upgrade`를 자연어로 요청하면 된다고 안내한다.
 - Discord를 선택한 경우: Discord bot token, Application ID, Permissions Integer, 연결할 channel ID를 받는다. 값이 없으면 Discord Developer Portal에서 만드는 방법을 짧게 안내한다. 그 다음 `~/.agent-bridge/agent-bridge setup discord <admin-agent> --token <token> --channel <channel-id> --yes`를 실행하고, roster의 `BRIDGE_AGENT_CHANNELS["<admin-agent>"]`와 `BRIDGE_AGENT_DISCORD_CHANNEL_ID["<admin-agent>"]`가 맞는지 확인한 뒤 admin 세션 재시작을 안내한다. 초대 URL은 `https://discord.com/oauth2/authorize?client_id=<application-id>&permissions=<permissions-integer>&scope=bot%20applications.commands` 형식으로 제공한다.
 - Telegram을 선택한 경우: Telegram bot token, 허용할 사용자 ID, default chat ID를 받는다. 값이 없으면 BotFather로 bot token을 만들고, 봇에게 메시지를 보낸 뒤 `getUpdates` 또는 user/chat ID 확인 봇으로 ID를 확인하는 방법을 짧게 안내한다. 그 다음 `~/.agent-bridge/agent-bridge setup telegram <admin-agent> --token <token> --allow-from <user-id> --default-chat <chat-id> --yes`를 실행하고, roster의 `BRIDGE_AGENT_CHANNELS["<admin-agent>"]`가 Telegram plugin으로 설정됐는지 확인한 뒤 admin 세션 재시작을 안내한다.
+
+## Channel Setup Protocol
+- 사용자가 어떤 에이전트든 새로 만들거나 설정하면서 채널을 언급하면, 먼저 선택지를 명확히 확인한다: `터미널만`, `Discord`, `Telegram`, `Discord와 Telegram 둘 다`.
+- Discord 또는 Telegram을 하나라도 선택하면 해당 에이전트는 Claude Code 엔진이어야 한다. Codex 요청과 외부 채널 요청이 충돌하면, 이유를 한 문장으로 설명하고 Claude Code로 진행한다.
+- Discord만 선택하면 Discord setup만 진행한다.
+- Telegram만 선택하면 Telegram setup만 진행한다.
+- Discord와 Telegram 둘 다 선택하면 둘 다 설정한다. 기본 순서는 Discord 먼저, Telegram 다음이다. 첫 번째 설정이 끝났다고 멈추지 말고 두 번째 설정까지 이어간다.
+- Discord setup에는 bot token, Application ID, Permissions Integer, channel ID가 필요하다. 부족하면 받는 방법을 안내하고 값을 받은 뒤 `~/.agent-bridge/agent-bridge setup discord <agent> --token <token> --channel <channel-id> --yes`를 실행한다.
+- Telegram setup에는 bot token, allowed user ID, default chat ID가 필요하다. 부족하면 받는 방법을 안내하고 값을 받은 뒤 `~/.agent-bridge/agent-bridge setup telegram <agent> --token <token> --allow-from <user-id> --default-chat <chat-id> --yes`를 실행한다.
+- setup 후에는 roster의 `BRIDGE_AGENT_CHANNELS["<agent>"]`가 선택한 plugin 채널과 일치하는지 확인한다. Discord는 `BRIDGE_AGENT_DISCORD_CHANNEL_ID["<agent>"]`도 확인한다.
+- 채널 설정이 끝나면 해당 에이전트를 재시작하거나 사용자에게 재시작 명령을 안내한다.
 <!-- END AGENT BRIDGE DOC MIGRATION -->
 
 너는 **<Agent Name>**야. <한 줄 역할 설명>.

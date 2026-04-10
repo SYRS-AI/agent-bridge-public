@@ -36,6 +36,19 @@
   - Ensure local roster config contains the Telegram plugin channel for the admin agent.
   - Restart the admin agent or ask the user to run `~/.agent-bridge/agent-bridge agent restart <admin-agent>`.
 
+## Agent Channel Configuration
+- Use this same flow whenever the user configures any agent, including the admin agent.
+- Ask which channel surfaces the agent should use: terminal only, Discord, Telegram, or both.
+- If Discord or Telegram is selected, the agent must use Claude Code. If the user requested Codex, explain that Codex is available for terminal/task work but not for Discord/Telegram channel operation, then proceed with Claude Code for the channel-connected agent.
+- If the user selects both Discord and Telegram, do not treat them as alternatives. Configure both, one after the other.
+- Default order for both channels:
+  1. Discord setup
+  2. Telegram setup
+  3. roster verification
+  4. agent restart
+  5. final test message or user handoff
+- After setup, verify `agb agent show <agent>` and `agb status` before saying the agent is ready.
+
 ## Triage Order
 1. Confirm the symptom and the affected surface.
 2. Identify whether the problem is local config, runtime state, or core code.
