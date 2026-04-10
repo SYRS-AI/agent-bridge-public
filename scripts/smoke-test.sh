@@ -1568,6 +1568,18 @@ assert_contains "$CLAUDE_LAUNCH_NO_CONTINUE" "claude --dangerously-skip-permissi
 [[ "$CLAUDE_LAUNCH_NO_CONTINUE" != *" -c "* ]] || die "static Claude launch still contains -c"
 [[ "$CLAUDE_LAUNCH_NO_CONTINUE" != *"'DISCORD_STATE_DIR="* ]] || die "static Claude env prefix should not be shell-quoted"
 
+CLAUDE_LAUNCH_MULTI_CHANNEL="$("$BASH4_BIN" -c '
+  source "'"$REPO_ROOT"'/bridge-lib.sh"
+  bridge_load_roster
+  BRIDGE_AGENT_CONTINUE["claude-static"]="0"
+  BRIDGE_AGENT_CHANNELS["claude-static"]="plugin:discord@claude-plugins-official,plugin:telegram@claude-plugins-official"
+  bridge_agent_launch_cmd "claude-static"
+')"
+assert_contains "$CLAUDE_LAUNCH_MULTI_CHANNEL" "--channels plugin:discord@claude-plugins-official --channels plugin:telegram@claude-plugins-official"
+assert_not_contains "$CLAUDE_LAUNCH_MULTI_CHANNEL" "--channels plugin:discord@claude-plugins-official,plugin:telegram@claude-plugins-official"
+assert_contains "$CLAUDE_LAUNCH_MULTI_CHANNEL" "DISCORD_STATE_DIR=$CLAUDE_STATIC_WORKDIR/.discord"
+assert_contains "$CLAUDE_LAUNCH_MULTI_CHANNEL" "TELEGRAM_STATE_DIR=$CLAUDE_STATIC_WORKDIR/.telegram"
+
 CLAUDE_LAUNCH_CONTINUE="$("$BASH4_BIN" -c '
   source "'"$REPO_ROOT"'/bridge-lib.sh"
   bridge_load_roster

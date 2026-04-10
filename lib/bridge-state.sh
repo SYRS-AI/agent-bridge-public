@@ -239,8 +239,8 @@ for item in [*existing, *required]:
     merged.append(item)
 
 rebuilt = ["claude", *filtered]
-if merged:
-    rebuilt.extend(["--channels", ",".join(merged)])
+for item in merged:
+    rebuilt.extend(["--channels", item])
 
 quoted = " ".join(shlex.quote(token) for token in rebuilt)
 print(f"{env_prefix}{quoted}" if env_prefix else quoted)
