@@ -1,6 +1,6 @@
 # Agent Bridge
 
-[![CI](https://github.com/SYRS-AI/agent-bridge/actions/workflows/ci.yml/badge.svg)](https://github.com/SYRS-AI/agent-bridge/actions/workflows/ci.yml)
+[![CI](https://github.com/SYRS-AI/agent-bridge-public/actions/workflows/ci.yml/badge.svg)](https://github.com/SYRS-AI/agent-bridge-public/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](./LICENSE)
 
 **AI 에이전트 팀을 만들어서 회사 업무를 자동화하세요.**
@@ -137,23 +137,27 @@ agb admin
 
 ## Discord 연결하기
 
-에이전트가 Discord에서 일하려면 Discord 봇이 필요합니다. 패치를 디스코드에 연결해봅니다.
-1. 먼저 PC에서 디스코드를 실행하고 좌측 하단에 User Settings(기어 아이콘) -> Advanced -> Developer Mode 를 On 해주세요.
-2. Discord 를 실행하여 #Patch 라는 채널을 만들어 줍니다.
-3. 채널명에서 마우스 오른쪽 키를 클릭 후 Copy Channel ID를 합니다.
+에이전트가 Discord에서 일하려면 Discord 봇이 필요합니다. 먼저 관리자 에이전트인 패치를 Discord에 연결해봅니다.
+
+먼저 Discord에서:
+
+1. 좌측 하단 **User Settings**(기어 아이콘) → **Advanced** → **Developer Mode**를 켭니다.
+2. 서버에 `#patch` 채널을 만듭니다.
+3. 채널명에서 마우스 오른쪽 클릭 → **Copy Channel ID**로 채널 ID를 복사합니다.
    
 ### 1. Discord 봇 만들기
 
 [Discord Developer Portal](https://discord.com/developers/applications)에서:
 
 1. **New Application** → 이름 입력 (예: "Patch")
-2. installation 메뉴 -> Install Link -> None
-3. **Bot** 탭 → Username 설정, public bot 끄기
-4. **Privileged Gateway Intents** → Server Members Intent 켜기, **Message Content Intent** 켜기
-5. Bot permissions -> Administrator 체크(디스코드에 익숙한 경우 필요한 권한 만 주셔도 됩니다)
-   || 패치가 아닌 일반 에이전트의 경우 View Channels, Send Messages, Manage Messages, Embed Links, Attach Files, Read Message History, Add Reactions 정도 권한을 주시면 됩니다.
+2. **General Information** → **Application ID** 복사
+3. **Installation** → **Install Link**를 `None`으로 설정
+4. **Bot** 탭 → Username 설정, **Public Bot** 끄기
+5. **Privileged Gateway Intents** → **Message Content Intent** 켜기
 6. **Reset Token** 버튼 클릭 → 토큰 복사
-7. 제일 하단에 Permissions Integer 복사
+7. **Bot Permissions**에서 권한 선택 후 **Permissions Integer** 복사
+
+권한은 처음에는 단순하게 `Administrator`로 시작할 수 있습니다. 운영 서버에서 최소 권한으로 줄이고 싶다면 `View Channels`, `Send Messages`, `Manage Messages`, `Embed Links`, `Attach Files`, `Read Message History`, `Add Reactions` 정도를 부여하세요.
 
 ### 2. 패치(터미널)에게 설정 맡기기
 
@@ -163,13 +167,15 @@ agb admin
 
 ```text
 Discord 봇을 연결해줘.
-토큰은 [복사한 토큰]이야. Permissions Integer는 [복사한 숫자]야.
-패치 에이전트를 #patch 채널([복사한 채널 아이디 숫자])에 연결해줘.
-봇을 디스코드 서버에 초대하게 필요한 링크도 생성해서 출력해줘.
+토큰은 [복사한 토큰]이야.
+Application ID는 [복사한 Application ID]야.
+Permissions Integer는 [복사한 숫자]야.
+패치 에이전트를 #patch 채널([복사한 채널 ID])에 연결해줘.
+봇을 Discord 서버에 초대할 링크도 생성해줘.
 ```
 
 관리자 에이전트가 토큰 저장, 채널 매핑, 에이전트 재시작까지 처리합니다.
-서버 초대용 링크를 눌러서 디스코드 서버에 봇을 넣어줍니다.
+서버 초대용 링크를 눌러 Discord 서버에 봇을 넣어주면 연결이 끝납니다.
 
 ### 지원 채널
 
@@ -214,7 +220,7 @@ Discord에 상주하며 영속적 메모리를 가지고 지속 근무하는 에
 
 ### 다이나믹 에이전트 (Dynamic)
 
-사용자가 직접 만들어서 쓰고 닫을수 있는 인스턴트 에이전트입니다. 기존 클로드코드나 코덱스 사용 경험을 생각하시면 됩니다.
+사용자가 직접 만들어서 쓰고 닫을 수 있는 인스턴트 에이전트입니다. 기존 Claude Code나 Codex 사용 경험을 생각하면 됩니다.
 
 ```bash
 # Claude Code 기반 다이나믹 에이전트
@@ -286,7 +292,7 @@ agb status
 | `agb attach <name>` | 특정 에이전트 세션에 직접 접속 |
 | `agb --claude --name <name>` | Claude Code 다이나믹 에이전트 생성 |
 | `agb --codex --name <name>` | Codex 다이나믹 에이전트 생성 |
-| `agb upgrade` | 최신 버전으로 업그레이드 | <-- 션 메시지: 여기에 --pull --restart-daemon 옵션이 같이 붙어 있었는데 이런거 너무 복잡해 그냥 agb upgrade 로 알아서 다 돌아가게 변경해줘.
+| `agb upgrade` | 최신 버전으로 업그레이드 |
 
 ### 관리자 에이전트가 주로 쓰는 것
 

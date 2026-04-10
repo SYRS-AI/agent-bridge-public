@@ -11,6 +11,8 @@ SOURCE_ROOT="$SCRIPT_DIR"
 TARGET_ROOT="$HOME/.agent-bridge"
 SUBCOMMAND="apply"
 PULL=0
+PULL_EXPLICIT=0
+SOURCE_EXPLICIT=0
 DRY_RUN=0
 RESTART_DAEMON=1
 JSON=0
@@ -24,7 +26,7 @@ ANALYSIS_JSON='{}'
 usage() {
   cat <<EOF
 Usage:
-  $(basename "$0") [--source <repo-dir>] [--target <bridge-home>] [--pull] [--restart-daemon|--no-restart-daemon] [--dry-run] [--json] [--allow-dirty] [--strict-merge] [--no-backup] [--no-migrate-agents]
+  $(basename "$0") [--source <repo-dir>] [--target <bridge-home>] [--pull|--no-pull] [--restart-daemon|--no-restart-daemon] [--dry-run] [--json] [--allow-dirty] [--strict-merge] [--no-backup] [--no-migrate-agents]
   $(basename "$0") analyze [--source <repo-dir>] [--target <bridge-home>] [--json]
   $(basename "$0") rollback [--target <bridge-home>] [--backup-root <dir>] [--restart-daemon|--no-restart-daemon] [--dry-run] [--json]
 
@@ -36,6 +38,7 @@ customizations such as:
 - live agent homes under agents/<agent>/
 
 The repo checkout remains source of truth for core code. Live-only operator changes are preserved.
+When run from an installed live copy without --source, the last recorded source checkout is reused and pulled automatically.
 EOF
 }
 
@@ -53,6 +56,7 @@ while [[ $# -gt 0 ]]; do
     --source)
       [[ $# -lt 2 ]] && bridge_die "--source 뒤에 값을 지정하세요."
       SOURCE_ROOT="$2"
+      SOURCE_EXPLICIT=1
       shift 2
       ;;
     --target)
@@ -67,6 +71,12 @@ while [[ $# -gt 0 ]]; do
       ;;
     --pull)
       PULL=1
+      PULL_EXPLICIT=1
+      shift
+      ;;
+    --no-pull)
+      PULL=0
+      PULL_EXPLICIT=1
       shift
       ;;
     --restart-daemon)
@@ -119,8 +129,35 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-SOURCE_ROOT="$(cd -P "$SOURCE_ROOT" && pwd -P)"
 TARGET_ROOT="$(cd -P "$(dirname "$TARGET_ROOT")" && pwd -P)/$(basename "$TARGET_ROOT")"
+SOURCE_ROOT="$(cd -P "$SOURCE_ROOT" && pwd -P)"
+
+if [[ $SOURCE_EXPLICIT -eq 0 && "$SOURCE_ROOT" == "$TARGET_ROOT" ]]; then
+  RECORDED_SOURCE_ROOT="$(
+    python3 - "$TARGET_ROOT/state/upgrade/last-upgrade.json" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+try:
+    payload = json.loads(path.read_text(encoding="utf-8"))
+except (FileNotFoundError, json.JSONDecodeError):
+    print("")
+    raise SystemExit(0)
+
+source = str(payload.get("source_root") or "").strip()
+print(source)
+PY
+  )"
+  if [[ -n "$RECORDED_SOURCE_ROOT" && -d "$RECORDED_SOURCE_ROOT/.git" ]]; then
+    SOURCE_ROOT="$(cd -P "$RECORDED_SOURCE_ROOT" && pwd -P)"
+    if [[ "$SUBCOMMAND" == "apply" && $PULL_EXPLICIT -eq 0 ]]; then
+      PULL=1
+    fi
+  fi
+fi
+
 TIMESTAMP="$(date '+%Y%m%d-%H%M%S')"
 if [[ -z "$BACKUP_ROOT" && "$SUBCOMMAND" != "rollback" ]]; then
   BACKUP_ROOT="$TARGET_ROOT/backups/upgrade-$TIMESTAMP"
