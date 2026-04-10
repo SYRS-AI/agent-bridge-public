@@ -167,6 +167,7 @@ FAKE_TELEGRAM_REQUESTS="$TMP_ROOT/fake-telegram-requests.jsonl"
 FAKE_TELEGRAM_PID=""
 TOKENFILE_ENV="$TMP_ROOT/tokenfile-telegram.env"
 CODEX_HOOKS_FILE="$TMP_ROOT/codex-home/.codex/hooks.json"
+export BRIDGE_CODEX_HOOKS_FILE="$CODEX_HOOKS_FILE"
 LIVE_ROSTER_FILE="$HOME/.agent-bridge/agent-roster.local.sh"
 LIVE_ROSTER_BACKUP="$TMP_ROOT/live-agent-roster.local.sh.bak"
 LIVE_ROSTER_PRESENT=0

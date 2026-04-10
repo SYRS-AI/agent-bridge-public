@@ -15,6 +15,10 @@ bridge_hook_clear_idle_path() {
 }
 
 bridge_codex_hooks_file() {
+  if [[ -n "${BRIDGE_CODEX_HOOKS_FILE:-}" ]]; then
+    printf '%s' "$BRIDGE_CODEX_HOOKS_FILE"
+    return 0
+  fi
   printf '%s/.codex/hooks.json' "$HOME"
 }
 
