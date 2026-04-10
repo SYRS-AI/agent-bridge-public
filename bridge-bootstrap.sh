@@ -96,6 +96,17 @@ case "$bootstrap_shell" in
     ;;
 esac
 
+if [[ -z "$bootstrap_rcfile" ]]; then
+  case "$bootstrap_shell" in
+    zsh)
+      bootstrap_rcfile="$HOME/.zshrc"
+      ;;
+    bash)
+      bootstrap_rcfile="$HOME/.bashrc"
+      ;;
+  esac
+fi
+
 bridge_require_python
 
 shell_status="skipped"
@@ -103,6 +114,7 @@ daemon_status="skipped"
 launchagent_status="skipped"
 systemd_status="skipped"
 next_command="agb admin"
+reload_command="source \"$bootstrap_rcfile\" || export PATH=\"\$HOME/.agent-bridge:\$PATH\""
 bootstrap_os="${BRIDGE_BOOTSTRAP_OS:-$(uname -s)}"
 
 if [[ $skip_shell_integration -eq 0 ]]; then
@@ -150,7 +162,7 @@ if [[ $skip_systemd -eq 0 ]]; then
 fi
 
 if [[ $json_mode -eq 1 ]]; then
-  python3 - "$init_json" "$shell_status" "$bootstrap_shell" "$bootstrap_rcfile" "$daemon_status" "$launchagent_status" "$systemd_status" "$next_command" <<'PY'
+  python3 - "$init_json" "$shell_status" "$bootstrap_shell" "$bootstrap_rcfile" "$daemon_status" "$launchagent_status" "$systemd_status" "$next_command" "$reload_command" <<'PY'
 import json
 import sys
 
@@ -167,9 +179,10 @@ payload = {
     "launchagent": {"status": sys.argv[6]},
     "systemd": {"status": sys.argv[7]},
     "next_command": sys.argv[8],
+    "reload_command": sys.argv[9],
     "handoff_steps": [
         "Close the temporary installer session.",
-        "Open a fresh shell if needed so the shell integration is loaded.",
+        f"Run `{sys.argv[9]}` in the terminal if you do not open a fresh shell.",
         f"Run `{sys.argv[8]}`.",
         "Let the admin agent guide the rest of the onboarding.",
     ],
@@ -191,9 +204,10 @@ printf 'shell_integration: %s\n' "$shell_status"
 printf 'daemon: %s\n' "$daemon_status"
 printf 'launchagent: %s\n' "$launchagent_status"
 printf 'systemd: %s\n' "$systemd_status"
+printf 'rc_reload_command: %s\n' "$reload_command"
 echo
 echo "handoff:"
 echo "1. Close the temporary installer session."
-echo "2. Open a fresh shell if this terminal has not reloaded your shell rc yet."
+echo "2. If you are staying in this terminal, run: $reload_command"
 echo "3. Run: $next_command"
 echo "4. Let the admin agent guide the rest of the onboarding."

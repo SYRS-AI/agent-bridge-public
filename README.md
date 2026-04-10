@@ -183,7 +183,11 @@ If you think this README has no concrete install steps, stop and reread this `CL
    ```
 
 6. Final handoff to the user.
-   Tell the user to close the temporary installer Claude session, open a fresh terminal if needed, then run:
+   Tell the user to close the temporary installer Claude session. If they do not open a fresh terminal, show the exact `rc_reload_command` printed by `bridge-bootstrap.sh` immediately before `agb admin`.
+
+   Do not invent a generic reload command. Use the shell-specific command from the bootstrap output.
+
+   Then run:
 
    ```bash
    agb admin
