@@ -744,6 +744,60 @@ bridge_audit_log() {
   python3 "$BRIDGE_SCRIPT_DIR/bridge-audit.py" write --file "$BRIDGE_AUDIT_LOG" --actor "$actor" --action "$action" --target "$target" "$@" >/dev/null
 }
 
+bridge_mcp_orphan_cleanup_state_dir() {
+  printf '%s/mcp-orphan-cleanup' "$BRIDGE_STATE_DIR"
+}
+
+bridge_mcp_orphan_cleanup_last_run_file() {
+  printf '%s/last-run' "$(bridge_mcp_orphan_cleanup_state_dir)"
+}
+
+bridge_mcp_orphan_cleanup_report_file() {
+  printf '%s/last.json' "$(bridge_mcp_orphan_cleanup_state_dir)"
+}
+
+bridge_mcp_orphan_pattern_args() {
+  local pattern=""
+
+  [[ -n "${BRIDGE_MCP_ORPHAN_PATTERNS:-}" ]] || return 0
+  while IFS= read -r pattern; do
+    pattern="$(bridge_trim_whitespace "$pattern")"
+    [[ -n "$pattern" ]] || continue
+    printf '%s\0%s\0' "--pattern" "$pattern"
+  done < <(printf '%s\n' "$BRIDGE_MCP_ORPHAN_PATTERNS" | tr ',' '\n')
+}
+
+bridge_mcp_orphan_cleanup() {
+  local trigger="${1:-manual}"
+  local min_age="${2:-${BRIDGE_MCP_ORPHAN_MIN_AGE_SECONDS:-300}}"
+  local kill_mode="${3:-1}"
+  local -a args=()
+  local -a pattern_args=()
+  local item=""
+
+  [[ "$min_age" =~ ^[0-9]+$ ]] || min_age=300
+  bridge_require_python
+  args=("$BRIDGE_SCRIPT_DIR/bridge-mcp-cleanup.py" cleanup --json --trigger "$trigger" --min-age "$min_age")
+  if [[ "$kill_mode" == "1" ]]; then
+    args+=(--kill)
+  else
+    args+=(--dry-run)
+  fi
+  while IFS= read -r -d '' item; do
+    pattern_args+=("$item")
+  done < <(bridge_mcp_orphan_pattern_args)
+  args+=("${pattern_args[@]}")
+  python3 "${args[@]}"
+}
+
+bridge_mcp_orphan_cleanup_after_session_stop() {
+  local agent="$1"
+  local min_age="${BRIDGE_MCP_ORPHAN_SESSION_STOP_MIN_AGE_SECONDS:-0}"
+
+  [[ "${BRIDGE_MCP_ORPHAN_CLEANUP_ENABLED:-1}" == "1" ]] || return 0
+  bridge_mcp_orphan_cleanup "session-stop:${agent}" "$min_age" 1
+}
+
 bridge_dynamic_agent_ids() {
   local agent
 

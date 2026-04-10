@@ -140,6 +140,7 @@ export BRIDGE_CODEX_SESSIONS_DIR="$TMP_ROOT/codex-sessions-empty"
 export BRIDGE_CLAUDE_INSTALLED_PLUGINS_FILE="$TMP_ROOT/installed_plugins.json"
 export BRIDGE_CLAUDE_CHANNELS_HOME="$TMP_ROOT/claude-channels"
 export BRIDGE_REVIEW_POLICY_FILE="$BRIDGE_HOME/review-policy.json"
+export BRIDGE_MCP_ORPHAN_CLEANUP_ENABLED=0
 export BRIDGE_WEBHOOK_PORT_RANGE_START=9301
 export BRIDGE_WEBHOOK_PORT_RANGE_END=9399
 
@@ -187,6 +188,9 @@ FAKE_TELEGRAM_PORT_FILE="$TMP_ROOT/fake-telegram.port"
 FAKE_TELEGRAM_REQUESTS="$TMP_ROOT/fake-telegram-requests.jsonl"
 FAKE_TELEGRAM_PID=""
 TEAMS_PLUGIN_PID=""
+MCP_ORPHAN_PID=""
+MCP_ATTACHED_PARENT_PID=""
+MCP_ATTACHED_CHILD_PID=""
 TOKENFILE_ENV="$TMP_ROOT/tokenfile-telegram.env"
 CODEX_HOOKS_FILE="$TMP_ROOT/codex-home/.codex/hooks.json"
 export BRIDGE_CODEX_HOOKS_FILE="$CODEX_HOOKS_FILE"
@@ -225,6 +229,16 @@ cleanup() {
   if [[ -n "$TEAMS_PLUGIN_PID" ]]; then
     kill "$TEAMS_PLUGIN_PID" >/dev/null 2>&1 || true
     wait "$TEAMS_PLUGIN_PID" >/dev/null 2>&1 || true
+  fi
+  if [[ -n "$MCP_ORPHAN_PID" ]]; then
+    kill "$MCP_ORPHAN_PID" >/dev/null 2>&1 || true
+  fi
+  if [[ -n "$MCP_ATTACHED_CHILD_PID" ]]; then
+    kill "$MCP_ATTACHED_CHILD_PID" >/dev/null 2>&1 || true
+  fi
+  if [[ -n "$MCP_ATTACHED_PARENT_PID" ]]; then
+    kill "$MCP_ATTACHED_PARENT_PID" >/dev/null 2>&1 || true
+    wait "$MCP_ATTACHED_PARENT_PID" >/dev/null 2>&1 || true
   fi
   if [[ "$LIVE_ROSTER_PRESENT" == "1" ]] && ! cmp -s "$LIVE_ROSTER_BACKUP" "$LIVE_ROSTER_FILE"; then
     cp "$LIVE_ROSTER_BACKUP" "$LIVE_ROSTER_FILE"
@@ -1080,6 +1094,80 @@ IDLE_REAP_OUTPUT="$("$BASH4_BIN" -lc '
 assert_contains "$IDLE_REAP_OUTPUT" "DYNAMIC_ALIVE=no"
 assert_contains "$IDLE_REAP_OUTPUT" "ORPHAN_ALIVE=no"
 assert_contains "$IDLE_REAP_OUTPUT" "DYNAMIC_META=no"
+
+log "cleaning orphan MCP processes conservatively"
+MCP_ORPHAN_PATTERN="agent-bridge-smoke-orphan-mcp-$SESSION_NAME"
+MCP_ATTACHED_PATTERN="agent-bridge-smoke-attached-mcp-$SESSION_NAME"
+MCP_ORPHAN_PID_FILE="$TMP_ROOT/mcp-orphan.pid"
+MCP_ATTACHED_PID_FILE="$TMP_ROOT/mcp-attached.pid"
+python3 - "$MCP_ORPHAN_PATTERN" "$MCP_ORPHAN_PID_FILE" <<'PY'
+import subprocess
+import sys
+from pathlib import Path
+
+pattern, pid_file = sys.argv[1], sys.argv[2]
+proc = subprocess.Popen(
+    [pattern, "600"],
+    executable="/bin/sleep",
+    stdout=subprocess.DEVNULL,
+    stderr=subprocess.DEVNULL,
+    start_new_session=True,
+)
+Path(pid_file).write_text(str(proc.pid), encoding="utf-8")
+PY
+MCP_ORPHAN_PID="$(cat "$MCP_ORPHAN_PID_FILE")"
+for _ in {1..20}; do
+  kill -0 "$MCP_ORPHAN_PID" >/dev/null 2>&1 && break
+  sleep 0.1
+done
+kill -0 "$MCP_ORPHAN_PID" >/dev/null 2>&1 || die "fake orphan MCP process did not start"
+MCP_ORPHAN_SCAN_JSON="$(python3 "$REPO_ROOT/bridge-mcp-cleanup.py" scan --pattern "$MCP_ORPHAN_PATTERN" --min-age 0 --json)"
+assert_contains "$MCP_ORPHAN_SCAN_JSON" "\"pid\": $MCP_ORPHAN_PID"
+BRIDGE_MCP_ORPHAN_CLEANUP_ENABLED=1 \
+BRIDGE_MCP_ORPHAN_CLEANUP_INTERVAL_SECONDS=0 \
+BRIDGE_MCP_ORPHAN_MIN_AGE_SECONDS=0 \
+BRIDGE_MCP_ORPHAN_PATTERNS="$MCP_ORPHAN_PATTERN" \
+  "$BASH4_BIN" "$REPO_ROOT/bridge-daemon.sh" sync >/dev/null
+if kill -0 "$MCP_ORPHAN_PID" >/dev/null 2>&1; then
+  die "daemon did not clean fake orphan MCP process"
+fi
+MCP_ORPHAN_PID=""
+assert_contains "$(cat "$BRIDGE_LOG_DIR/audit.jsonl")" "mcp_orphan_cleanup"
+
+python3 - "$MCP_ATTACHED_PATTERN" "$MCP_ATTACHED_PID_FILE" <<'PY' &
+import subprocess
+import sys
+import time
+from pathlib import Path
+
+pattern, pid_file = sys.argv[1], sys.argv[2]
+proc = subprocess.Popen(
+    [pattern, "600"],
+    executable="/bin/sleep",
+    stdout=subprocess.DEVNULL,
+    stderr=subprocess.DEVNULL,
+)
+Path(pid_file).write_text(str(proc.pid), encoding="utf-8")
+try:
+    time.sleep(600)
+finally:
+    proc.terminate()
+PY
+MCP_ATTACHED_PARENT_PID="$!"
+for _ in {1..20}; do
+  [[ -f "$MCP_ATTACHED_PID_FILE" ]] && break
+  sleep 0.1
+done
+[[ -f "$MCP_ATTACHED_PID_FILE" ]] || die "fake attached MCP pid file was not written"
+MCP_ATTACHED_CHILD_PID="$(cat "$MCP_ATTACHED_PID_FILE")"
+kill -0 "$MCP_ATTACHED_CHILD_PID" >/dev/null 2>&1 || die "fake attached MCP process did not start"
+python3 "$REPO_ROOT/bridge-mcp-cleanup.py" cleanup --kill --pattern "$MCP_ATTACHED_PATTERN" --min-age 0 --json >/dev/null
+kill -0 "$MCP_ATTACHED_CHILD_PID" >/dev/null 2>&1 || die "cleanup killed a non-orphan MCP process"
+kill "$MCP_ATTACHED_CHILD_PID" >/dev/null 2>&1 || true
+kill "$MCP_ATTACHED_PARENT_PID" >/dev/null 2>&1 || true
+wait "$MCP_ATTACHED_PARENT_PID" >/dev/null 2>&1 || true
+MCP_ATTACHED_CHILD_PID=""
+MCP_ATTACHED_PARENT_PID=""
 
 log "refreshing a static Claude session after memory-daily when prompt is free"
 MEMORY_REFRESH_OUTPUT="$("$BASH4_BIN" -lc '

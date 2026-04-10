@@ -2345,12 +2345,112 @@ reap_idle_orphan_sessions() {
     (( idle >= threshold )) || continue
 
     if bridge_tmux_kill_session "$session" >/dev/null 2>&1; then
+      sleep 0.2
+      if [[ "${BRIDGE_MCP_ORPHAN_CLEANUP_ENABLED:-1}" == "1" ]]; then
+        bridge_mcp_orphan_cleanup "orphan-session:${session}" "${BRIDGE_MCP_ORPHAN_SESSION_STOP_MIN_AGE_SECONDS:-0}" 1 >/dev/null 2>&1 || true
+      fi
       daemon_info "reaped orphan session ${session} (idle=${idle}s)"
       changed=0
     fi
   done < <(tmux list-sessions -F '#{session_name}' 2>/dev/null || true)
 
   return "$changed"
+}
+
+process_mcp_orphan_cleanup() {
+  local enabled="${BRIDGE_MCP_ORPHAN_CLEANUP_ENABLED:-1}"
+  local interval="${BRIDGE_MCP_ORPHAN_CLEANUP_INTERVAL_SECONDS:-300}"
+  local min_age="${BRIDGE_MCP_ORPHAN_MIN_AGE_SECONDS:-300}"
+  local notify_threshold="${BRIDGE_MCP_ORPHAN_NOTIFY_THRESHOLD:-10}"
+  local state_dir=""
+  local last_file=""
+  local report_file=""
+  local last_run=0
+  local now=0
+  local cleanup_json=""
+  local parsed=""
+  local killed_count=0
+  local orphan_count=0
+  local freed_mb="0"
+  local error_count=0
+  local admin_agent="${BRIDGE_ADMIN_AGENT_ID:-}"
+  local title=""
+  local body=""
+
+  [[ "$enabled" == "1" ]] || return 1
+  [[ "$interval" =~ ^[0-9]+$ ]] || interval=300
+  [[ "$min_age" =~ ^[0-9]+$ ]] || min_age=300
+  [[ "$notify_threshold" =~ ^[0-9]+$ ]] || notify_threshold=10
+
+  state_dir="$(bridge_mcp_orphan_cleanup_state_dir)"
+  last_file="$(bridge_mcp_orphan_cleanup_last_run_file)"
+  report_file="$(bridge_mcp_orphan_cleanup_report_file)"
+  mkdir -p "$state_dir"
+  now="$(date +%s)"
+  if [[ -f "$last_file" ]]; then
+    last_run="$(cat "$last_file" 2>/dev/null || printf '0')"
+    [[ "$last_run" =~ ^[0-9]+$ ]] || last_run=0
+  fi
+  if (( interval > 0 && now - last_run < interval )); then
+    return 1
+  fi
+  printf '%s\n' "$now" >"$last_file"
+
+  if ! cleanup_json="$(bridge_mcp_orphan_cleanup periodic "$min_age" 1 2>/dev/null)"; then
+    bridge_audit_log daemon mcp_orphan_cleanup_failed mcp \
+      --detail trigger=periodic \
+      --detail min_age_seconds="$min_age"
+    return 1
+  fi
+  printf '%s\n' "$cleanup_json" >"$report_file"
+
+  parsed="$(python3 - "$report_file" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+payload = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+print(
+    "\t".join(
+        [
+            str(payload.get("killed_count", 0)),
+            str(payload.get("orphan_count", 0)),
+            str(payload.get("freed_mb_estimate", 0)),
+            str(len(payload.get("errors", []))),
+        ]
+    )
+)
+PY
+)" || return 1
+  IFS=$'\t' read -r killed_count orphan_count freed_mb error_count <<<"$parsed"
+  [[ "$killed_count" =~ ^[0-9]+$ ]] || killed_count=0
+  [[ "$orphan_count" =~ ^[0-9]+$ ]] || orphan_count=0
+  [[ "$error_count" =~ ^[0-9]+$ ]] || error_count=0
+
+  if (( killed_count > 0 )); then
+    bridge_audit_log daemon mcp_orphan_cleanup mcp \
+      --detail trigger=periodic \
+      --detail killed="$killed_count" \
+      --detail orphan_count="$orphan_count" \
+      --detail freed_mb_estimate="$freed_mb" \
+      --detail report_file="$report_file"
+    daemon_info "cleaned orphan MCP processes (killed=${killed_count}, freed_mb_estimate=${freed_mb})"
+  fi
+
+  if (( error_count > 0 )); then
+    bridge_audit_log daemon mcp_orphan_cleanup_errors mcp \
+      --detail trigger=periodic \
+      --detail errors="$error_count" \
+      --detail report_file="$report_file"
+  fi
+
+  if (( killed_count >= notify_threshold )) && [[ -n "$admin_agent" ]] && bridge_agent_exists "$admin_agent"; then
+    title="[mcp-cleanup] orphan MCP processes cleaned"
+    body="고아 MCP 프로세스 ${killed_count}개를 정리했습니다. 예상 회수 메모리: ${freed_mb}MB. report: ${report_file}"
+    bridge_dispatch_notification "$admin_agent" "$title" "$body" "" high >/dev/null 2>&1 || true
+  fi
+
+  (( killed_count > 0 ))
 }
 
 cmd_sync_cycle() {
@@ -2436,6 +2536,9 @@ cmd_sync_cycle() {
     changed=0
   fi
   if reap_idle_orphan_sessions; then
+    changed=0
+  fi
+  if process_mcp_orphan_cleanup; then
     changed=0
   fi
   if [[ "$changed" == "0" ]]; then

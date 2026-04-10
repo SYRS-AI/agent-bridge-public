@@ -2057,6 +2057,8 @@ bridge_kill_agent_session() {
     bridge_warn "tmux 세션이 종료되지 않았습니다: $agent/$session"
     return 1
   fi
+  sleep 0.2
+  bridge_mcp_orphan_cleanup_after_session_stop "$agent" >/dev/null 2>&1 || true
   bridge_agent_clear_idle_marker "$agent"
   bridge_info "[info] killed ${agent}/${session}"
 }

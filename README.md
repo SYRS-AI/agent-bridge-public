@@ -486,6 +486,15 @@ agb status
 
 특히 context pressure는 프로세스 장애가 아닙니다. 세션이 정상 실행 중이어도 대화가 길어져 compaction, `NEXT-SESSION.md` handoff, 또는 재시작이 필요한 상태를 별도로 표시합니다.
 
+### MCP 고아 프로세스 정리
+
+Claude Code가 띄운 MCP 서버는 tmux 세션 종료 후에도 orphan으로 남을 수 있습니다. 데몬은 기본 5분 간격으로 보수적인 MCP 패턴을 스캔하고, 즉시 부모가 init/launchd로 떨어진 orphan MCP 프로세스만 정리합니다.
+
+- 세션 종료 시점에는 `BRIDGE_MCP_ORPHAN_SESSION_STOP_MIN_AGE_SECONDS=0` 기준으로 즉시 정리합니다.
+- 주기 정리는 `BRIDGE_MCP_ORPHAN_CLEANUP_INTERVAL_SECONDS=300`, 최소 age는 `BRIDGE_MCP_ORPHAN_MIN_AGE_SECONDS=300`이 기본입니다.
+- 대량 정리 기준은 `BRIDGE_MCP_ORPHAN_NOTIFY_THRESHOLD=10`이며 admin 채널로 알립니다.
+- 끄려면 `BRIDGE_MCP_ORPHAN_CLEANUP_ENABLED=0`을 설정합니다.
+
 ---
 
 ## 명령어 요약
