@@ -16,6 +16,8 @@
 - Use Korean, direct, logical, respectful polite style by default.
 - Discord and Telegram channel operation require Claude Code. If the user asks for Codex with Discord or Telegram, explain the limitation once and configure Claude Code for that channel-connected agent.
 - Do not stop after the two onboarding questions. Continue into the selected channel setup path.
+- If a channel setup requires restarting the current Claude session, leave a `NEXT-SESSION.md` file in the admin agent home before asking the user to type `exit`.
+- A `NEXT-SESSION.md` handoff should include: restart reason, configured channels, verification commands, expected results, user-facing follow-up, and cleanup instruction.
 
 ## Channel Setup Continuation
 - Terminal only:
@@ -28,12 +30,14 @@
   - Run `~/.agent-bridge/agent-bridge setup discord <admin-agent> --token <token> --channel <channel-id> --yes`.
   - Ensure local roster config contains the Discord plugin channel and primary Discord channel ID for the admin agent.
   - Provide the invite URL: `https://discord.com/oauth2/authorize?client_id=<application-id>&permissions=<permissions-integer>&scope=bot%20applications.commands`.
+  - Write `NEXT-SESSION.md`, set `Onboarding State: complete`, and verify both files before asking for `exit`.
   - Tell the user: `현재 Claude 세션에는 새 설정이 아직 완전히 붙지 않을 수 있습니다. 이 세션에서 exit로 종료하면 바깥 쉘로 돌아가고, 온보딩 완료된 admin은 백그라운드에서 다시 뜹니다. 그 다음 바깥 쉘에서 agb admin을 다시 실행하세요.`
 - Telegram:
   - Ask for Telegram bot token, allowed user ID, and default chat ID if missing.
   - If the user does not have them, explain the shortest path: create a bot with BotFather, send the bot one message, then obtain IDs through `getUpdates` or a trusted Telegram ID helper bot.
   - Run `~/.agent-bridge/agent-bridge setup telegram <admin-agent> --token <token> --allow-from <user-id> --default-chat <chat-id> --yes`.
   - Ensure local roster config contains the Telegram plugin channel for the admin agent.
+  - Write `NEXT-SESSION.md`, set `Onboarding State: complete`, and verify both files before asking for `exit`.
   - Tell the user: `현재 Claude 세션에는 새 설정이 아직 완전히 붙지 않을 수 있습니다. 이 세션에서 exit로 종료하면 바깥 쉘로 돌아가고, 온보딩 완료된 admin은 백그라운드에서 다시 뜹니다. 그 다음 바깥 쉘에서 agb admin을 다시 실행하세요.`
 - During first-run admin onboarding, do not tell the user to run `agent start patch`, `agent restart patch`, or `start patch`. Keep the user-facing command consistent: `agb admin`.
 
@@ -57,6 +61,15 @@
 3. Inspect current queue, daemon, and session state before editing code.
 4. Prefer targeted repair over broad resets.
 5. Leave a clear note in queue, audit, or shared handoff files when work spans sessions.
+
+## NEXT-SESSION.md Handoff
+- If `NEXT-SESSION.md` exists when a session starts, read it before doing unrelated work.
+- Treat it as the previous session's active handoff, not as long-term memory.
+- For first-run channel setup, verify:
+  - `~/.agent-bridge/agent-bridge agent start <admin-agent> --dry-run`
+  - `~/.agent-bridge/agent-bridge status`
+  - selected channel runtime files under `~/.agent-bridge/agents/<admin-agent>/.discord` and/or `.telegram`
+- After the handoff is complete, summarize the result in `memory/log.md` if useful, then delete `NEXT-SESSION.md`.
 
 ## Default Diagnostics
 - Queue state:
