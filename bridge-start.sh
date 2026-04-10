@@ -92,6 +92,8 @@ RUNNER="$SCRIPT_DIR/bridge-run.sh"
 ENV_PREFIX="$(bridge_export_env_prefix)"
 EFFECTIVE_CONTINUE_MODE="$(bridge_agent_continue "$AGENT")"
 FORCE_FRESH_SESSION=0
+SUPPRESS_MISSING_CHANNELS=0
+CHANNEL_REASON=""
 
 if [[ ! -d "$WORK_DIR" ]]; then
   if [[ "$WORK_DIR" == "$DEFAULT_WORK_DIR" ]]; then
@@ -177,6 +179,18 @@ elif [[ $CONTINUE_EXPLICIT -eq 1 ]]; then
   EFFECTIVE_CONTINUE_MODE="$CONTINUE_MODE"
 fi
 
+if [[ "$ENGINE" == "claude" ]]; then
+  CHANNEL_REASON="$(bridge_agent_channel_status_reason "$AGENT")"
+  if [[ -n "$CHANNEL_REASON" ]]; then
+    if bridge_agent_should_stop_on_attached_clean_exit "$AGENT"; then
+      SUPPRESS_MISSING_CHANNELS=1
+      bridge_warn "Channel runtime is incomplete for pending admin '$AGENT'. Starting without missing channel plugins until onboarding completes: $CHANNEL_REASON"
+    elif [[ $DRY_RUN -eq 0 ]]; then
+      bridge_die "$(bridge_agent_channel_setup_guidance "$AGENT" "$CHANNEL_REASON")"
+    fi
+  fi
+fi
+
 SESSION_CMD="$(bridge_join_quoted "$BRIDGE_BASH_BIN" "$RUNNER" "$AGENT")"
 if [[ "$EFFECTIVE_CONTINUE_MODE" == "1" ]]; then
   SESSION_CMD+=" --continue"
@@ -189,14 +203,26 @@ fi
 if [[ -n "$ENV_PREFIX" ]]; then
   SESSION_CMD="${ENV_PREFIX} ${SESSION_CMD}"
 fi
+if [[ $SUPPRESS_MISSING_CHANNELS -eq 1 ]]; then
+  SESSION_CMD="BRIDGE_AGENT_SUPPRESS_MISSING_CHANNELS=1 ${SESSION_CMD}"
+fi
 
 if [[ $DRY_RUN -eq 1 ]]; then
+  if [[ $SUPPRESS_MISSING_CHANNELS -eq 1 ]]; then
+    launch_channels="$(BRIDGE_AGENT_SUPPRESS_MISSING_CHANNELS=1 bridge_agent_launch_channels_csv "$AGENT")"
+  else
+    launch_channels="$(bridge_agent_launch_channels_csv "$AGENT")"
+  fi
   echo "agent=$AGENT"
   echo "session=$SESSION"
   echo "workdir=$WORK_DIR"
   echo "continue=$EFFECTIVE_CONTINUE_MODE"
   echo "channels=$(bridge_agent_channels_csv "$AGENT")"
+  echo "launch_channels=$launch_channels"
   echo "channel_status=$(bridge_agent_channel_status "$AGENT")"
+  if [[ -n "$CHANNEL_REASON" ]]; then
+    echo "channel_reason=$CHANNEL_REASON"
+  fi
   echo "tmux_command=$SESSION_CMD"
   exit 0
 fi

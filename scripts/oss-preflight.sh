@@ -33,6 +33,19 @@ check_pattern() {
   fi
 }
 
+check_email_patterns() {
+  local matches
+
+  matches="$(rg -n --color never -e '[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}' "${scan_files[@]}" || true)"
+  # Public plugin manifests may use non-routable placeholder contacts.
+  matches="$(printf '%s\n' "$matches" | grep -Ev '@(agent-bridge\.local|local\.invalid)([^A-Za-z0-9.-]|$)' || true)"
+  if [[ -n "$matches" ]]; then
+    echo "[oss] fail: email addresses in tracked content"
+    echo "$matches"
+    fail=1
+  fi
+}
+
 echo "[oss] checking tracked agent profiles"
 extra_profiles=""
 for path in "${tracked_files[@]}"; do
@@ -46,7 +59,7 @@ if [[ -n "$extra_profiles" ]]; then
   fail=1
 fi
 
-check_pattern "email addresses in tracked content" '[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}'
+check_email_patterns
 check_pattern "discord webhook URLs in tracked content" 'discord\.com/api/webhooks/'
 check_pattern "discord mention IDs in tracked content" '<@[0-9]{6,}>'
 

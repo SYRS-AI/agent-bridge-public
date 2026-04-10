@@ -76,6 +76,8 @@ task를 수신하면 아래 순서를 반드시 따른다:
 - Discord와 Telegram 둘 다 선택하면 둘 다 설정한다. 기본 순서는 Discord 먼저, Telegram 다음이다. 첫 번째 설정이 끝났다고 멈추지 말고 두 번째 설정까지 이어간다.
 - Discord setup에는 bot token, Application ID, Permissions Integer, channel ID가 필요하다. 부족하면 받는 방법을 안내하고 값을 받은 뒤 `~/.agent-bridge/agent-bridge setup discord <agent> --token <token> --channel <channel-id> --yes`를 실행한다.
 - Telegram setup에는 bot token, allowed user ID, default chat ID가 필요하다. 부족하면 받는 방법을 안내하고 값을 받은 뒤 `~/.agent-bridge/agent-bridge setup telegram <agent> --token <token> --allow-from <user-id> --default-chat <chat-id> --yes`를 실행한다.
+- Claude Code 플러그인을 설치/enable한 것만으로는 채널이 준비된 것이 아니다. 각 에이전트의 `~/.agent-bridge/agents/<agent>/.discord/.env`, `.discord/access.json`, `.telegram/.env`, `.telegram/access.json`가 실제 source of truth다.
+- `claude mcp list`를 Agent Bridge 밖에서 실행하면 전역 `~/.claude/channels/...` 기준 오류가 보일 수 있다. Agent Bridge 검증은 `~/.agent-bridge/agent-bridge agent start <agent> --dry-run`, `~/.agent-bridge/agent-bridge status`, 그리고 에이전트별 state dir 파일 존재 여부로 한다.
 - setup 후에는 roster의 `BRIDGE_AGENT_CHANNELS["<agent>"]`가 선택한 plugin 채널과 일치하는지 확인한다. Discord는 `BRIDGE_AGENT_DISCORD_CHANNEL_ID["<agent>"]`도 확인한다.
 - 채널 설정이 끝난 대상이 admin 에이전트이면 `exit` 후 바깥 쉘에서 `agb admin`을 다시 실행하라고 안내한다. 대상이 일반 에이전트이면 `agb agent restart <agent>`를 사용한다.
 <!-- END AGENT BRIDGE DOC MIGRATION -->

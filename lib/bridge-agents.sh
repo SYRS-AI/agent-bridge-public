@@ -733,6 +733,132 @@ bridge_agent_discord_channel_id() {
   printf '%s' ""
 }
 
+bridge_env_file_has_any_nonempty_key() {
+  local file="$1"
+  shift || true
+  local key=""
+
+  [[ -f "$file" ]] || return 1
+  for key in "$@"; do
+    if grep -Eq "^[[:space:]]*(export[[:space:]]+)?${key}=[^[:space:]#].*" "$file"; then
+      return 0
+    fi
+  done
+
+  return 1
+}
+
+bridge_agent_channel_runtime_ready_for_item() {
+  local agent="$1"
+  local item="$2"
+  local dir=""
+
+  item="$(bridge_trim_whitespace "$item")"
+  [[ -n "$item" ]] || return 1
+
+  case "$item" in
+    plugin:discord|plugin:discord@*)
+      dir="$(bridge_agent_discord_state_dir "$agent")"
+      [[ -f "$dir/access.json" ]] || return 1
+      bridge_env_file_has_any_nonempty_key "$dir/.env" DISCORD_BOT_TOKEN BOT_TOKEN TOKEN
+      ;;
+    plugin:telegram|plugin:telegram@*)
+      dir="$(bridge_agent_telegram_state_dir "$agent")"
+      [[ -f "$dir/access.json" ]] || return 1
+      bridge_env_file_has_any_nonempty_key "$dir/.env" TELEGRAM_BOT_TOKEN BOT_TOKEN TOKEN
+      ;;
+    plugin:teams|plugin:teams@*)
+      dir="$(bridge_agent_teams_state_dir "$agent")"
+      [[ -f "$dir/access.json" ]] || return 1
+      bridge_env_file_has_any_nonempty_key "$dir/.env" TEAMS_APP_ID MicrosoftAppId || return 1
+      bridge_env_file_has_any_nonempty_key "$dir/.env" TEAMS_APP_PASSWORD MicrosoftAppPassword
+      ;;
+    *)
+      return 0
+      ;;
+  esac
+}
+
+bridge_agent_ready_channels_csv() {
+  local agent="$1"
+  local required=""
+  local item=""
+  local ready=""
+  local -a items=()
+
+  required="$(bridge_agent_channels_csv "$agent")"
+  [[ -n "$required" ]] || {
+    printf '%s' ""
+    return 0
+  }
+
+  IFS=',' read -r -a items <<<"$required"
+  for item in "${items[@]}"; do
+    item="$(bridge_trim_whitespace "$item")"
+    [[ -n "$item" ]] || continue
+    if bridge_agent_channel_runtime_ready_for_item "$agent" "$item"; then
+      ready="$(bridge_append_csv_unique "$ready" "$item")"
+    fi
+  done
+
+  printf '%s' "$ready"
+}
+
+bridge_agent_missing_channels_csv() {
+  local agent="$1"
+  local required=""
+  local item=""
+  local missing=""
+  local -a items=()
+
+  required="$(bridge_agent_channels_csv "$agent")"
+  [[ -n "$required" ]] || {
+    printf '%s' ""
+    return 0
+  }
+
+  IFS=',' read -r -a items <<<"$required"
+  for item in "${items[@]}"; do
+    item="$(bridge_trim_whitespace "$item")"
+    [[ -n "$item" ]] || continue
+    if ! bridge_agent_channel_runtime_ready_for_item "$agent" "$item"; then
+      missing="$(bridge_append_csv_unique "$missing" "$item")"
+    fi
+  done
+
+  printf '%s' "$missing"
+}
+
+bridge_agent_launch_channels_csv() {
+  local agent="$1"
+
+  if [[ "${BRIDGE_AGENT_SUPPRESS_MISSING_CHANNELS:-0}" == "1" ]]; then
+    bridge_agent_ready_channels_csv "$agent"
+    return 0
+  fi
+
+  bridge_agent_channels_csv "$agent"
+}
+
+bridge_agent_channel_setup_guidance() {
+  local agent="$1"
+  local reason="${2:-$(bridge_agent_channel_status_reason "$agent")}"
+  local required=""
+  local cli="$BRIDGE_HOME/agent-bridge"
+
+  required="$(bridge_agent_channels_csv "$agent")"
+  printf "Channel runtime is not configured for '%s': %s" "$agent" "$reason"
+  if bridge_channel_csv_contains "$required" "plugin:discord"; then
+    printf "\nRun: %s setup discord %s --token <DISCORD_BOT_TOKEN> --channel <DISCORD_CHANNEL_ID>" "$cli" "$agent"
+  fi
+  if bridge_channel_csv_contains "$required" "plugin:telegram"; then
+    printf "\nRun: %s setup telegram %s --token <TELEGRAM_BOT_TOKEN> --allow-from <TELEGRAM_USER_ID> --default-chat <TELEGRAM_CHAT_ID>" "$cli" "$agent"
+  fi
+  if bridge_channel_csv_contains "$required" "plugin:teams"; then
+    printf "\nRun: %s setup teams %s --app-id <TEAMS_APP_ID> --app-password <TEAMS_APP_PASSWORD> --allow-from <TEAMS_USER_ID>" "$cli" "$agent"
+  fi
+}
+
 bridge_agent_channel_status_reason() {
   local agent="$1"
   local required=""
@@ -760,8 +886,12 @@ bridge_agent_channel_status_reason() {
 
   if bridge_channel_csv_contains "$required" "plugin:discord"; then
     discord_dir="$(bridge_agent_discord_state_dir "$agent")"
-    if [[ ! -f "$discord_dir/.env" || ! -f "$discord_dir/access.json" ]]; then
-      printf 'missing Discord runtime files under %s (.env and access.json required)' "$discord_dir"
+    if [[ ! -f "$discord_dir/access.json" ]]; then
+      printf 'missing Discord access file under %s (access.json required)' "$discord_dir"
+      return 0
+    fi
+    if ! bridge_env_file_has_any_nonempty_key "$discord_dir/.env" DISCORD_BOT_TOKEN BOT_TOKEN TOKEN; then
+      printf 'missing Discord bot token under %s (.env with DISCORD_BOT_TOKEN required)' "$discord_dir"
       return 0
     fi
   fi
@@ -769,8 +899,12 @@ bridge_agent_channel_status_reason() {
   if bridge_channel_csv_contains "$required" "plugin:telegram"; then
     local telegram_dir=""
     telegram_dir="$(bridge_agent_telegram_state_dir "$agent")"
-    if [[ ! -f "$telegram_dir/.env" || ! -f "$telegram_dir/access.json" ]]; then
-      printf 'missing Telegram runtime files under %s (.env and access.json required)' "$telegram_dir"
+    if [[ ! -f "$telegram_dir/access.json" ]]; then
+      printf 'missing Telegram access file under %s (access.json required)' "$telegram_dir"
+      return 0
+    fi
+    if ! bridge_env_file_has_any_nonempty_key "$telegram_dir/.env" TELEGRAM_BOT_TOKEN BOT_TOKEN TOKEN; then
+      printf 'missing Telegram bot token under %s (.env with TELEGRAM_BOT_TOKEN required)' "$telegram_dir"
       return 0
     fi
   fi
@@ -778,8 +912,16 @@ bridge_agent_channel_status_reason() {
   if bridge_channel_csv_contains "$required" "plugin:teams"; then
     local teams_dir=""
     teams_dir="$(bridge_agent_teams_state_dir "$agent")"
-    if [[ ! -f "$teams_dir/.env" || ! -f "$teams_dir/access.json" ]]; then
-      printf 'missing Teams runtime files under %s (.env and access.json required)' "$teams_dir"
+    if [[ ! -f "$teams_dir/access.json" ]]; then
+      printf 'missing Teams access file under %s (access.json required)' "$teams_dir"
+      return 0
+    fi
+    if ! bridge_env_file_has_any_nonempty_key "$teams_dir/.env" TEAMS_APP_ID MicrosoftAppId; then
+      printf 'missing Teams app id under %s (.env with TEAMS_APP_ID required)' "$teams_dir"
+      return 0
+    fi
+    if ! bridge_env_file_has_any_nonempty_key "$teams_dir/.env" TEAMS_APP_PASSWORD MicrosoftAppPassword; then
+      printf 'missing Teams app password under %s (.env with TEAMS_APP_PASSWORD required)' "$teams_dir"
       return 0
     fi
   fi

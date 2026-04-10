@@ -1259,6 +1259,15 @@ assert_contains "$(cat "$BRIDGE_AGENT_HOME_ROOT/$CREATED_AGENT/memory/index.md")
 [[ -f "$BRIDGE_AGENT_HOME_ROOT/$CREATED_AGENT/raw/captures/inbox/.gitkeep" ]] || die "agent create did not scaffold raw capture inbox"
 [[ -L "$BRIDGE_AGENT_HOME_ROOT/$CREATED_AGENT/.claude/skills/agent-bridge-runtime" ]] || die "agent create did not link runtime skill"
 [[ -L "$BRIDGE_AGENT_HOME_ROOT/$CREATED_AGENT/.claude/skills/memory-wiki" ]] || die "agent create did not link memory-wiki skill"
+MISSING_CHANNEL_START_OUTPUT="$("$REPO_ROOT/bridge-start.sh" "$CREATED_AGENT" 2>&1 || true)"
+assert_contains "$MISSING_CHANNEL_START_OUTPUT" "Channel runtime is not configured for '$CREATED_AGENT'"
+assert_contains "$MISSING_CHANNEL_START_OUTPUT" "agent-bridge setup telegram $CREATED_AGENT"
+MISSING_CHANNEL_SUPPRESSED_LAUNCH="$("$BASH4_BIN" -c '
+  source "'"$REPO_ROOT"'/bridge-lib.sh"
+  bridge_load_roster
+  BRIDGE_AGENT_SUPPRESS_MISSING_CHANNELS=1 bridge_agent_launch_cmd "'"$CREATED_AGENT"'"
+')"
+assert_not_contains "$MISSING_CHANNEL_SUPPRESSED_LAUNCH" "--channels plugin:telegram@claude-plugins-official"
 MEMORY_CAPTURE_JSON="$("$REPO_ROOT/agent-bridge" memory capture --agent "$CREATED_AGENT" --user owner --source telegram --author "Owner" --channel "chat-1" --text "I prefer concise morning updates." --json)"
 MEMORY_CAPTURE_ID="$(python3 - "$MEMORY_CAPTURE_JSON" <<'PY'
 import json
@@ -1393,7 +1402,8 @@ CREATED_AGENT_LAUNCH="$("$BASH4_BIN" -c '
   bridge_agent_launch_cmd "'"$CREATED_AGENT"'"
 ')"
 assert_contains "$CREATED_AGENT_LAUNCH" "TELEGRAM_STATE_DIR=$BRIDGE_AGENT_HOME_ROOT/$CREATED_AGENT/.telegram"
-assert_contains "$CREATED_AGENT_LAUNCH" "claude --continue --dangerously-skip-permissions --name $CREATED_AGENT --channels plugin:telegram@claude-plugins-official"
+assert_contains "$CREATED_AGENT_LAUNCH" "claude --dangerously-skip-permissions --name $CREATED_AGENT --channels plugin:telegram@claude-plugins-official"
+assert_not_contains "$CREATED_AGENT_LAUNCH" "claude --continue --dangerously-skip-permissions --name $CREATED_AGENT"
 CREATED_AGENT_START_OUTPUT="$("$REPO_ROOT/agent-bridge" agent start "$CREATED_AGENT" --dry-run)"
 assert_contains "$CREATED_AGENT_START_OUTPUT" "$CREATED_SESSION"
 CREATED_AGENT_RESTART_OUTPUT="$("$REPO_ROOT/agent-bridge" agent restart "$CREATED_AGENT" --dry-run)"

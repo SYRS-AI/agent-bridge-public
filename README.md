@@ -259,6 +259,30 @@ Permissions Integer는 [복사한 숫자]야.
 
 Discord를 메인으로 추천하는 이유: 서버 내 채널별로 에이전트를 배치할 수 있어서 팀 운영에 자연스럽습니다.
 
+### 채널 MCP 연결 오류가 날 때
+
+Claude Code 채널 플러그인은 설치만으로는 준비되지 않습니다. Discord/Telegram 봇 토큰과 접근 설정 파일이 있어야 MCP 서버가 연결됩니다.
+
+Agent Bridge는 각 에이전트별 state dir을 사용합니다:
+
+```text
+~/.agent-bridge/agents/<agent>/.discord/.env
+~/.agent-bridge/agents/<agent>/.discord/access.json
+~/.agent-bridge/agents/<agent>/.telegram/.env
+~/.agent-bridge/agents/<agent>/.telegram/access.json
+```
+
+에이전트에 채널이 지정돼 있는데 토큰이나 access 파일이 없으면 `agb agent start <agent>`는 불완전한 `--channels` 세션을 띄우지 않고 어떤 setup 명령을 실행해야 하는지 출력합니다. 첫 admin 온보딩 중에는 사용자가 설정을 마칠 수 있도록 준비된 채널만 붙이고, 아직 준비 안 된 채널은 임시로 제외합니다.
+
+직접 설정해야 할 때는:
+
+```bash
+agb setup discord <agent> --token <DISCORD_BOT_TOKEN> --channel <DISCORD_CHANNEL_ID>
+agb setup telegram <agent> --token <TELEGRAM_BOT_TOKEN> --allow-from <TELEGRAM_USER_ID> --default-chat <TELEGRAM_CHAT_ID>
+```
+
+참고: `claude mcp list`를 Agent Bridge 밖에서 실행하면 Claude Code의 기본 전역 경로(`~/.claude/channels/...`)를 기준으로 실패가 보일 수 있습니다. Agent Bridge가 실제로 쓰는 기준은 위의 에이전트별 state dir입니다. 검증은 `agb agent start <agent> --dry-run` 또는 `agb status`로 확인하세요.
+
 ---
 
 ## 에이전트 종류
@@ -380,6 +404,7 @@ agb status
 | `agb inbox <agent>` | 에이전트의 수신함 확인 |
 | `agb cron create ...` | 반복 작업 등록 |
 | `agb setup discord <agent>` | Discord 채널 연결 |
+| `agb setup telegram <agent>` | Telegram 채널 연결 |
 | `agb memory remember ...` | 에이전트 기억 저장 |
 
 ---

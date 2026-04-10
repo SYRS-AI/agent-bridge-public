@@ -172,7 +172,7 @@ bridge_claude_launch_with_channels() {
   local original="$2"
   local required=""
 
-  required="$(bridge_agent_channels_csv "$agent")"
+  required="$(bridge_agent_launch_channels_csv "$agent")"
   if [[ -z "$required" ]]; then
     printf '%s' "$original"
     return 0
@@ -255,7 +255,7 @@ bridge_claude_launch_with_channel_state_dirs() {
   local telegram_dir=""
   local teams_dir=""
 
-  required="$(bridge_agent_channels_csv "$agent")"
+  required="$(bridge_agent_launch_channels_csv "$agent")"
   if [[ -z "$required" ]]; then
     printf '%s' "$original"
     return 0
