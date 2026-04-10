@@ -19,9 +19,12 @@ node_modules/
 backups/
 .oss-preflight-patterns
 agent-roster.local.sh
+HEARTBEAT.md
 agents/*/.claude/
 # Shared agent settings (symlink target) is tracked
 !agents/.claude/
 !agents/.claude/settings.json
+!agents/_template/session-type-files/
+!agents/_template/session-type-files/**
 agents/.claude/settings.local.json
 agents/.claude/settings.effective.json

@@ -138,6 +138,7 @@ bridge_scaffold_agent_home() {
   local session_type="$6"
   local template_root="$SCRIPT_DIR/agents/_template"
   local session_template="$template_root/session-types/$session_type.md"
+  local session_files_root="$template_root/session-type-files/$session_type"
   local file=""
   local rel=""
   local target=""
@@ -154,7 +155,10 @@ bridge_scaffold_agent_home() {
       continue
     fi
     bridge_render_template_string "$file" "$agent" "$display_name" "$role_text" "$engine" "$session_type" >"$target"
-  done < <(find "$template_root" -path "$template_root/session-types" -prune -o -type f -print | LC_ALL=C sort)
+  done < <(find "$template_root" \
+    -path "$template_root/session-types" -prune -o \
+    -path "$template_root/session-type-files" -prune -o \
+    -type f -print | LC_ALL=C sort)
 
   if [[ ! -e "$home/SESSION-TYPE.md" ]]; then
     bridge_render_template_string "$session_template" "$agent" "$display_name" "$role_text" "$engine" "$session_type" >"$home/SESSION-TYPE.md"
@@ -162,7 +166,26 @@ bridge_scaffold_agent_home() {
 
   while IFS= read -r rel; do
     mkdir -p "$home/$rel"
-  done < <(cd "$template_root" && find . -path './session-types' -prune -o -type d -print | sed 's#^\./##' | grep -v '^$' | LC_ALL=C sort)
+  done < <(cd "$template_root" && find . \
+    -path './session-types' -prune -o \
+    -path './session-type-files' -prune -o \
+    -type d -print | sed 's#^\./##' | grep -v '^$' | LC_ALL=C sort)
+
+  if [[ -d "$session_files_root" ]]; then
+    while IFS= read -r file; do
+      rel="${file#"$session_files_root"/}"
+      target="$home/$rel"
+      mkdir -p "$(dirname "$target")"
+      if [[ -e "$target" ]]; then
+        continue
+      fi
+      bridge_render_template_string "$file" "$agent" "$display_name" "$role_text" "$engine" "$session_type" >"$target"
+    done < <(find "$session_files_root" -type f -print | LC_ALL=C sort)
+
+    while IFS= read -r rel; do
+      mkdir -p "$home/$rel"
+    done < <(cd "$session_files_root" && find . -type d -print | sed 's#^\./##' | grep -v '^$' | LC_ALL=C sort)
+  fi
 }
 
 bridge_normalize_user_specs_json() {

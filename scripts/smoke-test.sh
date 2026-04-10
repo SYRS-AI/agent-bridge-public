@@ -1684,7 +1684,7 @@ cat >"$BRIDGE_HOME/agents/.claude/settings.local.json" <<'EOF'
 EOF
 SHARED_HOOK_OUTPUT="$("$BASH4_BIN" -lc "source \"$REPO_ROOT/bridge-lib.sh\"; bridge_load_roster; bridge_ensure_claude_stop_hook \"$CLAUDE_STATIC_WORKDIR\"")"
 assert_contains "$SHARED_HOOK_OUTPUT" "settings_file: $CLAUDE_STATIC_WORKDIR/.claude/settings.json"
-assert_contains "$SHARED_HOOK_OUTPUT" "command: bash $BRIDGE_HOME/hooks/mark-idle.sh"
+assert_contains "$SHARED_HOOK_OUTPUT" "settings.effective.json"
 [[ -L "$CLAUDE_STATIC_WORKDIR/.claude/settings.json" ]] || die "expected shared Claude settings symlink"
 SHARED_SYMLINK_TARGET="$(readlink "$CLAUDE_STATIC_WORKDIR/.claude/settings.json")"
 assert_contains "$SHARED_SYMLINK_TARGET" "../../.claude/settings.effective.json"
