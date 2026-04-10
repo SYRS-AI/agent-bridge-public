@@ -1638,7 +1638,7 @@ bridge_kill_agent_session() {
     return 1
   fi
 
-  tmux kill-session -t "$session"
+  bridge_tmux_kill_session "$session"
   for attempt in {1..10}; do
     if ! bridge_tmux_session_exists "$session"; then
       break

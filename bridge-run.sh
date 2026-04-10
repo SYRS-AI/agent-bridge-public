@@ -132,7 +132,7 @@ bridge_run_session_attached() {
 
 bridge_run_detach_attached_clients() {
   [[ -n "$SESSION" ]] || return 0
-  tmux detach-client -s "$SESSION" >/dev/null 2>&1 || true
+  bridge_tmux_detach_clients "$SESSION" >/dev/null 2>&1 || true
 }
 
 bridge_run_stop_foreground_session() {

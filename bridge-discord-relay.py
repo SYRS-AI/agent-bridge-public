@@ -227,7 +227,7 @@ def tmux_session_active(session: str) -> bool:
     if not session:
         return False
     result = subprocess.run(
-        ["tmux", "has-session", "-t", session],
+        ["tmux", "has-session", "-t", f"={session}"],
         check=False,
         capture_output=True,
         text=True,

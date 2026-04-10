@@ -895,14 +895,14 @@ run_agent() {
   if [[ $test_start -eq 1 ]]; then
     echo
     echo "== Session smoke =="
-    if tmux has-session -t "$session" 2>/dev/null; then
+    if bridge_tmux_session_exists "$session"; then
       echo "session_smoke: already_active (left running)"
     else
       if "$BRIDGE_BASH_BIN" "$SCRIPT_DIR/bridge-start.sh" "$agent" >/dev/null 2>&1; then
         sleep 1
-        if tmux has-session -t "$session" 2>/dev/null; then
+        if bridge_tmux_session_exists "$session"; then
           echo "session_smoke: ok"
-          tmux kill-session -t "$session" >/dev/null 2>&1 || true
+          bridge_tmux_kill_session "$session" >/dev/null 2>&1 || true
           "$BRIDGE_BASH_BIN" "$SCRIPT_DIR/bridge-sync.sh" >/dev/null 2>&1 || true
           echo "session_smoke_cleanup: stopped"
         else

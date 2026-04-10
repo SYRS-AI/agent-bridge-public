@@ -103,9 +103,9 @@ if [[ ! -d "$WORK_DIR" ]]; then
   fi
 fi
 
-if tmux has-session -t "$SESSION" 2>/dev/null; then
+if bridge_tmux_session_exists "$SESSION"; then
   if [[ $REPLACE -eq 1 ]]; then
-    tmux kill-session -t "$SESSION"
+    bridge_tmux_kill_session "$SESSION"
     echo "[info] 기존 세션 '$SESSION' 제거"
   else
     echo "[info] 세션 '$SESSION'이 이미 실행 중입니다."

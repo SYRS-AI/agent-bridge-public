@@ -2025,7 +2025,7 @@ reap_idle_orphan_sessions() {
     [[ "$idle" =~ ^[0-9]+$ ]] || idle=0
     (( idle >= threshold )) || continue
 
-    if tmux kill-session -t "$session" >/dev/null 2>&1; then
+    if bridge_tmux_kill_session "$session" >/dev/null 2>&1; then
       daemon_info "reaped orphan session ${session} (idle=${idle}s)"
       changed=0
     fi

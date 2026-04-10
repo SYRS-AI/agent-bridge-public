@@ -30,6 +30,26 @@ assert_not_contains() {
   [[ "$haystack" != *"$needle"* ]] || die "expected output to not contain: $needle"
 }
 
+tmux_session_target() {
+  local session="$1"
+  printf '=%s' "$session"
+}
+
+tmux_pane_target() {
+  local session="$1"
+  printf '=%s:' "$session"
+}
+
+tmux_has_session_exact() {
+  local session="$1"
+  tmux has-session -t "$(tmux_session_target "$session")" >/dev/null 2>&1
+}
+
+tmux_kill_session_exact() {
+  local session="$1"
+  tmux kill-session -t "$(tmux_session_target "$session")" >/dev/null 2>&1
+}
+
 wait_for_tmux_session() {
   local session="$1"
   local expected="${2:-up}"
@@ -38,7 +58,7 @@ wait_for_tmux_session() {
   local i=0
 
   for ((i = 0; i < attempts; i++)); do
-    if tmux has-session -t "$session" >/dev/null 2>&1; then
+    if tmux_has_session_exact "$session"; then
       [[ "$expected" == "up" ]] && return 0
     else
       [[ "$expected" == "down" ]] && return 0
@@ -55,7 +75,7 @@ kill_stale_smoke_tmux_sessions() {
     [[ -n "$session" ]] || continue
     case "$session" in
       bridge-smoke-*|bridge-requester-*|auto-start-session-*|always-on-session-*|static-session-*|claude-static-bridge-smoke-*|worker-reuse-*|late-dynamic-agent-*|created-session-*|bootstrap-session-*|bootstrap-wrapper-session-*|broken-channel-*|codex-cli-session-*|project-claude-session-bridge-smoke-*)
-        tmux kill-session -t "$session" >/dev/null 2>&1 || true
+        tmux_kill_session_exact "$session" || true
         ;;
     esac
   done < <(tmux list-sessions -F '#{session_name}' 2>/dev/null || true)
@@ -183,14 +203,14 @@ cleanup() {
   local status=$?
   bash "$REPO_ROOT/bridge-daemon.sh" stop >/dev/null 2>&1 || true
   kill_stale_smoke_tmux_sessions
-  tmux kill-session -t "$SESSION_NAME" >/dev/null 2>&1 || true
-  tmux kill-session -t "$REQUESTER_SESSION" >/dev/null 2>&1 || true
-  tmux kill-session -t "$AUTO_START_SESSION" >/dev/null 2>&1 || true
-  tmux kill-session -t "$ALWAYS_ON_SESSION" >/dev/null 2>&1 || true
-  tmux kill-session -t "$STATIC_SESSION" >/dev/null 2>&1 || true
-  tmux kill-session -t "$CLAUDE_STATIC_SESSION" >/dev/null 2>&1 || true
-  tmux kill-session -t "$WORKTREE_AGENT" >/dev/null 2>&1 || true
-  tmux kill-session -t "$LATE_DYNAMIC_SESSION" >/dev/null 2>&1 || true
+  tmux_kill_session_exact "$SESSION_NAME" || true
+  tmux_kill_session_exact "$REQUESTER_SESSION" || true
+  tmux_kill_session_exact "$AUTO_START_SESSION" || true
+  tmux_kill_session_exact "$ALWAYS_ON_SESSION" || true
+  tmux_kill_session_exact "$STATIC_SESSION" || true
+  tmux_kill_session_exact "$CLAUDE_STATIC_SESSION" || true
+  tmux_kill_session_exact "$WORKTREE_AGENT" || true
+  tmux_kill_session_exact "$LATE_DYNAMIC_SESSION" || true
   if [[ -n "$FAKE_DISCORD_PID" ]]; then
     kill "$FAKE_DISCORD_PID" >/dev/null 2>&1 || true
     wait "$FAKE_DISCORD_PID" >/dev/null 2>&1 || true
@@ -232,8 +252,15 @@ log "cleaning stale smoke tmux sessions by prefix"
 tmux new-session -d -s "bootstrap-session-stale-smoke" "sleep 30"
 tmux new-session -d -s "codex-cli-session-stale-smoke" "sleep 30"
 kill_stale_smoke_tmux_sessions
-tmux has-session -t "bootstrap-session-stale-smoke" >/dev/null 2>&1 && die "stale bootstrap session survived smoke cleanup helper"
-tmux has-session -t "codex-cli-session-stale-smoke" >/dev/null 2>&1 && die "stale codex session survived smoke cleanup helper"
+tmux_has_session_exact "bootstrap-session-stale-smoke" && die "stale bootstrap session survived smoke cleanup helper"
+tmux_has_session_exact "codex-cli-session-stale-smoke" && die "stale codex session survived smoke cleanup helper"
+
+log "requiring exact tmux session matching"
+PREFIX_SESSION="bridge-smoke-prefix-$SESSION_NAME"
+PREFIX_SUFFIX_SESSION="${PREFIX_SESSION}-suffix"
+tmux new-session -d -s "$PREFIX_SUFFIX_SESSION" "sleep 30"
+"$BASH4_BIN" -lc 'source "'"$REPO_ROOT"'/bridge-lib.sh"; ! bridge_tmux_session_exists "'"$PREFIX_SESSION"'"' || die "bridge_tmux_session_exists matched prefix session"
+tmux_kill_session_exact "$PREFIX_SUFFIX_SESSION" || true
 
 cat >"$FAKE_BIN/codex" <<'EOF'
 #!/usr/bin/env bash
@@ -804,10 +831,10 @@ AUTO_START_OUTPUT="$(bash "$REPO_ROOT/bridge-task.sh" create --to "$AUTO_START_A
 assert_contains "$AUTO_START_OUTPUT" "created task #"
 bash "$REPO_ROOT/bridge-daemon.sh" sync >/dev/null
 sleep 1
-tmux has-session -t "$AUTO_START_SESSION" >/dev/null 2>&1 || die "auto-start role did not start with timeout=0"
+tmux_has_session_exact "$AUTO_START_SESSION" || die "auto-start role did not start with timeout=0"
 
 log "ensuring explicit timeout=0 role is restarted even without queue"
-tmux has-session -t "$ALWAYS_ON_SESSION" >/dev/null 2>&1 && tmux kill-session -t "$ALWAYS_ON_SESSION" >/dev/null 2>&1 || true
+tmux_has_session_exact "$ALWAYS_ON_SESSION" && tmux_kill_session_exact "$ALWAYS_ON_SESSION" || true
 bash "$REPO_ROOT/bridge-daemon.sh" sync >/dev/null
 wait_for_tmux_session "$ALWAYS_ON_SESSION" up 25 0.2 || die "always-on role did not restart without queue"
 
@@ -873,7 +900,7 @@ assert_contains "$CODEX_STOP_ACTIVE_OUTPUT" "{}"
 python3 "$REPO_ROOT/bridge-queue.py" done "$CODEX_STOP_TASK_ID" --agent "$SMOKE_AGENT" --note "codex hook smoke cleanup" >/dev/null
 
 log "nudging prompt-ready Codex sessions without waiting for idle threshold"
-tmux kill-session -t "$CODEX_CLI_SESSION" >/dev/null 2>&1 || true
+tmux_kill_session_exact "$CODEX_CLI_SESSION" || true
 tmux new-session -d -s "$CODEX_CLI_SESSION" "$BASH4_BIN -lc 'printf \"› ready\\n\"; sleep 30'"
 bash "$REPO_ROOT/bridge-sync.sh" >/dev/null
 CODEX_READY_TASK_OUTPUT="$(python3 "$REPO_ROOT/bridge-queue.py" create --to "$CODEX_CLI_AGENT" --title "codex ready pickup" --body "pickup" --from "$REQUESTER_AGENT")"
@@ -906,13 +933,13 @@ assert_contains "$NORMAL_NUDGE_OUTPUT" "created task #"
 NORMAL_NUDGE_TASK_ID="$(printf '%s\n' "$NORMAL_NUDGE_OUTPUT" | sed -n 's/^created task #\([0-9][0-9]*\).*/\1/p' | head -n1)"
 [[ -n "$NORMAL_NUDGE_TASK_ID" ]] || die "expected normal task id"
 sleep 1
-NORMAL_NUDGE_RECENT="$(tmux capture-pane -pt "$CODEX_CLI_SESSION" -S -20 2>/dev/null || true)"
+NORMAL_NUDGE_RECENT="$(tmux capture-pane -pt "$(tmux_pane_target "$CODEX_CLI_SESSION")" -S -20 2>/dev/null || true)"
 assert_contains "$NORMAL_NUDGE_RECENT" "agb inbox $CODEX_CLI_AGENT"
 python3 "$REPO_ROOT/bridge-queue.py" done "$NORMAL_NUDGE_TASK_ID" --agent "$CODEX_CLI_AGENT" --note "normal nudge smoke cleanup" >/dev/null
-tmux kill-session -t "$CODEX_CLI_SESSION" >/dev/null 2>&1 || true
+tmux_kill_session_exact "$CODEX_CLI_SESSION" || true
 
 log "waking a prompt-ready Claude session even when the idle marker is missing"
-tmux kill-session -t "$CLAUDE_STATIC_SESSION" >/dev/null 2>&1 || true
+tmux_kill_session_exact "$CLAUDE_STATIC_SESSION" || true
 tmux new-session -d -s "$CLAUDE_STATIC_SESSION" "$BASH4_BIN -lc 'printf \"❯ ready\\n\"; sleep 30'"
 CLAUDE_NO_IDLE_WAKE_OUTPUT="$("$BASH4_BIN" -lc '
   source "'"$REPO_ROOT"'/bridge-lib.sh"
@@ -939,7 +966,7 @@ CLAUDE_NO_IDLE_WAKE_OUTPUT="$("$BASH4_BIN" -lc '
 assert_contains "$CLAUDE_NO_IDLE_WAKE_OUTPUT" "DISPATCH_RC=0"
 assert_contains "$CLAUDE_NO_IDLE_WAKE_OUTPUT" "IDLE_MARKER=yes"
 assert_contains "$CLAUDE_NO_IDLE_WAKE_OUTPUT" "$CLAUDE_STATIC_SESSION|claude|[Agent Bridge] high: claude no-idle pickup"
-tmux kill-session -t "$CLAUDE_STATIC_SESSION" >/dev/null 2>&1 || true
+tmux_kill_session_exact "$CLAUDE_STATIC_SESSION" || true
 
 log "reloading dynamic agents inside a long-lived daemon cycle"
 cat >"$FAKE_BIN/codex" <<'EOF'
@@ -1020,12 +1047,12 @@ IDLE_REAP_OUTPUT="$("$BASH4_BIN" -lc '
   export BRIDGE_DYNAMIC_IDLE_REAP_SECONDS=1
   export BRIDGE_ORPHAN_SESSION_REAP_SECONDS=1
   cmd_sync_cycle >/dev/null
-  if tmux has-session -t "'"$IDLE_REAP_AGENT"'" 2>/dev/null; then
+  if tmux has-session -t "='"$IDLE_REAP_AGENT"'" 2>/dev/null; then
     echo "DYNAMIC_ALIVE=yes"
   else
     echo "DYNAMIC_ALIVE=no"
   fi
-  if tmux has-session -t "'"$ORPHAN_REAP_SESSION"'" 2>/dev/null; then
+  if tmux has-session -t "='"$ORPHAN_REAP_SESSION"'" 2>/dev/null; then
     echo "ORPHAN_ALIVE=yes"
   else
     echo "ORPHAN_ALIVE=no"
@@ -1058,7 +1085,7 @@ MEMORY_REFRESH_OUTPUT="$("$BASH4_BIN" -lc '
     printf "%s|%s|%s\n" "$1" "$2" "$3" >>"'"$TMP_ROOT"'/memory-refresh-send.log"
     return 0
   }
-  tmux kill-session -t "'"$CLAUDE_STATIC_SESSION"'" >/dev/null 2>&1 || true
+  tmux kill-session -t "='"$CLAUDE_STATIC_SESSION"'" >/dev/null 2>&1 || true
   tmux new-session -d -s "'"$CLAUDE_STATIC_SESSION"'" "sleep 30"
   "'"$REPO_ROOT"'/agent-bridge" task create --to claude-static --title "busy refresh" --body "wait" --from smoke >/dev/null
   busy_task="$(python3 "'"$REPO_ROOT"'/bridge-queue.py" find-open --agent claude-static | head -n 1)"
@@ -1123,7 +1150,7 @@ ATTACHED_REFRESH_OUTPUT="$("$BASH4_BIN" -lc '
     return 0
   }
   bridge_tmux_session_attached_count() { printf "1\n"; }
-  tmux kill-session -t "'"$CLAUDE_STATIC_SESSION"'" >/dev/null 2>&1 || true
+  tmux kill-session -t "='"$CLAUDE_STATIC_SESSION"'" >/dev/null 2>&1 || true
   tmux new-session -d -s "'"$CLAUDE_STATIC_SESSION"'" "sleep 30"
   bridge_agent_note_memory_daily_refresh "claude-static" "run-attached" "2026-04-08"
   process_memory_daily_refresh_requests || true
@@ -1223,8 +1250,8 @@ log "returning success for non-tty tmux attach"
 ATTACH_SESSION="attach-smoke-$SESSION_NAME"
 tmux new-session -d -s "$ATTACH_SESSION" "sleep 30"
 NONTTY_ATTACH_OUTPUT="$("$BASH4_BIN" -lc 'source "'"$REPO_ROOT"'/bridge-lib.sh"; bridge_attach_tmux_session "'"$ATTACH_SESSION"'"' 2>&1)"
-assert_contains "$NONTTY_ATTACH_OUTPUT" "attach manually with: tmux attach -t $ATTACH_SESSION"
-tmux kill-session -t "$ATTACH_SESSION" >/dev/null 2>&1 || true
+assert_contains "$NONTTY_ATTACH_OUTPUT" "attach manually with: tmux attach -t =$ATTACH_SESSION"
+tmux_kill_session_exact "$ATTACH_SESSION" || true
 
 log "requeueing stale claimed tasks from inactive agents"
 INACTIVE_CLAIM_TASK_OUTPUT="$(python3 "$REPO_ROOT/bridge-queue.py" create --to inactive-agent --title "inactive claim smoke" --body "orphan" --from "$REQUESTER_AGENT")"
@@ -3341,7 +3368,7 @@ bash "$REPO_ROOT/bridge-daemon.sh" sync >/dev/null
 UNKNOWN_STALL_TASK_ID="$(python3 "$REPO_ROOT/bridge-queue.py" find-open --agent "$SMOKE_AGENT" --title-prefix "[STALL/UNKNOWN] $STALL_UNKNOWN_AGENT " 2>/dev/null || true)"
 [[ "$UNKNOWN_STALL_TASK_ID" =~ ^[0-9]+$ ]] || die "expected unknown stall escalation"
 
-tmux kill-session -t "$STALL_RATE_AGENT" >/dev/null 2>&1 || true
+tmux_kill_session_exact "$STALL_RATE_AGENT" || true
 BRIDGE_STALL_SCAN_INTERVAL_SECONDS=0 \
 BRIDGE_STALL_EXPLICIT_IDLE_SECONDS=0 \
 bash "$REPO_ROOT/bridge-daemon.sh" sync >/dev/null
