@@ -80,6 +80,7 @@ fi
 WORK_DIR="$(bridge_agent_workdir "$AGENT")"
 LAUNCH_CMD="$(bridge_agent_launch_cmd "$AGENT")"
 ENGINE="$(bridge_agent_engine "$AGENT")"
+SESSION="$(bridge_agent_session "$AGENT")"
 
 if [[ -z "$WORK_DIR" || -z "$LAUNCH_CMD" ]]; then
   bridge_die "'$AGENT'의 workdir 또는 launch command가 비어 있습니다."
@@ -114,12 +115,24 @@ log_line() {
   echo "$line" | tee -a "$LOGFILE"
 }
 
+bridge_run_session_attached() {
+  local attached
+
+  [[ -n "$SESSION" ]] || return 1
+  attached="$(bridge_tmux_session_attached_count "$SESSION" 2>/dev/null || printf '0')"
+  [[ "$attached" =~ ^[0-9]+$ ]] || attached=0
+  (( attached > 0 ))
+}
+
 log_line "${AGENT} 에이전트 시작 (engine=${ENGINE}, dir=${WORK_DIR})"
 
 FAIL_COUNT=0
 while true; do
   local_err_size_before=0
   local_err_size_after=0
+  LAUNCH_CMD="$(bridge_agent_launch_cmd "$AGENT")"
+  [[ -n "$LAUNCH_CMD" ]] || bridge_die "'$AGENT'의 launch command가 비어 있습니다."
+
   log_line "실행: ${LAUNCH_CMD}"
   if [[ -f "$ERRFILE" ]]; then
     local_err_size_before="$(wc -c <"$ERRFILE" 2>/dev/null || echo 0)"
@@ -139,6 +152,15 @@ while true; do
     fi
     log_line "1회 실행 종료 (코드: ${EXIT_CODE})"
     exit "$EXIT_CODE"
+  fi
+
+  if [[ $EXIT_CODE -eq 0 ]] && bridge_run_session_attached; then
+    if [[ $FAIL_COUNT -gt 0 ]]; then
+      bridge_agent_clear_crash_report "$AGENT"
+    fi
+    bridge_agent_clear_idle_marker "$AGENT"
+    log_line "정상 종료. 사람이 연결된 tmux 세션이므로 자동 재시작하지 않습니다. 다시 열려면 'agb admin' 또는 'agb agent start ${AGENT}'를 실행하세요."
+    exit 0
   fi
 
   if [[ $EXIT_CODE -ne 0 ]]; then

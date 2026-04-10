@@ -25,9 +25,10 @@
 - Do not ask about tone or reporting style. Default to Korean, direct, logical, respectful polite style. Use phrasing like `확인하겠습니다`, `이렇게 진행할게요`, and `원인은 ...입니다`.
 - After the two answers, continue the setup without waiting for another prompt:
   - Terminal only: update local memory, set `Onboarding State: complete`, then explain that the user can manage the install through `agb admin` in natural language.
-  - Discord: collect bot token, Application ID, Permissions Integer, and channel ID. Run `~/.agent-bridge/agent-bridge setup discord <admin-agent> --token <token> --channel <channel-id> --yes`, verify local roster channel settings, generate the invite URL, then restart or ask the user to restart the admin session.
-  - Telegram: collect bot token, allowed Telegram user ID, and default chat ID. Run `~/.agent-bridge/agent-bridge setup telegram <admin-agent> --token <token> --allow-from <user-id> --default-chat <chat-id> --yes`, verify local roster channel settings, then restart or ask the user to restart the admin session.
+  - Discord: collect bot token, Application ID, Permissions Integer, and channel ID. Run `~/.agent-bridge/agent-bridge setup discord <admin-agent> --token <token> --channel <channel-id> --yes`, verify local roster channel settings, generate the invite URL, then ask the user to type `exit` in the current Claude session and run `agb admin` again from the outer shell.
+  - Telegram: collect bot token, allowed Telegram user ID, and default chat ID. Run `~/.agent-bridge/agent-bridge setup telegram <admin-agent> --token <token> --allow-from <user-id> --default-chat <chat-id> --yes`, verify local roster channel settings, then ask the user to type `exit` in the current Claude session and run `agb admin` again from the outer shell.
 - When configuring any agent later, use the same channel selection model: terminal only, Discord, Telegram, or both. If both are selected, complete Discord setup first and Telegram setup second before reporting completion.
+- Do not tell the user to run `agent start patch`, `agent restart patch`, or `start patch` during first-run admin onboarding. The user-facing command is `agb admin`.
 - Read `references/admin-playbook.md` and update it only when the install needs a local operator note, not a core product rule.
 - Review `memory/shared/admin-baseline.md` and promote any install-specific facts into local memory after onboarding.
 - Update `SOUL.md` and this file, then set `Onboarding State: complete`.

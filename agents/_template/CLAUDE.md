@@ -64,8 +64,9 @@ task를 수신하면 아래 순서를 반드시 따른다:
 - 기본 말투는 한국어, 직설적이고 논리적인 경어체다. 예: "확인하겠습니다", "이렇게 진행할게요", "원인은 ...입니다".
 - 답변을 받은 뒤 멈추지 않는다. 이름/닉네임은 로컬 사용자 메모리에 저장하고, 선택한 채널에 따라 바로 다음 설정 단계로 이어간다.
 - 터미널만 선택한 경우: `SOUL.md`, `SESSION-TYPE.md`, 사용자 메모리를 갱신하고 `Onboarding State: complete`로 바꾼 뒤 `agb status`, `agb agent create`, `agb task create`, `agb upgrade`를 자연어로 요청하면 된다고 안내한다.
-- Discord를 선택한 경우: Discord bot token, Application ID, Permissions Integer, 연결할 channel ID를 받는다. 값이 없으면 Discord Developer Portal에서 만드는 방법을 짧게 안내한다. 그 다음 `~/.agent-bridge/agent-bridge setup discord <admin-agent> --token <token> --channel <channel-id> --yes`를 실행하고, roster의 `BRIDGE_AGENT_CHANNELS["<admin-agent>"]`와 `BRIDGE_AGENT_DISCORD_CHANNEL_ID["<admin-agent>"]`가 맞는지 확인한 뒤 admin 세션 재시작을 안내한다. 초대 URL은 `https://discord.com/oauth2/authorize?client_id=<application-id>&permissions=<permissions-integer>&scope=bot%20applications.commands` 형식으로 제공한다.
-- Telegram을 선택한 경우: Telegram bot token, 허용할 사용자 ID, default chat ID를 받는다. 값이 없으면 BotFather로 bot token을 만들고, 봇에게 메시지를 보낸 뒤 `getUpdates` 또는 user/chat ID 확인 봇으로 ID를 확인하는 방법을 짧게 안내한다. 그 다음 `~/.agent-bridge/agent-bridge setup telegram <admin-agent> --token <token> --allow-from <user-id> --default-chat <chat-id> --yes`를 실행하고, roster의 `BRIDGE_AGENT_CHANNELS["<admin-agent>"]`가 Telegram plugin으로 설정됐는지 확인한 뒤 admin 세션 재시작을 안내한다.
+- Discord를 선택한 경우: Discord bot token, Application ID, Permissions Integer, 연결할 channel ID를 받는다. 값이 없으면 Discord Developer Portal에서 만드는 방법을 짧게 안내한다. 그 다음 `~/.agent-bridge/agent-bridge setup discord <admin-agent> --token <token> --channel <channel-id> --yes`를 실행하고, roster의 `BRIDGE_AGENT_CHANNELS["<admin-agent>"]`와 `BRIDGE_AGENT_DISCORD_CHANNEL_ID["<admin-agent>"]`가 맞는지 확인한다. 초대 URL은 `https://discord.com/oauth2/authorize?client_id=<application-id>&permissions=<permissions-integer>&scope=bot%20applications.commands` 형식으로 제공한다.
+- Telegram을 선택한 경우: Telegram bot token, 허용할 사용자 ID, default chat ID를 받는다. 값이 없으면 BotFather로 bot token을 만들고, 봇에게 메시지를 보낸 뒤 `getUpdates` 또는 user/chat ID 확인 봇으로 ID를 확인하는 방법을 짧게 안내한다. 그 다음 `~/.agent-bridge/agent-bridge setup telegram <admin-agent> --token <token> --allow-from <user-id> --default-chat <chat-id> --yes`를 실행하고, roster의 `BRIDGE_AGENT_CHANNELS["<admin-agent>"]`가 Telegram plugin으로 설정됐는지 확인한다.
+- admin 채널 설정이 끝나면 `agent start patch`, `agent restart patch`, `start patch` 같은 표현을 사용자에게 안내하지 않는다. 대신 "현재 Claude 세션에는 새 채널 설정이 아직 완전히 붙지 않을 수 있습니다. 이 세션에서 `exit`로 종료한 뒤, 바깥 쉘에서 `agb admin`을 다시 실행하세요."라고 안내한다.
 
 ## Channel Setup Protocol
 - 사용자가 어떤 에이전트든 새로 만들거나 설정하면서 채널을 언급하면, 먼저 선택지를 명확히 확인한다: `터미널만`, `Discord`, `Telegram`, `Discord와 Telegram 둘 다`.
@@ -76,7 +77,7 @@ task를 수신하면 아래 순서를 반드시 따른다:
 - Discord setup에는 bot token, Application ID, Permissions Integer, channel ID가 필요하다. 부족하면 받는 방법을 안내하고 값을 받은 뒤 `~/.agent-bridge/agent-bridge setup discord <agent> --token <token> --channel <channel-id> --yes`를 실행한다.
 - Telegram setup에는 bot token, allowed user ID, default chat ID가 필요하다. 부족하면 받는 방법을 안내하고 값을 받은 뒤 `~/.agent-bridge/agent-bridge setup telegram <agent> --token <token> --allow-from <user-id> --default-chat <chat-id> --yes`를 실행한다.
 - setup 후에는 roster의 `BRIDGE_AGENT_CHANNELS["<agent>"]`가 선택한 plugin 채널과 일치하는지 확인한다. Discord는 `BRIDGE_AGENT_DISCORD_CHANNEL_ID["<agent>"]`도 확인한다.
-- 채널 설정이 끝나면 해당 에이전트를 재시작하거나 사용자에게 재시작 명령을 안내한다.
+- 채널 설정이 끝난 대상이 admin 에이전트이면 `exit` 후 바깥 쉘에서 `agb admin`을 다시 실행하라고 안내한다. 대상이 일반 에이전트이면 `agb agent restart <agent>`를 사용한다.
 <!-- END AGENT BRIDGE DOC MIGRATION -->
 
 너는 **<Agent Name>**야. <한 줄 역할 설명>.

@@ -28,13 +28,14 @@
   - Run `~/.agent-bridge/agent-bridge setup discord <admin-agent> --token <token> --channel <channel-id> --yes`.
   - Ensure local roster config contains the Discord plugin channel and primary Discord channel ID for the admin agent.
   - Provide the invite URL: `https://discord.com/oauth2/authorize?client_id=<application-id>&permissions=<permissions-integer>&scope=bot%20applications.commands`.
-  - Restart the admin agent or ask the user to run `~/.agent-bridge/agent-bridge agent restart <admin-agent>`.
+  - Tell the user: `현재 Claude 세션에는 새 채널 설정이 아직 완전히 붙지 않을 수 있습니다. 이 세션에서 exit로 종료한 뒤, 바깥 쉘에서 agb admin을 다시 실행하세요.`
 - Telegram:
   - Ask for Telegram bot token, allowed user ID, and default chat ID if missing.
   - If the user does not have them, explain the shortest path: create a bot with BotFather, send the bot one message, then obtain IDs through `getUpdates` or a trusted Telegram ID helper bot.
   - Run `~/.agent-bridge/agent-bridge setup telegram <admin-agent> --token <token> --allow-from <user-id> --default-chat <chat-id> --yes`.
   - Ensure local roster config contains the Telegram plugin channel for the admin agent.
-  - Restart the admin agent or ask the user to run `~/.agent-bridge/agent-bridge agent restart <admin-agent>`.
+  - Tell the user: `현재 Claude 세션에는 새 채널 설정이 아직 완전히 붙지 않을 수 있습니다. 이 세션에서 exit로 종료한 뒤, 바깥 쉘에서 agb admin을 다시 실행하세요.`
+- During first-run admin onboarding, do not tell the user to run `agent start patch`, `agent restart patch`, or `start patch`. Keep the user-facing command consistent: `agb admin`.
 
 ## Agent Channel Configuration
 - Use this same flow whenever the user configures any agent, including the admin agent.
@@ -45,8 +46,9 @@
   1. Discord setup
   2. Telegram setup
   3. roster verification
-  4. agent restart
+  4. restart guidance
   5. final test message or user handoff
+- If the configured target is the admin agent, restart guidance is `exit` current Claude session, then run `agb admin` from the outer shell. If the target is a non-admin agent, use `agb agent restart <agent>`.
 - After setup, verify `agb agent show <agent>` and `agb status` before saying the agent is ready.
 
 ## Triage Order

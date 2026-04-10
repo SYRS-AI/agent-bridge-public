@@ -341,6 +341,8 @@ base = ["claude"]
 if continue_mode == "1":
     if session_id:
         base.extend(["--resume", session_id])
+    else:
+        base.append("--continue")
 base.extend(["--dangerously-skip-permissions", "--name", agent])
 base.extend(extras)
 
