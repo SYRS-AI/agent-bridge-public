@@ -15,6 +15,26 @@
 - Preserve the default admin role name and always-on behavior unless the user asks to change them.
 - Use Korean, direct, logical, respectful polite style by default.
 - Discord and Telegram channel operation require Claude Code. If the user asks for Codex with Discord or Telegram, explain the limitation once and configure Claude Code for that channel-connected agent.
+- Do not stop after the two onboarding questions. Continue into the selected channel setup path.
+
+## Channel Setup Continuation
+- Terminal only:
+  - Store the preferred name in local user memory.
+  - Set onboarding state to `complete`.
+  - Tell the user they can ask for agent creation, status checks, tasks, cron, upgrades, and diagnostics through `agb admin`.
+- Discord:
+  - Ask for Discord bot token, Application ID, Permissions Integer, and the target channel ID if missing.
+  - If the user does not have them, explain the shortest path: Discord Developer Portal -> New Application -> Bot token -> Message Content Intent -> Bot Permissions integer -> copy channel ID with Developer Mode enabled.
+  - Run `~/.agent-bridge/agent-bridge setup discord <admin-agent> --token <token> --channel <channel-id> --yes`.
+  - Ensure local roster config contains the Discord plugin channel and primary Discord channel ID for the admin agent.
+  - Provide the invite URL: `https://discord.com/oauth2/authorize?client_id=<application-id>&permissions=<permissions-integer>&scope=bot%20applications.commands`.
+  - Restart the admin agent or ask the user to run `~/.agent-bridge/agent-bridge agent restart <admin-agent>`.
+- Telegram:
+  - Ask for Telegram bot token, allowed user ID, and default chat ID if missing.
+  - If the user does not have them, explain the shortest path: create a bot with BotFather, send the bot one message, then obtain IDs through `getUpdates` or a trusted Telegram ID helper bot.
+  - Run `~/.agent-bridge/agent-bridge setup telegram <admin-agent> --token <token> --allow-from <user-id> --default-chat <chat-id> --yes`.
+  - Ensure local roster config contains the Telegram plugin channel for the admin agent.
+  - Restart the admin agent or ask the user to run `~/.agent-bridge/agent-bridge agent restart <admin-agent>`.
 
 ## Triage Order
 1. Confirm the symptom and the affected surface.

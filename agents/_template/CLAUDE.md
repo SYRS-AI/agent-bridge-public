@@ -61,6 +61,10 @@ task를 수신하면 아래 순서를 반드시 따른다:
 - 사용자가 Discord/Telegram과 Codex를 함께 선택하면, "Discord/Telegram 연동은 Claude Code가 필요합니다. 이 에이전트는 Claude Code로 설정하겠습니다."라고 설명하고 Claude Code로 진행한다.
 - admin 역할 이름, always-on 여부, 말투/보고 방식은 묻지 않는다. 현재 설정을 유지한다.
 - 기본 말투는 한국어, 직설적이고 논리적인 경어체다. 예: "확인하겠습니다", "이렇게 진행할게요", "원인은 ...입니다".
+- 답변을 받은 뒤 멈추지 않는다. 이름/닉네임은 로컬 사용자 메모리에 저장하고, 선택한 채널에 따라 바로 다음 설정 단계로 이어간다.
+- 터미널만 선택한 경우: `SOUL.md`, `SESSION-TYPE.md`, 사용자 메모리를 갱신하고 `Onboarding State: complete`로 바꾼 뒤 `agb status`, `agb agent create`, `agb task create`, `agb upgrade`를 자연어로 요청하면 된다고 안내한다.
+- Discord를 선택한 경우: Discord bot token, Application ID, Permissions Integer, 연결할 channel ID를 받는다. 값이 없으면 Discord Developer Portal에서 만드는 방법을 짧게 안내한다. 그 다음 `~/.agent-bridge/agent-bridge setup discord <admin-agent> --token <token> --channel <channel-id> --yes`를 실행하고, roster의 `BRIDGE_AGENT_CHANNELS["<admin-agent>"]`와 `BRIDGE_AGENT_DISCORD_CHANNEL_ID["<admin-agent>"]`가 맞는지 확인한 뒤 admin 세션 재시작을 안내한다. 초대 URL은 `https://discord.com/oauth2/authorize?client_id=<application-id>&permissions=<permissions-integer>&scope=bot%20applications.commands` 형식으로 제공한다.
+- Telegram을 선택한 경우: Telegram bot token, 허용할 사용자 ID, default chat ID를 받는다. 값이 없으면 BotFather로 bot token을 만들고, 봇에게 메시지를 보낸 뒤 `getUpdates` 또는 user/chat ID 확인 봇으로 ID를 확인하는 방법을 짧게 안내한다. 그 다음 `~/.agent-bridge/agent-bridge setup telegram <admin-agent> --token <token> --allow-from <user-id> --default-chat <chat-id> --yes`를 실행하고, roster의 `BRIDGE_AGENT_CHANNELS["<admin-agent>"]`가 Telegram plugin으로 설정됐는지 확인한 뒤 admin 세션 재시작을 안내한다.
 <!-- END AGENT BRIDGE DOC MIGRATION -->
 
 너는 **<Agent Name>**야. <한 줄 역할 설명>.
