@@ -1145,7 +1145,8 @@ STALE_RESUME_OUTPUT="$("$BASH4_BIN" -lc '
 ')"
 assert_not_contains "$STALE_RESUME_OUTPUT" "--resume stale-session-id"
 assert_not_contains "$STALE_RESUME_OUTPUT" "SESSION_ID=stale-session-id"
-assert_contains "$STALE_RESUME_OUTPUT" "claude --continue --dangerously-skip-permissions --name $STALE_RESUME_AGENT"
+assert_contains "$STALE_RESUME_OUTPUT" "claude --dangerously-skip-permissions --name $STALE_RESUME_AGENT"
+assert_not_contains "$STALE_RESUME_OUTPUT" "claude --continue --dangerously-skip-permissions --name $STALE_RESUME_AGENT"
 assert_contains "$STALE_RESUME_OUTPUT" "SESSION_ID="
 
 log "injecting bridge guidance into an existing project CLAUDE.md and forcing a fresh first launch"
@@ -1574,9 +1575,24 @@ CLAUDE_LAUNCH_CONTINUE="$("$BASH4_BIN" -c '
   unset BRIDGE_AGENT_SESSION_ID["claude-static"]
   bridge_agent_launch_cmd "claude-static"
 ')"
-assert_contains "$CLAUDE_LAUNCH_CONTINUE" "DISCORD_STATE_DIR=$CLAUDE_STATIC_WORKDIR/.discord claude --continue --dangerously-skip-permissions --name claude-static --channels plugin:discord@claude-plugins-official"
-assert_contains "$CLAUDE_LAUNCH_CONTINUE" "claude --continue --dangerously-skip-permissions --name claude-static --channels plugin:discord@claude-plugins-official"
+assert_contains "$CLAUDE_LAUNCH_CONTINUE" "DISCORD_STATE_DIR=$CLAUDE_STATIC_WORKDIR/.discord claude --dangerously-skip-permissions --name claude-static --channels plugin:discord@claude-plugins-official"
+assert_contains "$CLAUDE_LAUNCH_CONTINUE" "claude --dangerously-skip-permissions --name claude-static --channels plugin:discord@claude-plugins-official"
+assert_not_contains "$CLAUDE_LAUNCH_CONTINUE" "claude --continue"
 [[ "$CLAUDE_LAUNCH_CONTINUE" != *"'DISCORD_STATE_DIR="* ]] || die "static Claude env prefix should not be shell-quoted on continue"
+
+FAKE_CLAUDE_HOME="$TMP_ROOT/fake-claude-home"
+mkdir -p "$FAKE_CLAUDE_HOME/.claude/sessions"
+cat >"$FAKE_CLAUDE_HOME/.claude/sessions/static-existing.json" <<EOF
+{"sessionId":"static-existing-session-id","cwd":"$CLAUDE_STATIC_WORKDIR","startedAt":1760000000000}
+EOF
+CLAUDE_LAUNCH_EXISTING_SESSION="$(HOME="$FAKE_CLAUDE_HOME" "$BASH4_BIN" -c '
+  source "'"$REPO_ROOT"'/bridge-lib.sh"
+  bridge_load_roster
+  BRIDGE_AGENT_CONTINUE["claude-static"]="1"
+  unset BRIDGE_AGENT_SESSION_ID["claude-static"]
+  bridge_agent_launch_cmd "claude-static"
+')"
+assert_contains "$CLAUDE_LAUNCH_EXISTING_SESSION" "claude --resume static-existing-session-id --dangerously-skip-permissions --name claude-static --channels plugin:discord@claude-plugins-official"
 CLAUDE_CHANNEL_STATUS="$("$BASH4_BIN" -c '
   source "'"$REPO_ROOT"'/bridge-lib.sh"
   bridge_load_roster
@@ -1612,7 +1628,8 @@ EOF
   bridge_load_roster
   bridge_agent_launch_cmd "claude-static"
 ')"
-assert_contains "$CLAUDE_STALE_RESUME_FALLBACK" "claude --continue --dangerously-skip-permissions --name claude-static --channels plugin:discord@claude-plugins-official"
+assert_contains "$CLAUDE_STALE_RESUME_FALLBACK" "claude --dangerously-skip-permissions --name claude-static --channels plugin:discord@claude-plugins-official"
+assert_not_contains "$CLAUDE_STALE_RESUME_FALLBACK" "claude --continue"
 [[ "$CLAUDE_STALE_RESUME_FALLBACK" != *" --resume "* ]] || die "stale Claude session_id should not be used for resume"
 
 log "classifying admin foreground exit by onboarding state"

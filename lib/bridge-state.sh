@@ -7,8 +7,12 @@ bridge_build_dynamic_launch_cmd() {
 
   engine="$(bridge_agent_engine "$agent")"
   continue_mode="$(bridge_agent_continue "$agent")"
-  bridge_normalize_agent_session_id "$agent"
-  session_id="$(bridge_agent_session_id "$agent")"
+  if [[ "$engine" == "claude" && "$continue_mode" == "1" ]]; then
+    session_id="$(bridge_claude_resume_session_id_for_agent "$agent" || true)"
+  else
+    bridge_normalize_agent_session_id "$agent"
+    session_id="$(bridge_agent_session_id "$agent")"
+  fi
 
   case "$engine" in
     codex)
@@ -21,8 +25,6 @@ bridge_build_dynamic_launch_cmd() {
     claude)
       if [[ "$continue_mode" == "1" && -n "$session_id" ]]; then
         bridge_join_quoted claude --resume "$session_id" --dangerously-skip-permissions --name "$agent"
-      elif [[ "$continue_mode" == "1" ]]; then
-        bridge_join_quoted claude --continue --dangerously-skip-permissions --name "$agent"
       else
         bridge_join_quoted claude --dangerously-skip-permissions --name "$agent"
       fi
@@ -82,6 +84,25 @@ bridge_clear_agent_session_id() {
   local agent="$1"
   BRIDGE_AGENT_SESSION_ID["$agent"]=""
   bridge_persist_agent_state "$agent"
+}
+
+bridge_claude_resume_session_id_for_agent() {
+  local agent="$1"
+  local session_id=""
+  local detected=""
+
+  [[ "$(bridge_agent_engine "$agent")" == "claude" ]] || return 1
+
+  bridge_normalize_agent_session_id "$agent"
+  session_id="$(bridge_agent_session_id "$agent")"
+  if [[ -n "$session_id" ]]; then
+    printf '%s' "$session_id"
+    return 0
+  fi
+
+  detected="$(bridge_detect_claude_session_id "$(bridge_agent_workdir "$agent")" 0 "" 2>/dev/null || true)"
+  [[ -n "$detected" ]] || return 1
+  printf '%s' "$detected"
 }
 
 bridge_normalize_agent_session_id() {
@@ -303,7 +324,9 @@ bridge_build_static_claude_launch_cmd() {
   [[ -n "$fallback" ]] || return 1
 
   continue_mode="$(bridge_agent_continue "$agent")"
-  session_id="$(bridge_agent_session_id "$agent")"
+  if [[ "$continue_mode" == "1" ]]; then
+    session_id="$(bridge_claude_resume_session_id_for_agent "$agent" || true)"
+  fi
 
   bridge_require_python
   python3 - "$agent" "$continue_mode" "$session_id" "$fallback" <<'PY'
@@ -342,11 +365,8 @@ while j < len(rest):
     j += 1
 
 base = ["claude"]
-if continue_mode == "1":
-    if session_id:
-        base.extend(["--resume", session_id])
-    else:
-        base.append("--continue")
+if continue_mode == "1" and session_id:
+    base.extend(["--resume", session_id])
 base.extend(["--dangerously-skip-permissions", "--name", agent])
 base.extend(extras)
 
