@@ -271,12 +271,60 @@ Permissions Integer는 [복사한 숫자]야.
 |------|------|------|
 | **Discord** | 완전 지원 | **메인으로 권장** — 채널별 에이전트 분리, 팀 협업에 최적 |
 | **Telegram** | 완전 지원 | 개인 비서 용도에 적합 |
+| **Microsoft Teams** | Phase 1 지원 | 기업 Teams 환경용 — Azure Bot webhook 기반, `reply`/`fetch_messages` 지원 |
 
 Discord를 메인으로 추천하는 이유: 서버 내 채널별로 에이전트를 배치할 수 있어서 팀 운영에 자연스럽습니다.
 
+### Microsoft Teams 연결하기
+
+Teams 채널은 Claude Code Channels 플러그인(`plugin:teams@agent-bridge`)으로 동작합니다. 현재 범위는 Phase 1입니다: Azure Bot Service webhook 수신, allowlist 접근 제어, Claude 채널 알림, `reply`, `fetch_messages` 도구를 지원합니다.
+
+필요한 것:
+
+- Azure Bot Resource의 Application ID
+- Azure Bot client secret
+- Tenant ID
+- HTTPS로 외부에서 접근 가능한 messaging endpoint (`https://<domain>/api/messages`)
+- `bun` 실행 파일 (Teams 플러그인 런타임)
+
+관리자 에이전트에게 자연어로 맡길 수 있습니다:
+
+```text
+patch 에이전트를 Microsoft Teams에 연결해줘.
+Azure Bot Application ID는 [app id]야.
+client secret은 [secret]이야.
+Tenant ID는 [tenant id]야.
+허용할 Teams 사용자 ID 또는 AAD object ID는 [user id]야.
+```
+
+직접 실행할 때는:
+
+```bash
+agb setup teams patch \
+  --app-id "<azure-bot-app-id>" \
+  --app-password "<client-secret>" \
+  --tenant-id "<tenant-id>" \
+  --allow-from "<aad-object-id-or-teams-user-id>" \
+  --yes
+```
+
+팀 채널에서 멘션이 있을 때만 깨우려면 conversation id를 추가합니다:
+
+```bash
+agb setup teams patch \
+  --app-id "<azure-bot-app-id>" \
+  --app-password "<client-secret>" \
+  --tenant-id "<tenant-id>" \
+  --conversation "<teams-conversation-or-channel-id>" \
+  --require-mention \
+  --yes
+```
+
+자세한 플러그인 동작은 [plugins/teams/README.md](./plugins/teams/README.md)를 참고하세요.
+
 ### 채널 MCP 연결 오류가 날 때
 
-Claude Code 채널 플러그인은 설치만으로는 준비되지 않습니다. Discord/Telegram 봇 토큰, 접근 설정 파일, 그리고 Claude Code 플러그인이 모두 준비되어야 MCP 서버가 연결됩니다. Agent Bridge는 `setup`과 에이전트 시작 시점에 필요한 Claude Code 플러그인을 자동으로 설치/활성화합니다.
+Claude Code 채널 플러그인은 설치만으로는 준비되지 않습니다. Discord/Telegram 봇 토큰 또는 Teams Azure Bot credential, 접근 설정 파일, 그리고 Claude Code 플러그인이 모두 준비되어야 MCP 서버가 연결됩니다. Agent Bridge는 `setup`과 에이전트 시작 시점에 필요한 Claude Code 플러그인을 자동으로 설치/활성화합니다.
 
 일부 환경에서는 Claude Code의 `claude-plugins-official` 로컬 marketplace mirror가 오래되어 `discord@claude-plugins-official` 또는 `telegram@claude-plugins-official` 설치가 실패할 수 있습니다. Agent Bridge는 이 경우 marketplace를 `remove` 후 `add anthropics/claude-plugins-official`로 강제 갱신하고 1회 재시도합니다.
 
@@ -287,6 +335,8 @@ Agent Bridge는 각 에이전트별 state dir을 사용합니다:
 ~/.agent-bridge/agents/<agent>/.discord/access.json
 ~/.agent-bridge/agents/<agent>/.telegram/.env
 ~/.agent-bridge/agents/<agent>/.telegram/access.json
+~/.agent-bridge/agents/<agent>/.teams/.env
+~/.agent-bridge/agents/<agent>/.teams/access.json
 ```
 
 에이전트에 채널이 지정돼 있는데 토큰이나 access 파일이 없으면 `agb agent start <agent>`는 불완전한 `--channels` 세션을 띄우지 않고 어떤 setup 명령을 실행해야 하는지 출력합니다. 첫 admin 온보딩 중에는 사용자가 설정을 마칠 수 있도록 준비된 채널만 붙이고, 아직 준비 안 된 채널은 임시로 제외합니다.
@@ -307,6 +357,7 @@ claude plugin enable --scope user telegram@claude-plugins-official
 ```bash
 agb setup discord <agent> --token <DISCORD_BOT_TOKEN> --channel <DISCORD_CHANNEL_ID>
 agb setup telegram <agent> --token <TELEGRAM_BOT_TOKEN> --allow-from <TELEGRAM_USER_ID> --default-chat <TELEGRAM_CHAT_ID>
+agb setup teams <agent> --app-id <TEAMS_APP_ID> --app-password <TEAMS_APP_PASSWORD> --tenant-id <TEAMS_TENANT_ID> --allow-from <TEAMS_USER_ID>
 ```
 
 참고: `claude mcp list`를 Agent Bridge 밖에서 실행하면 Claude Code의 기본 전역 경로(`~/.claude/channels/...`)를 기준으로 실패가 보일 수 있습니다. Agent Bridge가 실제로 쓰는 기준은 위의 에이전트별 state dir입니다. 검증은 `agb agent start <agent> --dry-run` 또는 `agb status`로 확인하세요.
@@ -450,6 +501,7 @@ agb status
 | `agb cron create ...` | 반복 작업 등록 |
 | `agb setup discord <agent>` | Discord 채널 연결 |
 | `agb setup telegram <agent>` | Telegram 채널 연결 |
+| `agb setup teams <agent>` | Microsoft Teams 채널 연결 |
 | `agb user set --name "<name>"` | 에이전트별 사용자 메모리 호환용 기본 사용자 프로필 저장 |
 | `agb user show` | 사용자 프로필 확인 |
 | `agb knowledge init` | 팀 공통 지식 위키 생성 |

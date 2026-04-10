@@ -185,6 +185,7 @@ FAKE_DISCORD_PID=""
 FAKE_TELEGRAM_PORT_FILE="$TMP_ROOT/fake-telegram.port"
 FAKE_TELEGRAM_REQUESTS="$TMP_ROOT/fake-telegram-requests.jsonl"
 FAKE_TELEGRAM_PID=""
+TEAMS_PLUGIN_PID=""
 TOKENFILE_ENV="$TMP_ROOT/tokenfile-telegram.env"
 CODEX_HOOKS_FILE="$TMP_ROOT/codex-home/.codex/hooks.json"
 export BRIDGE_CODEX_HOOKS_FILE="$CODEX_HOOKS_FILE"
@@ -218,6 +219,10 @@ cleanup() {
   if [[ -n "$FAKE_TELEGRAM_PID" ]]; then
     kill "$FAKE_TELEGRAM_PID" >/dev/null 2>&1 || true
     wait "$FAKE_TELEGRAM_PID" >/dev/null 2>&1 || true
+  fi
+  if [[ -n "$TEAMS_PLUGIN_PID" ]]; then
+    kill "$TEAMS_PLUGIN_PID" >/dev/null 2>&1 || true
+    wait "$TEAMS_PLUGIN_PID" >/dev/null 2>&1 || true
   fi
   if [[ "$LIVE_ROSTER_PRESENT" == "1" ]] && ! cmp -s "$LIVE_ROSTER_BACKUP" "$LIVE_ROSTER_FILE"; then
     cp "$LIVE_ROSTER_BACKUP" "$LIVE_ROSTER_FILE"
@@ -1721,6 +1726,62 @@ CREATED_TEAMS_LAUNCH="$("$BASH4_BIN" -c '
 ')"
 assert_contains "$CREATED_TEAMS_LAUNCH" "TEAMS_STATE_DIR=$BRIDGE_AGENT_HOME_ROOT/$CREATED_AGENT/.teams"
 assert_contains "$CREATED_TEAMS_LAUNCH" "plugin:teams@agent-bridge"
+
+if command -v bun >/dev/null 2>&1; then
+  log "exercising Teams channel plugin health"
+  TEAMS_SMOKE_PORT="$(python3 - <<'PY'
+import socket
+s = socket.socket()
+s.bind(("127.0.0.1", 0))
+print(s.getsockname()[1])
+s.close()
+PY
+)"
+  TEAMS_PLUGIN_LOG="$TMP_ROOT/teams-plugin.log"
+  (
+    cd "$REPO_ROOT/plugins/teams"
+    TEAMS_STATE_DIR="$BRIDGE_AGENT_HOME_ROOT/$CREATED_AGENT/.teams" \
+      TEAMS_WEBHOOK_HOST=127.0.0.1 \
+      TEAMS_WEBHOOK_PORT="$TEAMS_SMOKE_PORT" \
+      bun run --shell=bun --silent start >"$TEAMS_PLUGIN_LOG" 2>&1
+  ) &
+  TEAMS_PLUGIN_PID=$!
+  for _ in {1..40}; do
+    if python3 - "$TEAMS_SMOKE_PORT" <<'PY' >/dev/null 2>&1
+import json
+import sys
+import urllib.request
+port = sys.argv[1]
+with urllib.request.urlopen(f"http://127.0.0.1:{port}/health", timeout=0.5) as res:
+    payload = json.load(res)
+if payload.get("ok") is not True or payload.get("channel") != "teams":
+    raise SystemExit(1)
+PY
+    then
+      break
+    fi
+    if ! kill -0 "$TEAMS_PLUGIN_PID" >/dev/null 2>&1; then
+      cat "$TEAMS_PLUGIN_LOG" >&2 || true
+      die "Teams plugin exited before health check"
+    fi
+    sleep 0.25
+  done
+  python3 - "$TEAMS_SMOKE_PORT" <<'PY' >/dev/null
+import json
+import sys
+import urllib.request
+port = sys.argv[1]
+with urllib.request.urlopen(f"http://127.0.0.1:{port}/health", timeout=1) as res:
+    payload = json.load(res)
+if payload.get("ok") is not True or payload.get("channel") != "teams":
+    raise SystemExit("Teams health payload mismatch")
+PY
+  kill "$TEAMS_PLUGIN_PID" >/dev/null 2>&1 || true
+  wait "$TEAMS_PLUGIN_PID" >/dev/null 2>&1 || true
+  TEAMS_PLUGIN_PID=""
+else
+  log "bun not installed; skipping Teams channel plugin runtime smoke"
+fi
 
 BOOTSTRAP_FAIL_HOME="$TMP_ROOT/bootstrap-fail-home"
 mkdir -p "$BOOTSTRAP_FAIL_HOME"
