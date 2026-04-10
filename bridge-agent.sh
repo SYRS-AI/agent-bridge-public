@@ -28,7 +28,7 @@ Options:
   --display-name <text>        scaffold display name (default: <agent>)
   --role <text>                scaffold role summary
   --session-type <type>        admin|static-claude|static-codex|dynamic|cron
-  --user <id[:display-name]>   scaffold one user memory partition (repeatable)
+  --user <id[:display-name]>   scaffold one user memory partition (repeatable; defaults to shared users)
   --launch-cmd <cmd>           explicit launch command
   --channels <csv>             required Claude channels metadata
   --discord-channel <id>       primary Discord channel metadata
@@ -191,18 +191,31 @@ bridge_scaffold_agent_home() {
 bridge_normalize_user_specs_json() {
   bridge_agent_manage_python "$@" <<'PY'
 import json
+import os
 import re
 import sys
+from pathlib import Path
 
 NAME_RE = re.compile(r"^[A-Za-z0-9._-]+$")
 
 items = []
 seen = set()
-for raw in sys.argv[1:]:
-    if ":" in raw:
-        user_id, display_name = raw.split(":", 1)
-    else:
-        user_id, display_name = raw, raw
+
+def display_name_from_user_file(path: Path, fallback: str) -> str:
+    try:
+        text = path.read_text(encoding="utf-8")
+    except Exception:
+        return fallback
+    preferred = ""
+    name = ""
+    for line in text.splitlines():
+        if line.startswith("- Preferred name:"):
+            preferred = line.split(":", 1)[1].strip()
+        elif line.startswith("- Name:"):
+            name = line.split(":", 1)[1].strip()
+    return preferred or name or fallback
+
+def add_user(user_id: str, display_name: str) -> None:
     user_id = user_id.strip()
     display_name = display_name.strip() or user_id
     if not user_id:
@@ -210,12 +223,47 @@ for raw in sys.argv[1:]:
     if not NAME_RE.match(user_id):
         raise SystemExit(f"invalid user id: {user_id}")
     if user_id in seen:
-        continue
+        return
     seen.add(user_id)
     items.append({"id": user_id, "display_name": display_name})
 
+for raw in sys.argv[1:]:
+    if ":" in raw:
+        user_id, display_name = raw.split(":", 1)
+    else:
+        user_id, display_name = raw, raw
+    add_user(user_id, display_name)
+
+def discover_shared_users() -> None:
+    shared_dir = Path(os.environ.get("BRIDGE_SHARED_DIR") or Path(os.environ.get("BRIDGE_HOME", "~/.agent-bridge")).expanduser() / "shared")
+    users_root = shared_dir / "users"
+    if not users_root.exists():
+        return
+    for user_root in sorted(path for path in users_root.iterdir() if path.is_dir()):
+        if not NAME_RE.match(user_root.name):
+            continue
+        display = display_name_from_user_file(user_root / "USER.md", user_root.name)
+        add_user(user_root.name, display)
+
+def discover_existing_agent_users() -> None:
+    agents_root = Path(os.environ.get("BRIDGE_AGENT_HOME_ROOT") or Path(os.environ.get("BRIDGE_HOME", "~/.agent-bridge")).expanduser() / "agents")
+    if not agents_root.exists():
+        return
+    for user_file in sorted(agents_root.glob("*/users/*/USER.md")):
+        user_id = user_file.parent.name
+        if not NAME_RE.match(user_id):
+            continue
+        display = display_name_from_user_file(user_file, user_id)
+        if user_id == "default" and display == "default":
+            continue
+        add_user(user_id, display)
+
 if not items:
-    items = [{"id": "default", "display_name": "default"}]
+    discover_shared_users()
+if not items:
+    discover_existing_agent_users()
+if not items:
+    add_user("default", "default")
 
 print(json.dumps(items, ensure_ascii=False))
 PY
@@ -224,8 +272,9 @@ PY
 bridge_scaffold_user_partitions() {
   local home="$1"
   local users_json="$2"
+  local shared_users_root="${3:-${BRIDGE_SHARED_DIR:-$BRIDGE_HOME/shared}/users}"
 
-  bridge_agent_manage_python "$home" "$users_json" <<'PY'
+  bridge_agent_manage_python "$home" "$users_json" "$shared_users_root" <<'PY'
 from pathlib import Path
 import json
 import shutil
@@ -233,6 +282,7 @@ import sys
 
 home = Path(sys.argv[1])
 users = json.loads(sys.argv[2])
+shared_users_root = Path(sys.argv[3])
 users_root = home / "users"
 default_root = users_root / "default"
 
@@ -245,20 +295,39 @@ def patch_user_file(path: Path, user_id: str, display_name: str) -> None:
     text = text.replace("- Preferred name:\n", f"- Preferred name: {display_name}\n")
     path.write_text(text, encoding="utf-8")
 
+def remove_path(path: Path) -> None:
+    if path.is_symlink() or path.is_file():
+        path.unlink()
+    elif path.exists():
+        shutil.rmtree(path)
+
+def link_or_copy(canonical: Path, target: Path) -> None:
+    if target.exists() or target.is_symlink():
+        remove_path(target)
+    try:
+        target.symlink_to(canonical, target_is_directory=True)
+    except OSError:
+        shutil.copytree(canonical, target, symlinks=True)
+
+def ensure_canonical_user(user_id: str, display_name: str) -> Path:
+    canonical = shared_users_root / user_id
+    if not canonical.exists():
+        canonical.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copytree(default_root, canonical, symlinks=True)
+    patch_user_file(canonical / "USER.md", user_id, display_name)
+    return canonical
+
 for user in users:
     user_id = user["id"]
     display_name = user.get("display_name") or user_id
+    canonical = ensure_canonical_user(user_id, display_name)
     target = users_root / user_id
-    if user_id == "default":
-        patch_user_file(target / "USER.md", user_id, display_name)
+    if target.exists() and not target.is_symlink() and user_id != "default":
         continue
-    if target.exists():
-        continue
-    shutil.copytree(default_root, target)
-    patch_user_file(target / "USER.md", user_id, display_name)
+    link_or_copy(canonical, target)
 
-if all(user["id"] != "default" for user in users):
-    shutil.rmtree(default_root)
+if all(user["id"] != "default" for user in users) and (default_root.exists() or default_root.is_symlink()):
+    remove_path(default_root)
 
 index_path = home / "memory" / "index.md"
 if index_path.exists():

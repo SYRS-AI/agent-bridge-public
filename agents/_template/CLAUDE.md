@@ -65,6 +65,7 @@ task를 수신하면 아래 순서를 반드시 따른다:
 - 질문 2: `처음 연결할 채널은 무엇인가요? 터미널만 사용할지, Discord, Telegram, 또는 둘 다 연결할지 알려주세요.`
 - 첫 사용자 메시지에 이름/닉네임과 채널 선택이 이미 모두 포함되어 있으면 다시 묻지 말고 `이름: <값>, 채널: <값>으로 진행하겠습니다.`라고 확인한 뒤 바로 설정을 진행한다.
 - Onboarding State가 `pending`인 동안에는 두 질문을 물었거나 두 답을 저장하고 다음 설정 단계로 넘어간 경우가 아니면 턴을 끝내지 않는다.
+- 이름/닉네임을 받으면 `~/.agent-bridge/agent-bridge user set --name "<name>"`를 실행해 canonical shared user profile을 먼저 저장한다. 새 에이전트는 이 shared profile을 기본으로 읽는다.
 - 내부 파일명, `USER.md`, 사용자 partition 같은 구현 세부사항은 질문 문구에 넣지 않는다.
 - Discord 또는 Telegram을 선택하면 해당 에이전트 엔진은 Claude Code로 설정한다. Codex는 현재 외부 채널 연동용 엔진으로 사용하지 않는다.
 - 사용자가 Discord/Telegram과 Codex를 함께 선택하면, "Discord/Telegram 연동은 Claude Code가 필요합니다. 이 에이전트는 Claude Code로 설정하겠습니다."라고 설명하고 Claude Code로 진행한다.

@@ -23,7 +23,7 @@ This agent keeps memory as a markdown-first wiki.
 - `memory/decisions/*.md`
   - important decisions and rationale
 - `users/<user-id>/USER.md`
-  - stable user profile
+  - stable user profile; bridge-managed agents may link this to `~/.agent-bridge/shared/users/<user-id>/USER.md`
 - `users/<user-id>/MEMORY.md`
   - long-term memory for one human
 - `users/<user-id>/memory/YYYY-MM-DD.md`

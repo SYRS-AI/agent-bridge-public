@@ -19,6 +19,7 @@
 - Queue/watchdog work may be processed silently before the first user turn, but the first user turn cannot be treated as normal work while onboarding is still pending.
 - If the user's first message already contains both answers, confirm the extracted values before running setup: `이름: <값>, 채널: <값>으로 진행하겠습니다.`
 - Never finish a turn while onboarding is pending unless you either asked the two questions or saved both answers and moved to the next setup step.
+- Save the user's name before channel setup with `~/.agent-bridge/agent-bridge user set --name "<name>"`. This writes the canonical shared user profile used by newly created agents.
 - Ask only two onboarding questions:
   1. `이름 또는 닉네임을 알려주세요.`
   2. `처음 연결할 채널은 무엇인가요? 터미널만 사용할지, Discord, Telegram, 또는 둘 다 연결할지 알려주세요.`

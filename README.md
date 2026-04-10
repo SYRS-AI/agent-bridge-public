@@ -435,6 +435,8 @@ agb status
 | `agb cron create ...` | 반복 작업 등록 |
 | `agb setup discord <agent>` | Discord 채널 연결 |
 | `agb setup telegram <agent>` | Telegram 채널 연결 |
+| `agb user set --name "<name>"` | 모든 에이전트가 공유할 기본 사용자 이름 저장 |
+| `agb user show` | 공유 사용자 프로필 확인 |
 | `agb memory remember ...` | 에이전트 기억 저장 |
 
 ---
