@@ -11,7 +11,7 @@ bridge_load_roster
 usage() {
   cat <<EOF
 Usage:
-  $(basename "$0") [--admin <agent>] [--engine claude|codex] [--session <name>] [--workdir <path>] [--user <id[:display-name]>]... [--channels <csv>] [--discord-channel <id>]... [--allow-from <id>]... [--default-chat <id>] [--channel-account <account>] [--runtime-config <path>] [--api-base-url <url>] [--skip-validate] [--skip-send-test] [--skip-channel-setup] [--test-start] [--dry-run] [--json]
+  $(basename "$0") [--admin <agent>] [--engine claude|codex] [--session <name>] [--workdir <path>] [--user <id[:display-name]>]... [--channels <csv>] [--discord-channel <id>]... [--allow-from <id>]... [--default-chat <id>] [--teams-app-id <id>] [--teams-app-password <secret>] [--teams-tenant-id <id>] [--teams-allow-from <id>]... [--teams-conversation <id>]... [--channel-account <account>] [--runtime-config <path>] [--api-base-url <url>] [--skip-validate] [--skip-send-test] [--skip-channel-setup] [--test-start] [--dry-run] [--json]
 
 Examples:
   $(basename "$0") --admin patch --engine claude --channels plugin:telegram@claude-plugins-official --allow-from 123456789 --default-chat 123456789 --channel-account default
@@ -78,6 +78,9 @@ bridge_init_runtime_present() {
     telegram)
       [[ -f "$(bridge_agent_telegram_state_dir "$agent")/.env" && -f "$(bridge_agent_telegram_state_dir "$agent")/access.json" ]]
       ;;
+    teams)
+      [[ -f "$(bridge_agent_teams_state_dir "$agent")/.env" && -f "$(bridge_agent_teams_state_dir "$agent")/access.json" ]]
+      ;;
     *)
       return 1
       ;;
@@ -135,6 +138,12 @@ WARNINGS=()
 discord_channels=()
 telegram_allow_from=()
 default_chat=""
+teams_app_id=""
+teams_app_password=""
+teams_tenant_id=""
+teams_service_url=""
+teams_allow_from=()
+teams_conversations=()
 notify_kind=""
 notify_target=""
 notify_account=""
@@ -206,6 +215,36 @@ while [[ $# -gt 0 ]]; do
     --default-chat)
       [[ $# -ge 2 ]] || bridge_die "옵션 값이 필요합니다: $1"
       default_chat="$2"
+      shift 2
+      ;;
+    --teams-app-id)
+      [[ $# -ge 2 ]] || bridge_die "옵션 값이 필요합니다: $1"
+      teams_app_id="$2"
+      shift 2
+      ;;
+    --teams-app-password)
+      [[ $# -ge 2 ]] || bridge_die "옵션 값이 필요합니다: $1"
+      teams_app_password="$2"
+      shift 2
+      ;;
+    --teams-tenant-id)
+      [[ $# -ge 2 ]] || bridge_die "옵션 값이 필요합니다: $1"
+      teams_tenant_id="$2"
+      shift 2
+      ;;
+    --teams-service-url)
+      [[ $# -ge 2 ]] || bridge_die "옵션 값이 필요합니다: $1"
+      teams_service_url="$2"
+      shift 2
+      ;;
+    --teams-allow-from)
+      [[ $# -ge 2 ]] || bridge_die "옵션 값이 필요합니다: $1"
+      teams_allow_from+=("$2")
+      shift 2
+      ;;
+    --teams-conversation)
+      [[ $# -ge 2 ]] || bridge_die "옵션 값이 필요합니다: $1"
+      teams_conversations+=("$2")
       shift 2
       ;;
     --channel-account|--openclaw-account)
@@ -355,10 +394,34 @@ if [[ $skip_channel_setup -eq 0 ]] && [[ $dry_run -eq 0 ]]; then
       bridge_init_append_warning "Telegram channel setup skipped: no existing runtime, allow_from ids, or --channel-account provided."
     fi
   fi
+  if bridge_channel_csv_contains "$channels" "plugin:teams"; then
+    if ((${#teams_allow_from[@]} > 0)) || ((${#teams_conversations[@]} > 0)) || [[ -n "$channel_account" ]] || [[ -n "$teams_app_id" && -n "$teams_app_password" ]] || bridge_init_runtime_present teams "$admin_agent"; then
+      setup_args=(teams "$admin_agent")
+      for item in "${teams_allow_from[@]}"; do
+        setup_args+=(--allow-from "$item")
+      done
+      for item in "${teams_conversations[@]}"; do
+        setup_args+=(--conversation "$item")
+      done
+      [[ -n "$teams_app_id" ]] && setup_args+=(--app-id "$teams_app_id")
+      [[ -n "$teams_app_password" ]] && setup_args+=(--app-password "$teams_app_password")
+      [[ -n "$teams_tenant_id" ]] && setup_args+=(--tenant-id "$teams_tenant_id")
+      [[ -n "$teams_service_url" ]] && setup_args+=(--service-url "$teams_service_url")
+      [[ -n "$channel_account" ]] && setup_args+=(--channel-account "$channel_account")
+      [[ -n "$runtime_config" ]] && setup_args+=(--runtime-config "$runtime_config")
+      [[ $skip_validate -eq 1 ]] && setup_args+=(--skip-validate)
+      [[ $skip_send_test -eq 1 ]] && setup_args+=(--skip-send-test)
+      setup_args+=(--yes)
+      bridge_init_run_step "teams bootstrap" "$BRIDGE_BASH_BIN" "$SCRIPT_DIR/bridge-setup.sh" "${setup_args[@]}"
+    else
+      channel_setup_status="partial"
+      bridge_init_append_warning "Teams channel setup skipped: no existing runtime, teams credentials, allow_from ids, conversations, or --channel-account provided."
+    fi
+  fi
 fi
 
 if [[ $dry_run -eq 0 ]]; then
-  preflight_args=(agent "$admin_agent" --skip-discord --skip-telegram)
+  preflight_args=(agent "$admin_agent" --skip-discord --skip-telegram --skip-teams)
   if [[ $test_start -eq 1 ]]; then
     preflight_args+=(--test-start)
   fi

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Interactive Discord and Telegram onboarding helpers for Agent Bridge."""
+"""Interactive Discord, Telegram, and Teams onboarding helpers for Agent Bridge."""
 
 from __future__ import annotations
 
@@ -69,6 +69,22 @@ def normalize_id_list(values: list[str] | tuple[str, ...] | None, label: str) ->
                 continue
             if not re.fullmatch(r"\d{6,}", chunk):
                 raise SetupError(f"{label} must be Discord snowflake IDs: {chunk}")
+            if chunk in seen:
+                continue
+            seen.add(chunk)
+            results.append(chunk)
+    return results
+
+
+def normalize_teams_id_list(values: list[str] | tuple[str, ...] | None, label: str) -> list[str]:
+    results: list[str] = []
+    seen: set[str] = set()
+    for raw in values or []:
+        for chunk in re.split(r"[\s,]+", str(raw).strip()):
+            if not chunk:
+                continue
+            if not re.fullmatch(r"[A-Za-z0-9._:@-]{3,256}", chunk):
+                raise SetupError(f"{label} must be Teams/AAD ids without whitespace: {chunk}")
             if chunk in seen:
                 continue
             seen.add(chunk)
@@ -217,6 +233,33 @@ def inspect_telegram_dir(telegram_dir: Path) -> dict[str, Any]:
         "token": env.get("TELEGRAM_BOT_TOKEN", "").strip(),
         "allow_from": allow_from,
         "default_chat": default_chat,
+        "access_payload": access_payload if isinstance(access_payload, dict) else {},
+    }
+
+
+def inspect_teams_dir(teams_dir: Path) -> dict[str, Any]:
+    env_path = teams_dir / ".env"
+    access_path = teams_dir / "access.json"
+    env = load_dotenv(env_path)
+    access_payload = load_json(access_path, {})
+    groups = access_payload.get("groups") or {}
+    conversations = [str(key) for key in groups.keys() if str(key).strip()]
+    allow_from = normalize_teams_id_list(access_payload.get("allowFrom") or [], "allow_from")
+    require_values = []
+    for conversation_id in conversations:
+        entry = groups.get(conversation_id) or {}
+        require_values.append(bool(entry.get("requireMention", False)))
+    require_mention = bool(require_values and all(require_values))
+    return {
+        "env_path": env_path,
+        "access_path": access_path,
+        "app_id": env.get("TEAMS_APP_ID", "").strip(),
+        "app_password": env.get("TEAMS_APP_PASSWORD", "").strip(),
+        "tenant_id": env.get("TEAMS_TENANT_ID", "").strip(),
+        "service_url": env.get("TEAMS_SERVICE_URL", "").strip(),
+        "conversations": conversations,
+        "allow_from": allow_from,
+        "require_mention": require_mention,
         "access_payload": access_payload if isinstance(access_payload, dict) else {},
     }
 
@@ -431,6 +474,30 @@ def print_telegram_result(result: dict[str, Any], *, stream: Any = sys.stdout) -
     for warning in result.get("warnings") or []:
         print(f"warning: {warning}", file=stream)
 
+    if result.get("error"):
+        print(f"error: {result['error']}", file=stream)
+
+
+def print_teams_result(result: dict[str, Any], *, stream: Any = sys.stdout) -> None:
+    print(f"agent: {result['agent']}", file=stream)
+    print(f"teams_dir: {result['teams_dir']}", file=stream)
+    print(f"env_file: {result['env_file']}", file=stream)
+    print(f"access_file: {result['access_file']}", file=stream)
+    print(f"credential_source: {result['credential_source']}", file=stream)
+    if result["allow_from"]:
+        print(f"allow_from: {', '.join(result['allow_from'])}", file=stream)
+    else:
+        print("allow_from: (none)", file=stream)
+    if result["conversations"]:
+        print(f"conversations: {', '.join(result['conversations'])}", file=stream)
+    else:
+        print("conversations: (none)", file=stream)
+    print(f"require_mention: {'yes' if result['require_mention'] else 'no'}", file=stream)
+    print(f"write_status: {result['write_status']}", file=stream)
+    validation = result.get("validation") or {}
+    print(f"validation: {validation.get('status', 'skipped')}", file=stream)
+    for warning in result.get("warnings") or []:
+        print(f"warning: {warning}", file=stream)
     if result.get("error"):
         print(f"error: {result['error']}", file=stream)
 
@@ -696,6 +763,165 @@ def cmd_telegram(args: argparse.Namespace) -> int:
         return 1
 
 
+def cmd_teams(args: argparse.Namespace) -> int:
+    teams_dir = Path(args.teams_dir).expanduser()
+    inspected = inspect_teams_dir(teams_dir)
+    access_payload = inspected["access_payload"]
+    warnings: list[str] = []
+    interactive = sys.stdin.isatty() and sys.stdout.isatty() and not args.yes
+
+    result: dict[str, Any] = {
+        "agent": args.agent,
+        "teams_dir": str(teams_dir),
+        "env_file": str(inspected["env_path"]),
+        "access_file": str(inspected["access_path"]),
+        "credential_source": "",
+        "allow_from": [],
+        "conversations": [],
+        "require_mention": False,
+        "write_status": "pending",
+        "validation": {"status": "skipped"},
+        "warnings": warnings,
+    }
+
+    try:
+        accounts = load_channel_accounts(Path(args.runtime_config), "teams") if args.runtime_config else {}
+        account_cfg: dict[str, Any] = {}
+        credential_source = ""
+        if args.channel_account:
+            account_cfg = accounts.get(args.channel_account) or {}
+            if not account_cfg:
+                raise SetupError(f"Configured teams account not found: {args.channel_account}")
+            credential_source = f"channel:{args.channel_account}"
+        elif accounts:
+            candidates = candidate_channel_accounts(args.agent, accounts)
+            if candidates and not interactive:
+                choice = candidates[0]
+                account_cfg = accounts.get(choice) or {}
+                credential_source = f"channel:{choice}"
+            elif interactive and candidates:
+                default_account = candidates[0]
+                choice = prompt_text(
+                    "Configured Teams channel account to import (enter 'skip' to paste manually)",
+                    default_account,
+                )
+                if choice.lower() not in {"skip", "none", "manual"}:
+                    account_cfg = accounts.get(choice) or {}
+                    if not account_cfg:
+                        raise SetupError(f"Configured teams account not found: {choice}")
+                    credential_source = f"channel:{choice}"
+
+        app_id = str(args.app_id or account_cfg.get("appId") or account_cfg.get("app_id") or inspected["app_id"]).strip()
+        app_password = str(
+            args.app_password
+            or account_cfg.get("appPassword")
+            or account_cfg.get("app_password")
+            or account_cfg.get("clientSecret")
+            or account_cfg.get("client_secret")
+            or inspected["app_password"]
+        ).strip()
+        tenant_id = str(args.tenant_id or account_cfg.get("tenantId") or account_cfg.get("tenant_id") or inspected["tenant_id"]).strip()
+        service_url = str(args.service_url or account_cfg.get("serviceUrl") or account_cfg.get("service_url") or inspected["service_url"]).strip()
+
+        if not credential_source:
+            if args.app_id or args.app_password or args.tenant_id:
+                credential_source = "flag"
+            elif inspected["app_id"] or inspected["app_password"]:
+                credential_source = "existing:.teams/.env"
+
+        if not app_id and interactive:
+            app_id = prompt_text("Teams Azure Bot Application ID", inspected["app_id"])
+            credential_source = credential_source or "prompt"
+        if not app_password and interactive:
+            app_password = prompt_text("Teams Azure Bot client secret", secret=True)
+            credential_source = credential_source or "prompt"
+        if not tenant_id and interactive:
+            tenant_id = prompt_text("Teams Azure tenant ID", inspected["tenant_id"])
+            credential_source = credential_source or "prompt"
+        if not service_url and interactive:
+            service_url = prompt_text("Optional Teams service URL for proactive replies", inspected["service_url"])
+
+        if not app_id or not app_password:
+            raise SetupError("Teams app id and app password are required. Pass --app-id/--app-password, --channel-account, or run in an interactive TTY.")
+
+        explicit_allow_from = normalize_teams_id_list(args.allow_from or [], "allow_from")
+        if interactive and not explicit_allow_from:
+            default_allow_csv = ",".join(inspected["allow_from"])
+            raw_allow_from = prompt_text("Allowed Teams AAD object/user id(s), comma-separated", default_allow_csv)
+            allow_from = normalize_teams_id_list([raw_allow_from], "allow_from")
+        else:
+            allow_from = explicit_allow_from or inspected["allow_from"]
+
+        explicit_conversations = normalize_teams_id_list(args.conversation or [], "conversation ids")
+        if interactive and not explicit_conversations:
+            default_conversation_csv = ",".join(inspected["conversations"])
+            raw_conversations = prompt_text("Optional Teams conversation/channel id(s), comma-separated", default_conversation_csv)
+            conversations = normalize_teams_id_list([raw_conversations], "conversation ids")
+        else:
+            conversations = explicit_conversations or inspected["conversations"]
+
+        require_mention = bool(args.require_mention or inspected["require_mention"])
+        if not allow_from and not conversations:
+            warnings.append(
+                f"No Teams allow_from ids or conversations configured for {args.agent}. The plugin will reject inbound messages until access.json is updated."
+            )
+        if not tenant_id:
+            warnings.append("TEAMS_TENANT_ID is unset. Single-tenant Azure Bot deployments should set --tenant-id.")
+
+        result["credential_source"] = credential_source or "existing:.teams/.env"
+        result["allow_from"] = allow_from
+        result["conversations"] = conversations
+        result["require_mention"] = require_mention
+
+        access_doc = dict(access_payload)
+        access_doc["dmPolicy"] = "allowlist"
+        access_doc["allowFrom"] = allow_from
+        old_groups = access_doc.get("groups") or {}
+        groups: dict[str, Any] = {}
+        for conversation_id in conversations:
+            old_entry = old_groups.get(conversation_id) or {}
+            preserved_allow = normalize_teams_id_list(old_entry.get("allowFrom") or [], "group allow_from")
+            groups[conversation_id] = {
+                "requireMention": require_mention,
+                "allowFrom": preserved_allow,
+            }
+        access_doc["groups"] = groups
+        if not isinstance(access_doc.get("pending"), dict):
+            access_doc["pending"] = {}
+        if not isinstance(access_doc.get("routes"), dict):
+            access_doc["routes"] = {}
+
+        if args.dry_run:
+            result["write_status"] = "dry_run"
+            result["validation"] = {"status": "dry_run"}
+            print_teams_result(result)
+            return 0
+
+        teams_dir.mkdir(parents=True, exist_ok=True)
+        env_lines = [
+            f"TEAMS_APP_ID={app_id}",
+            f"TEAMS_APP_PASSWORD={app_password}",
+        ]
+        if tenant_id:
+            env_lines.append(f"TEAMS_TENANT_ID={tenant_id}")
+        if service_url:
+            env_lines.append(f"TEAMS_SERVICE_URL={service_url}")
+        save_text(inspected["env_path"], "\n".join(env_lines) + "\n")
+        save_json(inspected["access_path"], access_doc)
+        result["write_status"] = "ok"
+        result["validation"] = {"status": "local"}
+        print_teams_result(result)
+        return 0
+    except SetupError as exc:
+        result["error"] = str(exc)
+        if result["write_status"] == "pending":
+            result["write_status"] = "skipped"
+        if result["credential_source"] == "":
+            result["credential_source"] = "(unset)"
+        print_teams_result(result, stream=sys.stderr)
+        return 1
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="bridge-setup.py")
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -736,6 +962,24 @@ def build_parser() -> argparse.ArgumentParser:
     telegram_parser.add_argument("--dry-run", action="store_true")
     telegram_parser.add_argument("--api-base-url", default="https://api.telegram.org")
     telegram_parser.set_defaults(handler=cmd_telegram)
+
+    teams_parser = subparsers.add_parser("teams")
+    teams_parser.add_argument("--agent", required=True)
+    teams_parser.add_argument("--teams-dir", required=True)
+    teams_parser.add_argument("--runtime-config", default="")
+    teams_parser.add_argument("--channel-account")
+    teams_parser.add_argument("--app-id", default="")
+    teams_parser.add_argument("--app-password", default="")
+    teams_parser.add_argument("--tenant-id", default="")
+    teams_parser.add_argument("--service-url", default="")
+    teams_parser.add_argument("--allow-from", action="append", default=[])
+    teams_parser.add_argument("--conversation", action="append", default=[])
+    teams_parser.add_argument("--require-mention", action="store_true")
+    teams_parser.add_argument("--yes", action="store_true")
+    teams_parser.add_argument("--skip-validate", action="store_true")
+    teams_parser.add_argument("--skip-send-test", action="store_true")
+    teams_parser.add_argument("--dry-run", action="store_true")
+    teams_parser.set_defaults(handler=cmd_teams)
 
     return parser
 

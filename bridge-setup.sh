@@ -13,13 +13,15 @@ usage() {
 Usage:
   $(basename "$0") discord <agent> [--token <token>] [--channel-account <account>] [--runtime-config <path>] [--channel <id>]... [--allow-from <id>]... [--require-mention] [--skip-validate] [--skip-send-test] [--yes] [--dry-run]
   $(basename "$0") telegram <agent> [--token <token>] [--channel-account <account>] [--runtime-config <path>] [--allow-from <id>]... [--default-chat <id>] [--test-chat <id>] [--skip-validate] [--skip-send-test] [--yes] [--dry-run]
-  $(basename "$0") agent <agent> [--skip-discord] [--skip-telegram] [--test-start] [setup options...]
+  $(basename "$0") teams <agent> [--app-id <id>] [--app-password <secret>] [--tenant-id <id>] [--channel-account <account>] [--runtime-config <path>] [--allow-from <id>]... [--conversation <id>]... [--require-mention] [--yes] [--dry-run]
+  $(basename "$0") agent <agent> [--skip-discord] [--skip-telegram] [--skip-teams] [--test-start] [setup options...]
   $(basename "$0") admin <agent>
 
 Examples:
   $(basename "$0") discord tester
   $(basename "$0") discord tester --channel-account default --channel 123456789012345678
   $(basename "$0") telegram tester --channel-account default --allow-from 123456789
+  $(basename "$0") teams tester --channel-account default --allow-from 00000000-0000-0000-0000-000000000000
   $(basename "$0") agent tester
   $(basename "$0") agent tester --test-start
   $(basename "$0") admin tester
@@ -41,10 +43,16 @@ Usage:
   $(basename "$0") telegram <agent> [--token <token>] [--channel-account <account>] [--runtime-config <path>] [--allow-from <id>]... [--default-chat <id>] [--test-chat <id>] [--skip-validate] [--skip-send-test] [--yes] [--dry-run]
 EOF
       ;;
+    teams)
+      cat <<EOF
+Usage:
+  $(basename "$0") teams <agent> [--app-id <id>] [--app-password <secret>] [--tenant-id <id>] [--channel-account <account>] [--runtime-config <path>] [--allow-from <id>]... [--conversation <id>]... [--require-mention] [--yes] [--dry-run]
+EOF
+      ;;
     agent)
       cat <<EOF
 Usage:
-  $(basename "$0") agent <agent> [--skip-discord] [--skip-telegram] [--test-start] [setup options...]
+  $(basename "$0") agent <agent> [--skip-discord] [--skip-telegram] [--skip-teams] [--test-start] [setup options...]
 EOF
       ;;
     admin)
@@ -179,6 +187,51 @@ except FileNotFoundError:
 value = str(payload.get("defaultChatId") or "").strip()
 if value:
     print(value)
+PY
+}
+
+bridge_setup_teams_allow_from() {
+  local teams_dir="$1"
+
+  bridge_require_python
+  python3 - "$teams_dir" <<'PY'
+import json
+import os
+import sys
+
+path = os.path.join(sys.argv[1], "access.json")
+try:
+    payload = json.load(open(path, "r", encoding="utf-8"))
+except FileNotFoundError:
+    raise SystemExit(0)
+
+for item in payload.get("allowFrom") or []:
+    value = str(item).strip()
+    if value:
+        print(value)
+PY
+}
+
+bridge_setup_teams_conversations() {
+  local teams_dir="$1"
+
+  bridge_require_python
+  python3 - "$teams_dir" <<'PY'
+import json
+import os
+import sys
+
+path = os.path.join(sys.argv[1], "access.json")
+try:
+    payload = json.load(open(path, "r", encoding="utf-8"))
+except FileNotFoundError:
+    raise SystemExit(0)
+
+groups = payload.get("groups") or {}
+for conversation_id in groups.keys():
+    conversation_id = str(conversation_id).strip()
+    if conversation_id:
+        print(conversation_id)
 PY
 }
 
@@ -478,15 +531,81 @@ run_telegram() {
   fi
 }
 
+run_teams() {
+  local agent="${1:-}"
+  local teams_dir=""
+  local runtime_config=""
+  local compat_config=""
+  local channel_account=""
+  local dry_run=0
+  local py_args=()
+  local base_args=()
+
+  shift || true
+  if [[ "$agent" == "-h" || "$agent" == "--help" || "$agent" == "help" ]]; then
+    setup_subcommand_usage "teams"
+    return 0
+  fi
+  [[ -n "$agent" ]] || bridge_die "Usage: $(basename "$0") teams <agent> [...]"
+  bridge_require_agent "$agent"
+  bridge_setup_require_claude_agent "$agent" "Teams"
+  runtime_config="$(bridge_compat_config_file)"
+  compat_config="$(bridge_compat_config_file)"
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --app-id|--app-password|--tenant-id|--service-url|--channel-account|--runtime-config|--allow-from|--conversation)
+        [[ $# -ge 2 ]] || bridge_die "옵션 값이 필요합니다: $1"
+        if [[ "$1" == "--channel-account" ]]; then
+          channel_account="$2"
+        fi
+        if [[ "$1" == "--runtime-config" ]]; then
+          runtime_config="$2"
+        fi
+        py_args+=("$1" "$2")
+        shift 2
+        ;;
+      --require-mention|--skip-validate|--skip-send-test|--yes|--dry-run)
+        [[ "$1" == "--dry-run" ]] && dry_run=1
+        py_args+=("$1")
+        shift
+        ;;
+      *)
+        bridge_die "지원하지 않는 setup teams 옵션입니다: $1"
+        ;;
+    esac
+  done
+
+  teams_dir="$(bridge_agent_teams_state_dir "$agent")"
+  base_args=(
+    teams
+    --agent "$agent"
+    --teams-dir "$teams_dir"
+    --runtime-config "$runtime_config"
+  )
+
+  bridge_setup_python "${base_args[@]}" "${py_args[@]}"
+  if [[ $dry_run -eq 0 ]]; then
+    bridge_setup_add_agent_channel "$agent" "plugin:teams"
+    if [[ -n "$channel_account" ]]; then
+      bridge_setup_sync_runtime_account "$runtime_config" "$compat_config" "teams" "$channel_account"
+      bridge_setup_write_local_assoc "BRIDGE_AGENT_NOTIFY_ACCOUNT" "$agent" "$channel_account" >/dev/null
+    fi
+    bridge_ensure_claude_channel_plugins "$agent"
+  fi
+}
+
 run_agent() {
   local agent="${1:-}"
   local skip_discord=0
   local skip_telegram=0
+  local skip_teams=0
   local test_start=0
   local failures=0
   local warnings=()
   local discord_args=()
   local telegram_args=()
+  local teams_args=()
   local engine=""
   local session=""
   local workdir=""
@@ -507,6 +626,9 @@ run_agent() {
   local telegram_dir=""
   local telegram_default_chat=""
   local telegram_allow_from=()
+  local teams_dir=""
+  local teams_allow_from=()
+  local teams_conversations=()
 
   shift || true
   if [[ "$agent" == "-h" || "$agent" == "--help" || "$agent" == "help" ]]; then
@@ -524,6 +646,10 @@ run_agent() {
         ;;
       --skip-telegram)
         skip_telegram=1
+        shift
+        ;;
+      --skip-teams)
+        skip_teams=1
         shift
         ;;
       --test-start)
@@ -545,15 +671,26 @@ run_agent() {
         telegram_args+=("$1" "$2")
         shift 2
         ;;
+      --conversation|--app-id|--app-password|--tenant-id|--service-url)
+        [[ $# -ge 2 ]] || bridge_die "옵션 값이 필요합니다: $1"
+        teams_args+=("$1" "$2")
+        shift 2
+        ;;
       --token|--channel-account|--openclaw-account|--runtime-config|--openclaw-config|--allow-from|--api-base-url)
         [[ $# -ge 2 ]] || bridge_die "옵션 값이 필요합니다: $1"
         discord_args+=("$1" "$2")
         telegram_args+=("$1" "$2")
+        case "$1" in
+          --channel-account|--runtime-config|--allow-from)
+            teams_args+=("$1" "$2")
+            ;;
+        esac
         shift 2
         ;;
       --require-mention|--skip-validate|--skip-send-test|--yes|--dry-run)
         discord_args+=("$1")
         telegram_args+=("$1")
+        teams_args+=("$1")
         shift
         ;;
       *)
@@ -576,6 +713,9 @@ run_agent() {
   telegram_dir="$(bridge_agent_telegram_state_dir "$agent")"
   telegram_default_chat="$(bridge_setup_telegram_default_chat "$telegram_dir" || true)"
   mapfile -t telegram_allow_from < <(bridge_setup_telegram_allow_from "$telegram_dir" || true)
+  teams_dir="$(bridge_agent_teams_state_dir "$agent")"
+  mapfile -t teams_allow_from < <(bridge_setup_teams_allow_from "$teams_dir" || true)
+  mapfile -t teams_conversations < <(bridge_setup_teams_conversations "$teams_dir" || true)
 
   if [[ $skip_discord -eq 0 ]] && bridge_channel_csv_contains "$required_channels" "plugin:discord"; then
     echo "== Discord setup =="
@@ -597,6 +737,16 @@ run_agent() {
     mapfile -t telegram_allow_from < <(bridge_setup_telegram_allow_from "$telegram_dir" || true)
   fi
 
+  if [[ $skip_teams -eq 0 ]] && bridge_channel_csv_contains "$required_channels" "plugin:teams"; then
+    echo "== Teams setup =="
+    if ! run_teams "$agent" "${teams_args[@]}"; then
+      failures=$((failures + 1))
+    fi
+    echo
+    mapfile -t teams_allow_from < <(bridge_setup_teams_allow_from "$teams_dir" || true)
+    mapfile -t teams_conversations < <(bridge_setup_teams_conversations "$teams_dir" || true)
+  fi
+
   echo "== Agent preflight =="
   printf 'agent: %s\n' "$agent"
   printf 'engine: %s\n' "$engine"
@@ -604,6 +754,7 @@ run_agent() {
   printf 'workdir: %s\n' "$workdir"
   printf 'discord_dir: %s\n' "$(bridge_agent_discord_state_dir "$agent")"
   printf 'telegram_dir: %s\n' "$telegram_dir"
+  printf 'teams_dir: %s\n' "$teams_dir"
   if [[ -n "$required_channels" ]]; then
     printf 'required_channels: %s\n' "$required_channels"
   else
@@ -623,6 +774,16 @@ run_agent() {
     printf 'telegram_allow_from: %s\n' "$(IFS=,; echo "${telegram_allow_from[*]}")"
   else
     printf 'telegram_allow_from: (none)\n'
+  fi
+  if [[ ${#teams_allow_from[@]} -gt 0 ]]; then
+    printf 'teams_allow_from: %s\n' "$(IFS=,; echo "${teams_allow_from[*]}")"
+  else
+    printf 'teams_allow_from: (none)\n'
+  fi
+  if [[ ${#teams_conversations[@]} -gt 0 ]]; then
+    printf 'teams_conversations: %s\n' "$(IFS=,; echo "${teams_conversations[*]}")"
+  else
+    printf 'teams_conversations: (none)\n'
   fi
   printf 'wake_channel: %s\n' "$wake_status"
   printf 'channel_status: %s\n' "$channel_status"
@@ -774,6 +935,9 @@ run_agent() {
   if bridge_channel_csv_contains "$required_channels" "plugin:telegram" && [[ ${#telegram_allow_from[@]} -eq 0 ]]; then
     warnings+=("Telegram role has no allow_from ids in $(bridge_agent_telegram_state_dir "$agent")/access.json. Re-run 'agent-bridge setup telegram $agent' and add intended users.")
   fi
+  if bridge_channel_csv_contains "$required_channels" "plugin:teams" && [[ ${#teams_allow_from[@]} -eq 0 && ${#teams_conversations[@]} -eq 0 ]]; then
+    warnings+=("Teams role has no allow_from ids or conversations in $(bridge_agent_teams_state_dir "$agent")/access.json. Re-run 'agent-bridge setup teams $agent' and add intended users or Teams conversations.")
+  fi
   if [[ "$engine" == "claude" && "$wake_status" == "miss" ]]; then
     warnings+=("Claude role has no session metadata for idle wake. Verify BRIDGE_AGENT_SESSION is set and restart the session after deploy.")
   fi
@@ -823,6 +987,9 @@ case "$subcommand" in
     ;;
   telegram)
     run_telegram "$@"
+    ;;
+  teams)
+    run_teams "$@"
     ;;
   agent)
     run_agent "$@"

@@ -328,6 +328,15 @@ cat >"$TMP_ROOT/openclaw.json" <<'EOF'
           "token": "smoke-telegram-token"
         }
       }
+    },
+    "teams": {
+      "accounts": {
+        "smoke": {
+          "appId": "smoke-teams-app-id",
+          "appPassword": "smoke-teams-secret",
+          "tenantId": "smoke-teams-tenant"
+        }
+      }
     }
   }
 }
@@ -349,6 +358,13 @@ cat >"$BRIDGE_CLAUDE_INSTALLED_PLUGINS_FILE" <<'EOF'
         "scope": "user",
         "installPath": "/tmp/discord",
         "version": "1.0.0"
+      }
+    ],
+    "teams@agent-bridge": [
+      {
+        "scope": "user",
+        "installPath": "/tmp/teams",
+        "version": "0.1.0"
       }
     ]
   }
@@ -1213,6 +1229,8 @@ assert_contains "$CREATE_JSON_OUTPUT" "\"channels\": \"plugin:telegram@claude-pl
 assert_contains "$CREATE_JSON_OUTPUT" "\"id\": \"owner\""
 CREATE_JSON_OUTPUT_NO_REGISTRY="$(BRIDGE_CLAUDE_INSTALLED_PLUGINS_FILE="$TMP_ROOT/missing-installed-plugins.json" "$REPO_ROOT/agent-bridge" agent create "${CREATED_AGENT}-fallback" --engine claude --session "${CREATED_SESSION}-fallback" --channels plugin:telegram --dry-run --json)"
 assert_contains "$CREATE_JSON_OUTPUT_NO_REGISTRY" "\"channels\": \"plugin:telegram@claude-plugins-official\""
+CREATE_TEAMS_JSON_OUTPUT="$("$REPO_ROOT/agent-bridge" agent create "${CREATED_AGENT}-teams" --engine claude --session "${CREATED_SESSION}-teams" --channels plugin:teams --dry-run --json)"
+assert_contains "$CREATE_TEAMS_JSON_OUTPUT" "\"channels\": \"plugin:teams@agent-bridge\""
 CREATE_OUTPUT="$("$REPO_ROOT/agent-bridge" agent create "$CREATED_AGENT" --engine claude --session "$CREATED_SESSION" --role "Smoke created role" --channels plugin:telegram --user owner:Owner --user reviewer:Reviewer)"
 assert_contains "$CREATE_OUTPUT" "create: ok"
 assert_contains "$CREATE_OUTPUT" "start_dry_run: ok"
@@ -1511,6 +1529,21 @@ PY
 SETUP_TELEGRAM_DOTENV_OUTPUT="$("$BASH4_BIN" "$REPO_ROOT/bridge-setup.sh" telegram "$CREATED_AGENT" --channel-account dotenv --runtime-config "$TMP_ROOT/openclaw.json" --allow-from 123456789 --default-chat 123456789 --skip-validate --skip-send-test --yes 2>&1)"
 assert_contains "$SETUP_TELEGRAM_DOTENV_OUTPUT" "token_source: channel:dotenv"
 assert_contains "$(cat "$BRIDGE_AGENT_HOME_ROOT/$CREATED_AGENT/.telegram/.env")" "TELEGRAM_BOT_TOKEN=dotenv-telegram-token"
+
+log "running guided Teams setup"
+SETUP_TEAMS_OUTPUT="$("$BASH4_BIN" "$REPO_ROOT/bridge-setup.sh" teams "$CREATED_AGENT" --channel-account smoke --runtime-config "$TMP_ROOT/openclaw.json" --allow-from 00000000-0000-0000-0000-000000000000 --conversation "19:smoke@thread.v2" --require-mention --yes 2>&1)"
+assert_contains "$SETUP_TEAMS_OUTPUT" "teams_dir: $BRIDGE_AGENT_HOME_ROOT/$CREATED_AGENT/.teams"
+assert_contains "$SETUP_TEAMS_OUTPUT" "credential_source: channel:smoke"
+assert_contains "$SETUP_TEAMS_OUTPUT" "validation: local"
+assert_contains "$(cat "$BRIDGE_AGENT_HOME_ROOT/$CREATED_AGENT/.teams/.env")" "TEAMS_APP_ID=smoke-teams-app-id"
+assert_contains "$(cat "$BRIDGE_AGENT_HOME_ROOT/$CREATED_AGENT/.teams/access.json")" "19:smoke@thread.v2"
+CREATED_TEAMS_LAUNCH="$("$BASH4_BIN" -c '
+  source "'"$REPO_ROOT"'/bridge-lib.sh"
+  bridge_load_roster
+  bridge_agent_launch_cmd "'"$CREATED_AGENT"'"
+')"
+assert_contains "$CREATED_TEAMS_LAUNCH" "TEAMS_STATE_DIR=$BRIDGE_AGENT_HOME_ROOT/$CREATED_AGENT/.teams"
+assert_contains "$CREATED_TEAMS_LAUNCH" "plugin:teams@agent-bridge"
 
 BOOTSTRAP_FAIL_HOME="$TMP_ROOT/bootstrap-fail-home"
 mkdir -p "$BOOTSTRAP_FAIL_HOME"

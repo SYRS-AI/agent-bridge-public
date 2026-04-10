@@ -451,6 +451,16 @@ bridge_agent_telegram_state_dir() {
   bridge_agent_default_telegram_state_dir "$agent"
 }
 
+bridge_agent_default_teams_state_dir() {
+  local agent="$1"
+  printf '%s/.teams' "$(bridge_agent_workdir "$agent")"
+}
+
+bridge_agent_teams_state_dir() {
+  local agent="$1"
+  bridge_agent_default_teams_state_dir "$agent"
+}
+
 bridge_agent_workdir() {
   local agent="$1"
   local explicit="${BRIDGE_AGENT_WORKDIR[$agent]-}"
@@ -543,6 +553,10 @@ bridge_qualify_channel_item() {
     case "$plugin_name" in
       telegram|discord)
         printf 'plugin:%s@claude-plugins-official' "$plugin_name"
+        return 0
+        ;;
+      teams)
+        printf 'plugin:%s@agent-bridge' "$plugin_name"
         return 0
         ;;
     esac
@@ -663,6 +677,11 @@ bridge_agent_uses_discord_plugin() {
   bridge_channel_csv_contains "$(bridge_agent_channels_csv "$agent")" "plugin:discord"
 }
 
+bridge_agent_uses_teams_plugin() {
+  local agent="$1"
+  bridge_channel_csv_contains "$(bridge_agent_channels_csv "$agent")" "plugin:teams"
+}
+
 bridge_agent_discord_channel_from_access() {
   local agent="$1"
   local access_file=""
@@ -752,6 +771,15 @@ bridge_agent_channel_status_reason() {
     telegram_dir="$(bridge_agent_telegram_state_dir "$agent")"
     if [[ ! -f "$telegram_dir/.env" || ! -f "$telegram_dir/access.json" ]]; then
       printf 'missing Telegram runtime files under %s (.env and access.json required)' "$telegram_dir"
+      return 0
+    fi
+  fi
+
+  if bridge_channel_csv_contains "$required" "plugin:teams"; then
+    local teams_dir=""
+    teams_dir="$(bridge_agent_teams_state_dir "$agent")"
+    if [[ ! -f "$teams_dir/.env" || ! -f "$teams_dir/access.json" ]]; then
+      printf 'missing Teams runtime files under %s (.env and access.json required)' "$teams_dir"
       return 0
     fi
   fi
@@ -873,6 +901,21 @@ bridge_ensure_claude_plugin_enabled() {
   [[ "$status" == "enabled" ]] || bridge_die "Claude plugin '$plugin_spec' is not enabled after install/setup (status=$status). Run: claude plugin install --scope user $plugin_spec"
 }
 
+bridge_ensure_agent_bridge_claude_marketplace() {
+  local output=""
+
+  [[ -z "${BRIDGE_CLAUDE_INSTALLED_PLUGINS_FILE:-}" ]] || return 0
+  command -v claude >/dev/null 2>&1 || return 0
+
+  output="$(claude plugin marketplace list 2>/dev/null || true)"
+  if printf '%s\n' "$output" | grep -Fq "agent-bridge"; then
+    return 0
+  fi
+
+  bridge_info "[info] Adding Claude plugin marketplace: agent-bridge"
+  claude plugin marketplace add --scope user "$BRIDGE_SCRIPT_DIR" >/dev/null
+}
+
 bridge_ensure_claude_channel_plugins() {
   local agent="$1"
   local channels=""
@@ -886,6 +929,10 @@ bridge_ensure_claude_channel_plugins() {
   fi
   if bridge_channel_csv_contains "$channels" "plugin:telegram"; then
     bridge_ensure_claude_plugin_enabled "telegram@claude-plugins-official"
+  fi
+  if bridge_channel_csv_contains "$channels" "plugin:teams"; then
+    bridge_ensure_agent_bridge_claude_marketplace
+    bridge_ensure_claude_plugin_enabled "teams@agent-bridge"
   fi
 }
 
