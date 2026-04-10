@@ -457,6 +457,7 @@ agb status
 - [RELEASE.md](./RELEASE.md) — 릴리즈와 업그레이드 정책
 - [KNOWN_ISSUES.md](./KNOWN_ISSUES.md) — 알려진 이슈
 - [CONTRIBUTING.md](./CONTRIBUTING.md) — 기여 가이드
+- [docs/live-feature-mining.md](./docs/live-feature-mining.md) — 라이브 런타임 기능 채굴/제품화 후보
 
 ---
 
