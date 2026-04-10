@@ -272,6 +272,14 @@ bridge_admin_agent_id() {
   printf '%s' "${BRIDGE_ADMIN_AGENT_ID:-}"
 }
 
+bridge_agent_is_admin() {
+  local agent="$1"
+  local admin_agent=""
+
+  admin_agent="$(bridge_admin_agent_id)"
+  [[ -n "$admin_agent" && "$agent" == "$admin_agent" ]]
+}
+
 bridge_agent_exists() {
   local agent="$1"
   declare -p BRIDGE_AGENT_SESSION >/dev/null 2>&1 || return 1
@@ -386,6 +394,36 @@ bridge_agent_session() {
 bridge_agent_default_home() {
   local agent="$1"
   printf '%s/%s' "$BRIDGE_AGENT_HOME_ROOT" "$agent"
+}
+
+bridge_agent_onboarding_state() {
+  local agent="$1"
+  local path=""
+  local line=""
+
+  for path in "$(bridge_agent_workdir "$agent")/SESSION-TYPE.md" "$(bridge_agent_default_home "$agent")/SESSION-TYPE.md"; do
+    [[ -f "$path" ]] || continue
+    line="$(grep -E 'Onboarding State:[[:space:]]*[A-Za-z0-9._-]+' "$path" 2>/dev/null | head -n 1 || true)"
+    if [[ "$line" =~ Onboarding[[:space:]]+State:[[:space:]]*([A-Za-z0-9._-]+) ]]; then
+      printf '%s' "${BASH_REMATCH[1]}"
+      return 0
+    fi
+  done
+
+  printf '%s' "missing"
+}
+
+bridge_agent_onboarding_complete() {
+  local agent="$1"
+  [[ "$(bridge_agent_onboarding_state "$agent")" == "complete" ]]
+}
+
+bridge_agent_should_stop_on_attached_clean_exit() {
+  local agent="$1"
+
+  bridge_agent_is_admin "$agent" || return 1
+  bridge_agent_onboarding_complete "$agent" && return 1
+  return 0
 }
 
 bridge_agent_default_profile_home() {

@@ -28,13 +28,13 @@
   - Run `~/.agent-bridge/agent-bridge setup discord <admin-agent> --token <token> --channel <channel-id> --yes`.
   - Ensure local roster config contains the Discord plugin channel and primary Discord channel ID for the admin agent.
   - Provide the invite URL: `https://discord.com/oauth2/authorize?client_id=<application-id>&permissions=<permissions-integer>&scope=bot%20applications.commands`.
-  - Tell the user: `현재 Claude 세션에는 새 채널 설정이 아직 완전히 붙지 않을 수 있습니다. 이 세션에서 exit로 종료하면 터미널로 돌아가고, 채널 연결 admin은 백그라운드에서 다시 뜹니다. 그 다음 바깥 쉘에서 agb admin을 다시 실행하세요.`
+  - Tell the user: `현재 Claude 세션에는 새 설정이 아직 완전히 붙지 않을 수 있습니다. 이 세션에서 exit로 종료하면 바깥 쉘로 돌아가고, 온보딩 완료된 admin은 백그라운드에서 다시 뜹니다. 그 다음 바깥 쉘에서 agb admin을 다시 실행하세요.`
 - Telegram:
   - Ask for Telegram bot token, allowed user ID, and default chat ID if missing.
   - If the user does not have them, explain the shortest path: create a bot with BotFather, send the bot one message, then obtain IDs through `getUpdates` or a trusted Telegram ID helper bot.
   - Run `~/.agent-bridge/agent-bridge setup telegram <admin-agent> --token <token> --allow-from <user-id> --default-chat <chat-id> --yes`.
   - Ensure local roster config contains the Telegram plugin channel for the admin agent.
-  - Tell the user: `현재 Claude 세션에는 새 채널 설정이 아직 완전히 붙지 않을 수 있습니다. 이 세션에서 exit로 종료하면 터미널로 돌아가고, 채널 연결 admin은 백그라운드에서 다시 뜹니다. 그 다음 바깥 쉘에서 agb admin을 다시 실행하세요.`
+  - Tell the user: `현재 Claude 세션에는 새 설정이 아직 완전히 붙지 않을 수 있습니다. 이 세션에서 exit로 종료하면 바깥 쉘로 돌아가고, 온보딩 완료된 admin은 백그라운드에서 다시 뜹니다. 그 다음 바깥 쉘에서 agb admin을 다시 실행하세요.`
 - During first-run admin onboarding, do not tell the user to run `agent start patch`, `agent restart patch`, or `start patch`. Keep the user-facing command consistent: `agb admin`.
 
 ## Agent Channel Configuration
@@ -48,7 +48,7 @@
   3. roster verification
   4. restart guidance
   5. final test message or user handoff
-- If the configured target is the admin agent, restart guidance is `exit` current Claude session, let the channel-connected admin continue in the background, then run `agb admin` from the outer shell. If the target is a non-admin agent, use `agb agent restart <agent>`.
+- If the configured target is the admin agent, restart guidance is `exit` current Claude session, let the onboarding-complete admin continue in the background, then run `agb admin` from the outer shell. If the target is a non-admin agent, use `agb agent restart <agent>`.
 - After setup, verify `agb agent show <agent>` and `agb status` before saying the agent is ready.
 
 ## Triage Order

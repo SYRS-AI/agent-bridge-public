@@ -135,10 +135,6 @@ bridge_run_detach_attached_clients() {
   tmux detach-client -s "$SESSION" >/dev/null 2>&1 || true
 }
 
-bridge_run_has_external_channel() {
-  [[ -n "$(bridge_agent_channels_csv "$AGENT")" ]]
-}
-
 bridge_run_stop_foreground_session() {
   if [[ "$(bridge_agent_source "$AGENT")" == "static" ]]; then
     bridge_agent_mark_manual_stop "$AGENT"
@@ -177,16 +173,16 @@ while true; do
   fi
 
   if [[ $EXIT_CODE -eq 0 ]] && bridge_run_session_attached; then
-    if bridge_run_has_external_channel; then
-      log_line "정상 종료. 사람이 연결된 tmux client는 분리하고, 채널 연결 에이전트는 백그라운드에서 계속 재시작합니다."
-      bridge_run_detach_attached_clients
-    else
+    if bridge_agent_should_stop_on_attached_clean_exit "$AGENT"; then
       if [[ $FAIL_COUNT -gt 0 ]]; then
         bridge_agent_clear_crash_report "$AGENT"
       fi
       bridge_run_stop_foreground_session
-      log_line "정상 종료. 외부 채널이 없는 foreground 세션이므로 자동 재시작하지 않습니다. 다시 열려면 'agb admin' 또는 'agb agent start ${AGENT}'를 실행하세요."
+      log_line "정상 종료. admin 온보딩이 아직 완료되지 않았으므로 자동 재시작하지 않습니다. 다시 열려면 'agb admin'을 실행하세요."
       exit 0
+    else
+      log_line "정상 종료. 온보딩 완료/일반 루프 에이전트이므로 tmux client는 분리하고, 에이전트는 백그라운드에서 계속 재시작합니다."
+      bridge_run_detach_attached_clients
     fi
   fi
 

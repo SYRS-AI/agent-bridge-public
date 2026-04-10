@@ -114,6 +114,8 @@ export BRIDGE_RUNTIME_MEMORY_DIR="$BRIDGE_RUNTIME_ROOT/memory"
 export BRIDGE_RUNTIME_CREDENTIALS_DIR="$BRIDGE_RUNTIME_ROOT/credentials"
 export BRIDGE_RUNTIME_SECRETS_DIR="$BRIDGE_RUNTIME_ROOT/secrets"
 export BRIDGE_RUNTIME_CONFIG_FILE="$BRIDGE_RUNTIME_ROOT/bridge-config.json"
+export BRIDGE_CLAUDE_USAGE_CACHE="$TMP_ROOT/claude-usage-empty.json"
+export BRIDGE_CODEX_SESSIONS_DIR="$TMP_ROOT/codex-sessions-empty"
 export BRIDGE_CLAUDE_INSTALLED_PLUGINS_FILE="$TMP_ROOT/installed_plugins.json"
 export BRIDGE_CLAUDE_CHANNELS_HOME="$TMP_ROOT/claude-channels"
 export BRIDGE_WEBHOOK_PORT_RANGE_START=9301
@@ -206,6 +208,7 @@ trap cleanup EXIT
 kill_stale_smoke_tmux_sessions
 
 mkdir -p "$BRIDGE_HOME" "$BRIDGE_STATE_DIR" "$BRIDGE_LOG_DIR" "$BRIDGE_SHARED_DIR" "$WORKDIR" "$REQUESTER_WORKDIR" "$AUTO_START_WORKDIR" "$BROKEN_CHANNEL_WORKDIR" "$LATE_DYNAMIC_WORKDIR"
+mkdir -p "$BRIDGE_CODEX_SESSIONS_DIR"
 mkdir -p "$HOOK_WORKDIR/.claude"
 mkdir -p "$MCP_WORKDIR"
 mkdir -p "$CLAUDE_STATIC_WORKDIR"
@@ -1578,6 +1581,40 @@ EOF
 ')"
 assert_contains "$CLAUDE_STALE_RESUME_FALLBACK" "claude --continue --dangerously-skip-permissions --name claude-static --channels plugin:discord@claude-plugins-official"
 [[ "$CLAUDE_STALE_RESUME_FALLBACK" != *" --resume "* ]] || die "stale Claude session_id should not be used for resume"
+
+log "classifying admin foreground exit by onboarding state"
+ONBOARDING_ADMIN_WORKDIR="$TMP_ROOT/onboarding-admin"
+mkdir -p "$ONBOARDING_ADMIN_WORKDIR"
+ONBOARDING_EXIT_OUTPUT="$("$BASH4_BIN" -c '
+  source "'"$REPO_ROOT"'/bridge-lib.sh"
+  bridge_load_roster
+  agent="onboarding-admin-smoke"
+  bridge_add_agent_id_if_missing "$agent"
+  BRIDGE_ADMIN_AGENT_ID="$agent"
+  BRIDGE_AGENT_ENGINE["$agent"]="claude"
+  BRIDGE_AGENT_SESSION["$agent"]="onboarding-admin-smoke"
+  BRIDGE_AGENT_WORKDIR["$agent"]="'"$ONBOARDING_ADMIN_WORKDIR"'"
+  cat >"'"$ONBOARDING_ADMIN_WORKDIR"'/SESSION-TYPE.md" <<EOF
+- Session Type: admin
+- Onboarding State: pending
+EOF
+  if bridge_agent_should_stop_on_attached_clean_exit "$agent"; then
+    echo "pending=stop"
+  else
+    echo "pending=loop"
+  fi
+  cat >"'"$ONBOARDING_ADMIN_WORKDIR"'/SESSION-TYPE.md" <<EOF
+- Session Type: admin
+- Onboarding State: complete
+EOF
+  if bridge_agent_should_stop_on_attached_clean_exit "$agent"; then
+    echo "complete=stop"
+  else
+    echo "complete=loop"
+  fi
+')"
+assert_contains "$ONBOARDING_EXIT_OUTPUT" "pending=stop"
+assert_contains "$ONBOARDING_EXIT_OUTPUT" "complete=loop"
 
 log "configuring admin role and launching it"
 SETUP_ADMIN_OUTPUT="$("$REPO_ROOT/agent-bridge" setup admin "$SMOKE_AGENT")"
