@@ -202,6 +202,7 @@ fi
 
 cleanup() {
   local status=$?
+  local _cleanup_attempt=""
   bash "$REPO_ROOT/bridge-daemon.sh" stop >/dev/null 2>&1 || true
   kill_stale_smoke_tmux_sessions
   tmux_kill_session_exact "$SESSION_NAME" || true
@@ -229,7 +230,14 @@ cleanup() {
     printf '[smoke][error] live roster changed during smoke; restored backup: %s\n' "$LIVE_ROSTER_FILE" >&2
     status=1
   fi
-  rm -rf "$TMP_ROOT"
+  for _cleanup_attempt in 1 2 3 4 5; do
+    rm -rf "$TMP_ROOT" >/dev/null 2>&1 && break
+    sleep 0.2
+  done
+  if [[ -e "$TMP_ROOT" ]]; then
+    printf '[smoke][error] failed to remove temporary smoke root after retries: %s\n' "$TMP_ROOT" >&2
+    status=1
+  fi
   exit "$status"
 }
 trap cleanup EXIT
@@ -1874,6 +1882,36 @@ CLAUDE_CHANNEL_STATUS="$("$BASH4_BIN" -c '
   printf "%s" "$(bridge_agent_channel_status "claude-static")"
 ')"
 [[ "$CLAUDE_CHANNEL_STATUS" == "ok" ]] || die "expected claude-static channel status to be ok"
+CLAUDE_STATIC_SHOW_JSON="$("$REPO_ROOT/agent-bridge" agent show "claude-static" --json)"
+python3 - "$CLAUDE_STATIC_SHOW_JSON" <<'PY'
+import json
+import sys
+
+payload = json.loads(sys.argv[1])
+diagnostics = payload["channels"]["diagnostics"]
+assert len(diagnostics) == 1, diagnostics
+item = diagnostics[0]
+assert item["channel"] == "plugin:discord@claude-plugins-official", item
+assert item["plugin_installed"] is True, item
+assert item["plugin_enabled"] is True, item
+assert item["launch_allowlisted"] is True, item
+assert item["access_status"] == "present", item
+assert item["credentials_status"] == "present", item
+assert item["runtime_ready"] is True, item
+session = payload["session_health"]
+assert session["loop"] is True, session
+assert session["continue"] is True, session
+assert session["restart_readiness"] == "ready", session
+assert session["detach_hint"] == "Ctrl-b then d", session
+assert session["stop_command"] == "agent-bridge kill claude-static", session
+PY
+assert_not_contains "$CLAUDE_STATIC_SHOW_JSON" "smoke-token"
+CLAUDE_STATIC_SHOW_TEXT="$("$REPO_ROOT/agent-bridge" agent show "claude-static")"
+assert_contains "$CLAUDE_STATIC_SHOW_TEXT" "channel_diagnostics:"
+assert_contains "$CLAUDE_STATIC_SHOW_TEXT" "plugin: installed=yes enabled=yes"
+assert_contains "$CLAUDE_STATIC_SHOW_TEXT" "session_health:"
+assert_contains "$CLAUDE_STATIC_SHOW_TEXT" "detach_to_shell: Ctrl-b then d"
+assert_not_contains "$CLAUDE_STATIC_SHOW_TEXT" "smoke-token"
 
 STATIC_HISTORY_CONTINUE="$("$BASH4_BIN" -c '
   source "'"$REPO_ROOT"'/bridge-lib.sh"
@@ -3192,6 +3230,15 @@ CHANNEL_HEALTH_INBOX="$(bash "$REPO_ROOT/bridge-task.sh" inbox "$SMOKE_AGENT" --
 assert_contains "$CHANNEL_HEALTH_INBOX" "[channel-health] $BROKEN_CHANNEL_AGENT (miss)"
 CHANNEL_HEALTH_OPEN_ID="$(python3 "$REPO_ROOT/bridge-queue.py" find-open --agent "$SMOKE_AGENT" --title-prefix "[channel-health] $BROKEN_CHANNEL_AGENT " 2>/dev/null || true)"
 [[ "$CHANNEL_HEALTH_OPEN_ID" =~ ^[0-9]+$ ]] || die "expected channel-health task for $BROKEN_CHANNEL_AGENT"
+CHANNEL_HEALTH_BODY_FILE="$BRIDGE_SHARED_DIR/channel-health/$BROKEN_CHANNEL_AGENT.md"
+[[ -f "$CHANNEL_HEALTH_BODY_FILE" ]] || die "expected channel-health body file"
+CHANNEL_HEALTH_BODY="$(cat "$CHANNEL_HEALTH_BODY_FILE")"
+assert_contains "$CHANNEL_HEALTH_BODY" "## Channel Diagnostics"
+assert_contains "$CHANNEL_HEALTH_BODY" "launch_allowlisted: yes"
+assert_contains "$CHANNEL_HEALTH_BODY" "runtime: state_dir=missing access=missing credentials=missing ready=no"
+assert_contains "$CHANNEL_HEALTH_BODY" "## Session Health"
+assert_contains "$CHANNEL_HEALTH_BODY" "detach_to_shell: Ctrl-b then d"
+assert_not_contains "$CHANNEL_HEALTH_BODY" "smoke-token"
 bash "$REPO_ROOT/bridge-daemon.sh" sync >/dev/null
 CHANNEL_HEALTH_OPEN_ID_AGAIN="$(python3 "$REPO_ROOT/bridge-queue.py" find-open --agent "$SMOKE_AGENT" --title-prefix "[channel-health] $BROKEN_CHANNEL_AGENT " 2>/dev/null || true)"
 [[ "$CHANNEL_HEALTH_OPEN_ID_AGAIN" == "$CHANNEL_HEALTH_OPEN_ID" ]] || die "channel-health alert should be deduped"

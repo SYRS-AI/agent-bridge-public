@@ -824,6 +824,414 @@ bridge_agent_channel_runtime_ready_for_item() {
   esac
 }
 
+bridge_channel_provider_for_item() {
+  local item="$1"
+
+  item="$(bridge_qualify_channel_item "$item")"
+  case "$item" in
+    plugin:discord|plugin:discord@*)
+      printf '%s' "discord"
+      ;;
+    plugin:telegram|plugin:telegram@*)
+      printf '%s' "telegram"
+      ;;
+    plugin:teams|plugin:teams@*)
+      printf '%s' "teams"
+      ;;
+    plugin:*)
+      printf '%s' "${item#plugin:}"
+      ;;
+    server:*)
+      printf '%s' "${item#server:}"
+      ;;
+    *)
+      printf '%s' "unknown"
+      ;;
+  esac
+}
+
+bridge_channel_state_dir_for_item() {
+  local agent="$1"
+  local item="$2"
+
+  item="$(bridge_qualify_channel_item "$item")"
+  case "$item" in
+    plugin:discord|plugin:discord@*)
+      bridge_agent_discord_state_dir "$agent"
+      ;;
+    plugin:telegram|plugin:telegram@*)
+      bridge_agent_telegram_state_dir "$agent"
+      ;;
+    plugin:teams|plugin:teams@*)
+      bridge_agent_teams_state_dir "$agent"
+      ;;
+    *)
+      printf '%s' ""
+      ;;
+  esac
+}
+
+bridge_channel_credentials_status_for_item() {
+  local agent="$1"
+  local item="$2"
+  local dir=""
+
+  item="$(bridge_qualify_channel_item "$item")"
+  dir="$(bridge_channel_state_dir_for_item "$agent" "$item")"
+  case "$item" in
+    plugin:discord|plugin:discord@*)
+      bridge_env_file_has_any_nonempty_key "$dir/.env" DISCORD_BOT_TOKEN BOT_TOKEN TOKEN && printf '%s' "present" || printf '%s' "missing"
+      ;;
+    plugin:telegram|plugin:telegram@*)
+      bridge_env_file_has_any_nonempty_key "$dir/.env" TELEGRAM_BOT_TOKEN BOT_TOKEN TOKEN && printf '%s' "present" || printf '%s' "missing"
+      ;;
+    plugin:teams|plugin:teams@*)
+      if bridge_env_file_has_any_nonempty_key "$dir/.env" TEAMS_APP_ID MicrosoftAppId \
+        && bridge_env_file_has_any_nonempty_key "$dir/.env" TEAMS_APP_PASSWORD MicrosoftAppPassword; then
+        printf '%s' "present"
+      else
+        printf '%s' "missing"
+      fi
+      ;;
+    *)
+      printf '%s' "n/a"
+      ;;
+  esac
+}
+
+bridge_channel_access_status_for_item() {
+  local agent="$1"
+  local item="$2"
+  local provider=""
+  local dir=""
+  local access_file=""
+
+  item="$(bridge_qualify_channel_item "$item")"
+  provider="$(bridge_channel_provider_for_item "$item")"
+  dir="$(bridge_channel_state_dir_for_item "$agent" "$item")"
+  [[ -n "$dir" ]] || {
+    printf '%s' "n/a"
+    return 0
+  }
+
+  access_file="$dir/access.json"
+  [[ -f "$access_file" ]] || {
+    printf '%s' "missing"
+    return 0
+  }
+
+  bridge_require_python
+  python3 - "$access_file" "$provider" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+provider = sys.argv[2]
+
+try:
+    payload = json.loads(path.read_text(encoding="utf-8"))
+except Exception:
+    print("invalid")
+    raise SystemExit(0)
+
+def nonempty_list(value):
+    if not isinstance(value, list):
+        return 0
+    return sum(1 for item in value if str(item).strip())
+
+def nonempty_groups(value):
+    if not isinstance(value, dict):
+        return 0
+    return sum(1 for key in value.keys() if str(key).strip())
+
+count = 0
+if provider == "discord":
+    count += nonempty_groups(payload.get("groups"))
+    count += nonempty_list(payload.get("allowFrom"))
+elif provider == "telegram":
+    count += nonempty_list(payload.get("allowFrom"))
+    if str(payload.get("defaultChatId") or "").strip():
+        count += 1
+elif provider == "teams":
+    count += nonempty_groups(payload.get("groups"))
+    count += nonempty_list(payload.get("allowFrom"))
+else:
+    count += nonempty_groups(payload.get("groups"))
+    count += nonempty_list(payload.get("allowFrom"))
+
+print("present" if count > 0 else "empty")
+PY
+}
+
+bridge_agent_channel_launch_allowlisted_for_item() {
+  local agent="$1"
+  local item="$2"
+  local generated=""
+  local effective=""
+
+  [[ "$(bridge_agent_engine "$agent")" == "claude" ]] || {
+    printf '%s' "n/a"
+    return 0
+  }
+
+  item="$(bridge_qualify_channel_item "$item")"
+  generated="$(bridge_claude_launch_with_channels "$agent" "$(bridge_agent_launch_cmd_raw "$agent")")"
+  effective="$(bridge_extract_channels_from_command "$generated")"
+  if bridge_channel_csv_is_subset "$item" "$effective"; then
+    printf '%s' "yes"
+  else
+    printf '%s' "no"
+  fi
+}
+
+bridge_agent_channel_diagnostics_tsv() {
+  local agent="$1"
+  local required=""
+  local item=""
+  local provider=""
+  local plugin_spec=""
+  local plugin_status=""
+  local plugin_installed=""
+  local plugin_enabled=""
+  local launch_allowlisted=""
+  local access_status=""
+  local credentials_status=""
+  local runtime_ready=""
+  local state_dir_status=""
+  local -a items=()
+
+  printf 'channel\tprovider\tplugin_spec\tplugin_status\tplugin_installed\tplugin_enabled\tlaunch_allowlisted\taccess_status\tcredentials_status\truntime_ready\tstate_dir\n'
+
+  required="$(bridge_agent_channels_csv "$agent")"
+  [[ -n "$required" ]] || return 0
+
+  IFS=',' read -r -a items <<<"$required"
+  for item in "${items[@]}"; do
+    item="$(bridge_qualify_channel_item "$item")"
+    [[ -n "$item" ]] || continue
+
+    provider="$(bridge_channel_provider_for_item "$item")"
+    plugin_spec="-"
+    plugin_status="n/a"
+    plugin_installed="n/a"
+    plugin_enabled="n/a"
+    if [[ "$item" == plugin:* ]]; then
+      plugin_spec="${item#plugin:}"
+      plugin_status="$(bridge_claude_plugin_status "$plugin_spec")"
+      case "$plugin_status" in
+        enabled)
+          plugin_installed="yes"
+          plugin_enabled="yes"
+          ;;
+        disabled)
+          plugin_installed="yes"
+          plugin_enabled="no"
+          ;;
+        *)
+          plugin_installed="no"
+          plugin_enabled="no"
+          ;;
+      esac
+    fi
+
+    launch_allowlisted="$(bridge_agent_channel_launch_allowlisted_for_item "$agent" "$item")"
+    access_status="$(bridge_channel_access_status_for_item "$agent" "$item")"
+    credentials_status="$(bridge_channel_credentials_status_for_item "$agent" "$item")"
+    if bridge_agent_channel_runtime_ready_for_item "$agent" "$item"; then
+      runtime_ready="yes"
+    else
+      runtime_ready="no"
+    fi
+    state_dir_status="n/a"
+    if [[ -n "$(bridge_channel_state_dir_for_item "$agent" "$item")" ]]; then
+      if [[ -d "$(bridge_channel_state_dir_for_item "$agent" "$item")" ]]; then
+        state_dir_status="present"
+      else
+        state_dir_status="missing"
+      fi
+    fi
+
+    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+      "$item" \
+      "$provider" \
+      "$plugin_spec" \
+      "$plugin_status" \
+      "$plugin_installed" \
+      "$plugin_enabled" \
+      "$launch_allowlisted" \
+      "$access_status" \
+      "$credentials_status" \
+      "$runtime_ready" \
+      "$state_dir_status"
+  done
+}
+
+bridge_agent_channel_diagnostics_json() {
+  local agent="$1"
+  local tsv=""
+
+  tsv="$(bridge_agent_channel_diagnostics_tsv "$agent")"
+  bridge_require_python
+  python3 - "$tsv" <<'PY'
+import csv
+import io
+import json
+import sys
+
+rows = list(csv.DictReader(io.StringIO(sys.argv[1]), delimiter="\t"))
+
+def yn(value):
+    if value == "yes":
+        return True
+    if value == "no":
+        return False
+    return None
+
+payload = []
+for row in rows:
+    payload.append({
+        "channel": row["channel"],
+        "provider": row["provider"],
+        "plugin_spec": None if row["plugin_spec"] == "-" else row["plugin_spec"],
+        "plugin_status": row["plugin_status"],
+        "plugin_installed": yn(row["plugin_installed"]),
+        "plugin_enabled": yn(row["plugin_enabled"]),
+        "launch_allowlisted": yn(row["launch_allowlisted"]),
+        "access_status": row["access_status"],
+        "credentials_status": row["credentials_status"],
+        "runtime_ready": yn(row["runtime_ready"]),
+        "state_dir": row["state_dir"],
+    })
+
+print(json.dumps(payload, ensure_ascii=False, separators=(",", ":")))
+PY
+}
+
+bridge_agent_channel_diagnostics_text() {
+  local agent="$1"
+  local tsv=""
+  local row_count=0
+
+  tsv="$(bridge_agent_channel_diagnostics_tsv "$agent")"
+  while IFS=$'\t' read -r channel provider plugin_spec plugin_status plugin_installed plugin_enabled launch_allowlisted access_status credentials_status runtime_ready state_dir; do
+    [[ "$channel" == "channel" ]] && continue
+    [[ -n "$channel" ]] || continue
+    row_count=$((row_count + 1))
+    printf -- '- channel: %s\n' "$channel"
+    printf '  provider: %s\n' "$provider"
+    printf '  plugin: installed=%s enabled=%s status=%s spec=%s\n' "$plugin_installed" "$plugin_enabled" "$plugin_status" "$plugin_spec"
+    printf '  launch_allowlisted: %s\n' "$launch_allowlisted"
+    printf '  runtime: state_dir=%s access=%s credentials=%s ready=%s\n' "$state_dir" "$access_status" "$credentials_status" "$runtime_ready"
+  done <<<"$tsv"
+
+  if [[ "$row_count" == "0" ]]; then
+    printf '%s\n' "- channels: (none)"
+  fi
+}
+
+bridge_agent_session_health_json() {
+  local agent="$1"
+  local session=""
+  local active="no"
+  local loop_mode=""
+  local continue_mode=""
+  local onboarding_state=""
+  local attached_exit_behavior="exit"
+  local restart_readiness="not-looped"
+
+  session="$(bridge_agent_session "$agent")"
+  if bridge_agent_is_active "$agent"; then
+    active="yes"
+  fi
+  loop_mode="$(bridge_agent_loop "$agent")"
+  continue_mode="$(bridge_agent_continue "$agent")"
+  onboarding_state="$(bridge_agent_onboarding_state "$agent")"
+
+  if [[ "$loop_mode" == "1" ]]; then
+    if bridge_agent_should_stop_on_attached_clean_exit "$agent"; then
+      attached_exit_behavior="stop-until-next-admin-command"
+      restart_readiness="onboarding-pending"
+    else
+      attached_exit_behavior="detach-client-and-restart-loop"
+      if bridge_agent_channel_setup_complete "$agent"; then
+        restart_readiness="ready"
+      else
+        restart_readiness="channel-setup-incomplete"
+      fi
+    fi
+  fi
+
+  bridge_require_python
+  python3 - "$agent" "$session" "$active" "$loop_mode" "$continue_mode" "$onboarding_state" "$attached_exit_behavior" "$restart_readiness" <<'PY'
+import json
+import sys
+
+agent, session, active, loop_mode, continue_mode, onboarding_state, attached_exit_behavior, restart_readiness = sys.argv[1:]
+payload = {
+    "session": session or None,
+    "tmux_active": active == "yes",
+    "loop": loop_mode == "1",
+    "continue": continue_mode == "1",
+    "onboarding_state": onboarding_state,
+    "attached_exit_behavior": attached_exit_behavior,
+    "restart_readiness": restart_readiness,
+    "detach_hint": "Ctrl-b then d",
+    "stop_command": f"agent-bridge kill {agent}",
+}
+if session:
+    payload["attach_command"] = f"tmux attach -t ={session}"
+print(json.dumps(payload, ensure_ascii=False, separators=(",", ":")))
+PY
+}
+
+bridge_agent_session_guidance_text() {
+  local agent="$1"
+  local session=""
+  local active="no"
+  local loop_mode=""
+  local continue_mode=""
+  local onboarding_state=""
+  local exit_behavior=""
+  local restart_readiness=""
+
+  session="$(bridge_agent_session "$agent")"
+  if bridge_agent_is_active "$agent"; then
+    active="yes"
+  fi
+  loop_mode="$(bridge_agent_loop "$agent")"
+  continue_mode="$(bridge_agent_continue "$agent")"
+  onboarding_state="$(bridge_agent_onboarding_state "$agent")"
+  exit_behavior="exit"
+  restart_readiness="not-looped"
+  if [[ "$loop_mode" == "1" ]]; then
+    if bridge_agent_should_stop_on_attached_clean_exit "$agent"; then
+      exit_behavior="stop-until-next-admin-command"
+      restart_readiness="onboarding-pending"
+    else
+      exit_behavior="detach-client-and-restart-loop"
+      if bridge_agent_channel_setup_complete "$agent"; then
+        restart_readiness="ready"
+      else
+        restart_readiness="channel-setup-incomplete"
+      fi
+    fi
+  fi
+
+  printf -- '- tmux_session: %s\n' "${session:--}"
+  printf -- '- tmux_active: %s\n' "$active"
+  printf -- '- loop: %s\n' "$loop_mode"
+  printf -- '- continue: %s\n' "$continue_mode"
+  printf -- '- onboarding_state: %s\n' "$onboarding_state"
+  printf -- '- attached_exit_behavior: %s\n' "$exit_behavior"
+  printf -- '- restart_readiness: %s\n' "$restart_readiness"
+  if [[ -n "$session" ]]; then
+    printf -- '- attach: tmux attach -t =%s\n' "$session"
+  fi
+  printf -- '- detach_to_shell: Ctrl-b then d\n'
+  printf -- '- fully_stop: agent-bridge kill %s\n' "$agent"
+}
+
 bridge_agent_ready_channels_csv() {
   local agent="$1"
   local required=""

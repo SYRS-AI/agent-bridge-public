@@ -360,7 +360,7 @@ agb setup telegram <agent> --token <TELEGRAM_BOT_TOKEN> --allow-from <TELEGRAM_U
 agb setup teams <agent> --app-id <TEAMS_APP_ID> --app-password <TEAMS_APP_PASSWORD> --tenant-id <TEAMS_TENANT_ID> --allow-from <TEAMS_USER_ID>
 ```
 
-참고: `claude mcp list`를 Agent Bridge 밖에서 실행하면 Claude Code의 기본 전역 경로(`~/.claude/channels/...`)를 기준으로 실패가 보일 수 있습니다. Agent Bridge가 실제로 쓰는 기준은 위의 에이전트별 state dir입니다. 검증은 `agb agent start <agent> --dry-run` 또는 `agb status`로 확인하세요.
+참고: `claude mcp list`를 Agent Bridge 밖에서 실행하면 Claude Code의 기본 전역 경로(`~/.claude/channels/...`)를 기준으로 실패가 보일 수 있습니다. Agent Bridge가 실제로 쓰는 기준은 위의 에이전트별 state dir입니다. 검증은 `agb agent show <agent>`에서 `channel_diagnostics`를 보거나, `agb agent start <agent> --dry-run`, `agb status`로 확인하세요.
 
 ---
 
@@ -494,6 +494,7 @@ agb status
 | 명령 | 설명 |
 |------|------|
 | `agb agent create <name>` | 스태틱 에이전트 생성 |
+| `agb agent show <name>` | 채널/세션/loop 진단 확인 |
 | `agb agent start/stop/restart <name>` | 에이전트 시작/중지/재시작 |
 | `agb task create --to <agent>` | 에이전트에게 작업 전달 |
 | `agb urgent <agent> "메시지"` | 긴급 인터럽트 |

@@ -1368,6 +1368,14 @@ bridge_write_channel_health_body() {
 
 ${reason:-unknown channel health mismatch}
 
+## Channel Diagnostics
+
+$(bridge_agent_channel_diagnostics_text "$agent")
+
+## Session Health
+
+$(bridge_agent_session_guidance_text "$agent")
+
 ## Suggested next steps
 
 1. Run \`agent-bridge setup agent ${agent}\`

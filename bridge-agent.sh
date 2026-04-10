@@ -741,7 +741,18 @@ run_show() {
 
   output="$(bridge_agent_records_tsv "$agent")"
   if [[ $json_mode -eq 1 ]]; then
-    emit_agent_records_json show "$output"
+    bridge_agent_manage_python \
+      "$(emit_agent_records_json show "$output")" \
+      "$(bridge_agent_channel_diagnostics_json "$agent")" \
+      "$(bridge_agent_session_health_json "$agent")" <<'PY'
+import json
+import sys
+
+payload = json.loads(sys.argv[1])
+payload.setdefault("channels", {})["diagnostics"] = json.loads(sys.argv[2])
+payload["session_health"] = json.loads(sys.argv[3])
+print(json.dumps(payload, ensure_ascii=False, indent=2))
+PY
     return 0
   fi
 
@@ -773,6 +784,10 @@ run_show() {
     printf 'discord_channel_id: %s\n' "${discord_channel_id:--}"
     printf 'queue: queued=%s claimed=%s blocked=%s\n' "$queue_queued" "$queue_claimed" "$queue_blocked"
     printf 'actions: %s\n' "$actions"
+    printf 'channel_diagnostics:\n'
+    bridge_agent_channel_diagnostics_text "$agent" | sed 's/^/  /'
+    printf 'session_health:\n'
+    bridge_agent_session_guidance_text "$agent" | sed 's/^/  /'
   done <<<"$output"
 }
 
