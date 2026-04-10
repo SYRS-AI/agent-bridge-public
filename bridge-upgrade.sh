@@ -317,15 +317,15 @@ echo "preserved_customizations: agent-roster.local.sh, state/, logs/, shared/, b
 echo "strict_merge: $([[ $STRICT_MERGE -eq 1 ]] && printf yes || printf no)"
 if [[ $BACKUP -eq 1 ]]; then
   echo "backup_root: $BACKUP_ROOT"
-  printf '%s' "$BACKUP_JSON" | python3 - <<'PY'
+  python3 - "$BACKUP_JSON" <<'PY'
 import json, sys
-payload = json.load(sys.stdin)
+payload = json.loads(sys.argv[1])
 print(f"backup_created: {'yes' if payload.get('created') else 'no'}")
 PY
 fi
-printf '%s' "$ANALYSIS_JSON" | python3 - <<'PY'
+python3 - "$ANALYSIS_JSON" <<'PY'
 import json, sys
-payload = json.load(sys.stdin)
+payload = json.loads(sys.argv[1])
 counts = payload.get("counts", {})
 print(f"analysis_base_ref: {payload.get('base_ref') or '-'}")
 print(f"analysis_missing_live: {counts.get('missing_live', 0)}")
@@ -334,9 +334,9 @@ print(f"analysis_live_only: {counts.get('live_only', 0)}")
 print(f"analysis_merge_required: {counts.get('merge_required', 0)}")
 print(f"analysis_unknown_base_live_diff: {counts.get('unknown_base_live_diff', 0)}")
 PY
-printf '%s' "$APPLY_JSON" | python3 - <<'PY'
+python3 - "$APPLY_JSON" <<'PY'
 import json, sys
-payload = json.load(sys.stdin)
+payload = json.loads(sys.argv[1])
 counts = payload.get("counts", {})
 print(f"files_copied: {counts.get('files_copied', 0)}")
 print(f"files_merged_clean: {counts.get('files_merged_clean', 0)}")
@@ -344,9 +344,9 @@ print(f"files_merged_conflict: {counts.get('files_merged_conflict', 0)}")
 print(f"files_preserved_live: {counts.get('files_preserved_live', 0)}")
 PY
 if [[ $MIGRATE_AGENTS -eq 1 ]]; then
-  printf '%s' "$MIGRATION_JSON" | python3 - <<'PY'
+  python3 - "$MIGRATION_JSON" <<'PY'
 import json, sys
-payload = json.load(sys.stdin)
+payload = json.loads(sys.argv[1])
 print(f"agents_migrated: {payload.get('agents_with_additions', 0)}")
 print(f"migrated_files: {payload.get('added_files', 0)}")
 PY
