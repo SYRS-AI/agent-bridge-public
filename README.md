@@ -127,10 +127,11 @@ You are installing Agent Bridge for a non-technical user. Follow these steps exa
 2. Clone or update the public source checkout.
 
    ```bash
-   if [ -d "$HOME/agent-bridge-public/.git" ]; then
-     git -C "$HOME/agent-bridge-public" pull --ff-only origin main
+   SOURCE_DIR="${AGENT_BRIDGE_SOURCE_DIR:-$HOME/.agent-bridge-source}"
+   if [ -d "$SOURCE_DIR/.git" ]; then
+     git -C "$SOURCE_DIR" pull --ff-only origin main
    else
-     git clone https://github.com/SYRS-AI/agent-bridge-public "$HOME/agent-bridge-public"
+     git clone https://github.com/SYRS-AI/agent-bridge-public "$SOURCE_DIR"
    fi
    ```
 
@@ -138,7 +139,8 @@ You are installing Agent Bridge for a non-technical user. Follow these steps exa
    Runtime files, agent homes, queue state, logs, backups, and local roster files must be preserved.
 
    ```bash
-   cd "$HOME/agent-bridge-public"
+   SOURCE_DIR="${AGENT_BRIDGE_SOURCE_DIR:-$HOME/.agent-bridge-source}"
+   cd "$SOURCE_DIR"
    bash scripts/deploy-live-install.sh --target "$HOME/.agent-bridge" --restart-daemon
    ```
 

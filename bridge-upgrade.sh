@@ -157,6 +157,7 @@ PY
     fi
   else
     for CANDIDATE_SOURCE_ROOT in \
+      "$HOME/.agent-bridge-source" \
       "$HOME/agent-bridge-public" \
       "$HOME/agent-bridge"
     do
@@ -184,8 +185,8 @@ APPLY_JSON='{}'
 if ! git -C "$SOURCE_ROOT" rev-parse --show-toplevel >/dev/null 2>&1; then
   if [[ $SOURCE_EXPLICIT -eq 0 && "$SOURCE_ROOT" == "$TARGET_ROOT" ]]; then
     bridge_die "live install은 git repo가 아니고 source checkout 기록도 없습니다: $TARGET_ROOT
-복구: git clone https://github.com/SYRS-AI/agent-bridge-public \"\$HOME/agent-bridge-public\" 후 다시 실행하거나,
-명시적으로 실행하세요: $TARGET_ROOT/agent-bridge upgrade --source \"\$HOME/agent-bridge-public\""
+복구: git clone https://github.com/SYRS-AI/agent-bridge-public \"\$HOME/.agent-bridge-source\" 후 다시 실행하거나,
+명시적으로 실행하세요: $TARGET_ROOT/agent-bridge upgrade --source \"\$HOME/.agent-bridge-source\""
   fi
   bridge_die "git repo가 아닙니다: $SOURCE_ROOT"
 fi

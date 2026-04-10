@@ -4,7 +4,7 @@ This is the operator runbook for a normal Agent Bridge install.
 
 The recommended layout is:
 
-- Source checkout: `~/agent-bridge-public`
+- Source checkout: `~/.agent-bridge-source`
 - Live runtime: `~/.agent-bridge`
 
 The source checkout is safe to pull from GitHub. The live runtime contains local
@@ -87,7 +87,7 @@ The upgrader preserves local runtime data by default:
 For a source checkout to live runtime deploy during development:
 
 ```bash
-cd ~/agent-bridge-public
+cd ~/.agent-bridge-source
 ./scripts/deploy-live-install.sh --dry-run --target ~/.agent-bridge
 ./scripts/deploy-live-install.sh --target ~/.agent-bridge --restart-daemon
 ```
