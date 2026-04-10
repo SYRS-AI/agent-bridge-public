@@ -77,7 +77,7 @@ done
 [[ -n "$BASH4_BIN" ]] || die "missing bash 4+ interpreter"
 
 log "linting shell entry points"
-bash -n "$REPO_ROOT"/*.sh "$REPO_ROOT"/agent-bridge "$REPO_ROOT"/agb "$REPO_ROOT"/scripts/smoke-test.sh
+"$BASH4_BIN" -n "$REPO_ROOT"/*.sh "$REPO_ROOT"/agent-bridge "$REPO_ROOT"/agb "$REPO_ROOT"/scripts/smoke-test.sh
 if command -v shellcheck >/dev/null 2>&1; then
   shellcheck "$REPO_ROOT"/*.sh "$REPO_ROOT"/agent-bridge "$REPO_ROOT"/agb "$REPO_ROOT"/scripts/smoke-test.sh "$REPO_ROOT"/agent-roster.local.example.sh
 else
@@ -296,6 +296,12 @@ path.write_text(text.replace("REPLACE_CLAUDE_DISCORD", sys.argv[2]), encoding="u
 PY
 
 mkdir -p "$CLAUDE_STATIC_WORKDIR/.discord"
+cat >"$CLAUDE_STATIC_WORKDIR/SESSION-TYPE.md" <<'EOF'
+# Session Type
+
+- Session Type: static-claude
+- Onboarding State: complete
+EOF
 cat >"$CLAUDE_STATIC_WORKDIR/.discord/.env" <<'EOF'
 DISCORD_BOT_TOKEN=smoke-token
 EOF
@@ -901,6 +907,36 @@ assert_contains "$NORMAL_NUDGE_RECENT" "agb inbox $CODEX_CLI_AGENT"
 python3 "$REPO_ROOT/bridge-queue.py" done "$NORMAL_NUDGE_TASK_ID" --agent "$CODEX_CLI_AGENT" --note "normal nudge smoke cleanup" >/dev/null
 tmux kill-session -t "$CODEX_CLI_SESSION" >/dev/null 2>&1 || true
 
+log "waking a prompt-ready Claude session even when the idle marker is missing"
+tmux kill-session -t "$CLAUDE_STATIC_SESSION" >/dev/null 2>&1 || true
+tmux new-session -d -s "$CLAUDE_STATIC_SESSION" "$BASH4_BIN -lc 'printf \"❯ ready\\n\"; sleep 30'"
+CLAUDE_NO_IDLE_WAKE_OUTPUT="$("$BASH4_BIN" -lc '
+  source "'"$REPO_ROOT"'/bridge-lib.sh"
+  bridge_load_roster
+  send_log="'"$TMP_ROOT"'/claude-no-idle-wake-send.log"
+  bridge_tmux_send_and_submit() {
+    printf "%s|%s|%s\n" "$1" "$2" "$3" >"$send_log"
+    return 0
+  }
+  bridge_tmux_wait_for_prompt "'"$CLAUDE_STATIC_SESSION"'" claude 5
+  rm -f "$(bridge_agent_idle_since_file "claude-static")"
+  if bridge_dispatch_notification "claude-static" "claude no-idle pickup" "pickup" "" high; then
+    echo "DISPATCH_RC=0"
+  else
+    echo "DISPATCH_RC=$?"
+  fi
+  if [[ -f "$(bridge_agent_idle_since_file "claude-static")" ]]; then
+    echo "IDLE_MARKER=yes"
+  else
+    echo "IDLE_MARKER=no"
+  fi
+  cat "$send_log"
+')"
+assert_contains "$CLAUDE_NO_IDLE_WAKE_OUTPUT" "DISPATCH_RC=0"
+assert_contains "$CLAUDE_NO_IDLE_WAKE_OUTPUT" "IDLE_MARKER=yes"
+assert_contains "$CLAUDE_NO_IDLE_WAKE_OUTPUT" "$CLAUDE_STATIC_SESSION|claude|[Agent Bridge] high: claude no-idle pickup"
+tmux kill-session -t "$CLAUDE_STATIC_SESSION" >/dev/null 2>&1 || true
+
 log "reloading dynamic agents inside a long-lived daemon cycle"
 cat >"$FAKE_BIN/codex" <<'EOF'
 #!/usr/bin/env bash
@@ -1386,6 +1422,48 @@ READY_CHANNEL_PLUGIN_CHECK="$(BRIDGE_CLAUDE_INSTALLED_PLUGINS_FILE="$TMP_ROOT/mi
   bridge_ensure_claude_launch_channel_plugins "'"$CREATED_AGENT"'"
 ' 2>&1 || true)"
 assert_contains "$READY_CHANNEL_PLUGIN_CHECK" "Claude plugin registry is missing 'telegram@claude-plugins-official' in test mode."
+FAKE_CLAUDE_BIN_DIR="$TMP_ROOT/fake-claude-bin"
+FAKE_CLAUDE_PLUGIN_STATE="$TMP_ROOT/fake-claude-plugin-state"
+FAKE_CLAUDE_PLUGIN_LOG="$TMP_ROOT/fake-claude-plugin.log"
+mkdir -p "$FAKE_CLAUDE_BIN_DIR"
+cat >"$FAKE_CLAUDE_BIN_DIR/claude" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\n' "$*" >>"${FAKE_CLAUDE_PLUGIN_LOG:?}"
+if [[ "$1 $2" == "plugin list" ]]; then
+  if [[ -f "${FAKE_CLAUDE_PLUGIN_STATE:?}" ]]; then
+    printf '  ❯ discord@claude-plugins-official\n'
+    printf '    Status: enabled\n'
+  fi
+  exit 0
+fi
+if [[ "$1 $2 $3" == "plugin marketplace remove" ]]; then
+  exit 0
+fi
+if [[ "$1 $2 $3" == "plugin marketplace add" ]]; then
+  touch "${FAKE_CLAUDE_PLUGIN_STATE:?}"
+  exit 0
+fi
+if [[ "$1 $2" == "plugin install" ]]; then
+  if [[ -f "${FAKE_CLAUDE_PLUGIN_STATE:?}" ]]; then
+    exit 0
+  fi
+  printf 'Plugin "discord" not found in marketplace "claude-plugins-official"\n' >&2
+  exit 1
+fi
+if [[ "$1 $2" == "plugin enable" ]]; then
+  exit 0
+fi
+exit 0
+EOF
+chmod +x "$FAKE_CLAUDE_BIN_DIR/claude"
+FORCE_REFRESH_OUTPUT="$(PATH="$FAKE_CLAUDE_BIN_DIR:$PATH" FAKE_CLAUDE_PLUGIN_STATE="$FAKE_CLAUDE_PLUGIN_STATE" FAKE_CLAUDE_PLUGIN_LOG="$FAKE_CLAUDE_PLUGIN_LOG" BRIDGE_CLAUDE_INSTALLED_PLUGINS_FILE= "$BASH4_BIN" -c '
+  source "'"$REPO_ROOT"'/bridge-lib.sh"
+  bridge_ensure_claude_plugin_enabled "discord@claude-plugins-official"
+' 2>&1)"
+assert_contains "$FORCE_REFRESH_OUTPUT" "Refreshing Claude plugin marketplace: claude-plugins-official"
+assert_contains "$(cat "$FAKE_CLAUDE_PLUGIN_LOG")" "plugin marketplace remove claude-plugins-official"
+assert_contains "$(cat "$FAKE_CLAUDE_PLUGIN_LOG")" "plugin marketplace add anthropics/claude-plugins-official"
 CREATE_LIST_JSON="$("$REPO_ROOT/agent-bridge" agent list --json)"
 CREATE_SHOW_JSON="$("$REPO_ROOT/agent-bridge" agent show "$CREATED_AGENT" --json)"
 python3 - "$CREATE_LIST_JSON" "$CREATE_SHOW_JSON" "$CREATED_AGENT" "$SMOKE_AGENT" <<'PY'
@@ -1620,6 +1698,32 @@ assert_contains "$CLAUDE_LAUNCH_CONTINUE" "DISCORD_STATE_DIR=$CLAUDE_STATIC_WORK
 assert_contains "$CLAUDE_LAUNCH_CONTINUE" "claude --dangerously-skip-permissions --name claude-static --channels plugin:discord@claude-plugins-official"
 assert_not_contains "$CLAUDE_LAUNCH_CONTINUE" "claude --continue"
 [[ "$CLAUDE_LAUNCH_CONTINUE" != *"'DISCORD_STATE_DIR="* ]] || die "static Claude env prefix should not be shell-quoted on continue"
+
+CLAUDE_LAUNCH_RESTART_CONTINUE="$("$BASH4_BIN" -c '
+  source "'"$REPO_ROOT"'/bridge-lib.sh"
+  bridge_load_roster
+  BRIDGE_AGENT_CONTINUE["claude-static"]="1"
+  BRIDGE_AGENT_LOOP_RESTART_COUNT=1
+  unset BRIDGE_AGENT_SESSION_ID["claude-static"]
+  bridge_agent_launch_cmd "claude-static"
+')"
+assert_contains "$CLAUDE_LAUNCH_RESTART_CONTINUE" "claude --continue --dangerously-skip-permissions --name claude-static --channels plugin:discord@claude-plugins-official"
+
+cat >"$CLAUDE_STATIC_WORKDIR/NEXT-SESSION.md" <<'EOF'
+# NEXT SESSION
+
+Verify channel setup and tell the user what happened.
+EOF
+CLAUDE_LAUNCH_NEXT_SESSION_FRESH="$("$BASH4_BIN" -c '
+  source "'"$REPO_ROOT"'/bridge-lib.sh"
+  bridge_load_roster
+  BRIDGE_AGENT_CONTINUE["claude-static"]="1"
+  BRIDGE_AGENT_LOOP_RESTART_COUNT=1
+  unset BRIDGE_AGENT_SESSION_ID["claude-static"]
+  bridge_agent_launch_cmd "claude-static"
+')"
+assert_not_contains "$CLAUDE_LAUNCH_NEXT_SESSION_FRESH" "claude --continue"
+rm -f "$CLAUDE_STATIC_WORKDIR/NEXT-SESSION.md"
 
 FAKE_CLAUDE_HOME="$TMP_ROOT/fake-claude-home"
 mkdir -p "$FAKE_CLAUDE_HOME/.claude/sessions"
@@ -2154,14 +2258,15 @@ PY
 python3 "$REPO_ROOT/bridge-queue.py" done "$NATIVE_ONESHOT_TASK_ID" --agent "$SMOKE_AGENT" --note "one-shot smoke cleaned up" >/dev/null
 
 log "dry-run upgrade preserves custom paths"
+EXPECTED_VERSION="$(tr -d '[:space:]' <"$REPO_ROOT/VERSION")"
 VERSION_OUTPUT="$("$REPO_ROOT/agent-bridge" version)"
-assert_contains "$VERSION_OUTPUT" "Agent Bridge 0.1.0"
+assert_contains "$VERSION_OUTPUT" "Agent Bridge $EXPECTED_VERSION"
 UPGRADE_CHECK_JSON="$("$REPO_ROOT/agent-bridge" upgrade --source "$REPO_ROOT" --target "$BRIDGE_HOME" --check --json)"
 assert_contains "$UPGRADE_CHECK_JSON" "\"mode\": \"upgrade-check\""
-assert_contains "$UPGRADE_CHECK_JSON" "\"target_version\": \"0.1.0\""
+assert_contains "$UPGRADE_CHECK_JSON" "\"target_version\": \"$EXPECTED_VERSION\""
 UPGRADE_JSON="$("$REPO_ROOT/agent-bridge" upgrade --source "$REPO_ROOT" --target "$BRIDGE_HOME" --dry-run --json)"
 assert_contains "$UPGRADE_JSON" "\"mode\": \"upgrade\""
-assert_contains "$UPGRADE_JSON" "\"version\": \"0.1.0\""
+assert_contains "$UPGRADE_JSON" "\"version\": \"$EXPECTED_VERSION\""
 assert_contains "$UPGRADE_JSON" "\"preserved_paths\""
 assert_contains "$UPGRADE_JSON" "\"backup_enabled\": true"
 assert_contains "$UPGRADE_JSON" "\"agent_migration\""
@@ -2183,7 +2288,7 @@ PY
 UPGRADE_APPLY_JSON="$("$REPO_ROOT/agent-bridge" upgrade --source "$REPO_ROOT" --target "$BRIDGE_HOME" --no-restart-daemon --allow-dirty --json)"
 assert_contains "$UPGRADE_APPLY_JSON" "\"backup_enabled\": true"
 assert_contains "$UPGRADE_APPLY_JSON" "\"migrate_agents\": true"
-assert_contains "$UPGRADE_APPLY_JSON" "\"version\": \"0.1.0\""
+assert_contains "$UPGRADE_APPLY_JSON" "\"version\": \"$EXPECTED_VERSION\""
 assert_contains "$UPGRADE_APPLY_JSON" "\"added_files\""
 assert_contains "$UPGRADE_APPLY_JSON" "\"updated_files\""
 [[ -f "$BRIDGE_AGENT_HOME_ROOT/$CREATED_AGENT/MEMORY-SCHEMA.md" ]] || die "upgrade did not restore missing agent template file"

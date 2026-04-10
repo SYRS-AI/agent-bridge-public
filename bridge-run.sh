@@ -142,17 +142,84 @@ bridge_run_stop_foreground_session() {
   bridge_agent_clear_idle_marker "$AGENT"
 }
 
+bridge_run_schedule_next_session_prompt() {
+  local next_file="$WORK_DIR/NEXT-SESSION.md"
+  local marker_dir="$BRIDGE_STATE_DIR/next-session-prompts"
+  local marker_file="$marker_dir/${AGENT}.sha"
+  local digest=""
+
+  [[ "$ENGINE" == "claude" ]] || return 0
+  [[ -f "$next_file" ]] || return 0
+
+  digest="$(bridge_sha1 "$(cat "$next_file")")"
+  if [[ -f "$marker_file" && "$(cat "$marker_file" 2>/dev/null || true)" == "$digest" ]]; then
+    return 0
+  fi
+
+  (
+    "$BRIDGE_BASH_BIN" -lc '
+      set -euo pipefail
+      script_dir="$1"
+      session="$2"
+      agent="$3"
+      marker_file="$4"
+      digest="$5"
+      source "$script_dir/bridge-lib.sh"
+      if bridge_tmux_wait_for_prompt "$session" claude 20; then
+        bridge_tmux_send_and_submit "$session" claude "You have just restarted under Agent Bridge. Read NEXT-SESSION.md now, run the verification commands listed there, then open with a short user-facing resume summary before doing unrelated work."
+        mkdir -p "$(dirname "$marker_file")"
+        printf "%s" "$digest" >"$marker_file"
+      fi
+    ' -- "$SCRIPT_DIR" "$SESSION" "$AGENT" "$marker_file" "$digest"
+  ) >/dev/null 2>&1 &
+}
+
+bridge_run_schedule_idle_marker_and_inbox_bootstrap() {
+  local next_file="$WORK_DIR/NEXT-SESSION.md"
+  local marker_dir="$BRIDGE_STATE_DIR/initial-inbox-prompts"
+  local marker_file="$marker_dir/${AGENT}.started"
+
+  [[ "$ENGINE" == "claude" ]] || return 0
+
+  (
+    "$BRIDGE_BASH_BIN" -lc '
+      set -euo pipefail
+      script_dir="$1"
+      session="$2"
+      agent="$3"
+      marker_file="$4"
+      next_file="$5"
+      source "$script_dir/bridge-lib.sh"
+      if bridge_tmux_wait_for_prompt "$session" claude 30; then
+        bridge_agent_mark_idle_now "$agent"
+        if [[ ! -f "$next_file" && ! -f "$marker_file" ]]; then
+          task_id="$(bridge_queue_cli find-open --agent "$agent" 2>/dev/null | head -n 1 || true)"
+          if [[ -n "$task_id" ]]; then
+            bridge_tmux_send_and_submit "$session" claude "[Agent Bridge] ACTION REQUIRED — queued tasks detected. Run exactly: ~/.agent-bridge/agb inbox $agent"
+          fi
+          mkdir -p "$(dirname "$marker_file")"
+          printf "%s\n" "$(date +%s)" >"$marker_file"
+        fi
+      fi
+    ' -- "$SCRIPT_DIR" "$SESSION" "$AGENT" "$marker_file" "$next_file"
+  ) >/dev/null 2>&1 &
+}
+
 log_line "${AGENT} 에이전트 시작 (engine=${ENGINE}, dir=${WORK_DIR})"
 
 FAIL_COUNT=0
+RESTART_COUNT=0
 while true; do
   local_err_size_before=0
   local_err_size_after=0
+  export BRIDGE_AGENT_LOOP_RESTART_COUNT="$RESTART_COUNT"
   LAUNCH_CMD="$(bridge_agent_launch_cmd "$AGENT")"
   [[ -n "$LAUNCH_CMD" ]] || bridge_die "'$AGENT'의 launch command가 비어 있습니다."
 
   if [[ "$ENGINE" == "claude" ]]; then
     bridge_ensure_claude_launch_channel_plugins "$AGENT"
+    bridge_run_schedule_idle_marker_and_inbox_bootstrap
+    bridge_run_schedule_next_session_prompt
   fi
 
   log_line "실행: ${LAUNCH_CMD}"
@@ -205,6 +272,7 @@ while true; do
     fi
     log_line "비정상 종료 (코드: ${EXIT_CODE}, 연속실패: ${FAIL_COUNT}회). 5초 후 재시작..."
     log_loop_help
+    RESTART_COUNT=$((RESTART_COUNT + 1))
     if [[ $FAIL_COUNT -ge 10 ]]; then
       log_line "연속 ${FAIL_COUNT}회 실패. 60초 대기..."
       sleep 60
@@ -221,6 +289,7 @@ while true; do
     FAIL_COUNT=0
     log_line "정상 종료. 5초 후 재시작..."
     log_loop_help
+    RESTART_COUNT=$((RESTART_COUNT + 1))
     sleep 5
   fi
 done

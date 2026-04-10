@@ -548,6 +548,13 @@ bridge_qualify_channel_item() {
     return 0
   }
 
+  case "$item" in
+    plugin:discord@claude-plugins-official|plugin:telegram@claude-plugins-official)
+      printf '%s' "$item"
+      return 0
+      ;;
+  esac
+
   if [[ "$item" == plugin:* && "$item" != *@* ]]; then
     plugin_name="${item#plugin:}"
     case "$plugin_name" in
@@ -622,6 +629,44 @@ bridge_channel_csv_contains() {
   done
 
   return 1
+}
+
+bridge_channel_item_requires_claude_plugin() {
+  local item="${1:-}"
+
+  item="$(bridge_qualify_channel_item "$item")"
+  case "$item" in
+    plugin:*|server:*)
+      return 0
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
+bridge_filter_claude_plugin_channels_csv() {
+  local csv="${1:-}"
+  local item=""
+  local filtered=""
+  local -a items=()
+
+  [[ -n "$csv" ]] || {
+    printf '%s' ""
+    return 0
+  }
+
+  IFS=',' read -r -a items <<<"$csv"
+  for item in "${items[@]}"; do
+    item="$(bridge_trim_whitespace "$item")"
+    [[ -n "$item" ]] || continue
+    item="$(bridge_qualify_channel_item "$item")"
+    if bridge_channel_item_requires_claude_plugin "$item"; then
+      filtered="$(bridge_append_csv_unique "$filtered" "$item")"
+    fi
+  done
+
+  printf '%s' "$filtered"
 }
 
 bridge_channel_csv_is_subset() {
@@ -831,13 +876,104 @@ bridge_agent_missing_channels_csv() {
 
 bridge_agent_launch_channels_csv() {
   local agent="$1"
+  local channels=""
 
   if [[ "${BRIDGE_AGENT_SUPPRESS_MISSING_CHANNELS:-0}" == "1" ]]; then
-    bridge_agent_ready_channels_csv "$agent"
+    channels="$(bridge_agent_ready_channels_csv "$agent")"
+  else
+    channels="$(bridge_agent_channels_csv "$agent")"
+  fi
+  bridge_filter_claude_plugin_channels_csv "$channels"
+}
+
+bridge_agent_required_launch_channels_csv() {
+  local agent="$1"
+
+  bridge_filter_claude_plugin_channels_csv "$(bridge_agent_channels_csv "$agent")"
+}
+
+bridge_agent_required_runtime_channels_csv() {
+  local agent="$1"
+
+  bridge_agent_channels_csv "$agent"
+}
+
+bridge_agent_launch_channel_status_reason() {
+  local agent="$1"
+  local required=""
+  local effective=""
+  local generated=""
+
+  required="$(bridge_agent_required_launch_channels_csv "$agent")"
+  [[ -n "$required" ]] || {
+    printf '%s' ""
+    return 0
+  }
+
+  generated="$(bridge_claude_launch_with_channels "$agent" "$(bridge_agent_launch_cmd_raw "$agent")")"
+  effective="$(bridge_extract_channels_from_command "$generated")"
+  if ! bridge_channel_csv_is_subset "$required" "$effective"; then
+    printf 'launch command missing required Claude --channels (%s)' "$required"
     return 0
   fi
 
-  bridge_agent_channels_csv "$agent"
+  printf '%s' ""
+}
+
+bridge_agent_runtime_channel_status_reason() {
+  local agent="$1"
+  local required=""
+  local discord_dir=""
+  local telegram_dir=""
+  local teams_dir=""
+
+  required="$(bridge_agent_required_runtime_channels_csv "$agent")"
+  if [[ -z "$required" ]]; then
+    printf '%s' ""
+    return 0
+  fi
+
+  if bridge_channel_csv_contains "$required" "plugin:discord"; then
+    discord_dir="$(bridge_agent_discord_state_dir "$agent")"
+    if [[ ! -f "$discord_dir/access.json" ]]; then
+      printf 'missing Discord access file under %s (access.json required)' "$discord_dir"
+      return 0
+    fi
+    if ! bridge_env_file_has_any_nonempty_key "$discord_dir/.env" DISCORD_BOT_TOKEN BOT_TOKEN TOKEN; then
+      printf 'missing Discord bot token under %s (.env with DISCORD_BOT_TOKEN required)' "$discord_dir"
+      return 0
+    fi
+  fi
+
+  if bridge_channel_csv_contains "$required" "plugin:telegram"; then
+    telegram_dir="$(bridge_agent_telegram_state_dir "$agent")"
+    if [[ ! -f "$telegram_dir/access.json" ]]; then
+      printf 'missing Telegram access file under %s (access.json required)' "$telegram_dir"
+      return 0
+    fi
+    if ! bridge_env_file_has_any_nonempty_key "$telegram_dir/.env" TELEGRAM_BOT_TOKEN BOT_TOKEN TOKEN; then
+      printf 'missing Telegram bot token under %s (.env with TELEGRAM_BOT_TOKEN required)' "$telegram_dir"
+      return 0
+    fi
+  fi
+
+  if bridge_channel_csv_contains "$required" "plugin:teams"; then
+    teams_dir="$(bridge_agent_teams_state_dir "$agent")"
+    if [[ ! -f "$teams_dir/access.json" ]]; then
+      printf 'missing Teams access file under %s (access.json required)' "$teams_dir"
+      return 0
+    fi
+    if ! bridge_env_file_has_any_nonempty_key "$teams_dir/.env" TEAMS_APP_ID MicrosoftAppId; then
+      printf 'missing Teams app id under %s (.env with TEAMS_APP_ID required)' "$teams_dir"
+      return 0
+    fi
+    if ! bridge_env_file_has_any_nonempty_key "$teams_dir/.env" TEAMS_APP_PASSWORD MicrosoftAppPassword; then
+      printf 'missing Teams app password under %s (.env with TEAMS_APP_PASSWORD required)' "$teams_dir"
+      return 0
+    fi
+  fi
+
+  printf '%s' ""
 }
 
 bridge_agent_channel_setup_guidance() {
@@ -861,69 +997,18 @@ bridge_agent_channel_setup_guidance() {
 
 bridge_agent_channel_status_reason() {
   local agent="$1"
-  local required=""
-  local effective=""
-  local explicit=""
-  local discord_dir=""
+  local reason=""
 
-  required="$(bridge_agent_channels_csv "$agent")"
-  if [[ -z "$required" ]]; then
-    printf '%s' ""
+  reason="$(bridge_agent_launch_channel_status_reason "$agent")"
+  if [[ -n "$reason" ]]; then
+    printf '%s' "$reason"
     return 0
   fi
 
-  explicit="${BRIDGE_AGENT_CHANNELS[$agent]-}"
-  if [[ -n "$explicit" ]]; then
-    effective="$required"
-  else
-    effective="$(bridge_extract_channels_from_command "$(bridge_agent_launch_cmd_raw "$agent")")"
-  fi
-
-  if ! bridge_channel_csv_is_subset "$required" "$effective"; then
-    printf 'launch command missing required --channels (%s)' "$required"
+  reason="$(bridge_agent_runtime_channel_status_reason "$agent")"
+  if [[ -n "$reason" ]]; then
+    printf '%s' "$reason"
     return 0
-  fi
-
-  if bridge_channel_csv_contains "$required" "plugin:discord"; then
-    discord_dir="$(bridge_agent_discord_state_dir "$agent")"
-    if [[ ! -f "$discord_dir/access.json" ]]; then
-      printf 'missing Discord access file under %s (access.json required)' "$discord_dir"
-      return 0
-    fi
-    if ! bridge_env_file_has_any_nonempty_key "$discord_dir/.env" DISCORD_BOT_TOKEN BOT_TOKEN TOKEN; then
-      printf 'missing Discord bot token under %s (.env with DISCORD_BOT_TOKEN required)' "$discord_dir"
-      return 0
-    fi
-  fi
-
-  if bridge_channel_csv_contains "$required" "plugin:telegram"; then
-    local telegram_dir=""
-    telegram_dir="$(bridge_agent_telegram_state_dir "$agent")"
-    if [[ ! -f "$telegram_dir/access.json" ]]; then
-      printf 'missing Telegram access file under %s (access.json required)' "$telegram_dir"
-      return 0
-    fi
-    if ! bridge_env_file_has_any_nonempty_key "$telegram_dir/.env" TELEGRAM_BOT_TOKEN BOT_TOKEN TOKEN; then
-      printf 'missing Telegram bot token under %s (.env with TELEGRAM_BOT_TOKEN required)' "$telegram_dir"
-      return 0
-    fi
-  fi
-
-  if bridge_channel_csv_contains "$required" "plugin:teams"; then
-    local teams_dir=""
-    teams_dir="$(bridge_agent_teams_state_dir "$agent")"
-    if [[ ! -f "$teams_dir/access.json" ]]; then
-      printf 'missing Teams access file under %s (access.json required)' "$teams_dir"
-      return 0
-    fi
-    if ! bridge_env_file_has_any_nonempty_key "$teams_dir/.env" TEAMS_APP_ID MicrosoftAppId; then
-      printf 'missing Teams app id under %s (.env with TEAMS_APP_ID required)' "$teams_dir"
-      return 0
-    fi
-    if ! bridge_env_file_has_any_nonempty_key "$teams_dir/.env" TEAMS_APP_PASSWORD MicrosoftAppPassword; then
-      printf 'missing Teams app password under %s (.env with TEAMS_APP_PASSWORD required)' "$teams_dir"
-      return 0
-    fi
   fi
 
   printf '%s' ""
@@ -1010,9 +1095,56 @@ print("missing")
 PY
 }
 
+bridge_claude_plugin_marketplace() {
+  local plugin_spec="$1"
+
+  if [[ "$plugin_spec" == *@* ]]; then
+    printf '%s' "${plugin_spec#*@}"
+  else
+    printf '%s' ""
+  fi
+}
+
+bridge_claude_marketplace_source() {
+  local marketplace="$1"
+
+  case "$marketplace" in
+    claude-plugins-official)
+      printf '%s' "anthropics/claude-plugins-official"
+      ;;
+    agent-bridge)
+      printf '%s' "$BRIDGE_SCRIPT_DIR"
+      ;;
+    *)
+      printf '%s' ""
+      ;;
+  esac
+}
+
+bridge_claude_plugin_install_missing_from_marketplace() {
+  local output="$1"
+
+  [[ "$output" == *"not found in marketplace"* || "$output" == *"not found"* ]]
+}
+
+bridge_force_refresh_claude_marketplace() {
+  local marketplace="$1"
+  local source=""
+
+  [[ -n "$marketplace" ]] || return 1
+  source="$(bridge_claude_marketplace_source "$marketplace")"
+  [[ -n "$source" ]] || return 1
+
+  bridge_info "[info] Refreshing Claude plugin marketplace: $marketplace"
+  claude plugin marketplace remove "$marketplace" >/dev/null 2>&1 || true
+  claude plugin marketplace add "$source" >/dev/null
+}
+
 bridge_ensure_claude_plugin_enabled() {
   local plugin_spec="$1"
   local status=""
+  local output=""
+  local marketplace=""
 
   status="$(bridge_claude_plugin_status "$plugin_spec")"
   case "$status" in
@@ -1032,7 +1164,16 @@ bridge_ensure_claude_plugin_enabled() {
         bridge_die "Claude plugin registry is missing '$plugin_spec' in test mode."
       fi
       bridge_info "[info] Installing Claude plugin: $plugin_spec"
-      claude plugin install --scope user "$plugin_spec" >/dev/null
+      if ! output="$(claude plugin install --scope user "$plugin_spec" 2>&1)"; then
+        marketplace="$(bridge_claude_plugin_marketplace "$plugin_spec")"
+        if bridge_claude_plugin_install_missing_from_marketplace "$output" && bridge_force_refresh_claude_marketplace "$marketplace"; then
+          bridge_info "[info] Retrying Claude plugin install after marketplace refresh: $plugin_spec"
+          claude plugin install --scope user "$plugin_spec" >/dev/null
+        else
+          printf '%s\n' "$output" >&2
+          bridge_die "Claude plugin install failed: $plugin_spec"
+        fi
+      fi
       ;;
     *)
       bridge_die "Unknown Claude plugin status for '$plugin_spec': $status"
@@ -1041,6 +1182,35 @@ bridge_ensure_claude_plugin_enabled() {
 
   status="$(bridge_claude_plugin_status "$plugin_spec")"
   [[ "$status" == "enabled" ]] || bridge_die "Claude plugin '$plugin_spec' is not enabled after install/setup (status=$status). Run: claude plugin install --scope user $plugin_spec"
+}
+
+bridge_claude_channel_plugins_ready_for_csv() {
+  local channels="$1"
+  local item=""
+  local plugin_spec=""
+  local status=""
+  local -a items=()
+
+  [[ -n "$channels" ]] || return 0
+
+  IFS=',' read -r -a items <<<"$(bridge_filter_claude_plugin_channels_csv "$channels")"
+  for item in "${items[@]}"; do
+    item="$(bridge_trim_whitespace "$item")"
+    [[ "$item" == plugin:* ]] || continue
+    plugin_spec="${item#plugin:}"
+    status="$(bridge_claude_plugin_status "$plugin_spec")"
+    [[ "$status" == "enabled" ]] || return 1
+  done
+
+  return 0
+}
+
+bridge_agent_channel_setup_complete() {
+  local agent="$1"
+
+  [[ "$(bridge_agent_channel_status "$agent")" == "ok" || "$(bridge_agent_channel_status "$agent")" == "-" ]] || return 1
+  [[ "$(bridge_agent_engine "$agent")" == "claude" ]] || return 0
+  bridge_claude_channel_plugins_ready_for_csv "$(bridge_agent_launch_channels_csv "$agent")"
 }
 
 bridge_ensure_agent_bridge_claude_marketplace() {
@@ -1060,19 +1230,22 @@ bridge_ensure_agent_bridge_claude_marketplace() {
 
 bridge_ensure_claude_channel_plugins_for_csv() {
   local channels="$1"
+  local item=""
+  local plugin_spec=""
+  local -a items=()
 
   [[ -n "$channels" ]] || return 0
 
-  if bridge_channel_csv_contains "$channels" "plugin:discord"; then
-    bridge_ensure_claude_plugin_enabled "discord@claude-plugins-official"
-  fi
-  if bridge_channel_csv_contains "$channels" "plugin:telegram"; then
-    bridge_ensure_claude_plugin_enabled "telegram@claude-plugins-official"
-  fi
-  if bridge_channel_csv_contains "$channels" "plugin:teams"; then
-    bridge_ensure_agent_bridge_claude_marketplace
-    bridge_ensure_claude_plugin_enabled "teams@agent-bridge"
-  fi
+  IFS=',' read -r -a items <<<"$(bridge_filter_claude_plugin_channels_csv "$channels")"
+  for item in "${items[@]}"; do
+    item="$(bridge_trim_whitespace "$item")"
+    [[ "$item" == plugin:* ]] || continue
+    plugin_spec="${item#plugin:}"
+    if [[ "$plugin_spec" == teams@agent-bridge ]]; then
+      bridge_ensure_agent_bridge_claude_marketplace
+    fi
+    bridge_ensure_claude_plugin_enabled "$plugin_spec"
+  done
 }
 
 bridge_ensure_claude_channel_plugins() {

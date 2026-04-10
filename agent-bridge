@@ -25,6 +25,7 @@ Usage:
   $CLI_NAME upgrade analyze [--target <bridge-home>] [--json]
   $CLI_NAME upgrade rollback [--target <bridge-home>] [--backup-root <dir>] [--json]
   $CLI_NAME escalate question --agent <agent> --question "<text>" [--context "<text>"] [--wait-seconds <seconds>] [--json]
+  $CLI_NAME upstream <draft|propose|review> ...
   $CLI_NAME agent <create|list|show|start|stop|restart|attach> ...
   $CLI_NAME kill <number|all>
   $CLI_NAME attach [number|name]
@@ -109,6 +110,8 @@ Examples:
   $CLI_NAME upgrade analyze --json
   $CLI_NAME upgrade rollback --json
   $CLI_NAME escalate question --agent reviewer --question "Should I ship this now?" --context "Second ask without a user reply."
+  $CLI_NAME upstream draft --title "setup fails" --symptom "..." --why "..." --output /tmp/issue.md
+  $CLI_NAME upstream propose --title "setup fails" --body-file /tmp/issue.md
   $CLI_NAME list
   $CLI_NAME kill 1
   $CLI_NAME kill all
@@ -429,6 +432,10 @@ PY
     escalate)
       shift
       exec "$BRIDGE_BASH_BIN" "$SCRIPT_DIR/bridge-escalate.sh" "$@"
+      ;;
+    upstream)
+      shift
+      exec "$BRIDGE_BASH_BIN" "$SCRIPT_DIR/bridge-upstream.sh" "$@"
       ;;
     list)
       if [[ $# -ne 1 ]]; then

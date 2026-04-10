@@ -1,14 +1,47 @@
 #!/usr/bin/env bash
 # shellcheck shell=bash disable=SC2034
 
+bridge_agent_next_session_file() {
+  local agent="$1"
+  printf '%s/NEXT-SESSION.md' "$(bridge_agent_workdir "$agent")"
+}
+
+bridge_agent_claude_effective_engine_continue() {
+  local agent="$1"
+  local onboarding_state=""
+
+  [[ "$(bridge_agent_engine "$agent")" == "claude" ]] || return 1
+  [[ "$(bridge_agent_continue "$agent")" == "1" ]] || return 1
+  onboarding_state="$(bridge_agent_onboarding_state "$agent")"
+  if [[ "$onboarding_state" != "complete" ]]; then
+    [[ "$onboarding_state" == "missing" ]] && ! bridge_agent_is_admin "$agent" || return 1
+  fi
+  bridge_agent_channel_setup_complete "$agent" || return 1
+  [[ ! -f "$(bridge_agent_next_session_file "$agent")" ]] || return 1
+  return 0
+}
+
 bridge_build_dynamic_launch_cmd() {
   local agent="$1"
-  local engine continue_mode session_id
+  local engine continue_mode session_id continue_fallback effective_continue
 
   engine="$(bridge_agent_engine "$agent")"
   continue_mode="$(bridge_agent_continue "$agent")"
-  if [[ "$engine" == "claude" && "$continue_mode" == "1" ]]; then
-    session_id="$(bridge_claude_resume_session_id_for_agent "$agent" || true)"
+  continue_fallback=0
+  effective_continue=0
+  if [[ "$engine" == "claude" ]]; then
+    if bridge_agent_claude_effective_engine_continue "$agent"; then
+      effective_continue=1
+      session_id="$(bridge_claude_resume_session_id_for_agent "$agent" || true)"
+    else
+      session_id=""
+    fi
+    if [[ "$effective_continue" == "1" \
+      && -z "$session_id" \
+      && "${BRIDGE_AGENT_LOOP_RESTART_COUNT:-0}" =~ ^[0-9]+$ \
+      && "${BRIDGE_AGENT_LOOP_RESTART_COUNT:-0}" -gt 0 ]]; then
+      continue_fallback=1
+    fi
   else
     bridge_normalize_agent_session_id "$agent"
     session_id="$(bridge_agent_session_id "$agent")"
@@ -23,8 +56,10 @@ bridge_build_dynamic_launch_cmd() {
       fi
       ;;
     claude)
-      if [[ "$continue_mode" == "1" && -n "$session_id" ]]; then
+      if [[ "$effective_continue" == "1" && -n "$session_id" ]]; then
         bridge_join_quoted claude --resume "$session_id" --dangerously-skip-permissions --name "$agent"
+      elif [[ "$continue_fallback" == "1" ]]; then
+        bridge_join_quoted claude --continue --dangerously-skip-permissions --name "$agent"
       else
         bridge_join_quoted claude --dangerously-skip-permissions --name "$agent"
       fi
@@ -45,6 +80,9 @@ bridge_build_resume_launch_cmd() {
 
   engine="$(bridge_agent_engine "$agent")"
   continue_mode="$(bridge_agent_continue "$agent")"
+  if [[ "$engine" == "claude" ]] && ! bridge_agent_claude_effective_engine_continue "$agent"; then
+    return 1
+  fi
   bridge_normalize_agent_session_id "$agent"
   session_id="$(bridge_agent_session_id "$agent")"
 
@@ -319,22 +357,31 @@ bridge_build_static_claude_launch_cmd() {
   local fallback=""
   local continue_mode=""
   local session_id=""
+  local continue_fallback=0
+  local effective_continue=0
 
   fallback="${BRIDGE_AGENT_LAUNCH_CMD[$agent]-}"
   [[ -n "$fallback" ]] || return 1
 
   continue_mode="$(bridge_agent_continue "$agent")"
-  if [[ "$continue_mode" == "1" ]]; then
+  if bridge_agent_claude_effective_engine_continue "$agent"; then
+    effective_continue=1
     session_id="$(bridge_claude_resume_session_id_for_agent "$agent" || true)"
+    if [[ "$effective_continue" == "1" \
+      && -z "$session_id" \
+      && "${BRIDGE_AGENT_LOOP_RESTART_COUNT:-0}" =~ ^[0-9]+$ \
+      && "${BRIDGE_AGENT_LOOP_RESTART_COUNT:-0}" -gt 0 ]]; then
+      continue_fallback=1
+    fi
   fi
 
   bridge_require_python
-  python3 - "$agent" "$continue_mode" "$session_id" "$fallback" <<'PY'
+  python3 - "$agent" "$continue_mode" "$session_id" "$continue_fallback" "$fallback" <<'PY'
 import re
 import shlex
 import sys
 
-agent, continue_mode, session_id, original = sys.argv[1:]
+agent, continue_mode, session_id, continue_fallback, original = sys.argv[1:]
 match = re.match(r"^(?P<prefix>.*?)(?P<command>claude(?:\s|$).*)$", original)
 if not match:
     print(original)
@@ -367,6 +414,8 @@ while j < len(rest):
 base = ["claude"]
 if continue_mode == "1" and session_id:
     base.extend(["--resume", session_id])
+elif continue_mode == "1" and continue_fallback == "1":
+    base.append("--continue")
 base.extend(["--dangerously-skip-permissions", "--name", agent])
 base.extend(extras)
 

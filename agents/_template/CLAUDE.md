@@ -13,6 +13,7 @@
 ## Queue & Delivery
 - inbox / task 상태 확인은 `~/.agent-bridge/agb inbox|show|claim|done`를 사용한다.
 - durable A2A는 `~/.agent-bridge/agent-bridge task create|urgent|handoff`를 사용한다.
+- `NEXT-SESSION.md`가 없더라도 high-priority queue item이나 `needs_human_followup=true` 작업이 있으면, 첫 assistant turn에서 가장 중요한 항목과 제안하는 다음 행동을 짧게 말한다.
 - 사람에게 보이는 Discord/Telegram 응답은 연결된 Claude 세션 안에서 처리한다. direct-send CLI는 기본 경로가 아니다.
 - subagent가 필요하면 bridge-managed disposable child 또는 현재 엔진의 정식 subagent 기능을 사용한다. 옛 child-session 헬퍼는 기준이 아니다.
 
@@ -49,15 +50,21 @@ task를 수신하면 아래 순서를 반드시 따른다:
 ## Upstream Issue Policy
 - 설치/환경 문제와 코어 제품 문제를 구분한다. 사용자 로컬 설정, 비밀키, 채널 권한, 일회성 운영 실수는 먼저 로컬 문제로 본다.
 - Agent Bridge 코어 버그나 제품 개선점으로 보이면, 바로 GitHub issue를 만들지 않는다.
-- 먼저 사용자에게 증상, 재현 조건, 영향 범위, 왜 코어 이슈라고 판단했는지 짧게 보고하고 upstream issue 등록 허락을 받는다.
+- upstream 가능성이 높다고 판단한 같은 턴에 표준 제안을 반드시 한다: 증상 한 줄, 로컬 설정 문제가 아니라 코어 이슈로 보는 이유 한 줄, `Agent Bridge 코어 이슈로 보입니다. upstream GitHub issue를 바로 등록할까요?`라는 yes/no 질문.
+- 재현 로그가 있으면 `~/.agent-bridge/agent-bridge upstream draft --title "<title>" --symptom "<symptom>" --why "<reason>" --reproduction-file <path> --output <draft.md>`로 초안을 만든다.
+- 사용자가 승인하면 `~/.agent-bridge/agent-bridge upstream propose --title "<title>" --body-file <draft.md> --yes`로 등록한다.
+- 사용자가 거절하거나 답하지 않으면 `~/.agent-bridge/agent-bridge upstream propose --title "<title>" --body-file <draft.md>`를 사용해 local candidate로 저장하거나, 직접 `~/.agent-bridge/shared/upstream-candidates/`에 저장한다.
 - 사용자가 명시적으로 승인한 뒤에만 GitHub issue를 등록한다.
 - 사용자와 함께 작업하다가 범용 제품에 들어갈 만한 변경이 보이면, upstream 후보라고 먼저 알린다.
 - upstream 성격의 변경은 관리자 에이전트가 로컬 live install이나 repo에 바로 적용하지 않는다. 먼저 사용자 승인 또는 upstream 제안 여부를 확인한다.
 
 ## Admin First-Run Onboarding Defaults
 - `SESSION-TYPE.md`의 Session Type이 `admin`이고 Onboarding State가 `pending`이면, 사용자에게는 필요한 것만 짧게 묻는다.
+- Onboarding State가 `pending`인 admin 세션에서 첫 사용자 메시지가 도착하면, queue/watchdog 처리 여부와 무관하게 먼저 짧게 인사하고 아래 두 질문을 실제로 물어본다. 사용자의 첫 메시지가 다른 요청이어도 일반 요청으로 처리하지 않는다.
 - 질문 1: `이름 또는 닉네임을 알려주세요.`
 - 질문 2: `처음 연결할 채널은 무엇인가요? 터미널만 사용할지, Discord, Telegram, 또는 둘 다 연결할지 알려주세요.`
+- 첫 사용자 메시지에 이름/닉네임과 채널 선택이 이미 모두 포함되어 있으면 다시 묻지 말고 `이름: <값>, 채널: <값>으로 진행하겠습니다.`라고 확인한 뒤 바로 설정을 진행한다.
+- Onboarding State가 `pending`인 동안에는 두 질문을 물었거나 두 답을 저장하고 다음 설정 단계로 넘어간 경우가 아니면 턴을 끝내지 않는다.
 - 내부 파일명, `USER.md`, 사용자 partition 같은 구현 세부사항은 질문 문구에 넣지 않는다.
 - Discord 또는 Telegram을 선택하면 해당 에이전트 엔진은 Claude Code로 설정한다. Codex는 현재 외부 채널 연동용 엔진으로 사용하지 않는다.
 - 사용자가 Discord/Telegram과 Codex를 함께 선택하면, "Discord/Telegram 연동은 Claude Code가 필요합니다. 이 에이전트는 Claude Code로 설정하겠습니다."라고 설명하고 Claude Code로 진행한다.
@@ -79,7 +86,7 @@ task를 수신하면 아래 순서를 반드시 따른다:
 - Discord와 Telegram 둘 다 선택하면 둘 다 설정한다. 기본 순서는 Discord 먼저, Telegram 다음이다. 첫 번째 설정이 끝났다고 멈추지 말고 두 번째 설정까지 이어간다.
 - Discord setup에는 bot token, Application ID, Permissions Integer, channel ID가 필요하다. 부족하면 받는 방법을 안내하고 값을 받은 뒤 `~/.agent-bridge/agent-bridge setup discord <agent> --token <token> --channel <channel-id> --yes`를 실행한다.
 - Telegram setup에는 bot token, allowed user ID, default chat ID가 필요하다. 부족하면 받는 방법을 안내하고 값을 받은 뒤 `~/.agent-bridge/agent-bridge setup telegram <agent> --token <token> --allow-from <user-id> --default-chat <chat-id> --yes`를 실행한다.
-- `setup discord/telegram`과 에이전트 시작 경로는 필요한 Claude Code 플러그인을 자동으로 설치/enable한다. 그래도 채널 준비의 source of truth는 각 에이전트의 `~/.agent-bridge/agents/<agent>/.discord/.env`, `.discord/access.json`, `.telegram/.env`, `.telegram/access.json`다.
+- `setup discord/telegram`과 에이전트 시작 경로는 필요한 Claude Code 플러그인을 자동으로 설치/enable한다. 오래된 `claude-plugins-official` marketplace mirror 때문에 plugin install이 실패하면 Agent Bridge가 mirror를 강제 갱신하고 1회 재시도한다. 그래도 채널 준비의 source of truth는 각 에이전트의 `~/.agent-bridge/agents/<agent>/.discord/.env`, `.discord/access.json`, `.telegram/.env`, `.telegram/access.json`다.
 - `claude mcp list`를 Agent Bridge 밖에서 실행하면 전역 `~/.claude/channels/...` 기준 오류가 보일 수 있다. Agent Bridge 검증은 `~/.agent-bridge/agent-bridge agent start <agent> --dry-run`, `~/.agent-bridge/agent-bridge status`, 그리고 에이전트별 state dir 파일 존재 여부로 한다.
 - setup 후에는 roster의 `BRIDGE_AGENT_CHANNELS["<agent>"]`가 선택한 plugin 채널과 일치하는지 확인한다. Discord는 `BRIDGE_AGENT_DISCORD_CHANNEL_ID["<agent>"]`도 확인한다.
 - 채널 설정이 끝난 대상이 admin 에이전트이면 `exit` 후 바깥 쉘에서 `agb admin`을 다시 실행하라고 안내한다. 대상이 일반 에이전트이면 `agb agent restart <agent>`를 사용한다.
@@ -103,7 +110,7 @@ task를 수신하면 아래 순서를 반드시 따른다:
 1. `SOUL.md` 읽기
 2. 이 `CLAUDE.md` 읽기
 3. `SESSION-TYPE.md` 읽기
-4. `NEXT-SESSION.md`가 있으면 읽고 handoff 작업을 먼저 처리
+4. `NEXT-SESSION.md`가 있으면 읽고 handoff 작업을 먼저 처리한다. 검증 명령을 실행한 뒤 첫 assistant turn에서 반드시 재개 요약, 검증 결과, 다음 행동/질문을 사용자에게 말한다.
 5. `MEMORY-SCHEMA.md` 읽기
 6. 현재 대화 상대의 `users/<user-id>/USER.md`와 최근 메모가 있으면 먼저 확인
 7. `MEMORY.md`와 `memory/` 확인

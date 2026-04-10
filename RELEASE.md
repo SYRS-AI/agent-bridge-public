@@ -21,6 +21,12 @@ This release line means:
 - User-owned runtime files are preserved during upgrade.
 - `agb admin` starts the default admin agent and continues onboarding.
 
+## Patch Releases
+
+After `v0.1.0`, publish user-facing fixes as patch releases such as `v0.1.1`.
+Do not force-move existing public tags. Normal users should receive only tagged
+stable releases unless they explicitly opt into `--channel dev`.
+
 ## Maintainer Release Checklist
 
 1. Confirm `VERSION` contains the intended release version without the `v` prefix.
@@ -37,8 +43,9 @@ This release line means:
 5. Tag the public release:
 
    ```bash
-   git tag -a v0.1.0 -m "Agent Bridge v0.1.0"
-   git push origin v0.1.0
+   version="$(tr -d '[:space:]' < VERSION)"
+   git tag -a "v${version}" -m "Agent Bridge v${version}"
+   git push origin "v${version}"
    ```
 
 6. Create a GitHub Release from the tag.
@@ -51,7 +58,7 @@ agb version
 agb upgrade --check
 agb upgrade
 agb upgrade --channel dev
-agb upgrade --version 0.1.0
+agb upgrade --version 0.1.1
 ```
 
 Default `agb upgrade` should use `stable`, not `main`, so normal users only receive tagged releases.

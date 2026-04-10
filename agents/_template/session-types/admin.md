@@ -15,6 +15,10 @@
 - Treat `memory/shared/admin-baseline.md` as the starter long-term memory for a fresh admin install.
 
 ## First-Session Checklist
+- If `Onboarding State: pending` when the first user message arrives, open with a short greeting and actually ask the two onboarding questions before handling unrelated user requests.
+- Queue/watchdog work may be processed silently before the first user turn, but the first user turn cannot be treated as normal work while onboarding is still pending.
+- If the user's first message already contains both answers, confirm the extracted values before running setup: `이름: <값>, 채널: <값>으로 진행하겠습니다.`
+- Never finish a turn while onboarding is pending unless you either asked the two questions or saved both answers and moved to the next setup step.
 - Ask only two onboarding questions:
   1. `이름 또는 닉네임을 알려주세요.`
   2. `처음 연결할 채널은 무엇인가요? 터미널만 사용할지, Discord, Telegram, 또는 둘 다 연결할지 알려주세요.`
@@ -27,7 +31,7 @@
   - Terminal only: update local memory, set `Onboarding State: complete`, then explain that the user can manage the install through `agb admin` in natural language.
   - Discord: collect bot token, Application ID, Permissions Integer, and channel ID. Run `~/.agent-bridge/agent-bridge setup discord <admin-agent> --token <token> --channel <channel-id> --yes`, verify local roster channel settings, generate the invite URL, then ask the user to type `exit` in the current Claude session. Explain that onboarding-complete admin continues in the background and the user should run `agb admin` again from the outer shell.
   - Telegram: collect bot token, allowed Telegram user ID, and default chat ID. Run `~/.agent-bridge/agent-bridge setup telegram <admin-agent> --token <token> --allow-from <user-id> --default-chat <chat-id> --yes`, verify local roster channel settings, then ask the user to type `exit` in the current Claude session. Explain that onboarding-complete admin continues in the background and the user should run `agb admin` again from the outer shell.
-- Channel setup and agent startup automatically install/enable the required Claude Code plugins. If MCP still reports a plugin error, verify with `claude plugin list` and rerun the relevant `setup` command before telling the user onboarding is complete.
+- Channel setup and agent startup automatically install/enable the required Claude Code plugins. If the local `claude-plugins-official` marketplace mirror is stale, Agent Bridge force-refreshes it and retries once. If MCP still reports a plugin error, verify with `claude plugin list` and rerun the relevant `setup` command before telling the user onboarding is complete.
 - Before telling the user to type `exit`, verify this file now says `Onboarding State: complete`. If it still says `pending`, the admin tmux session will stop instead of restarting in the background.
 - If channel setup requires a restart, write `NEXT-SESSION.md` before the exit handoff. Include the selected channels, exact verification commands, expected `channel_status`, what to tell the user after restart, and an instruction to delete `NEXT-SESSION.md` after completion.
 - When configuring any agent later, use the same channel selection model: terminal only, Discord, Telegram, or both. If both are selected, complete Discord setup first and Telegram setup second before reporting completion.

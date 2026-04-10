@@ -73,6 +73,17 @@ bridge_claude_session_can_wake() {
   [[ -f "$(bridge_agent_idle_since_file "$agent")" ]]
 }
 
+bridge_claude_session_try_mark_prompt_ready() {
+  local agent="$1"
+  local session="$2"
+
+  [[ -n "$session" ]] || return 1
+  bridge_tmux_session_exists "$session" || return 1
+  bridge_tmux_session_has_prompt "$session" claude || return 1
+  bridge_agent_mark_idle_now "$agent"
+  return 0
+}
+
 bridge_notification_text() {
   local title="$1"
   local message="$2"
@@ -142,7 +153,9 @@ bridge_dispatch_notification() {
         return 2
       fi
       if ! bridge_claude_session_can_wake "$agent" "$session"; then
-        return 2
+        if ! bridge_claude_session_try_mark_prompt_ready "$agent" "$session"; then
+          return 2
+        fi
       fi
 
       text="$(bridge_notification_text "$title" "$message" "$task_id" "$priority")"

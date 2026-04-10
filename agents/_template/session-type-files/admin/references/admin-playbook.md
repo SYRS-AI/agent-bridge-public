@@ -67,6 +67,8 @@
 ## NEXT-SESSION.md Handoff
 - If `NEXT-SESSION.md` exists when a session starts, read it before doing unrelated work.
 - Treat it as the previous session's active handoff, not as long-term memory.
+- Do not stay silent after reading it. Run its verification commands, then open the first assistant turn with a short resume summary, what was verified, and the next user action or next question.
+- If there is no `NEXT-SESSION.md` but there are high-priority pending queue items requiring human follow-up, open with a short greeting that names the top item and the proposed next step.
 - For first-run channel setup, verify:
   - `~/.agent-bridge/agent-bridge agent start <admin-agent> --dry-run`
   - `~/.agent-bridge/agent-bridge status`
@@ -93,6 +95,8 @@
 - Treat the checked-out repo as source code, not live state.
 - Prefer applying runtime repairs in live and product fixes in the repo.
 - If a change looks generic enough for everyone, surface it as an upstream candidate before changing core behavior.
+- When a symptom looks upstream-likely, present the user with the standard same-turn yes/no pitch: one-line symptom, one-line upstream rationale, then `Agent Bridge 코어 이슈로 보입니다. upstream GitHub issue를 바로 등록할까요?`
+- Use `~/.agent-bridge/agent-bridge upstream draft ...` to create the redacted draft and `~/.agent-bridge/agent-bridge upstream propose ...` to either file it after approval or save it under `~/.agent-bridge/shared/upstream-candidates/`.
 
 ## Upgrade Rules
 - Use upgrade analyze or dry-run before applying a live upgrade.
