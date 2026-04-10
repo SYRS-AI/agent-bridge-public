@@ -312,6 +312,28 @@ target_path.chmod(0o600)
 PY
 }
 
+bridge_setup_require_claude_agent() {
+  local agent="$1"
+  local kind="$2"
+
+  if [[ "$(bridge_agent_engine "$agent")" != "claude" ]]; then
+    bridge_die "$kind channel setup requires a Claude Code agent. Current engine for '$agent': $(bridge_agent_engine "$agent")"
+  fi
+}
+
+bridge_setup_add_agent_channel() {
+  local agent="$1"
+  local channel="$2"
+  local current=""
+  local merged=""
+
+  channel="$(bridge_qualify_channel_item "$channel")"
+  current="$(bridge_agent_channels_csv "$agent")"
+  merged="$(bridge_merge_channels_csv "$current" "$channel")"
+  bridge_setup_write_local_assoc "BRIDGE_AGENT_CHANNELS" "$agent" "$merged" >/dev/null
+  BRIDGE_AGENT_CHANNELS["$agent"]="$merged"
+}
+
 run_discord() {
   local agent="${1:-}"
   local workdir=""
@@ -320,6 +342,7 @@ run_discord() {
   local runtime_config=""
   local compat_config=""
   local channel_account=""
+  local primary_channel=""
   local dry_run=0
   local py_args=()
   local base_args=()
@@ -331,6 +354,7 @@ run_discord() {
   fi
   [[ -n "$agent" ]] || bridge_die "Usage: $(basename "$0") discord <agent> [...]"
   bridge_require_agent "$agent"
+  bridge_setup_require_claude_agent "$agent" "Discord"
   runtime_config="$(bridge_compat_config_file)"
   compat_config="$(bridge_compat_config_file)"
 
@@ -340,6 +364,9 @@ run_discord() {
         [[ $# -ge 2 ]] || bridge_die "옵션 값이 필요합니다: $1"
         if [[ "$1" == "--channel-account" || "$1" == "--openclaw-account" ]]; then
           channel_account="$2"
+        fi
+        if [[ "$1" == "--channel" && -z "$primary_channel" ]]; then
+          primary_channel="$2"
         fi
         if [[ "$1" == "--runtime-config" || "$1" == "--openclaw-config" ]]; then
           runtime_config="$2"
@@ -372,9 +399,16 @@ run_discord() {
   fi
 
   bridge_setup_python "${base_args[@]}" "${py_args[@]}"
-  if [[ $dry_run -eq 0 && -n "$channel_account" ]]; then
-    bridge_setup_sync_runtime_account "$runtime_config" "$compat_config" "discord" "$channel_account"
-    bridge_setup_write_local_assoc "BRIDGE_AGENT_NOTIFY_ACCOUNT" "$agent" "$channel_account" >/dev/null
+  if [[ $dry_run -eq 0 ]]; then
+    bridge_setup_add_agent_channel "$agent" "plugin:discord"
+    if [[ -n "$primary_channel" ]]; then
+      bridge_setup_write_local_assoc "BRIDGE_AGENT_DISCORD_CHANNEL_ID" "$agent" "$primary_channel" >/dev/null
+    fi
+    if [[ -n "$channel_account" ]]; then
+      bridge_setup_sync_runtime_account "$runtime_config" "$compat_config" "discord" "$channel_account"
+      bridge_setup_write_local_assoc "BRIDGE_AGENT_NOTIFY_ACCOUNT" "$agent" "$channel_account" >/dev/null
+    fi
+    bridge_ensure_claude_channel_plugins "$agent"
   fi
 }
 
@@ -396,6 +430,7 @@ run_telegram() {
   fi
   [[ -n "$agent" ]] || bridge_die "Usage: $(basename "$0") telegram <agent> [...]"
   bridge_require_agent "$agent"
+  bridge_setup_require_claude_agent "$agent" "Telegram"
   runtime_config="$(bridge_compat_config_file)"
   compat_config="$(bridge_compat_config_file)"
 
@@ -433,9 +468,13 @@ run_telegram() {
   )
 
   bridge_setup_python "${base_args[@]}" "${py_args[@]}"
-  if [[ $dry_run -eq 0 && -n "$channel_account" ]]; then
-    bridge_setup_sync_runtime_account "$runtime_config" "$compat_config" "telegram" "$channel_account"
-    bridge_setup_write_local_assoc "BRIDGE_AGENT_NOTIFY_ACCOUNT" "$agent" "$channel_account" >/dev/null
+  if [[ $dry_run -eq 0 ]]; then
+    bridge_setup_add_agent_channel "$agent" "plugin:telegram"
+    if [[ -n "$channel_account" ]]; then
+      bridge_setup_sync_runtime_account "$runtime_config" "$compat_config" "telegram" "$channel_account"
+      bridge_setup_write_local_assoc "BRIDGE_AGENT_NOTIFY_ACCOUNT" "$agent" "$channel_account" >/dev/null
+    fi
+    bridge_ensure_claude_channel_plugins "$agent"
   fi
 }
 

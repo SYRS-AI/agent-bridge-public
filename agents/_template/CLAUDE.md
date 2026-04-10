@@ -66,7 +66,7 @@ task를 수신하면 아래 순서를 반드시 따른다:
 - 터미널만 선택한 경우: `SOUL.md`, `SESSION-TYPE.md`, 사용자 메모리를 갱신하고 `Onboarding State: complete`로 바꾼 뒤 `agb status`, `agb agent create`, `agb task create`, `agb upgrade`를 자연어로 요청하면 된다고 안내한다.
 - Discord를 선택한 경우: Discord bot token, Application ID, Permissions Integer, 연결할 channel ID를 받는다. 값이 없으면 Discord Developer Portal에서 만드는 방법을 짧게 안내한다. 그 다음 `~/.agent-bridge/agent-bridge setup discord <admin-agent> --token <token> --channel <channel-id> --yes`를 실행하고, roster의 `BRIDGE_AGENT_CHANNELS["<admin-agent>"]`와 `BRIDGE_AGENT_DISCORD_CHANNEL_ID["<admin-agent>"]`가 맞는지 확인한다. 초대 URL은 `https://discord.com/oauth2/authorize?client_id=<application-id>&permissions=<permissions-integer>&scope=bot%20applications.commands` 형식으로 제공한다.
 - Telegram을 선택한 경우: Telegram bot token, 허용할 사용자 ID, default chat ID를 받는다. 값이 없으면 BotFather로 bot token을 만들고, 봇에게 메시지를 보낸 뒤 `getUpdates` 또는 user/chat ID 확인 봇으로 ID를 확인하는 방법을 짧게 안내한다. 그 다음 `~/.agent-bridge/agent-bridge setup telegram <admin-agent> --token <token> --allow-from <user-id> --default-chat <chat-id> --yes`를 실행하고, roster의 `BRIDGE_AGENT_CHANNELS["<admin-agent>"]`가 Telegram plugin으로 설정됐는지 확인한다.
-- admin 채널 설정이 끝나면 `agent start patch`, `agent restart patch`, `start patch` 같은 표현을 사용자에게 안내하지 않는다. 대신 "현재 Claude 세션에는 새 채널 설정이 아직 완전히 붙지 않을 수 있습니다. 이 세션에서 `exit`로 종료한 뒤, 바깥 쉘에서 `agb admin`을 다시 실행하세요."라고 안내한다.
+- admin 채널 설정이 끝나면 `agent start patch`, `agent restart patch`, `start patch` 같은 표현을 사용자에게 안내하지 않는다. 대신 "현재 Claude 세션에는 새 채널 설정이 아직 완전히 붙지 않을 수 있습니다. 이 세션에서 `exit`로 종료하면 터미널로 돌아가고, 채널 연결 admin은 백그라운드에서 다시 뜹니다. 그 다음 바깥 쉘에서 `agb admin`을 다시 실행하세요."라고 안내한다.
 
 ## Channel Setup Protocol
 - 사용자가 어떤 에이전트든 새로 만들거나 설정하면서 채널을 언급하면, 먼저 선택지를 명확히 확인한다: `터미널만`, `Discord`, `Telegram`, `Discord와 Telegram 둘 다`.

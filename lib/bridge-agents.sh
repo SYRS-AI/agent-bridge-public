@@ -741,6 +741,116 @@ bridge_agent_channel_status() {
   printf '%s' "ok"
 }
 
+bridge_claude_plugin_status() {
+  local plugin_spec="$1"
+  local registry="${BRIDGE_CLAUDE_INSTALLED_PLUGINS_FILE:-}"
+  local output=""
+
+  if [[ -n "$registry" && -f "$registry" ]]; then
+    bridge_require_python
+    python3 - "$registry" "$plugin_spec" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+spec = sys.argv[2]
+try:
+    payload = json.loads(path.read_text(encoding="utf-8"))
+except Exception:
+    print("missing")
+    raise SystemExit(0)
+
+plugins = payload.get("plugins") or {}
+print("enabled" if spec in plugins else "missing")
+PY
+    return 0
+  fi
+
+  if ! command -v claude >/dev/null 2>&1; then
+    printf '%s' "missing"
+    return 0
+  fi
+
+  output="$(claude plugin list 2>/dev/null || true)"
+  bridge_require_python
+  BRIDGE_PLUGIN_LIST_OUTPUT="$output" python3 - "$plugin_spec" <<'PY'
+import os
+import sys
+
+spec = sys.argv[1]
+lines = os.environ.get("BRIDGE_PLUGIN_LIST_OUTPUT", "").splitlines()
+current = False
+
+for raw in lines:
+    line = raw.strip()
+    if spec in line:
+        current = True
+        continue
+    if current and line.startswith("Status:"):
+        if "enabled" in line:
+            print("enabled")
+        elif "disabled" in line:
+            print("disabled")
+        else:
+            print("missing")
+        raise SystemExit(0)
+    if current and line.startswith("❯ "):
+        break
+
+print("missing")
+PY
+}
+
+bridge_ensure_claude_plugin_enabled() {
+  local plugin_spec="$1"
+  local status=""
+
+  status="$(bridge_claude_plugin_status "$plugin_spec")"
+  case "$status" in
+    enabled)
+      bridge_info "[info] Claude plugin ready: $plugin_spec"
+      return 0
+      ;;
+    disabled)
+      if [[ -n "${BRIDGE_CLAUDE_INSTALLED_PLUGINS_FILE:-}" ]]; then
+        bridge_die "Claude plugin registry marks '$plugin_spec' disabled/missing in test mode."
+      fi
+      bridge_info "[info] Enabling Claude plugin: $plugin_spec"
+      claude plugin enable --scope user "$plugin_spec" >/dev/null
+      ;;
+    missing)
+      if [[ -n "${BRIDGE_CLAUDE_INSTALLED_PLUGINS_FILE:-}" ]]; then
+        bridge_die "Claude plugin registry is missing '$plugin_spec' in test mode."
+      fi
+      bridge_info "[info] Installing Claude plugin: $plugin_spec"
+      claude plugin install --scope user "$plugin_spec" >/dev/null
+      ;;
+    *)
+      bridge_die "Unknown Claude plugin status for '$plugin_spec': $status"
+      ;;
+  esac
+
+  status="$(bridge_claude_plugin_status "$plugin_spec")"
+  [[ "$status" == "enabled" ]] || bridge_die "Claude plugin '$plugin_spec' is not enabled after install/setup (status=$status). Run: claude plugin install --scope user $plugin_spec"
+}
+
+bridge_ensure_claude_channel_plugins() {
+  local agent="$1"
+  local channels=""
+
+  [[ "$(bridge_agent_engine "$agent")" == "claude" ]] || return 0
+  channels="$(bridge_agent_channels_csv "$agent")"
+  [[ -n "$channels" ]] || return 0
+
+  if bridge_channel_csv_contains "$channels" "plugin:discord"; then
+    bridge_ensure_claude_plugin_enabled "discord@claude-plugins-official"
+  fi
+  if bridge_channel_csv_contains "$channels" "plugin:telegram"; then
+    bridge_ensure_claude_plugin_enabled "telegram@claude-plugins-official"
+  fi
+}
+
 bridge_agent_notify_kind() {
   local agent="$1"
   local explicit="${BRIDGE_AGENT_NOTIFY_KIND[$agent]-}"

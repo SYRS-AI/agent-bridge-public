@@ -115,6 +115,12 @@ log_line() {
   echo "$line" | tee -a "$LOGFILE"
 }
 
+log_loop_help() {
+  bridge_run_session_attached || return 0
+  log_line "tmux에서 쉘로 돌아가기: Ctrl-b 를 누른 뒤 d 를 누르세요."
+  log_line "에이전트를 완전히 종료하기: 바깥 터미널에서 'agb kill ${AGENT}' 를 실행하세요."
+}
+
 bridge_run_session_attached() {
   local attached
 
@@ -122,6 +128,22 @@ bridge_run_session_attached() {
   attached="$(bridge_tmux_session_attached_count "$SESSION" 2>/dev/null || printf '0')"
   [[ "$attached" =~ ^[0-9]+$ ]] || attached=0
   (( attached > 0 ))
+}
+
+bridge_run_detach_attached_clients() {
+  [[ -n "$SESSION" ]] || return 0
+  tmux detach-client -s "$SESSION" >/dev/null 2>&1 || true
+}
+
+bridge_run_has_external_channel() {
+  [[ -n "$(bridge_agent_channels_csv "$AGENT")" ]]
+}
+
+bridge_run_stop_foreground_session() {
+  if [[ "$(bridge_agent_source "$AGENT")" == "static" ]]; then
+    bridge_agent_mark_manual_stop "$AGENT"
+  fi
+  bridge_agent_clear_idle_marker "$AGENT"
 }
 
 log_line "${AGENT} 에이전트 시작 (engine=${ENGINE}, dir=${WORK_DIR})"
@@ -155,12 +177,17 @@ while true; do
   fi
 
   if [[ $EXIT_CODE -eq 0 ]] && bridge_run_session_attached; then
-    if [[ $FAIL_COUNT -gt 0 ]]; then
-      bridge_agent_clear_crash_report "$AGENT"
+    if bridge_run_has_external_channel; then
+      log_line "정상 종료. 사람이 연결된 tmux client는 분리하고, 채널 연결 에이전트는 백그라운드에서 계속 재시작합니다."
+      bridge_run_detach_attached_clients
+    else
+      if [[ $FAIL_COUNT -gt 0 ]]; then
+        bridge_agent_clear_crash_report "$AGENT"
+      fi
+      bridge_run_stop_foreground_session
+      log_line "정상 종료. 외부 채널이 없는 foreground 세션이므로 자동 재시작하지 않습니다. 다시 열려면 'agb admin' 또는 'agb agent start ${AGENT}'를 실행하세요."
+      exit 0
     fi
-    bridge_agent_clear_idle_marker "$AGENT"
-    log_line "정상 종료. 사람이 연결된 tmux 세션이므로 자동 재시작하지 않습니다. 다시 열려면 'agb admin' 또는 'agb agent start ${AGENT}'를 실행하세요."
-    exit 0
   fi
 
   if [[ $EXIT_CODE -ne 0 ]]; then
@@ -177,6 +204,7 @@ while true; do
         --detail stderr_file="$ERRFILE"
     fi
     log_line "비정상 종료 (코드: ${EXIT_CODE}, 연속실패: ${FAIL_COUNT}회). 5초 후 재시작..."
+    log_loop_help
     if [[ $FAIL_COUNT -ge 10 ]]; then
       log_line "연속 ${FAIL_COUNT}회 실패. 60초 대기..."
       sleep 60
@@ -192,6 +220,7 @@ while true; do
     fi
     FAIL_COUNT=0
     log_line "정상 종료. 5초 후 재시작..."
+    log_loop_help
     sleep 5
   fi
 done

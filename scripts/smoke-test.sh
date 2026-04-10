@@ -100,6 +100,7 @@ export BRIDGE_CRON_DISPATCH_WORKER_DIR="$BRIDGE_CRON_STATE_DIR/workers"
 export BRIDGE_OPENCLAW_CRON_JOBS_FILE="$TMP_ROOT/openclaw-jobs.json"
 export BRIDGE_DAEMON_INTERVAL=1
 export BRIDGE_CRON_DISPATCH_MAX_PARALLEL=1
+export BRIDGE_DISCORD_RELAY_ENABLED=0
 export BRIDGE_ROSTER_FILE="$REPO_ROOT/agent-roster.sh"
 export BRIDGE_ROSTER_LOCAL_FILE="$BRIDGE_HOME/agent-roster.local.sh"
 export BRIDGE_AGENT_HOME_ROOT="$BRIDGE_HOME/agents"
@@ -270,6 +271,7 @@ BRIDGE_AGENT_WORKDIR["$ALWAYS_ON_AGENT"]="$AUTO_START_WORKDIR"
 BRIDGE_AGENT_WORKDIR["$CODEX_CLI_AGENT"]="$WORKDIR"
 BRIDGE_AGENT_WORKDIR["claude-static"]="$CLAUDE_STATIC_WORKDIR"
 BRIDGE_AGENT_DISCORD_CHANNEL_ID["$SMOKE_AGENT"]="123456789012345678"
+BRIDGE_AGENT_NOTIFY_ACCOUNT["$SMOKE_AGENT"]="smoke"
 BRIDGE_AGENT_CHANNELS["claude-static"]="plugin:discord@claude-plugins-official"
 BRIDGE_CRON_AGENT_TARGET["legacy-ops"]="$AUTO_START_AGENT"
 BRIDGE_AGENT_LAUNCH_CMD["$SMOKE_AGENT"]='python3 -c "import time; print(\"smoke-agent ready\", flush=True); time.sleep(30)"'
@@ -492,6 +494,8 @@ payload = json.loads(path.read_text(encoding="utf-8"))
 payload.setdefault("channels", {}).setdefault("telegram", {}).setdefault("accounts", {}).setdefault("smoke", {})["apiBaseUrl"] = sys.argv[2]
 path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 PY
+mkdir -p "$BRIDGE_RUNTIME_ROOT"
+cp "$TMP_ROOT/openclaw.json" "$BRIDGE_RUNTIME_CONFIG_FILE"
 
 log "verifying empty runtime starts clean"
 BRIDGE_ROSTER_LOCAL_FILE=/nonexistent bash "$REPO_ROOT/bridge-start.sh" --list >/dev/null
@@ -781,14 +785,16 @@ wait_for_tmux_session "$ALWAYS_ON_SESSION" down 10 0.2 || die "always-on role re
 wait_for_tmux_session "$ALWAYS_ON_SESSION" up 25 0.2 || die "always-on role did not restart after explicit start"
 
 log "running guided Discord setup"
-SETUP_DISCORD_OUTPUT="$("$REPO_ROOT/agent-bridge" setup discord "$SMOKE_AGENT" --channel-account smoke --runtime-config "$TMP_ROOT/openclaw.json" --api-base-url "$FAKE_DISCORD_API_BASE" --yes)"
+SETUP_DISCORD_OUTPUT="$("$REPO_ROOT/agent-bridge" setup discord "claude-static" --channel-account smoke --channel 123456789012345678 --runtime-config "$TMP_ROOT/openclaw.json" --api-base-url "$FAKE_DISCORD_API_BASE" --yes)"
 assert_contains "$SETUP_DISCORD_OUTPUT" "validation: ok"
 assert_contains "$SETUP_DISCORD_OUTPUT" "token_source: channel:smoke"
 assert_contains "$SETUP_DISCORD_OUTPUT" "channel 123456789012345678: read=ok send=ok"
-[[ -f "$WORKDIR/.discord/.env" ]] || die "setup discord did not create .env"
-[[ -f "$WORKDIR/.discord/access.json" ]] || die "setup discord did not create access.json"
-assert_contains "$(cat "$WORKDIR/.discord/.env")" "DISCORD_BOT_TOKEN=smoke-token"
-assert_contains "$(cat "$BRIDGE_ROSTER_LOCAL_FILE")" "BRIDGE_AGENT_NOTIFY_ACCOUNT[\"$SMOKE_AGENT\"]=\"smoke\""
+[[ -f "$CLAUDE_STATIC_WORKDIR/.discord/.env" ]] || die "setup discord did not create .env"
+[[ -f "$CLAUDE_STATIC_WORKDIR/.discord/access.json" ]] || die "setup discord did not create access.json"
+assert_contains "$(cat "$CLAUDE_STATIC_WORKDIR/.discord/.env")" "DISCORD_BOT_TOKEN=smoke-token"
+assert_contains "$(cat "$BRIDGE_ROSTER_LOCAL_FILE")" "BRIDGE_AGENT_NOTIFY_ACCOUNT[\"claude-static\"]=\"smoke\""
+assert_contains "$(cat "$BRIDGE_ROSTER_LOCAL_FILE")" "BRIDGE_AGENT_CHANNELS[\"claude-static\"]=\"plugin:discord@claude-plugins-official\""
+assert_contains "$(cat "$BRIDGE_ROSTER_LOCAL_FILE")" "BRIDGE_AGENT_DISCORD_CHANNEL_ID[\"claude-static\"]=\"123456789012345678\""
 assert_contains "$(cat "$FAKE_DISCORD_REQUESTS")" "[Agent Bridge setup]"
 
 log "running broader agent preflight"
@@ -1365,7 +1371,7 @@ CREATED_AGENT_LAUNCH="$("$BASH4_BIN" -c '
   bridge_agent_launch_cmd "'"$CREATED_AGENT"'"
 ')"
 assert_contains "$CREATED_AGENT_LAUNCH" "TELEGRAM_STATE_DIR=$BRIDGE_AGENT_HOME_ROOT/$CREATED_AGENT/.telegram"
-assert_contains "$CREATED_AGENT_LAUNCH" "claude --dangerously-skip-permissions --name $CREATED_AGENT --channels plugin:telegram@claude-plugins-official"
+assert_contains "$CREATED_AGENT_LAUNCH" "claude --continue --dangerously-skip-permissions --name $CREATED_AGENT --channels plugin:telegram@claude-plugins-official"
 CREATED_AGENT_START_OUTPUT="$("$REPO_ROOT/agent-bridge" agent start "$CREATED_AGENT" --dry-run)"
 assert_contains "$CREATED_AGENT_START_OUTPUT" "$CREATED_SESSION"
 CREATED_AGENT_RESTART_OUTPUT="$("$REPO_ROOT/agent-bridge" agent restart "$CREATED_AGENT" --dry-run)"
@@ -1532,9 +1538,8 @@ CLAUDE_LAUNCH_CONTINUE="$("$BASH4_BIN" -c '
   unset BRIDGE_AGENT_SESSION_ID["claude-static"]
   bridge_agent_launch_cmd "claude-static"
 ')"
-assert_contains "$CLAUDE_LAUNCH_CONTINUE" "DISCORD_STATE_DIR=$CLAUDE_STATIC_WORKDIR/.discord claude --dangerously-skip-permissions --name claude-static --channels plugin:discord@claude-plugins-official"
-assert_contains "$CLAUDE_LAUNCH_CONTINUE" "claude --dangerously-skip-permissions --name claude-static --channels plugin:discord@claude-plugins-official"
-[[ "$CLAUDE_LAUNCH_CONTINUE" != *" --continue "* ]] || die "static Claude launch without session_id should start fresh, not use --continue"
+assert_contains "$CLAUDE_LAUNCH_CONTINUE" "DISCORD_STATE_DIR=$CLAUDE_STATIC_WORKDIR/.discord claude --continue --dangerously-skip-permissions --name claude-static --channels plugin:discord@claude-plugins-official"
+assert_contains "$CLAUDE_LAUNCH_CONTINUE" "claude --continue --dangerously-skip-permissions --name claude-static --channels plugin:discord@claude-plugins-official"
 [[ "$CLAUDE_LAUNCH_CONTINUE" != *"'DISCORD_STATE_DIR="* ]] || die "static Claude env prefix should not be shell-quoted on continue"
 CLAUDE_CHANNEL_STATUS="$("$BASH4_BIN" -c '
   source "'"$REPO_ROOT"'/bridge-lib.sh"
@@ -1571,9 +1576,8 @@ EOF
   bridge_load_roster
   bridge_agent_launch_cmd "claude-static"
 ')"
-assert_contains "$CLAUDE_STALE_RESUME_FALLBACK" "claude --dangerously-skip-permissions --name claude-static --channels plugin:discord@claude-plugins-official"
+assert_contains "$CLAUDE_STALE_RESUME_FALLBACK" "claude --continue --dangerously-skip-permissions --name claude-static --channels plugin:discord@claude-plugins-official"
 [[ "$CLAUDE_STALE_RESUME_FALLBACK" != *" --resume "* ]] || die "stale Claude session_id should not be used for resume"
-[[ "$CLAUDE_STALE_RESUME_FALLBACK" != *" --continue "* ]] || die "stale Claude session_id should fall back to fresh start"
 
 log "configuring admin role and launching it"
 SETUP_ADMIN_OUTPUT="$("$REPO_ROOT/agent-bridge" setup admin "$SMOKE_AGENT")"

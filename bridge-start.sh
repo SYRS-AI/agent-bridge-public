@@ -201,6 +201,10 @@ if [[ $DRY_RUN -eq 1 ]]; then
   exit 0
 fi
 
+if [[ "$ENGINE" == "claude" ]]; then
+  bridge_ensure_claude_channel_plugins "$AGENT"
+fi
+
 bridge_agent_clear_idle_marker "$AGENT"
 
 # Refresh the launch window so a new session id can be detected for this run.
