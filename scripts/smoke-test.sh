@@ -2989,6 +2989,23 @@ grep -q 'agent-bridge task create' "$BRIDGE_HOME/runtime/scripts/email-webhook-h
 grep -q 'queue-dispatch' "$BRIDGE_HOME/runtime/scripts/webhook_utils.py" || die "expected bridge-native one-shot cron helper in webhook utils"
 grep -q 'BRIDGE_RUNTIME_CREDENTIALS_DIR' "$BRIDGE_HOME/runtime/scripts/creds.py" || die "expected bridge-native credential loader"
 grep -q 'gws_api' "$BRIDGE_HOME/runtime/skills/agent-db/scripts/email-sync.py" || die "expected gws-backed email sync script"
+python3 - "$BRIDGE_HOME/runtime/scripts" <<'PY'
+import sys
+sys.path.insert(0, sys.argv[1])
+import creds
+diag = creds.credential_diagnostic("missing-service.json")
+assert diag["credential"] == "missing-service.json"
+assert diag["found"] is False
+assert "policy" in diag
+try:
+    creds.load_creds("missing-service.json")
+except creds.CredentialNotFoundError as err:
+    text = str(err)
+    assert "missing-service.json" in text
+    assert "checked redacted roots" in text
+else:
+    raise AssertionError("missing credential should raise CredentialNotFoundError")
+PY
 
 log "prioritizing idle memory-daily dispatch over busy sessions"
 MEMORY_DAILY_READY_OUTPUT="$("$BASH4_BIN" -lc '

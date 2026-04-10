@@ -32,16 +32,48 @@ SECRETS_DIR = Path(os.environ.get("BRIDGE_RUNTIME_SECRETS_DIR", str(RUNTIME_ROOT
 _CACHE: dict[str, Any] = {}
 
 
+class CredentialNotFoundError(FileNotFoundError):
+    """Raised when a runtime credential is absent without exposing secrets."""
+
+
 def _candidate_paths(filename: str) -> list[Path]:
     return [CREDENTIALS_DIR / filename, SECRETS_DIR / filename]
+
+
+def _redact_path(path: Path) -> str:
+    try:
+        home = Path.home().expanduser().resolve()
+        resolved = path.expanduser().resolve()
+        if resolved == home:
+            return "~"
+        return "~/" + str(resolved.relative_to(home)) if resolved.is_relative_to(home) else str(resolved)
+    except Exception:
+        text = str(path.expanduser())
+        home_text = str(Path.home().expanduser())
+        if text == home_text:
+            return "~"
+        if text.startswith(home_text + os.sep):
+            return "~/" + text[len(home_text + os.sep):]
+        return text
+
+
+def credential_diagnostic(filename: str) -> dict[str, Any]:
+    """Return redacted lookup diagnostics without reading credential values."""
+    return {
+        "credential": filename,
+        "found": any(path.exists() for path in _candidate_paths(filename)),
+        "search_roots": [_redact_path(CREDENTIALS_DIR), _redact_path(SECRETS_DIR)],
+        "policy": "Store secret values only in runtime credentials/secrets files; never paste them into logs, tasks, issues, or source.",
+    }
 
 
 def _read_file(filename: str) -> str:
     for path in _candidate_paths(filename):
         if path.exists():
             return path.read_text(encoding="utf-8")
-    checked = ", ".join(str(path) for path in _candidate_paths(filename))
-    raise FileNotFoundError(f"Credential not found: {filename}; checked: {checked}")
+    diagnostic = credential_diagnostic(filename)
+    checked = ", ".join(diagnostic["search_roots"])
+    raise CredentialNotFoundError(f"Credential not found: {filename}; checked redacted roots: {checked}")
 
 
 def load_creds(filename: str) -> Any:
