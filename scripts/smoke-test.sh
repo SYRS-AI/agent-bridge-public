@@ -996,6 +996,73 @@ sleep 1
 NORMAL_NUDGE_RECENT="$(tmux capture-pane -pt "$(tmux_pane_target "$CODEX_CLI_SESSION")" -S -20 2>/dev/null || true)"
 assert_contains "$NORMAL_NUDGE_RECENT" "agb inbox $CODEX_CLI_AGENT"
 python3 "$REPO_ROOT/bridge-queue.py" done "$NORMAL_NUDGE_TASK_ID" --agent "$CODEX_CLI_AGENT" --note "normal nudge smoke cleanup" >/dev/null
+
+log "dropping a stale nudge when the queued task is completed before dispatch"
+STALE_NUDGE_OUTPUT="$(python3 "$REPO_ROOT/bridge-queue.py" create --to "$CODEX_CLI_AGENT" --title "stale nudge drop" --body "pickup" --from "$REQUESTER_AGENT")"
+assert_contains "$STALE_NUDGE_OUTPUT" "created task #"
+STALE_NUDGE_TASK_ID="$(printf '%s\n' "$STALE_NUDGE_OUTPUT" | sed -n 's/^created task #\([0-9][0-9]*\).*/\1/p' | head -n1)"
+[[ -n "$STALE_NUDGE_TASK_ID" ]] || die "expected stale nudge task id"
+STALE_NUDGE_ROW="$("$BASH4_BIN" -lc '
+  source "'"$REPO_ROOT"'/bridge-lib.sh"
+  bridge_load_roster
+  snapshot_file="$(mktemp)"
+  ready_file="$(mktemp)"
+  trap "rm -f \"$snapshot_file\" \"$ready_file\"" EXIT
+  bridge_write_agent_snapshot "$snapshot_file"
+  bridge_write_idle_ready_agents "$ready_file"
+  python3 "'"$REPO_ROOT"'/bridge-queue.py" daemon-step \
+    --snapshot "$snapshot_file" \
+    --lease-seconds "$BRIDGE_TASK_LEASE_SECONDS" \
+    --heartbeat-window "$BRIDGE_TASK_HEARTBEAT_WINDOW_SECONDS" \
+    --idle-threshold 9999 \
+    --nudge-cooldown "$BRIDGE_TASK_NUDGE_COOLDOWN_SECONDS" \
+    --zombie-threshold "${BRIDGE_ZOMBIE_NUDGE_THRESHOLD:-10}" \
+    --ready-agents-file "$ready_file" | head -n 1
+')"
+assert_contains "$STALE_NUDGE_ROW" "$CODEX_CLI_AGENT"
+python3 "$REPO_ROOT/bridge-queue.py" done "$STALE_NUDGE_TASK_ID" --agent "$CODEX_CLI_AGENT" --note "stale nudge smoke cleanup" >/dev/null
+STALE_NUDGE_SEND_LOG="$TMP_ROOT/stale-nudge-send.log"
+STALE_NUDGE_CHECKER="$TMP_ROOT/stale-nudge-check.sh"
+cat >"$STALE_NUDGE_CHECKER" <<EOF
+#!/usr/bin/env bash
+set -euo pipefail
+
+stale_row="\$1"
+send_log="\$2"
+daemon_lib="$TMP_ROOT/bridge-daemon-functions.sh"
+
+awk -v repo_root="$REPO_ROOT" '
+  BEGIN { q="\"" }
+  index(\$0, "CMD=\"\${1:-}\"") == 1 { exit }
+  /^SCRIPT_DIR=/ { print "SCRIPT_DIR=" q repo_root q; next }
+  { print }
+' "$REPO_ROOT/bridge-daemon.sh" >"\$daemon_lib"
+
+source "\$daemon_lib"
+rm -f "\$send_log"
+
+daemon_info() {
+  :
+}
+
+bridge_dispatch_notification() {
+  printf "%s|%s|%s|%s|%s\n" "\$1" "\$2" "\$3" "\$4" "\$5" >"\$send_log"
+  return 0
+}
+
+IFS=\$'\t' read -r agent session queued claimed idle nudge_key <<<"\$stale_row"
+nudge_agent_session "\$agent" "\$session" "\$queued" "\$claimed" "\$idle" "\$nudge_key"
+
+if [[ -f "\$send_log" ]]; then
+  printf "%s" "sent"
+else
+  printf "%s" "dropped"
+fi
+EOF
+chmod +x "$STALE_NUDGE_CHECKER"
+STALE_NUDGE_RESULT="$("$BASH4_BIN" "$STALE_NUDGE_CHECKER" "$STALE_NUDGE_ROW" "$STALE_NUDGE_SEND_LOG")"
+[[ "$STALE_NUDGE_RESULT" == "dropped" ]] || die "expected stale nudge to be dropped"
+[[ ! -f "$STALE_NUDGE_SEND_LOG" ]] || die "stale nudge unexpectedly dispatched"
 tmux_kill_session_exact "$CODEX_CLI_SESSION" || true
 
 log "waking a prompt-ready Claude session even when the idle marker is missing"

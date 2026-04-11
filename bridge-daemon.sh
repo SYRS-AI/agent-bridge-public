@@ -1583,6 +1583,10 @@ nudge_agent_session() {
   local claimed="$4"
   local idle="$5"
   local nudge_key="${6:-}"
+  local live_state=""
+  local live_queued="$queued"
+  local live_claimed="$claimed"
+  local live_nudge_key="$nudge_key"
   local title
   local message
   local status=0
@@ -1590,20 +1594,69 @@ nudge_agent_session() {
   local task_id=""
   local task_title=""
   local task_priority=""
+  local task_status=""
 
-  title="$(bridge_queue_attention_title "$queued")"
+  live_state="$(python3 - "$BRIDGE_TASK_DB" "$agent" <<'PY' 2>/dev/null || true
+import sqlite3
+import sys
+
+db_path, agent = sys.argv[1:]
+with sqlite3.connect(db_path) as conn:
+    queued_ids = [
+        str(row[0])
+        for row in conn.execute(
+            """
+            SELECT id
+            FROM tasks
+            WHERE assigned_to = ?
+              AND status = 'queued'
+              AND title NOT LIKE '[cron-dispatch]%'
+            ORDER BY id
+            """,
+            (agent,),
+        ).fetchall()
+    ]
+    claimed_count = conn.execute(
+        "SELECT COUNT(*) FROM tasks WHERE claimed_by = ? AND status = 'claimed'",
+        (agent,),
+    ).fetchone()[0]
+print(f"{len(queued_ids)}\t{claimed_count}\t{','.join(queued_ids)}")
+PY
+)"
+  if [[ -n "$live_state" ]]; then
+    IFS=$'\t' read -r live_queued live_claimed live_nudge_key <<<"$live_state"
+  else
+    live_queued=0
+    live_claimed=0
+    live_nudge_key=""
+  fi
+  [[ "$live_queued" =~ ^[0-9]+$ ]] || live_queued=0
+  [[ "$live_claimed" =~ ^[0-9]+$ ]] || live_claimed=0
+
+  if (( live_queued <= 0 )); then
+    bridge_audit_log daemon session_nudge_dropped_stale "$agent" \
+      --detail queued_snapshot="$queued" \
+      --detail claimed_snapshot="$claimed" \
+      --detail queued_live="$live_queued" \
+      --detail claimed_live="$live_claimed"
+    daemon_info "skipped stale nudge for ${agent} (snapshot queued=${queued}, live queued=${live_queued})"
+    return 0
+  fi
+
+  title="$(bridge_queue_attention_title "$live_queued")"
   open_task_shell="$(bridge_queue_cli find-open --agent "$agent" --format shell 2>/dev/null || true)"
   if [[ -n "$open_task_shell" ]]; then
     # shellcheck disable=SC1091
     source /dev/stdin <<<"$open_task_shell"
   fi
-  if [[ -n "$TASK_ID" && -n "$TASK_TITLE" ]]; then
+  task_status="${TASK_STATUS:-}"
+  if [[ "$task_status" == "queued" && -n "$TASK_ID" && -n "$TASK_TITLE" ]]; then
     task_id="$TASK_ID"
     task_title="$TASK_TITLE"
     task_priority="${TASK_PRIORITY:-normal}"
   fi
 
-  message="$(bridge_queue_attention_message "$agent" "$queued" "$task_id" "$task_priority" "$task_title")"
+  message="$(bridge_queue_attention_message "$agent" "$live_queued" "$task_id" "$task_priority" "$task_title")"
   if ! bridge_dispatch_notification "$agent" "$title" "$message" "" "normal"; then
     status=$?
     if [[ "$status" == "2" ]]; then
@@ -1611,14 +1664,14 @@ nudge_agent_session() {
     fi
     return 1
   fi
-  bridge_task_note_nudge "$agent" "$nudge_key" || true
+  bridge_task_note_nudge "$agent" "${live_nudge_key:-$nudge_key}" || true
   bridge_audit_log daemon session_nudge_sent "$agent" \
-    --detail queued="$queued" \
-    --detail claimed="$claimed" \
+    --detail queued="$live_queued" \
+    --detail claimed="$live_claimed" \
     --detail idle_seconds="$idle" \
     --detail task_id="${task_id:-0}" \
     --detail title="$title"
-  daemon_info "nudged ${agent} (queued=${queued}, claimed=${claimed}, idle=${idle}s)"
+  daemon_info "nudged ${agent} (queued=${live_queued}, claimed=${live_claimed}, idle=${idle}s)"
 }
 
 recover_claude_bootstrap_blockers() {
