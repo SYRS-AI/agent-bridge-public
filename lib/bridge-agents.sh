@@ -969,6 +969,7 @@ bridge_agent_channel_launch_allowlisted_for_item() {
   local item="$2"
   local generated=""
   local effective=""
+  local marketplace=""
 
   [[ "$(bridge_agent_engine "$agent")" == "claude" ]] || {
     printf '%s' "n/a"
@@ -979,10 +980,18 @@ bridge_agent_channel_launch_allowlisted_for_item() {
   generated="$(bridge_claude_launch_with_channels "$agent" "$(bridge_agent_launch_cmd_raw "$agent")")"
   effective="$(bridge_extract_channels_from_command "$generated")"
   if bridge_channel_csv_is_subset "$item" "$effective"; then
+    if [[ "$item" == plugin:*@* ]]; then
+      marketplace="${item#*@}"
+      if [[ "$marketplace" != "claude-plugins-official" && "$generated" != *"--dangerously-load-development-channels"* ]]; then
+        printf '%s' "no"
+        return 0
+      fi
+    fi
     printf '%s' "yes"
-  else
-    printf '%s' "no"
+    return 0
   fi
+
+  printf '%s' "no"
 }
 
 bridge_agent_channel_diagnostics_tsv() {

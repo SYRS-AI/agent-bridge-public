@@ -57,9 +57,6 @@ const ACCESS_FILE = join(STATE_DIR, 'access.json')
 const ENV_FILE = join(STATE_DIR, '.env')
 const REFERENCES_FILE = join(STATE_DIR, 'conversations.json')
 const MESSAGES_FILE = join(STATE_DIR, 'messages.jsonl')
-const HOST = process.env.TEAMS_WEBHOOK_HOST ?? '127.0.0.1'
-const PORT = Number(process.env.TEAMS_WEBHOOK_PORT ?? '3978')
-const STATIC = process.env.TEAMS_ACCESS_MODE === 'static'
 
 try {
   chmodSync(ENV_FILE, 0o600)
@@ -68,6 +65,10 @@ try {
     if (m && process.env[m[1]] === undefined) process.env[m[1]] = m[2]
   }
 } catch {}
+
+const HOST = process.env.TEAMS_WEBHOOK_HOST ?? '127.0.0.1'
+const PORT = Number(process.env.TEAMS_WEBHOOK_PORT ?? '3978')
+const STATIC = process.env.TEAMS_ACCESS_MODE === 'static'
 
 const APP_ID = process.env.TEAMS_APP_ID ?? process.env.MicrosoftAppId
 const APP_PASSWORD = process.env.TEAMS_APP_PASSWORD ?? process.env.MicrosoftAppPassword

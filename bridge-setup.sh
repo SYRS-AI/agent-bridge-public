@@ -387,6 +387,24 @@ bridge_setup_add_agent_channel() {
   BRIDGE_AGENT_CHANNELS["$agent"]="$merged"
 }
 
+bridge_setup_ensure_development_channels_launch_flag() {
+  local agent="$1"
+  local current=""
+  local updated=""
+
+  current="$(bridge_agent_launch_cmd_raw "$agent")"
+  [[ -n "$current" ]] || return 1
+
+  updated="$(bridge_claude_launch_with_development_channels "$current" "$(bridge_agent_channels_csv "$agent")")"
+  if [[ "$updated" == "$current" ]]; then
+    return 1
+  fi
+
+  bridge_setup_write_local_assoc "BRIDGE_AGENT_LAUNCH_CMD" "$agent" "$updated" >/dev/null
+  BRIDGE_AGENT_LAUNCH_CMD["$agent"]="$updated"
+  return 0
+}
+
 run_discord() {
   local agent="${1:-}"
   local workdir=""
@@ -587,6 +605,11 @@ run_teams() {
   bridge_setup_python "${base_args[@]}" "${py_args[@]}"
   if [[ $dry_run -eq 0 ]]; then
     bridge_setup_add_agent_channel "$agent" "plugin:teams"
+    if bridge_setup_ensure_development_channels_launch_flag "$agent"; then
+      bridge_info "[info] added --dangerously-load-development-channels to $agent launch (local marketplace channel detected)"
+    else
+      bridge_info "[info] $agent launch already allows development channels for local marketplace plugins"
+    fi
     if [[ -n "$channel_account" ]]; then
       bridge_setup_sync_runtime_account "$runtime_config" "$compat_config" "teams" "$channel_account"
       bridge_setup_write_local_assoc "BRIDGE_AGENT_NOTIFY_ACCOUNT" "$agent" "$channel_account" >/dev/null

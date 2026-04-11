@@ -5,7 +5,7 @@
 - `SOUL.md`가 성격과 말투의 기준이다. 매 세션 시작 시 가장 먼저 읽는다.
 - `CLAUDE.md`는 운영 계약서다. 레거시 문서와 충돌하면 이 파일이 우선한다.
 - `SESSION-TYPE.md`는 이 세션이 어떤 종류의 역할인지와 첫 세션 온보딩 상태를 정의한다.
-- `NEXT-SESSION.md`가 있으면 이전 세션에서 남긴 handoff다. 시작 직후 읽고 먼저 처리한다.
+- `NEXT-SESSION.md`가 있으면 이전 세션에서 남긴 handoff다. 시작 직후 읽고 먼저 처리하고, 검증이 끝나면 파일을 삭제한다.
 - `MEMORY-SCHEMA.md`는 memory wiki를 어떻게 유지할지 정의한다.
 - `MEMORY.md`와 `memory/`는 작업 메모리이자 장기 기억 위키다. `HEARTBEAT.md`는 필요할 때만 읽는 운영 참고 문서다.
 - `~/.agent-bridge/shared/wiki/`가 있으면 팀 전체가 공유하는 knowledge SSOT다. `index.md`와 관련 페이지만 읽고, 필요하면 `agent-bridge knowledge search`로 찾는다.
@@ -81,7 +81,7 @@ task를 수신하면 아래 순서를 반드시 따른다:
 - Discord를 선택한 경우: Discord bot token, Application ID, Permissions Integer, 연결할 channel ID를 받는다. 값이 없으면 Discord Developer Portal에서 만드는 방법을 짧게 안내한다. 그 다음 `~/.agent-bridge/agent-bridge setup discord <admin-agent> --token <token> --channel <channel-id> --yes`를 실행하고, roster의 `BRIDGE_AGENT_CHANNELS["<admin-agent>"]`와 `BRIDGE_AGENT_DISCORD_CHANNEL_ID["<admin-agent>"]`가 맞는지 확인한다. 초대 URL은 `https://discord.com/oauth2/authorize?client_id=<application-id>&permissions=<permissions-integer>&scope=bot%20applications.commands` 형식으로 제공한다.
 - Telegram을 선택한 경우: Telegram bot token, 허용할 사용자 ID, default chat ID를 받는다. 값이 없으면 BotFather로 bot token을 만들고, 봇에게 메시지를 보낸 뒤 `getUpdates` 또는 user/chat ID 확인 봇으로 ID를 확인하는 방법을 짧게 안내한다. 그 다음 `~/.agent-bridge/agent-bridge setup telegram <admin-agent> --token <token> --allow-from <user-id> --default-chat <chat-id> --yes`를 실행하고, roster의 `BRIDGE_AGENT_CHANNELS["<admin-agent>"]`가 Telegram plugin으로 설정됐는지 확인한다.
 - 채널 setup이 끝났더라도 `SESSION-TYPE.md`가 `Onboarding State: pending`이면 admin은 `exit` 후 자동 재시작하지 않는다. `exit` 안내 전 반드시 `SESSION-TYPE.md`를 `Onboarding State: complete`로 갱신하고 파일을 다시 확인한다.
-- 채널 setup 때문에 현재 Claude 세션을 재시작해야 하면, `exit` 안내 전에 `NEXT-SESSION.md`를 작성한다. 포함할 내용: 왜 재시작하는지, 방금 설정한 채널, 다음 세션에서 실행할 검증 명령, 성공 후 사용자에게 보낼 안내, 완료 후 `NEXT-SESSION.md` 삭제.
+- 채널 setup 때문에 현재 Claude 세션을 재시작해야 하면, `exit` 안내 전에 `NEXT-SESSION.md`를 작성한다. 포함할 내용: 왜 재시작하는지, 방금 설정한 채널, 다음 세션에서 실행할 검증 명령, 성공 후 사용자에게 보낼 안내, 검증 완료 후 `NEXT-SESSION.md` 삭제.
 - admin 온보딩이 끝나면 `agent start patch`, `agent restart patch`, `start patch` 같은 표현을 사용자에게 안내하지 않는다. 대신 "현재 Claude 세션에는 새 설정이 아직 완전히 붙지 않을 수 있습니다. 이 세션에서 `exit`로 종료하면 바깥 쉘로 돌아가고, 온보딩 완료된 admin은 백그라운드에서 다시 뜹니다. 그 다음 바깥 쉘에서 `agb admin`을 다시 실행하세요."라고 안내한다.
 
 ## Channel Setup Protocol
@@ -116,7 +116,7 @@ task를 수신하면 아래 순서를 반드시 따른다:
 1. `SOUL.md` 읽기
 2. 이 `CLAUDE.md` 읽기
 3. `SESSION-TYPE.md` 읽기
-4. `NEXT-SESSION.md`가 있으면 읽고 handoff 작업을 먼저 처리한다. 검증 명령을 실행한 뒤 첫 assistant turn에서 반드시 재개 요약, 검증 결과, 다음 행동/질문을 사용자에게 말한다.
+4. `NEXT-SESSION.md`가 있으면 읽고 handoff 작업을 먼저 처리한다. 검증 명령을 실행한 뒤 첫 assistant turn에서 반드시 재개 요약, 검증 결과, 다음 행동/질문을 사용자에게 말하고, 끝나면 `NEXT-SESSION.md`를 삭제한다.
 5. `~/.agent-bridge/shared/wiki/index.md`가 있으면 읽고, 현재 작업과 관련된 team wiki 페이지만 추가로 확인한다.
 6. `MEMORY-SCHEMA.md` 읽기
 7. 현재 대화 상대의 `users/<user-id>/USER.md`와 최근 메모가 있으면 먼저 확인
@@ -131,7 +131,7 @@ task를 수신하면 아래 순서를 반드시 따른다:
 - admin 세션은 위의 `Admin First-Run Onboarding Defaults`를 우선한다.
 - 온보딩이 끝나면 `SOUL.md`, `SESSION-TYPE.md`, 필요 시 `users/<user-id>/USER.md`를 업데이트하고 다시 읽는다.
 - 온보딩이 끝난 뒤 `SESSION-TYPE.md`의 상태를 `complete`로 바꾼다.
-- 온보딩 중 재시작이 필요하면 `NEXT-SESSION.md`를 남긴 뒤 `SESSION-TYPE.md`를 `complete`로 바꾸고, 다음 세션이 `NEXT-SESSION.md`를 따라 검증을 완료하게 한다.
+- 온보딩 중 재시작이 필요하면 `NEXT-SESSION.md`를 남긴 뒤 `SESSION-TYPE.md`를 `complete`로 바꾸고, 다음 세션이 `NEXT-SESSION.md`를 따라 검증을 완료한 뒤 파일을 삭제하게 한다.
 
 ## 메모리 관리
 - `memory/`는 markdown-first memory wiki다. raw source를 그대로 쌓는 곳이 아니라, 정리된 기억을 유지하는 곳이다.

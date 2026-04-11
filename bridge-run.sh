@@ -108,6 +108,7 @@ cd "$WORK_DIR" || bridge_die "$WORK_DIR 디렉토리가 없습니다."
 
 LOGFILE="$BRIDGE_LOG_DIR/${AGENT}-$(date '+%Y%m%d').log"
 ERRFILE="$BRIDGE_LOG_DIR/${AGENT}-$(date '+%Y%m%d').err.log"
+BRIDGE_RUN_ROSTER_SIGNATURE=""
 
 log_line() {
   local line
@@ -142,15 +143,83 @@ bridge_run_stop_foreground_session() {
   bridge_agent_clear_idle_marker "$AGENT"
 }
 
+bridge_run_roster_signature() {
+  local payload=""
+  local file=""
+
+  for file in "$BRIDGE_ROSTER_FILE" "$BRIDGE_ROSTER_LOCAL_FILE"; do
+    payload+="${file}"$'\n'
+    if [[ -f "$file" ]]; then
+      payload+="present"$'\n'
+      payload+="$(cat "$file")"$'\n'
+    else
+      payload+="missing"$'\n'
+    fi
+  done
+
+  bridge_sha1 "$payload"
+}
+
+bridge_run_refresh_roster_if_changed() {
+  local signature=""
+
+  signature="$(bridge_run_roster_signature)"
+  if [[ -n "$BRIDGE_RUN_ROSTER_SIGNATURE" && "$signature" == "$BRIDGE_RUN_ROSTER_SIGNATURE" ]]; then
+    return 0
+  fi
+
+  bridge_load_roster
+  bridge_require_agent "$AGENT"
+  if [[ $CONTINUE_EXPLICIT -eq 1 ]]; then
+    BRIDGE_AGENT_CONTINUE["$AGENT"]="$CONTINUE_MODE"
+  fi
+  WORK_DIR="$(bridge_agent_workdir "$AGENT")"
+  ENGINE="$(bridge_agent_engine "$AGENT")"
+  SESSION="$(bridge_agent_session "$AGENT")"
+  [[ -n "$WORK_DIR" ]] || bridge_die "'$AGENT'의 workdir가 비어 있습니다."
+  cd "$WORK_DIR" || bridge_die "$WORK_DIR 디렉토리가 없습니다."
+  if [[ -n "$BRIDGE_RUN_ROSTER_SIGNATURE" ]]; then
+    log_line "[info] roster changed on disk; reloading before next relaunch"
+  fi
+  BRIDGE_RUN_ROSTER_SIGNATURE="$signature"
+}
+
+bridge_run_reconcile_next_session_state() {
+  local next_file=""
+  local marker_file=""
+  local age_seconds=""
+  local ttl_seconds="${BRIDGE_NEXT_SESSION_AUTO_CLEAR_SECONDS:-300}"
+
+  [[ "$ENGINE" == "claude" ]] || return 0
+  next_file="$(bridge_agent_next_session_file "$AGENT")"
+  [[ -f "$next_file" ]] || return 0
+
+  age_seconds="$(bridge_agent_maybe_expire_next_session "$AGENT" "$ttl_seconds" || true)"
+  if [[ "$age_seconds" =~ ^[0-9]+$ ]]; then
+    marker_file="$(bridge_agent_next_session_marker_file "$AGENT")"
+    log_line "[info] auto-cleared stale NEXT-SESSION.md after ${age_seconds}s (previous handoff digest was already delivered)"
+    bridge_audit_log daemon next_session_autocleared "$AGENT" \
+      --detail age_seconds="$age_seconds" \
+      --detail ttl_seconds="$ttl_seconds" \
+      --detail next_session_file="$next_file" \
+      --detail marker_file="$marker_file"
+    return 0
+  fi
+
+  if [[ "$(bridge_agent_continue "$AGENT")" == "1" ]]; then
+    log_line "[warn] NEXT-SESSION.md present at $next_file -> --resume suppressed for this restart. Delete it after handoff verification."
+  fi
+}
+
 bridge_run_schedule_next_session_prompt() {
   local next_file="$WORK_DIR/NEXT-SESSION.md"
-  local marker_dir="$BRIDGE_STATE_DIR/next-session-prompts"
-  local marker_file="$marker_dir/${AGENT}.sha"
+  local marker_file=""
   local digest=""
 
   [[ "$ENGINE" == "claude" ]] || return 0
   [[ -f "$next_file" ]] || return 0
 
+  marker_file="$(bridge_agent_next_session_marker_file "$AGENT")"
   digest="$(bridge_sha1 "$(cat "$next_file")")"
   if [[ -f "$marker_file" && "$(cat "$marker_file" 2>/dev/null || true)" == "$digest" ]]; then
     return 0
@@ -166,7 +235,7 @@ bridge_run_schedule_next_session_prompt() {
       digest="$5"
       source "$script_dir/bridge-lib.sh"
       if bridge_tmux_wait_for_prompt "$session" claude 20; then
-        bridge_tmux_send_and_submit "$session" claude "You have just restarted under Agent Bridge. Read NEXT-SESSION.md now, run the verification commands listed there, then open with a short user-facing resume summary before doing unrelated work."
+        bridge_tmux_send_and_submit "$session" claude "You have just restarted under Agent Bridge. Read NEXT-SESSION.md now, run the verification commands listed there, open with a short user-facing resume summary, and then delete NEXT-SESSION.md before doing unrelated work."
         mkdir -p "$(dirname "$marker_file")"
         printf "%s" "$digest" >"$marker_file"
       fi
@@ -206,13 +275,16 @@ bridge_run_schedule_idle_marker_and_inbox_bootstrap() {
 }
 
 log_line "${AGENT} 에이전트 시작 (engine=${ENGINE}, dir=${WORK_DIR})"
+BRIDGE_RUN_ROSTER_SIGNATURE="$(bridge_run_roster_signature)"
 
 FAIL_COUNT=0
 RESTART_COUNT=0
 while true; do
   local_err_size_before=0
   local_err_size_after=0
+  bridge_run_refresh_roster_if_changed
   export BRIDGE_AGENT_LOOP_RESTART_COUNT="$RESTART_COUNT"
+  bridge_run_reconcile_next_session_state
   LAUNCH_CMD="$(bridge_agent_launch_cmd "$AGENT")"
   [[ -n "$LAUNCH_CMD" ]] || bridge_die "'$AGENT'의 launch command가 비어 있습니다."
 

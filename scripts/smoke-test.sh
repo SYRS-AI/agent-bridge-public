@@ -147,6 +147,8 @@ export BRIDGE_WEBHOOK_PORT_RANGE_END=9399
 SESSION_NAME="bridge-smoke-$$"
 REQUESTER_SESSION="bridge-requester-$$"
 CLAUDE_STATIC_SESSION="claude-static-$SESSION_NAME"
+ROSTER_RELOAD_AGENT="roster-reload-agent-$$"
+ROSTER_RELOAD_SESSION="roster-reload-session-$$"
 SMOKE_AGENT="smoke-agent-$$"
 REQUESTER_AGENT="requester-agent-$$"
 AUTO_START_AGENT="auto-start-agent-$$"
@@ -180,6 +182,7 @@ PROJECT_ROOT="$TMP_ROOT/git-project"
 HOOK_WORKDIR="$TMP_ROOT/claude-hook-workdir"
 MCP_WORKDIR="$TMP_ROOT/claude-mcp-workdir"
 CLAUDE_STATIC_WORKDIR="$BRIDGE_HOME/agents/claude-static"
+ROSTER_RELOAD_WORKDIR="$TMP_ROOT/roster-reload-workdir"
 FAKE_BIN="$TMP_ROOT/bin"
 FAKE_DISCORD_PORT_FILE="$TMP_ROOT/fake-discord.port"
 FAKE_DISCORD_REQUESTS="$TMP_ROOT/fake-discord-requests.jsonl"
@@ -259,7 +262,7 @@ trap cleanup EXIT
 
 kill_stale_smoke_tmux_sessions
 
-mkdir -p "$BRIDGE_HOME" "$BRIDGE_STATE_DIR" "$BRIDGE_LOG_DIR" "$BRIDGE_SHARED_DIR" "$WORKDIR" "$REQUESTER_WORKDIR" "$AUTO_START_WORKDIR" "$BROKEN_CHANNEL_WORKDIR" "$LATE_DYNAMIC_WORKDIR"
+mkdir -p "$BRIDGE_HOME" "$BRIDGE_STATE_DIR" "$BRIDGE_LOG_DIR" "$BRIDGE_SHARED_DIR" "$WORKDIR" "$REQUESTER_WORKDIR" "$AUTO_START_WORKDIR" "$BROKEN_CHANNEL_WORKDIR" "$LATE_DYNAMIC_WORKDIR" "$ROSTER_RELOAD_WORKDIR"
 mkdir -p "$BRIDGE_CODEX_SESSIONS_DIR"
 mkdir -p "$HOOK_WORKDIR/.claude"
 mkdir -p "$MCP_WORKDIR"
@@ -307,6 +310,7 @@ bridge_add_agent_id_if_missing "$AUTO_START_AGENT"
 bridge_add_agent_id_if_missing "$ALWAYS_ON_AGENT"
 bridge_add_agent_id_if_missing "$CODEX_CLI_AGENT"
 bridge_add_agent_id_if_missing "claude-static"
+bridge_add_agent_id_if_missing "$ROSTER_RELOAD_AGENT"
 BRIDGE_ADMIN_AGENT_ID="$SMOKE_AGENT"
 BRIDGE_AGENT_DESC["$SMOKE_AGENT"]="Smoke test role"
 BRIDGE_AGENT_DESC["$REQUESTER_AGENT"]="Requester role"
@@ -314,27 +318,32 @@ BRIDGE_AGENT_DESC["$AUTO_START_AGENT"]="Auto-start role"
 BRIDGE_AGENT_DESC["$ALWAYS_ON_AGENT"]="Always-on role"
 BRIDGE_AGENT_DESC["$CODEX_CLI_AGENT"]="Codex CLI hook role"
 BRIDGE_AGENT_DESC["claude-static"]="Claude static role"
+BRIDGE_AGENT_DESC["$ROSTER_RELOAD_AGENT"]="Roster reload role"
 BRIDGE_AGENT_ENGINE["$SMOKE_AGENT"]="codex"
 BRIDGE_AGENT_ENGINE["$REQUESTER_AGENT"]="codex"
 BRIDGE_AGENT_ENGINE["$AUTO_START_AGENT"]="codex"
 BRIDGE_AGENT_ENGINE["$ALWAYS_ON_AGENT"]="codex"
 BRIDGE_AGENT_ENGINE["$CODEX_CLI_AGENT"]="codex"
 BRIDGE_AGENT_ENGINE["claude-static"]="claude"
+BRIDGE_AGENT_ENGINE["$ROSTER_RELOAD_AGENT"]="claude"
 BRIDGE_AGENT_SESSION["$SMOKE_AGENT"]="$SESSION_NAME"
 BRIDGE_AGENT_SESSION["$REQUESTER_AGENT"]="$REQUESTER_SESSION"
 BRIDGE_AGENT_SESSION["$AUTO_START_AGENT"]="$AUTO_START_SESSION"
 BRIDGE_AGENT_SESSION["$ALWAYS_ON_AGENT"]="$ALWAYS_ON_SESSION"
 BRIDGE_AGENT_SESSION["$CODEX_CLI_AGENT"]="$CODEX_CLI_SESSION"
 BRIDGE_AGENT_SESSION["claude-static"]="claude-static-$SESSION_NAME"
+BRIDGE_AGENT_SESSION["$ROSTER_RELOAD_AGENT"]="$ROSTER_RELOAD_SESSION"
 BRIDGE_AGENT_WORKDIR["$SMOKE_AGENT"]="$WORKDIR"
 BRIDGE_AGENT_WORKDIR["$REQUESTER_AGENT"]="$REQUESTER_WORKDIR"
 BRIDGE_AGENT_WORKDIR["$AUTO_START_AGENT"]="$AUTO_START_WORKDIR"
 BRIDGE_AGENT_WORKDIR["$ALWAYS_ON_AGENT"]="$AUTO_START_WORKDIR"
 BRIDGE_AGENT_WORKDIR["$CODEX_CLI_AGENT"]="$WORKDIR"
 BRIDGE_AGENT_WORKDIR["claude-static"]="$CLAUDE_STATIC_WORKDIR"
+BRIDGE_AGENT_WORKDIR["$ROSTER_RELOAD_AGENT"]="$ROSTER_RELOAD_WORKDIR"
 BRIDGE_AGENT_DISCORD_CHANNEL_ID["$SMOKE_AGENT"]="123456789012345678"
 BRIDGE_AGENT_NOTIFY_ACCOUNT["$SMOKE_AGENT"]="smoke"
 BRIDGE_AGENT_CHANNELS["claude-static"]="plugin:discord@claude-plugins-official"
+BRIDGE_AGENT_CONTINUE["$ROSTER_RELOAD_AGENT"]="0"
 BRIDGE_CRON_AGENT_TARGET["legacy-ops"]="$AUTO_START_AGENT"
 BRIDGE_AGENT_LAUNCH_CMD["$SMOKE_AGENT"]='python3 -c "import time; print(\"smoke-agent ready\", flush=True); time.sleep(30)"'
 BRIDGE_AGENT_LAUNCH_CMD["$REQUESTER_AGENT"]='python3 -c "import time; print(\"requester-agent ready\", flush=True); time.sleep(30)"'
@@ -342,6 +351,7 @@ BRIDGE_AGENT_LAUNCH_CMD["$AUTO_START_AGENT"]='python3 -c "import time; print(\"a
 BRIDGE_AGENT_LAUNCH_CMD["$ALWAYS_ON_AGENT"]='python3 -c "import time; print(\"always-on ready\", flush=True); time.sleep(30)"'
 BRIDGE_AGENT_LAUNCH_CMD["$CODEX_CLI_AGENT"]='codex'
 BRIDGE_AGENT_LAUNCH_CMD["claude-static"]='DISCORD_STATE_DIR=REPLACE_CLAUDE_DISCORD claude -c --dangerously-skip-permissions'
+BRIDGE_AGENT_LAUNCH_CMD["$ROSTER_RELOAD_AGENT"]='ROSTER_MARK=before claude --dangerously-skip-permissions --name roster-reload'
 BRIDGE_AGENT_IDLE_TIMEOUT["$ALWAYS_ON_AGENT"]="0"
 EOF
 
@@ -1459,8 +1469,30 @@ assert_contains "$HANDOFF_SHOW_JSON" "\"bundle_id\": \"$HANDOFF_BUNDLE_ID\""
 assert_contains "$HANDOFF_SHOW_JSON" "\"to_agent\": \"$REQUESTER_AGENT\""
 assert_contains "$HANDOFF_SHOW_JSON" "\"path\": \"$HANDOFF_ARTIFACT\""
 TASK_SHELL="$(python3 "$REPO_ROOT/bridge-queue.py" show "$HANDOFF_TASK_ID" --format shell)"
-# shellcheck disable=SC1090
-source <(printf '%s\n' "$TASK_SHELL")
+TASK_TITLE="$(python3 - "$TASK_SHELL" <<'PY'
+import shlex
+import sys
+
+for raw in sys.argv[1].splitlines():
+    if raw.startswith("TASK_TITLE="):
+        value = raw.split("=", 1)[1]
+        parts = shlex.split(value)
+        print(parts[0] if parts else "")
+        break
+PY
+)"
+TASK_BODY_PATH="$(python3 - "$TASK_SHELL" <<'PY'
+import shlex
+import sys
+
+for raw in sys.argv[1].splitlines():
+    if raw.startswith("TASK_BODY_PATH="):
+        value = raw.split("=", 1)[1]
+        parts = shlex.split(value)
+        print(parts[0] if parts else "")
+        break
+PY
+)"
 assert_contains "$TASK_TITLE" "[handoff] bundle smoke"
 assert_contains "$TASK_BODY_PATH" "shared/a2a-files/$HANDOFF_BUNDLE_ID/handoff.md"
 "$REPO_ROOT/agent-bridge" claim "$HANDOFF_TASK_ID" --agent "$REQUESTER_AGENT" >/dev/null
@@ -1487,8 +1519,30 @@ INTAKE_SHOW_JSON="$("$REPO_ROOT/agent-bridge" intake show "$INTAKE_CAPTURE_ID" -
 assert_contains "$INTAKE_SHOW_JSON" "\"suggested_owner\": \"$REQUESTER_AGENT\""
 assert_contains "$INTAKE_SHOW_JSON" "\"order_id\": \"SO-123\""
 TASK_SHELL="$(python3 "$REPO_ROOT/bridge-queue.py" show "$INTAKE_TASK_ID" --format shell)"
-# shellcheck disable=SC1090
-source <(printf '%s\n' "$TASK_SHELL")
+TASK_TITLE="$(python3 - "$TASK_SHELL" <<'PY'
+import shlex
+import sys
+
+for raw in sys.argv[1].splitlines():
+    if raw.startswith("TASK_TITLE="):
+        value = raw.split("=", 1)[1]
+        parts = shlex.split(value)
+        print(parts[0] if parts else "")
+        break
+PY
+)"
+TASK_BODY_PATH="$(python3 - "$TASK_SHELL" <<'PY'
+import shlex
+import sys
+
+for raw in sys.argv[1].splitlines():
+    if raw.startswith("TASK_BODY_PATH="):
+        value = raw.split("=", 1)[1]
+        parts = shlex.split(value)
+        print(parts[0] if parts else "")
+        break
+PY
+)"
 assert_contains "$TASK_TITLE" "[intake] Customer needs ETA and refund guidance."
 assert_contains "$TASK_BODY_PATH" "shared/raw/intake/$INTAKE_CAPTURE_ID.md"
 "$REPO_ROOT/agent-bridge" claim "$INTAKE_TASK_ID" --agent "$REQUESTER_AGENT" >/dev/null
@@ -1936,6 +1990,7 @@ SETUP_TEAMS_OUTPUT="$("$BASH4_BIN" "$REPO_ROOT/bridge-setup.sh" teams "$CREATED_
 assert_contains "$SETUP_TEAMS_OUTPUT" "teams_dir: $BRIDGE_AGENT_HOME_ROOT/$CREATED_AGENT/.teams"
 assert_contains "$SETUP_TEAMS_OUTPUT" "credential_source: channel:smoke"
 assert_contains "$SETUP_TEAMS_OUTPUT" "validation: local"
+assert_contains "$SETUP_TEAMS_OUTPUT" "--dangerously-load-development-channels"
 assert_contains "$(cat "$BRIDGE_AGENT_HOME_ROOT/$CREATED_AGENT/.teams/.env")" "TEAMS_APP_ID=smoke-teams-app-id"
 assert_contains "$(cat "$BRIDGE_AGENT_HOME_ROOT/$CREATED_AGENT/.teams/access.json")" "19:smoke@thread.v2"
 CREATED_TEAMS_LAUNCH="$("$BASH4_BIN" -c '
@@ -1945,6 +2000,7 @@ CREATED_TEAMS_LAUNCH="$("$BASH4_BIN" -c '
 ')"
 assert_contains "$CREATED_TEAMS_LAUNCH" "TEAMS_STATE_DIR=$BRIDGE_AGENT_HOME_ROOT/$CREATED_AGENT/.teams"
 assert_contains "$CREATED_TEAMS_LAUNCH" "plugin:teams@agent-bridge"
+assert_contains "$CREATED_TEAMS_LAUNCH" "--dangerously-load-development-channels"
 
 if command -v bun >/dev/null 2>&1; then
   log "exercising Teams channel plugin health"
@@ -1957,11 +2013,13 @@ s.close()
 PY
 )"
   TEAMS_PLUGIN_LOG="$TMP_ROOT/teams-plugin.log"
+  cat >>"$BRIDGE_AGENT_HOME_ROOT/$CREATED_AGENT/.teams/.env" <<EOF
+TEAMS_WEBHOOK_HOST=0.0.0.0
+TEAMS_WEBHOOK_PORT=$TEAMS_SMOKE_PORT
+EOF
   (
     cd "$REPO_ROOT/plugins/teams"
     TEAMS_STATE_DIR="$BRIDGE_AGENT_HOME_ROOT/$CREATED_AGENT/.teams" \
-      TEAMS_WEBHOOK_HOST=127.0.0.1 \
-      TEAMS_WEBHOOK_PORT="$TEAMS_SMOKE_PORT" \
       bun run --shell=bun --silent start >"$TEAMS_PLUGIN_LOG" 2>&1
   ) &
   TEAMS_PLUGIN_PID=$!
@@ -1995,6 +2053,7 @@ with urllib.request.urlopen(f"http://127.0.0.1:{port}/health", timeout=1) as res
 if payload.get("ok") is not True or payload.get("channel") != "teams":
     raise SystemExit("Teams health payload mismatch")
 PY
+  assert_contains "$(cat "$TEAMS_PLUGIN_LOG")" "http://0.0.0.0:$TEAMS_SMOKE_PORT/api/messages"
   kill "$TEAMS_PLUGIN_PID" >/dev/null 2>&1 || true
   wait "$TEAMS_PLUGIN_PID" >/dev/null 2>&1 || true
   TEAMS_PLUGIN_PID=""
@@ -2074,6 +2133,36 @@ CLAUDE_LAUNCH_NEXT_SESSION_FRESH="$("$BASH4_BIN" -c '
 assert_not_contains "$CLAUDE_LAUNCH_NEXT_SESSION_FRESH" "claude --continue"
 rm -f "$CLAUDE_STATIC_WORKDIR/NEXT-SESSION.md"
 
+cat >"$CLAUDE_STATIC_WORKDIR/NEXT-SESSION.md" <<'EOF'
+# STALE NEXT SESSION
+
+Already delivered in a previous restart.
+EOF
+CLAUDE_STATIC_NEXT_DIGEST="$("$BASH4_BIN" -c '
+  source "'"$REPO_ROOT"'/bridge-lib.sh"
+  bridge_load_roster
+  bridge_agent_next_session_digest "claude-static"
+')"
+mkdir -p "$BRIDGE_STATE_DIR/next-session-prompts"
+printf '%s' "$CLAUDE_STATIC_NEXT_DIGEST" >"$BRIDGE_STATE_DIR/next-session-prompts/claude-static.sha"
+python3 - "$CLAUDE_STATIC_WORKDIR/NEXT-SESSION.md" <<'PY'
+import os
+import sys
+import time
+
+path = sys.argv[1]
+old = time.time() - 600
+os.utime(path, (old, old))
+PY
+CLAUDE_STALE_NEXT_CLEAR_AGE="$("$BASH4_BIN" -c '
+  source "'"$REPO_ROOT"'/bridge-lib.sh"
+  bridge_load_roster
+  bridge_agent_maybe_expire_next_session "claude-static" 300 || true
+')"
+[[ "$CLAUDE_STALE_NEXT_CLEAR_AGE" =~ ^[0-9]+$ ]] || die "expected stale NEXT-SESSION auto-clear age"
+[[ ! -f "$CLAUDE_STATIC_WORKDIR/NEXT-SESSION.md" ]] || die "expected stale NEXT-SESSION file to be cleared"
+[[ ! -f "$BRIDGE_STATE_DIR/next-session-prompts/claude-static.sha" ]] || die "expected stale NEXT-SESSION marker to be cleared"
+
 FAKE_CLAUDE_HOME="$TMP_ROOT/fake-claude-home"
 mkdir -p "$FAKE_CLAUDE_HOME/.claude/sessions"
 cat >"$FAKE_CLAUDE_HOME/.claude/sessions/static-existing.json" <<EOF
@@ -2152,9 +2241,78 @@ EOF
   bridge_load_roster
   bridge_agent_launch_cmd "claude-static"
 ')"
-assert_contains "$CLAUDE_STALE_RESUME_FALLBACK" "claude --dangerously-skip-permissions --name claude-static --channels plugin:discord@claude-plugins-official"
-assert_not_contains "$CLAUDE_STALE_RESUME_FALLBACK" "claude --continue"
+assert_contains "$CLAUDE_STALE_RESUME_FALLBACK" "claude --continue --dangerously-skip-permissions --name claude-static --channels plugin:discord@claude-plugins-official"
 [[ "$CLAUDE_STALE_RESUME_FALLBACK" != *" --resume "* ]] || die "stale Claude session_id should not be used for resume"
+
+log "reloading roster inside the long-lived bridge-run loop"
+FAKE_CLAUDE_BIN="$TMP_ROOT/fake-claude-bin"
+FAKE_CLAUDE_LOG="$TMP_ROOT/fake-claude-invocations.log"
+mkdir -p "$FAKE_CLAUDE_BIN"
+python3 - "$FAKE_CLAUDE_BIN/claude" "$FAKE_CLAUDE_LOG" <<'PY'
+from pathlib import Path
+import sys
+
+script_path = Path(sys.argv[1])
+log_path = sys.argv[2]
+script_path.write_text(
+    "#!/usr/bin/env bash\n"
+    f"printf 'mark=%s args=%s\\n' \"${{ROSTER_MARK:-}}\" \"$*\" >> {log_path!r}\n"
+    "exit 0\n",
+    encoding="utf-8",
+)
+PY
+chmod +x "$FAKE_CLAUDE_BIN/claude"
+: >"$FAKE_CLAUDE_LOG"
+python3 - "$BRIDGE_ROSTER_LOCAL_FILE" "$ROSTER_RELOAD_AGENT" "$FAKE_CLAUDE_BIN/claude" <<'PY'
+from pathlib import Path
+import re
+import sys
+
+path = Path(sys.argv[1])
+agent = sys.argv[2]
+claude_path = sys.argv[3]
+text = path.read_text(encoding="utf-8")
+pattern = re.compile(rf'(?m)^BRIDGE_AGENT_LAUNCH_CMD\["{re.escape(agent)}"\]=.*$')
+replacement = f'BRIDGE_AGENT_LAUNCH_CMD["{agent}"]=\'ROSTER_MARK=before {claude_path} --dangerously-skip-permissions --name roster-reload\''
+text, count = pattern.subn(replacement, text, count=1)
+assert count == 1, (agent, path)
+path.write_text(text, encoding="utf-8")
+PY
+ROSTER_RELOAD_RUN_LOG="$BRIDGE_LOG_DIR/${ROSTER_RELOAD_AGENT}-$(date '+%Y%m%d').log"
+"$BASH4_BIN" "$REPO_ROOT/bridge-run.sh" "$ROSTER_RELOAD_AGENT" >/dev/null 2>&1 &
+ROSTER_RELOAD_PID=$!
+for _ in {1..40}; do
+  if [[ -f "$FAKE_CLAUDE_LOG" ]] && grep -Fq 'mark=before' "$FAKE_CLAUDE_LOG"; then
+    break
+  fi
+  sleep 0.25
+done
+grep -Fq 'mark=before' "$FAKE_CLAUDE_LOG" || die "expected first bridge-run launch to use initial roster launch command"
+python3 - "$BRIDGE_ROSTER_LOCAL_FILE" "$ROSTER_RELOAD_AGENT" "$FAKE_CLAUDE_BIN/claude" <<'PY'
+from pathlib import Path
+import re
+import sys
+
+path = Path(sys.argv[1])
+agent = sys.argv[2]
+claude_path = sys.argv[3]
+text = path.read_text(encoding="utf-8")
+pattern = re.compile(rf'(?m)^BRIDGE_AGENT_LAUNCH_CMD\["{re.escape(agent)}"\]=.*$')
+replacement = f'BRIDGE_AGENT_LAUNCH_CMD["{agent}"]=\'ROSTER_MARK=after {claude_path} --dangerously-skip-permissions --name roster-reload\''
+text, count = pattern.subn(replacement, text, count=1)
+assert count == 1, (agent, path)
+path.write_text(text, encoding="utf-8")
+PY
+for _ in {1..40}; do
+  if grep -Fq 'mark=after' "$FAKE_CLAUDE_LOG"; then
+    break
+  fi
+  sleep 0.25
+done
+grep -Fq 'mark=after' "$FAKE_CLAUDE_LOG" || die "expected bridge-run loop to reload roster changes before next relaunch"
+grep -Fq 'roster changed on disk; reloading before next relaunch' "$ROSTER_RELOAD_RUN_LOG" || die "expected bridge-run to log roster reload"
+kill "$ROSTER_RELOAD_PID" >/dev/null 2>&1 || true
+wait "$ROSTER_RELOAD_PID" >/dev/null 2>&1 || true
 
 log "classifying admin foreground exit by onboarding state"
 ONBOARDING_ADMIN_WORKDIR="$TMP_ROOT/onboarding-admin"
