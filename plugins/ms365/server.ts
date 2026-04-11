@@ -320,6 +320,7 @@ async function graph(
   body?: unknown,
   query?: Record<string, string | number | undefined>,
   version: 'v1.0' | 'beta' = 'v1.0',
+  extraHeaders?: Record<string, string>,
 ): Promise<any> {
   const token = await getAccessToken(upn)
   let url = `https://graph.microsoft.com/${version}${path}`
@@ -337,6 +338,7 @@ async function graph(
       Authorization: `Bearer ${token}`,
       'Content-Type': 'application/json',
       Accept: 'application/json',
+      ...(extraHeaders ?? {}),
     },
     body: body != null ? JSON.stringify(body) : undefined,
   })
@@ -709,6 +711,63 @@ const tools: ToolDef[] = [
         id: p.id,
       }))
       return textResult({ query: q, count: people.length, people })
+    },
+  },
+  {
+    name: 'users_list',
+    description:
+      'Enumerate users from the directory via Graph /users. Supports OData $filter / $search / $top / $select for department-, jobTitle-, or displayName-scoped queries. Uses ConsistencyLevel=eventual + $count=true so advanced filters (startsWith, endsWith, contains, $search) work. Requires User.Read.All or Directory.Read.All.',
+    schema: {
+      type: 'object',
+      properties: {
+        upn: { type: 'string', description: 'Caller UPN (default MS365_DEFAULT_UPN).' },
+        filter: { type: 'string', description: "OData $filter expression, e.g. \"department eq 'Sales 7'\" or \"startsWith(department,'Sales')\"." },
+        search: { type: 'string', description: 'OData $search expression (fully quoted), e.g. "\\"department:Sales\\"".' },
+        top: { type: 'number', description: 'Default 25, max 200.' },
+        select: { type: 'string', description: 'Comma-separated $select field list.' },
+        orderby: { type: 'string', description: 'Optional $orderby, e.g. "displayName".' },
+      },
+    },
+    handler: async args => {
+      const caller = resolveUpn(args.upn)
+      const top = Math.max(1, Math.min(Number(args.top ?? 25), 200))
+      const select = String(
+        args.select ??
+          'id,displayName,userPrincipalName,mail,jobTitle,department,officeLocation,companyName',
+      )
+      const query: Record<string, string | number | undefined> = {
+        $top: top,
+        $select: select,
+        $count: 'true',
+      }
+      if (args.filter) query.$filter = String(args.filter)
+      if (args.search) query.$search = String(args.search)
+      if (args.orderby) query.$orderby = String(args.orderby)
+      const data = await graph(
+        caller,
+        'GET',
+        '/users',
+        undefined,
+        query,
+        'v1.0',
+        { ConsistencyLevel: 'eventual' },
+      )
+      const users = (data?.value ?? []).map((u: any) => ({
+        id: u.id,
+        name: u.displayName,
+        upn: u.userPrincipalName,
+        mail: u.mail,
+        jobTitle: u.jobTitle,
+        department: u.department,
+        office: u.officeLocation,
+        company: u.companyName,
+      }))
+      return textResult({
+        count: users.length,
+        total_at_server: data?.['@odata.count'] ?? null,
+        next_link: data?.['@odata.nextLink'] ?? null,
+        users,
+      })
     },
   },
   {
