@@ -30,6 +30,7 @@ Usage:
   $CLI_NAME user <set|show> ...
   $CLI_NAME knowledge <init|operator|capture|promote|search|lint> ...
   $CLI_NAME bundle <create|show> ...
+  $CLI_NAME intake <triage|show> ...
   $CLI_NAME agent <create|list|show|start|stop|restart|attach> ...
   $CLI_NAME kill <number|all>
   $CLI_NAME attach [number|name]
@@ -96,6 +97,7 @@ Usage:
   $CLI_NAME knowledge operator set --user owner --name "<name>"
   $CLI_NAME knowledge operator show [--json]
   $CLI_NAME bundle create --to reviewer --title "QA handoff" --summary "Review attached draft" --action "Return blockers" --artifact ~/agent-bridge/shared/report.md::draft
+  $CLI_NAME intake triage --capture <capture-id> --owner patch --summary "Customer needs ETA update" --category support --route
   $CLI_NAME knowledge capture --source chat --text "..."
   $CLI_NAME knowledge promote --kind people --summary "..."
   $CLI_NAME knowledge search --query "..."
@@ -129,6 +131,7 @@ Examples:
   $CLI_NAME knowledge init --team-name "Acme"
   $CLI_NAME knowledge operator set --user owner --name "Sean"
   $CLI_NAME bundle show 20260411T130000+0900-qa-handoff --json
+  $CLI_NAME intake show 20260411T130000+0900-mail --json
   $CLI_NAME knowledge search --query "primary operator"
   $CLI_NAME list
   $CLI_NAME kill 1
@@ -470,6 +473,10 @@ PY
     bundle)
       shift
       exec "$BRIDGE_BASH_BIN" "$SCRIPT_DIR/bridge-bundle.sh" "$@"
+      ;;
+    intake)
+      shift
+      exec "$BRIDGE_BASH_BIN" "$SCRIPT_DIR/bridge-intake.sh" "$@"
       ;;
     list)
       if [[ $# -ne 1 ]]; then

@@ -223,6 +223,13 @@ The generic public flow should be:
 4. attach a human-follow-up draft only when required
 5. promote only the durable team knowledge, not the whole payload
 
+Canonical home:
+
+- raw source: `shared/raw/captures/inbox/<capture-id>.json`
+- triage record: `shared/raw/intake/<capture-id>.json`
+- queue body / operator-readable summary: `shared/raw/intake/<capture-id>.md`
+- built with `agent-bridge knowledge capture` plus `agent-bridge intake triage|show`
+
 This generalizes the live mail triage pattern without copying a SYRS-specific
 mail workflow into core.
 

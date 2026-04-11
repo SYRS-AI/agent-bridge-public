@@ -1466,6 +1466,34 @@ assert_contains "$TASK_BODY_PATH" "shared/a2a-files/$HANDOFF_BUNDLE_ID/handoff.m
 "$REPO_ROOT/agent-bridge" claim "$HANDOFF_TASK_ID" --agent "$REQUESTER_AGENT" >/dev/null
 "$REPO_ROOT/agent-bridge" done "$HANDOFF_TASK_ID" --agent "$REQUESTER_AGENT" --note "bundle processed" >/dev/null
 
+log "triaging a raw intake capture and routing it through the queue"
+INTAKE_CAPTURE_JSON="$("$REPO_ROOT/agent-bridge" knowledge capture --source email --author Customer --title "Delivery ETA" --text "Customer asks for delivery ETA and refund options for order SO-123." --json)"
+INTAKE_CAPTURE_ID="$(python3 - "$INTAKE_CAPTURE_JSON" <<'PY'
+import json
+import sys
+print(json.loads(sys.argv[1])["capture_id"])
+PY
+)"
+INTAKE_TRIAGE_JSON="$("$REPO_ROOT/agent-bridge" intake triage --capture "$INTAKE_CAPTURE_ID" --owner "$REQUESTER_AGENT" --summary "Customer needs ETA and refund guidance." --category support --importance high --reply-needed yes --confidence 0.91 --field order_id=SO-123 --field topic=delivery-refund --followup "Thanks. We are checking ETA and refund options and will reply shortly." --route --json)"
+assert_contains "$INTAKE_TRIAGE_JSON" "\"capture_id\": \"$INTAKE_CAPTURE_ID\""
+assert_contains "$INTAKE_TRIAGE_JSON" "\"needs_human_followup\": true"
+INTAKE_TASK_ID="$(python3 - "$INTAKE_TRIAGE_JSON" <<'PY'
+import json
+import sys
+print(json.loads(sys.argv[1])["task"]["id"])
+PY
+)"
+INTAKE_SHOW_JSON="$("$REPO_ROOT/agent-bridge" intake show "$INTAKE_CAPTURE_ID" --json)"
+assert_contains "$INTAKE_SHOW_JSON" "\"suggested_owner\": \"$REQUESTER_AGENT\""
+assert_contains "$INTAKE_SHOW_JSON" "\"order_id\": \"SO-123\""
+TASK_SHELL="$(python3 "$REPO_ROOT/bridge-queue.py" show "$INTAKE_TASK_ID" --format shell)"
+# shellcheck disable=SC1090
+source <(printf '%s\n' "$TASK_SHELL")
+assert_contains "$TASK_TITLE" "[intake] Customer needs ETA and refund guidance."
+assert_contains "$TASK_BODY_PATH" "shared/raw/intake/$INTAKE_CAPTURE_ID.md"
+"$REPO_ROOT/agent-bridge" claim "$INTAKE_TASK_ID" --agent "$REQUESTER_AGENT" >/dev/null
+"$REPO_ROOT/agent-bridge" done "$INTAKE_TASK_ID" --agent "$REQUESTER_AGENT" --note "intake processed" >/dev/null
+
 log "requesting and completing a queue-backed review gate"
 cat >"$BRIDGE_REVIEW_POLICY_FILE" <<EOF
 {

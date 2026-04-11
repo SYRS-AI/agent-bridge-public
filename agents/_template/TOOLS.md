@@ -9,6 +9,7 @@
 - `~/.agent-bridge/agb done <task-id> --agent <agent> --note "..."`
 - `~/.agent-bridge/agent-bridge task create --to <agent> ...`
 - `~/.agent-bridge/agent-bridge bundle create --to <agent> ...`
+- `~/.agent-bridge/agent-bridge intake triage --capture <id> --owner <agent> --route`
 - `~/.agent-bridge/agent-bridge urgent <agent> "..."`
 - `~/.agent-bridge/agent-bridge escalate question --agent <agent> --question "..." --context "..."`
 - `~/.agent-bridge/agent-bridge cron ...`
