@@ -52,6 +52,9 @@ The public core should make those layers explicit.
 | Automation/Cron Orchestration | Daily briefing, event reminder, cron failure monitor, cron dispatch artifacts | Scheduled work produces auditable outputs and escalates failures | Cron run history, retry/escalation policy, optional wiki promotion | Medium | Medium | P1 |
 | Agent Factory | Role templates, checklists, per-agent soul/heartbeat conventions | New agents have consistent identity, lifecycle, memory, skills, and channel setup | Role profile templates and agent creation wizard | Low | Medium | P1 |
 | Collaboration Review Loops | Cross-agent/Codex review scripts and handoff patterns | Important plans and code changes get independent review before execution | Optional review gate contracts and queue-first review tasks | Low | Medium | P1 |
+| Shared Operator Profile | Shared user profile, channel handles, and addressing rules reused across roles | Every long-lived agent needs the same primary human identity, aliases, handles, and approval scope without rediscovering them | Canonical operator profile contract in the shared team registry, consumed by all roles at startup | High: redact person IDs and handles | Medium | P0 |
+| Structured Collaboration Handoff | `a2a-files`, queue handoff notes, and file-backed transfer conventions | Multi-agent work becomes lossy when files, images, and expected outputs are passed only as free text | Queue-first handoff bundle with artifact manifest, required action, and completion contract | Medium | Medium | P0 |
+| External Intake Triage | Mail triage notes, raw captures, classification/routing workflows, follow-up drafts | External inputs need consistent filter/extract/route behavior instead of ad hoc per-role prompting | Generic capture inbox, extraction schema, queue routing, and optional human follow-up draft contract | Medium/High | Medium | P0 |
 | Memory Curation | Daily memory, promotion logs, memory search skill, wiki index | Agents can retain durable lessons without loading all history | Team wiki + per-agent memory lifecycle with lint/search/promote commands | Medium | Large | P0 |
 | Media/Input Capture | Inbound media metadata files and raw capture folders | Channel artifacts can be referenced without dumping raw payloads into prompts | Raw capture store with safe summaries and promotion workflow | Medium/High | Medium | P2 |
 | Migration Audit | Migration plans, audit notes, compatibility backlog | Live systems can move from older runtimes without losing state | Migration audit command and compatibility checklist | Medium | Medium | P2 |
@@ -138,6 +141,18 @@ Storage policy:
    - Make cross-agent review an optional queue workflow.
    - Avoid hard-coding any one provider or private agent identity.
 
+7. **Structured Handoff Bundles** (`#23`)
+   - Add a first-class handoff bundle contract for queue-first collaboration.
+   - Include artifact manifests and explicit return/completion expectations.
+
+8. **External Intake Triage** (`#24`)
+   - Define the raw capture -> classify -> extract -> route pipeline.
+   - Standardize `needs_human_followup` drafts instead of direct-send shortcuts.
+
+9. **Shared Operator Profiles** (`#25`)
+   - Add one canonical operator/human profile surface for all long-lived agents.
+   - Keep this as a concrete slice under the broader shared-team knowledge contract (`#22`).
+
 ## Review Checklist For Porting A Live Feature
 
 Before turning a live artifact into public code, answer:
@@ -150,4 +165,3 @@ Before turning a live artifact into public code, answer:
 - Does this belong in core, a template, a skill, or documentation?
 - What migration path is needed for existing installs?
 - What smoke test proves it works on a clean install?
-
