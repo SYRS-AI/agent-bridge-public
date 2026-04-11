@@ -33,7 +33,7 @@ This agent keeps memory as a markdown-first wiki.
 Team-wide knowledge lives outside this agent home:
 
 - `~/.agent-bridge/shared/wiki/people.md`
-  - team members, aliases, handles, decision scope, communication preferences
+  - primary operator profile plus team members, aliases, handles, decision scope, communication preferences
 - `~/.agent-bridge/shared/wiki/agents.md`
   - agent roles, owners, lifecycle, channels, escalation paths
 - `~/.agent-bridge/shared/wiki/operating-rules.md`

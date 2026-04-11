@@ -92,6 +92,8 @@ Usage:
   $CLI_NAME cron cleanup prune [--mode expired-one-shot] [--dry-run]
   $CLI_NAME memory init --agent <agent> [--user <id[:display-name]>] [--json]
   $CLI_NAME knowledge init [--team-name <name>] [--json]
+  $CLI_NAME knowledge operator set --user owner --name "<name>"
+  $CLI_NAME knowledge operator show [--json]
   $CLI_NAME knowledge capture --source chat --text "..."
   $CLI_NAME knowledge promote --kind people --summary "..."
   $CLI_NAME knowledge search --query "..."
@@ -123,7 +125,7 @@ Examples:
   $CLI_NAME user set --name "Sean" --timezone Asia/Seoul
   $CLI_NAME user show --json
   $CLI_NAME knowledge init --team-name "Acme"
-  $CLI_NAME knowledge promote --kind people --summary "Sean is the primary operator."
+  $CLI_NAME knowledge operator set --user owner --name "Sean"
   $CLI_NAME knowledge search --query "primary operator"
   $CLI_NAME list
   $CLI_NAME kill 1

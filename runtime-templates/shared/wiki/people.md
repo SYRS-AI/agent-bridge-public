@@ -1,19 +1,26 @@
 # People
 
-Team members, users, collaborators, aliases, channel handles, decision scope,
-and communication preferences live here.
+Canonical operator profiles and other durable people facts live here.
 
-## Notes
-
-Add people records as concise entries. Include only information that multiple
-agents need to know.
-
-Recommended fields:
+## Canonical Operator Schema
 
 - Display name
 - Preferred address
-- Role
-- Decision scope
-- Languages
+- Aliases / nicknames
 - Channel handles
 - Communication preferences
+- Decision / approval scope
+- Escalation relevance
+
+## Primary Operator
+
+<!-- BEGIN PRIMARY OPERATOR -->
+_Not configured yet. Use `agb knowledge operator set --user owner --name "<name>"` to define the primary operator profile._
+<!-- END PRIMARY OPERATOR -->
+
+## Notes
+
+Add additional people records as concise notes. Include only information that
+multiple agents need to know. The primary operator block above is the canonical
+shared profile for the install owner/operator and should be updated through
+`knowledge operator set`, not by hand.

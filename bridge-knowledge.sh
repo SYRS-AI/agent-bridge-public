@@ -14,12 +14,14 @@ Usage:
   $(basename "$0") init [--team-name <name>] [--dry-run] [--json]
   $(basename "$0") capture --source <source> [--author <name>] [--channel <id>] [--title <text>] (--text <text> | --text-file <path>) [--dry-run] [--json]
   $(basename "$0") promote --kind people|agents|operating-rules|data-source|data-sources|tools|decision|project|playbook [--capture <id>] [--page <slug>] [--title <text>] [--summary <text>] [--dry-run] [--json]
+  $(basename "$0") operator set [--user <id>] --name <name> [--preferred-address <text>] [--alias <text>]... [--handle <surface=value>]... [--communication-preferences <text>] [--decision-scope <text>] [--escalation-relevance <text>] [--dry-run] [--json]
+  $(basename "$0") operator show [--json]
   $(basename "$0") search --query <text> [--scope wiki|raw|all] [--limit <count>] [--json]
   $(basename "$0") lint [--json]
 
 Examples:
   $(basename "$0") init --team-name "Acme"
-  $(basename "$0") promote --kind people --title "Primary operator" --summary "The primary operator prefers concise updates."
+  $(basename "$0") operator set --user owner --name "Sean" --decision-scope "Final release approval"
   $(basename "$0") capture --source telegram --author Alice --text "Alice owns billing approvals."
   $(basename "$0") search --query "billing approvals"
 EOF
@@ -215,6 +217,111 @@ case "$command" in
     [[ -n "$title" ]] && args+=(--title "$title")
     [[ -n "$summary" ]] && args+=(--summary "$summary")
     run_python "${args[@]}"
+    ;;
+  operator)
+    mode="${1:-}"
+    [[ -n "$mode" ]] || bridge_die "knowledge operator 하위 명령이 필요합니다: set|show"
+    shift || true
+    case "$mode" in
+      set)
+        user_id=""
+        name=""
+        preferred_address=""
+        communication_preferences=""
+        decision_scope=""
+        escalation_relevance=""
+        aliases=()
+        handles=()
+        while [[ $# -gt 0 ]]; do
+          parse_common_flag "$@" || consumed=$?
+          consumed="${consumed:-0}"
+          if [[ "$consumed" -gt 0 ]]; then
+            shift "$consumed"
+            unset consumed
+            continue
+          fi
+          case "$1" in
+            --user)
+              [[ $# -ge 2 ]] || bridge_die "옵션 값이 필요합니다: $1"
+              user_id="$2"
+              shift 2
+              ;;
+            --name)
+              [[ $# -ge 2 ]] || bridge_die "옵션 값이 필요합니다: $1"
+              name="$2"
+              shift 2
+              ;;
+            --preferred-address)
+              [[ $# -ge 2 ]] || bridge_die "옵션 값이 필요합니다: $1"
+              preferred_address="$2"
+              shift 2
+              ;;
+            --alias)
+              [[ $# -ge 2 ]] || bridge_die "옵션 값이 필요합니다: $1"
+              aliases+=("$2")
+              shift 2
+              ;;
+            --handle)
+              [[ $# -ge 2 ]] || bridge_die "옵션 값이 필요합니다: $1"
+              handles+=("$2")
+              shift 2
+              ;;
+            --communication-preferences)
+              [[ $# -ge 2 ]] || bridge_die "옵션 값이 필요합니다: $1"
+              communication_preferences="$2"
+              shift 2
+              ;;
+            --decision-scope)
+              [[ $# -ge 2 ]] || bridge_die "옵션 값이 필요합니다: $1"
+              decision_scope="$2"
+              shift 2
+              ;;
+            --escalation-relevance)
+              [[ $# -ge 2 ]] || bridge_die "옵션 값이 필요합니다: $1"
+              escalation_relevance="$2"
+              shift 2
+              ;;
+            *)
+              bridge_die "지원하지 않는 knowledge operator set 옵션입니다: $1"
+              ;;
+          esac
+        done
+        [[ -n "$name" ]] || bridge_die "--name is required"
+        args=(operator-set)
+        add_common_args
+        [[ -n "$user_id" ]] && args+=(--user "$user_id")
+        args+=(--name "$name")
+        [[ -n "$preferred_address" ]] && args+=(--preferred-address "$preferred_address")
+        for alias in "${aliases[@]}"; do
+          args+=(--alias "$alias")
+        done
+        for handle in "${handles[@]}"; do
+          args+=(--handle "$handle")
+        done
+        [[ -n "$communication_preferences" ]] && args+=(--communication-preferences "$communication_preferences")
+        [[ -n "$decision_scope" ]] && args+=(--decision-scope "$decision_scope")
+        [[ -n "$escalation_relevance" ]] && args+=(--escalation-relevance "$escalation_relevance")
+        run_python "${args[@]}"
+        ;;
+      show)
+        while [[ $# -gt 0 ]]; do
+          parse_common_flag "$@" || consumed=$?
+          consumed="${consumed:-0}"
+          if [[ "$consumed" -gt 0 ]]; then
+            shift "$consumed"
+            unset consumed
+            continue
+          fi
+          bridge_die "지원하지 않는 knowledge operator show 옵션입니다: $1"
+        done
+        args=(operator-show)
+        add_common_args
+        run_python "${args[@]}"
+        ;;
+      *)
+        bridge_die "지원하지 않는 knowledge operator 하위 명령입니다: $mode"
+        ;;
+    esac
     ;;
   search)
     query=""

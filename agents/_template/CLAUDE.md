@@ -66,7 +66,7 @@ task를 수신하면 아래 순서를 반드시 따른다:
 - 질문 2: `처음 연결할 채널은 무엇인가요? 터미널만 사용할지, Discord, Telegram, 또는 둘 다 연결할지 알려주세요.`
 - 첫 사용자 메시지에 이름/닉네임과 채널 선택이 이미 모두 포함되어 있으면 다시 묻지 말고 `이름: <값>, 채널: <값>으로 진행하겠습니다.`라고 확인한 뒤 바로 설정을 진행한다.
 - Onboarding State가 `pending`인 동안에는 두 질문을 물었거나 두 답을 저장하고 다음 설정 단계로 넘어간 경우가 아니면 턴을 끝내지 않는다.
-- 이름/닉네임을 받으면 `~/.agent-bridge/agent-bridge knowledge init`을 실행하고, `~/.agent-bridge/agent-bridge knowledge promote --kind people --title "Primary operator" --summary "<name> is the primary operator for this Agent Bridge install."`로 팀 people registry에 저장한다. 새 에이전트는 shared wiki를 공통 지식 기준으로 사용한다.
+- 이름/닉네임을 받으면 `~/.agent-bridge/agent-bridge user set --user owner --name "<name>"`, `~/.agent-bridge/agent-bridge knowledge init`, `~/.agent-bridge/agent-bridge knowledge operator set --user owner --name "<name>"`를 순서대로 실행한다. primary operator profile은 `shared/wiki/people.md`가 canonical source다.
 - 내부 파일명, `USER.md`, 사용자 partition 같은 구현 세부사항은 질문 문구에 넣지 않는다.
 - Discord 또는 Telegram을 선택하면 해당 에이전트 엔진은 Claude Code로 설정한다. Codex는 현재 외부 채널 연동용 엔진으로 사용하지 않는다.
 - 사용자가 Discord/Telegram과 Codex를 함께 선택하면, "Discord/Telegram 연동은 Claude Code가 필요합니다. 이 에이전트는 Claude Code로 설정하겠습니다."라고 설명하고 Claude Code로 진행한다.
@@ -131,6 +131,7 @@ task를 수신하면 아래 순서를 반드시 따른다:
 ## 메모리 관리
 - `memory/`는 markdown-first memory wiki다. raw source를 그대로 쌓는 곳이 아니라, 정리된 기억을 유지하는 곳이다.
 - 팀 전체가 공유해야 하는 사람, 에이전트, 운영 규칙, 도구, 데이터 소스, 결정, 프로젝트, 플레이북은 `~/.agent-bridge/shared/wiki/`에 기록한다.
+- operator identity, preferred address, channel handles, decision scope, escalation relevance가 필요하면 로컬 추측보다 먼저 `~/.agent-bridge/shared/wiki/people.md`의 primary operator profile을 확인한다.
 - 팀 공통 지식은 `agent-bridge knowledge capture|promote|search|lint`를 사용한다. 에이전트 개인 기억은 `agent-bridge memory ...`를 사용한다.
 - 사용자별 정보는 `users/<user-id>/...` 아래에서 관리한다. 다른 사람의 사실을 현재 사용자 메모리에 섞지 않는다.
 - 반복 가치가 있는 사실만 `MEMORY.md` 또는 사용자별 `MEMORY.md`로 승격한다.

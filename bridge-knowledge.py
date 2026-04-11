@@ -33,6 +33,9 @@ RAW_DIRS = (
     "indexes",
 )
 SEARCH_SCOPES = ("wiki", "raw", "all")
+PRIMARY_OPERATOR_HEADING = "## Primary Operator"
+PRIMARY_OPERATOR_START = "<!-- BEGIN PRIMARY OPERATOR -->"
+PRIMARY_OPERATOR_END = "<!-- END PRIMARY OPERATOR -->"
 KIND_ALIASES = {
     "people": "people",
     "person": "people",
@@ -269,6 +272,215 @@ def maybe_move_capture(shared_root: Path, capture_path: Path, dry_run: bool) -> 
     return target
 
 
+def extract_managed_block(text: str, start: str, end: str) -> str:
+    pattern = re.compile(re.escape(start) + r".*?" + re.escape(end), re.DOTALL)
+    match = pattern.search(text)
+    return match.group(0) if match else ""
+
+
+def parse_csv_field(value: str) -> list[str]:
+    return [item.strip() for item in value.split(",") if item.strip()]
+
+
+def parse_handles_field(value: str) -> dict[str, str]:
+    handles: dict[str, str] = {}
+    for raw_item in value.split(";"):
+        item = raw_item.strip()
+        if not item:
+            continue
+        if "=" in item:
+            surface, handle = item.split("=", 1)
+        elif ":" in item:
+            surface, handle = item.split(":", 1)
+        else:
+            continue
+        surface = surface.strip().lower()
+        handle = handle.strip()
+        if surface and handle:
+            handles[surface] = handle
+    return handles
+
+
+def serialize_handles(handles: dict[str, str]) -> str:
+    if not handles:
+        return ""
+    return "; ".join(f"{surface}={handle}" for surface, handle in sorted(handles.items()))
+
+
+def parse_operator_profile(text: str) -> dict[str, object]:
+    block = extract_managed_block(text, PRIMARY_OPERATOR_START, PRIMARY_OPERATOR_END)
+    if not block:
+        return {
+            "configured": False,
+            "role": "primary operator",
+            "user_id": "",
+            "display_name": "",
+            "preferred_address": "",
+            "aliases": [],
+            "channel_handles": {},
+            "communication_preferences": "",
+            "decision_scope": "",
+            "escalation_relevance": "",
+            "updated_at": "",
+        }
+    fields: dict[str, str] = {}
+    for line in block.splitlines():
+        match = re.match(r"^- ([^:]+):\s*(.*)$", line.strip())
+        if match:
+            fields[match.group(1).strip()] = match.group(2).strip()
+    display_name = fields.get("Display name", "")
+    return {
+        "configured": bool(display_name),
+        "role": fields.get("Role", "primary operator"),
+        "user_id": fields.get("User ID", ""),
+        "display_name": display_name,
+        "preferred_address": fields.get("Preferred address", ""),
+        "aliases": parse_csv_field(fields.get("Aliases", "")),
+        "channel_handles": parse_handles_field(fields.get("Channel handles", "")),
+        "communication_preferences": fields.get("Communication preferences", ""),
+        "decision_scope": fields.get("Decision scope", ""),
+        "escalation_relevance": fields.get("Escalation relevance", ""),
+        "updated_at": fields.get("Updated at", ""),
+    }
+
+
+def render_operator_profile(payload: dict[str, object]) -> str:
+    lines = [
+        PRIMARY_OPERATOR_START,
+        "- Role: primary operator",
+        f"- User ID: {payload['user_id']}",
+        f"- Display name: {payload['display_name']}",
+        f"- Preferred address: {payload['preferred_address']}",
+        f"- Aliases: {', '.join(payload['aliases'])}",
+        f"- Channel handles: {serialize_handles(payload['channel_handles'])}",
+        f"- Communication preferences: {payload['communication_preferences']}",
+        f"- Decision scope: {payload['decision_scope']}",
+        f"- Escalation relevance: {payload['escalation_relevance']}",
+        f"- Updated at: {payload['updated_at']}",
+        PRIMARY_OPERATOR_END,
+    ]
+    return "\n".join(lines)
+
+
+def upsert_operator_profile(path: Path, payload: dict[str, object], dry_run: bool) -> None:
+    block = render_operator_profile(payload)
+    text = read_text(path) if path.exists() else "# People\n"
+    pattern = re.compile(
+        re.escape(PRIMARY_OPERATOR_START) + r".*?" + re.escape(PRIMARY_OPERATOR_END),
+        re.DOTALL,
+    )
+    if pattern.search(text):
+        updated = pattern.sub(block, text, count=1)
+    elif PRIMARY_OPERATOR_HEADING in text:
+        updated = text.replace(PRIMARY_OPERATOR_HEADING, f"{PRIMARY_OPERATOR_HEADING}\n\n{block}", 1)
+    elif "## Notes" in text:
+        updated = text.replace("## Notes", f"{PRIMARY_OPERATOR_HEADING}\n\n{block}\n\n## Notes", 1)
+    else:
+        updated = text.rstrip() + f"\n\n{PRIMARY_OPERATOR_HEADING}\n\n{block}\n"
+    write_text(path, updated.rstrip() + "\n", dry_run)
+
+
+def normalize_handle(raw: str) -> tuple[str, str]:
+    if "=" not in raw:
+        die(f"invalid handle format (expected surface=value): {raw}")
+    surface, handle = raw.split("=", 1)
+    surface = surface.strip().lower()
+    handle = handle.strip()
+    if not surface or not handle:
+        die(f"invalid handle format (expected surface=value): {raw}")
+    if not re.fullmatch(r"[A-Za-z0-9._-]+", surface):
+        die(f"invalid handle surface: {surface}")
+    return surface, handle
+
+
+def cmd_operator_set(args: argparse.Namespace) -> int:
+    shared_root = Path(args.shared_root)
+    ensure_layout(shared_root, Path(args.template_root), args.team_name, args.dry_run)
+    target = wiki_root(shared_root) / "people.md"
+    ensure_page(target, "People", args.dry_run)
+    existing = parse_operator_profile(read_text(target) if target.exists() else "")
+    handles = dict(existing["channel_handles"])
+    if args.handle:
+        handles = {}
+        for raw_handle in args.handle:
+            surface, handle = normalize_handle(raw_handle)
+            handles[surface] = handle
+    aliases = args.alias if args.alias else list(existing["aliases"])
+    payload: dict[str, object] = {
+        "configured": True,
+        "role": "primary operator",
+        "user_id": args.user or str(existing["user_id"]) or "owner",
+        "display_name": args.name.strip(),
+        "preferred_address": (
+            args.preferred_address.strip()
+            if args.preferred_address
+            else str(existing["preferred_address"]) or args.name.strip()
+        ),
+        "aliases": aliases,
+        "channel_handles": handles,
+        "communication_preferences": (
+            args.communication_preferences.strip()
+            if args.communication_preferences
+            else str(existing["communication_preferences"])
+        ),
+        "decision_scope": (
+            args.decision_scope.strip()
+            if args.decision_scope
+            else str(existing["decision_scope"])
+        ),
+        "escalation_relevance": (
+            args.escalation_relevance.strip()
+            if args.escalation_relevance
+            else str(existing["escalation_relevance"])
+        ),
+        "updated_at": now().isoformat(timespec="seconds"),
+    }
+    upsert_operator_profile(target, payload, args.dry_run)
+    append_log(
+        shared_root,
+        f"- {now().isoformat(timespec='seconds')} updated primary operator -> {target.relative_to(shared_root)}",
+        args.dry_run,
+    )
+    result = {
+        **payload,
+        "path": str(target),
+        "relative_path": str(target.relative_to(shared_root)),
+        "dry_run": args.dry_run,
+    }
+    if args.json:
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+    else:
+        print("role: primary operator")
+        print(f"user_id: {payload['user_id']}")
+        print(f"display_name: {payload['display_name']}")
+        print(f"relative_path: {target.relative_to(shared_root)}")
+    return 0
+
+
+def cmd_operator_show(args: argparse.Namespace) -> int:
+    shared_root = Path(args.shared_root)
+    target = wiki_root(shared_root) / "people.md"
+    payload = parse_operator_profile(read_text(target) if target.exists() else "")
+    result = {
+        **payload,
+        "path": str(target),
+        "relative_path": str(target.relative_to(shared_root)),
+    }
+    if args.json:
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+    else:
+        print(f"configured: {'true' if payload['configured'] else 'false'}")
+        if payload["configured"]:
+            print("role: primary operator")
+            print(f"user_id: {payload['user_id']}")
+            print(f"display_name: {payload['display_name']}")
+            print(f"preferred_address: {payload['preferred_address']}")
+            if payload["channel_handles"]:
+                print(f"channel_handles: {serialize_handles(payload['channel_handles'])}")
+        print(f"path: {target}")
+    return 0
+
+
 def cmd_promote(args: argparse.Namespace) -> int:
     shared_root = Path(args.shared_root)
     ensure_layout(shared_root, Path(args.template_root), args.team_name, args.dry_run)
@@ -424,6 +636,22 @@ def build_parser() -> argparse.ArgumentParser:
     promote_parser.add_argument("--title", default="")
     promote_parser.add_argument("--summary", default="")
     promote_parser.set_defaults(func=cmd_promote)
+
+    operator_set_parser = subparsers.add_parser("operator-set")
+    add_common(operator_set_parser)
+    operator_set_parser.add_argument("--user", default="")
+    operator_set_parser.add_argument("--name", required=True)
+    operator_set_parser.add_argument("--preferred-address", default="")
+    operator_set_parser.add_argument("--alias", action="append", default=[])
+    operator_set_parser.add_argument("--handle", action="append", default=[])
+    operator_set_parser.add_argument("--communication-preferences", default="")
+    operator_set_parser.add_argument("--decision-scope", default="")
+    operator_set_parser.add_argument("--escalation-relevance", default="")
+    operator_set_parser.set_defaults(func=cmd_operator_set)
+
+    operator_show_parser = subparsers.add_parser("operator-show")
+    add_common(operator_show_parser)
+    operator_show_parser.set_defaults(func=cmd_operator_show)
 
     search_parser = subparsers.add_parser("search")
     search_parser.add_argument("--shared-root", required=True)

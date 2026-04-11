@@ -169,6 +169,7 @@ home.
 Canonical home:
 
 - `shared/wiki/people.md`
+- maintained through `agent-bridge knowledge operator set|show` for the primary operator profile
 
 Required fields for the primary operator profile:
 
