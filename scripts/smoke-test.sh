@@ -74,7 +74,7 @@ kill_stale_smoke_tmux_sessions() {
   while IFS= read -r session; do
     [[ -n "$session" ]] || continue
     case "$session" in
-      bridge-smoke-*|bridge-requester-*|auto-start-session-*|always-on-session-*|static-session-*|claude-static-bridge-smoke-*|worker-reuse-*|late-dynamic-agent-*|created-session-*|bootstrap-session-*|bootstrap-wrapper-session-*|broken-channel-*|context-pressure-bridge-smoke-*|codex-cli-session-*|project-claude-session-bridge-smoke-*)
+      bridge-smoke-*|bridge-requester-*|auto-start-session-*|always-on-session-*|static-session-*|claude-static-bridge-smoke-*|worker-reuse-*|late-dynamic-agent-*|created-session-*|bootstrap-session-*|bootstrap-wrapper-session-*|broken-channel-*|context-pressure-bridge-smoke-*|codex-cli-session-*|project-claude-session-bridge-smoke-*|stall-auth-*|stall-rate-*|stall-unknown-*|roster-reload-session-*|smoke-admin-test*|stall-rate-test-*)
         tmux_kill_session_exact "$session" || true
         ;;
     esac
@@ -214,6 +214,16 @@ cleanup() {
   local status=$?
   local _cleanup_attempt=""
   bash "$REPO_ROOT/bridge-daemon.sh" stop >/dev/null 2>&1 || true
+  # Kill every tmux session that did not exist before the smoke test started.
+  if [[ -n "${SMOKE_PRE_SESSIONS_FILE:-}" && -f "$SMOKE_PRE_SESSIONS_FILE" ]]; then
+    local _new_session=""
+    while IFS= read -r _new_session; do
+      [[ -n "$_new_session" ]] || continue
+      tmux_kill_session_exact "$_new_session" || true
+    done < <(comm -13 "$SMOKE_PRE_SESSIONS_FILE" <(tmux list-sessions -F '#{session_name}' 2>/dev/null | sort) 2>/dev/null || true)
+    rm -f "$SMOKE_PRE_SESSIONS_FILE"
+  fi
+  # Fallback: also kill by known patterns in case the snapshot was lost.
   kill_stale_smoke_tmux_sessions
   tmux_kill_session_exact "$SESSION_NAME" || true
   tmux_kill_session_exact "$REQUESTER_SESSION" || true
@@ -265,6 +275,10 @@ cleanup() {
   exit "$status"
 }
 trap cleanup EXIT
+
+# Snapshot tmux sessions before smoke test so cleanup only reaps new sessions.
+SMOKE_PRE_SESSIONS_FILE="$(mktemp)"
+tmux list-sessions -F '#{session_name}' 2>/dev/null | sort > "$SMOKE_PRE_SESSIONS_FILE" || true
 
 kill_stale_smoke_tmux_sessions
 
