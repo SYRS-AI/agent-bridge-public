@@ -2278,6 +2278,30 @@ CLAUDE_LAUNCH_EXISTING_SESSION="$(HOME="$FAKE_CLAUDE_HOME" "$BASH4_BIN" -c '
   bridge_agent_launch_cmd "claude-static"
 ')"
 assert_contains "$CLAUDE_LAUNCH_EXISTING_SESSION" "claude --resume static-existing-session-id --dangerously-skip-permissions --name claude-static --channels plugin:discord@claude-plugins-official"
+CLAUDE_SAFE_MODE_RESUME="$(HOME="$FAKE_CLAUDE_HOME" "$BASH4_BIN" -c '
+  source "'"$REPO_ROOT"'/bridge-lib.sh"
+  bridge_load_roster
+  BRIDGE_AGENT_CONTINUE["claude-static"]="1"
+  unset BRIDGE_AGENT_SESSION_ID["claude-static"]
+  bridge_build_safe_launch_cmd "claude-static"
+')"
+assert_contains "$CLAUDE_SAFE_MODE_RESUME" "claude --resume static-existing-session-id --dangerously-skip-permissions --name claude-static"
+assert_not_contains "$CLAUDE_SAFE_MODE_RESUME" "--channels"
+cat >"$CLAUDE_STATIC_WORKDIR/NEXT-SESSION.md" <<'EOF'
+# SAFE MODE NEXT SESSION
+
+This should not suppress --continue in safe mode.
+EOF
+CLAUDE_SAFE_MODE_CONTINUE="$(HOME="$TMP_ROOT/safe-mode-continue-home" "$BASH4_BIN" -c '
+  source "'"$REPO_ROOT"'/bridge-lib.sh"
+  bridge_load_roster
+  BRIDGE_AGENT_CONTINUE["claude-static"]="1"
+  unset BRIDGE_AGENT_SESSION_ID["claude-static"]
+  bridge_build_safe_launch_cmd "claude-static"
+')"
+assert_contains "$CLAUDE_SAFE_MODE_CONTINUE" "claude --continue --dangerously-skip-permissions --name claude-static"
+assert_not_contains "$CLAUDE_SAFE_MODE_CONTINUE" "--channels"
+rm -f "$CLAUDE_STATIC_WORKDIR/NEXT-SESSION.md"
 CLAUDE_CHANNEL_STATUS="$("$BASH4_BIN" -c '
   source "'"$REPO_ROOT"'/bridge-lib.sh"
   bridge_load_roster
@@ -2484,8 +2508,75 @@ if [[ "$ADMIN_OUTPUT" != *"세션 '$SESSION_NAME'이 이미 실행 중입니다.
   die "expected admin launch to either reuse or start session"
 fi
 
-ADMIN_REPLACE_OUTPUT="$("$REPO_ROOT/agent-bridge" admin --replace --no-continue --no-attach 2>&1)"
+ADMIN_SAFE_MODE_DRY_RUN="$("$REPO_ROOT/agent-bridge" admin --safe-mode --replace --no-attach --dry-run 2>&1)" || die "admin safe-mode dry-run failed: $ADMIN_SAFE_MODE_DRY_RUN"
+assert_contains "$ADMIN_SAFE_MODE_DRY_RUN" "safe_mode=1"
+assert_contains "$ADMIN_SAFE_MODE_DRY_RUN" "--safe-mode"
+
+ADMIN_REPLACE_OUTPUT="$("$REPO_ROOT/agent-bridge" admin --replace --no-continue --no-attach 2>&1)" || die "admin replace failed: $ADMIN_REPLACE_OUTPUT"
 assert_contains "$ADMIN_REPLACE_OUTPUT" "세션 '$SESSION_NAME' 시작 완료"
+
+log "opening the circuit breaker after repeated rapid launch failures"
+CIRCUIT_AGENT="circuit-breaker-$SESSION_NAME"
+CIRCUIT_SESSION="circuit-breaker-session-$SESSION_NAME"
+CIRCUIT_WORKDIR="$TMP_ROOT/circuit-breaker-workdir"
+CIRCUIT_CLAUDE_BIN_DIR="$TMP_ROOT/circuit-claude-bin"
+CIRCUIT_CLAUDE_LOG="$TMP_ROOT/circuit-claude.log"
+mkdir -p "$CIRCUIT_WORKDIR" "$CIRCUIT_CLAUDE_BIN_DIR"
+python3 - "$CIRCUIT_CLAUDE_BIN_DIR/claude" "$CIRCUIT_CLAUDE_LOG" <<'PY'
+from pathlib import Path
+import sys
+
+script_path = Path(sys.argv[1])
+log_path = sys.argv[2]
+script_path.write_text(
+    "#!/usr/bin/env bash\n"
+    "printf 'args=%s\\n' \"$*\" >> " + repr(log_path) + "\n"
+    "printf 'broken launch smoke error\\n' >&2\n"
+    "exit 1\n",
+    encoding="utf-8",
+)
+PY
+chmod +x "$CIRCUIT_CLAUDE_BIN_DIR/claude"
+: >"$CIRCUIT_CLAUDE_LOG"
+cat >>"$BRIDGE_ROSTER_LOCAL_FILE" <<EOF
+
+# BEGIN AGENT BRIDGE MANAGED ROLE: $CIRCUIT_AGENT
+bridge_add_agent_id_if_missing "$CIRCUIT_AGENT"
+BRIDGE_AGENT_DESC["$CIRCUIT_AGENT"]="Circuit breaker smoke role"
+BRIDGE_AGENT_ENGINE["$CIRCUIT_AGENT"]="claude"
+BRIDGE_AGENT_SESSION["$CIRCUIT_AGENT"]="$CIRCUIT_SESSION"
+BRIDGE_AGENT_WORKDIR["$CIRCUIT_AGENT"]="$CIRCUIT_WORKDIR"
+BRIDGE_AGENT_LAUNCH_CMD["$CIRCUIT_AGENT"]='PATH=$CIRCUIT_CLAUDE_BIN_DIR:$PATH claude --dangerously-skip-permissions --name $CIRCUIT_AGENT'
+BRIDGE_AGENT_LOOP["$CIRCUIT_AGENT"]="1"
+BRIDGE_AGENT_CONTINUE["$CIRCUIT_AGENT"]="0"
+# END AGENT BRIDGE MANAGED ROLE: $CIRCUIT_AGENT
+EOF
+CIRCUIT_BREAKER_OUTPUT="$(
+  BRIDGE_RUN_MAX_RAPID_FAILS=3 \
+  BRIDGE_RUN_FAIL_BACKOFFS_CSV=1,1,1 \
+  BRIDGE_RUN_RAPID_FAIL_WINDOW_SECONDS=10 \
+  "$BASH4_BIN" "$REPO_ROOT/bridge-run.sh" "$CIRCUIT_AGENT" 2>&1 || true
+)"
+assert_contains "$CIRCUIT_BREAKER_OUTPUT" "Circuit breaker opened."
+assert_contains "$CIRCUIT_BREAKER_OUTPUT" "agent-bridge agent safe-mode $CIRCUIT_AGENT"
+CIRCUIT_BROKEN_LAUNCH_FILE="$BRIDGE_STATE_DIR/agents/$CIRCUIT_AGENT/broken-launch"
+[[ -f "$CIRCUIT_BROKEN_LAUNCH_FILE" ]] || die "expected broken-launch state file for $CIRCUIT_AGENT"
+assert_contains "$(cat "$CIRCUIT_BROKEN_LAUNCH_FILE")" "broken launch smoke error"
+assert_contains "$(cat "$CIRCUIT_BROKEN_LAUNCH_FILE")" "agent-bridge agent safe-mode $CIRCUIT_AGENT"
+CIRCUIT_SHOW_JSON="$("$REPO_ROOT/agent-bridge" agent show "$CIRCUIT_AGENT" --json)"
+python3 - "$CIRCUIT_SHOW_JSON" "$CIRCUIT_BROKEN_LAUNCH_FILE" <<'PY'
+import json
+import sys
+
+payload = json.loads(sys.argv[1])
+broken_launch_file = sys.argv[2]
+session = payload["session_health"]
+assert session["restart_readiness"] == "broken-launch", session
+assert session["broken_launch_file"] == broken_launch_file, session
+PY
+CIRCUIT_SHOW_TEXT="$("$REPO_ROOT/agent-bridge" agent show "$CIRCUIT_AGENT")"
+assert_contains "$CIRCUIT_SHOW_TEXT" "restart_readiness: broken-launch"
+assert_contains "$CIRCUIT_SHOW_TEXT" "recovery: agent-bridge agent safe-mode $CIRCUIT_AGENT"
 
 log "escalating a repeated unanswered question through the admin channel"
 ESCALATE_DRY_RUN_JSON="$("$REPO_ROOT/agent-bridge" escalate question --agent "$CREATED_AGENT" --question "Should I deploy now?" --context "Second ask without a user reply." --wait-seconds 120 --json --dry-run)"
@@ -4092,6 +4183,7 @@ bash "$REPO_ROOT/bridge-daemon.sh" sync >/dev/null
 CONTEXT_PRESSURE_TASK_ID_AGAIN="$(python3 "$REPO_ROOT/bridge-queue.py" find-open --agent "$SMOKE_AGENT" --title-prefix "[context-pressure] $CONTEXT_PRESSURE_AGENT " 2>/dev/null || true)"
 [[ "$CONTEXT_PRESSURE_TASK_ID_AGAIN" == "$CONTEXT_PRESSURE_TASK_ID" ]] || die "expected deduped context-pressure report"
 tmux_kill_session_exact "$CONTEXT_PRESSURE_AGENT" || true
+"$BASH4_BIN" -lc "source \"$REPO_ROOT/bridge-lib.sh\"; bridge_load_roster; bridge_agent_mark_manual_stop \"$CONTEXT_PRESSURE_AGENT\""
 BRIDGE_CONTEXT_PRESSURE_SCAN_INTERVAL_SECONDS=0 \
 bash "$REPO_ROOT/bridge-daemon.sh" sync >/dev/null
 CONTEXT_RECOVERED_JSON="$("$REPO_ROOT/agent-bridge" audit --action context_pressure_recovered --limit 20 --json)"

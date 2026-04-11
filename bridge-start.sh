@@ -9,7 +9,7 @@ source "$SCRIPT_DIR/bridge-lib.sh"
 bridge_load_roster
 
 usage() {
-  echo "Usage: bash $SCRIPT_DIR/bridge-start.sh <agent> [--replace] [--attach] [--continue|--no-continue] [--dry-run] [--skip-project-skill]"
+  echo "Usage: bash $SCRIPT_DIR/bridge-start.sh <agent> [--replace] [--attach|--no-attach] [--continue|--no-continue] [--safe-mode] [--dry-run] [--skip-project-skill]"
   echo "       bash $SCRIPT_DIR/bridge-start.sh --list"
   echo ""
   echo "등록된 에이전트:"
@@ -23,6 +23,7 @@ DRY_RUN=0
 CONTINUE_EXPLICIT=0
 CONTINUE_MODE=1
 INSTALL_PROJECT_SKILL=1
+SAFE_MODE=0
 AGENT=""
 
 while [[ $# -gt 0 ]]; do
@@ -39,8 +40,17 @@ while [[ $# -gt 0 ]]; do
       ATTACH=1
       shift
       ;;
+    --no-attach)
+      ATTACH=0
+      shift
+      ;;
     --dry-run)
       DRY_RUN=1
+      shift
+      ;;
+    --safe-mode)
+      SAFE_MODE=1
+      INSTALL_PROJECT_SKILL=0
       shift
       ;;
     --skip-project-skill)
@@ -116,7 +126,7 @@ if bridge_tmux_session_exists "$SESSION"; then
   fi
 fi
 
-if [[ "$ENGINE" == "claude" ]]; then
+if [[ "$ENGINE" == "claude" && $SAFE_MODE -eq 0 ]]; then
   if bridge_project_claude_guidance_needed "$WORK_DIR"; then
     FORCE_FRESH_SESSION=1
   fi
@@ -156,7 +166,7 @@ if [[ "$ENGINE" == "claude" ]]; then
   if ! bridge_disable_claude_webhook_channel "$AGENT" "$WORK_DIR" >/dev/null 2>&1; then
     bridge_warn "Claude backlog webhook channel cleanup skipped: $WORK_DIR"
   fi
-elif [[ "$ENGINE" == "codex" ]]; then
+elif [[ "$ENGINE" == "codex" && $SAFE_MODE -eq 0 ]]; then
   if ! bridge_project_skill_bootstrap_needed "$ENGINE" "$WORK_DIR"; then
     FORCE_FRESH_SESSION=1
   fi
@@ -179,7 +189,7 @@ elif [[ $CONTINUE_EXPLICIT -eq 1 ]]; then
   EFFECTIVE_CONTINUE_MODE="$CONTINUE_MODE"
 fi
 
-if [[ "$ENGINE" == "claude" ]]; then
+if [[ "$ENGINE" == "claude" && $SAFE_MODE -eq 0 ]]; then
   CHANNEL_REASON="$(bridge_agent_channel_status_reason "$AGENT")"
   if [[ -n "$CHANNEL_REASON" ]]; then
     if bridge_agent_should_stop_on_attached_clean_exit "$AGENT"; then
@@ -196,6 +206,9 @@ if [[ "$EFFECTIVE_CONTINUE_MODE" == "1" ]]; then
   SESSION_CMD+=" --continue"
 else
   SESSION_CMD+=" --no-continue"
+fi
+if [[ $SAFE_MODE -eq 1 ]]; then
+  SESSION_CMD+=" --safe-mode"
 fi
 if [[ "$(bridge_agent_loop "$AGENT")" != "1" ]]; then
   SESSION_CMD+=" --once"
@@ -217,6 +230,7 @@ if [[ $DRY_RUN -eq 1 ]]; then
   echo "session=$SESSION"
   echo "workdir=$WORK_DIR"
   echo "continue=$EFFECTIVE_CONTINUE_MODE"
+  echo "safe_mode=$SAFE_MODE"
   echo "channels=$(bridge_agent_channels_csv "$AGENT")"
   echo "launch_channels=$launch_channels"
   echo "channel_status=$(bridge_agent_channel_status "$AGENT")"
@@ -227,7 +241,7 @@ if [[ $DRY_RUN -eq 1 ]]; then
   exit 0
 fi
 
-if [[ "$ENGINE" == "claude" ]]; then
+if [[ "$ENGINE" == "claude" && $SAFE_MODE -eq 0 ]]; then
   if [[ $SUPPRESS_MISSING_CHANNELS -eq 1 ]]; then
     BRIDGE_AGENT_SUPPRESS_MISSING_CHANNELS=1 bridge_ensure_claude_launch_channel_plugins "$AGENT"
   else

@@ -9,7 +9,7 @@ source "$SCRIPT_DIR/bridge-lib.sh"
 bridge_load_roster
 
 usage() {
-  echo "Usage: bash $SCRIPT_DIR/bridge-run.sh <agent> [--once] [--continue|--no-continue] [--dry-run]"
+  echo "Usage: bash $SCRIPT_DIR/bridge-run.sh <agent> [--once] [--continue|--no-continue] [--safe-mode] [--dry-run]"
   echo "       bash $SCRIPT_DIR/bridge-run.sh --list"
   echo ""
   echo "등록된 에이전트:"
@@ -21,6 +21,7 @@ ONCE=0
 DRY_RUN=0
 CONTINUE_EXPLICIT=0
 CONTINUE_MODE=1
+SAFE_MODE=0
 AGENT=""
 
 while [[ $# -gt 0 ]]; do
@@ -35,6 +36,10 @@ while [[ $# -gt 0 ]]; do
       ;;
     --dry-run)
       DRY_RUN=1
+      shift
+      ;;
+    --safe-mode)
+      SAFE_MODE=1
       shift
       ;;
     --continue)
@@ -77,10 +82,18 @@ if [[ $CONTINUE_EXPLICIT -eq 1 ]]; then
   BRIDGE_AGENT_CONTINUE["$AGENT"]="$CONTINUE_MODE"
 fi
 
+if [[ $SAFE_MODE -eq 1 ]]; then
+  ONCE=1
+fi
+
 WORK_DIR="$(bridge_agent_workdir "$AGENT")"
-LAUNCH_CMD="$(bridge_agent_launch_cmd "$AGENT")"
 ENGINE="$(bridge_agent_engine "$AGENT")"
 SESSION="$(bridge_agent_session "$AGENT")"
+if [[ $SAFE_MODE -eq 1 ]]; then
+  LAUNCH_CMD="$(bridge_build_safe_launch_cmd "$AGENT")"
+else
+  LAUNCH_CMD="$(bridge_agent_launch_cmd "$AGENT")"
+fi
 
 if [[ -z "$WORK_DIR" || -z "$LAUNCH_CMD" ]]; then
   bridge_die "'$AGENT'의 workdir 또는 launch command가 비어 있습니다."
@@ -93,6 +106,7 @@ if [[ $DRY_RUN -eq 1 ]]; then
   echo "loop=$(bridge_agent_loop "$AGENT")"
   echo "continue=$(bridge_agent_continue "$AGENT")"
   echo "session_id=$(bridge_agent_session_id "$AGENT")"
+  echo "safe_mode=$SAFE_MODE"
   echo "channels=$(bridge_agent_channels_csv "$AGENT")"
   echo "channel_status=$(bridge_agent_channel_status "$AGENT")"
   echo "launch=$LAUNCH_CMD"
@@ -191,6 +205,7 @@ bridge_run_reconcile_next_session_state() {
   local ttl_seconds="${BRIDGE_NEXT_SESSION_AUTO_CLEAR_SECONDS:-300}"
 
   [[ "$ENGINE" == "claude" ]] || return 0
+  [[ $SAFE_MODE -eq 0 ]] || return 0
   next_file="$(bridge_agent_next_session_file "$AGENT")"
   [[ -f "$next_file" ]] || return 0
 
@@ -217,6 +232,7 @@ bridge_run_schedule_next_session_prompt() {
   local digest=""
 
   [[ "$ENGINE" == "claude" ]] || return 0
+  [[ $SAFE_MODE -eq 0 ]] || return 0
   [[ -f "$next_file" ]] || return 0
 
   marker_file="$(bridge_agent_next_session_marker_file "$AGENT")"
@@ -249,6 +265,7 @@ bridge_run_schedule_idle_marker_and_inbox_bootstrap() {
   local marker_file="$marker_dir/${AGENT}.started"
 
   [[ "$ENGINE" == "claude" ]] || return 0
+  [[ $SAFE_MODE -eq 0 ]] || return 0
 
   (
     "$BRIDGE_BASH_BIN" -lc '
@@ -282,6 +299,7 @@ bridge_run_should_auto_accept_dev_channels() {
   local -a items=()
 
   [[ "$ENGINE" == "claude" ]] || return 1
+  [[ $SAFE_MODE -eq 0 ]] || return 1
   effective="$(bridge_extract_development_channels_from_command "$launch_cmd")"
   [[ -n "$effective" ]] || return 1
   allowed="$(bridge_agent_auto_accept_dev_channels_csv "$AGENT")"
@@ -315,21 +333,81 @@ bridge_run_schedule_dev_channels_accept() {
   ) >/dev/null 2>&1 &
 }
 
+bridge_run_safe_mode_resume_hint() {
+  local mode=""
+  local admin_agent=""
+
+  mode="$(bridge_safe_mode_resume_mode "$AGENT")"
+  admin_agent="$(bridge_require_admin_agent 2>/dev/null || true)"
+  log_line "[safe-mode] booting ${AGENT} with minimal launch"
+  log_line "[safe-mode] ignored roster launch_cmd: $(bridge_agent_launch_cmd_raw "$AGENT")"
+  if [[ -n "$(bridge_agent_channels_csv "$AGENT")" ]]; then
+    log_line "[safe-mode] suppressed channels: $(bridge_agent_channels_csv "$AGENT")"
+  fi
+  if [[ -n "$(bridge_agent_effective_dev_channels_csv "$AGENT")" ]]; then
+    log_line "[safe-mode] suppressed development channels: $(bridge_agent_effective_dev_channels_csv "$AGENT")"
+  fi
+  log_line "[safe-mode] skipped project bootstrap and channel plugin loading"
+  log_line "[safe-mode] resume strategy: ${mode}"
+  if [[ -n "$admin_agent" && "$AGENT" == "$admin_agent" ]]; then
+    log_line "[safe-mode] return to normal mode with: agb admin"
+  else
+    log_line "[safe-mode] return to normal mode with: agent-bridge agent start ${AGENT}"
+  fi
+}
+
+bridge_run_fail_backoff_seconds() {
+  local count="$1"
+  local csv="${BRIDGE_RUN_FAIL_BACKOFFS_CSV:-5,10,20,40,80}"
+  local -a values=()
+  local index=0
+
+  IFS=',' read -r -a values <<<"$csv"
+  [[ "$count" =~ ^[0-9]+$ ]] || count=1
+  index=$((count - 1))
+  if (( index < 0 )); then
+    index=0
+  fi
+  if (( index < ${#values[@]} )); then
+    printf '%s' "${values[$index]}"
+  elif (( ${#values[@]} > 0 )); then
+    printf '%s' "${values[$((${#values[@]} - 1))]}"
+  else
+    printf '%s' "80"
+  fi
+}
+
 log_line "${AGENT} 에이전트 시작 (engine=${ENGINE}, dir=${WORK_DIR})"
 BRIDGE_RUN_ROSTER_SIGNATURE="$(bridge_run_roster_signature)"
+if [[ $SAFE_MODE -eq 1 ]]; then
+  bridge_run_safe_mode_resume_hint
+fi
 
 FAIL_COUNT=0
 RESTART_COUNT=0
+RAPID_FAIL_COUNT=0
+RAPID_FAIL_WINDOW="${BRIDGE_RUN_RAPID_FAIL_WINDOW_SECONDS:-10}"
+MAX_RAPID_FAILS="${BRIDGE_RUN_MAX_RAPID_FAILS:-5}"
+HEALTHY_RUN_RESET_SECONDS="${BRIDGE_RUN_HEALTHY_RESET_SECONDS:-60}"
 while true; do
   local_err_size_before=0
   local_err_size_after=0
+  run_started_at=0
+  run_ended_at=0
+  run_duration=0
+  rapid_failure=0
+  sleep_seconds=5
   bridge_run_refresh_roster_if_changed
   export BRIDGE_AGENT_LOOP_RESTART_COUNT="$RESTART_COUNT"
   bridge_run_reconcile_next_session_state
-  LAUNCH_CMD="$(bridge_agent_launch_cmd "$AGENT")"
+  if [[ $SAFE_MODE -eq 1 ]]; then
+    LAUNCH_CMD="$(bridge_build_safe_launch_cmd "$AGENT")"
+  else
+    LAUNCH_CMD="$(bridge_agent_launch_cmd "$AGENT")"
+  fi
   [[ -n "$LAUNCH_CMD" ]] || bridge_die "'$AGENT'의 launch command가 비어 있습니다."
 
-  if [[ "$ENGINE" == "claude" ]]; then
+  if [[ "$ENGINE" == "claude" && $SAFE_MODE -eq 0 ]]; then
     bridge_ensure_claude_launch_channel_plugins "$AGENT"
     bridge_run_schedule_dev_channels_accept "$LAUNCH_CMD"
     bridge_run_schedule_idle_marker_and_inbox_bootstrap
@@ -340,10 +418,15 @@ while true; do
   if [[ -f "$ERRFILE" ]]; then
     local_err_size_before="$(wc -c <"$ERRFILE" 2>/dev/null || echo 0)"
   fi
+  run_started_at="$(date +%s)"
   if "$BRIDGE_BASH_BIN" -lc "$LAUNCH_CMD" 2> >(tee -a "$ERRFILE" >&2); then
     EXIT_CODE=0
   else
     EXIT_CODE=$?
+  fi
+  run_ended_at="$(date +%s)"
+  if [[ "$run_started_at" =~ ^[0-9]+$ && "$run_ended_at" =~ ^[0-9]+$ ]]; then
+    run_duration=$((run_ended_at - run_started_at))
   fi
   if [[ -f "$ERRFILE" ]]; then
     local_err_size_after="$(wc -c <"$ERRFILE" 2>/dev/null || echo 0)"
@@ -372,10 +455,21 @@ while true; do
   fi
 
   if [[ $EXIT_CODE -ne 0 ]]; then
+    if [[ "$run_duration" =~ ^[0-9]+$ ]] && [[ "$HEALTHY_RUN_RESET_SECONDS" =~ ^[0-9]+$ ]] && (( run_duration >= HEALTHY_RUN_RESET_SECONDS )); then
+      FAIL_COUNT=0
+      RAPID_FAIL_COUNT=0
+      bridge_agent_clear_crash_report "$AGENT"
+    fi
     if [[ $local_err_size_after -gt $local_err_size_before ]]; then
       log_line "stderr captured: ${ERRFILE}"
     fi
     FAIL_COUNT=$((FAIL_COUNT + 1))
+    if [[ "$run_duration" =~ ^[0-9]+$ ]] && [[ "$RAPID_FAIL_WINDOW" =~ ^[0-9]+$ ]] && (( run_duration < RAPID_FAIL_WINDOW )); then
+      rapid_failure=1
+      RAPID_FAIL_COUNT=$((RAPID_FAIL_COUNT + 1))
+    else
+      RAPID_FAIL_COUNT=0
+    fi
     if [[ $FAIL_COUNT -eq 5 || $(( FAIL_COUNT % 10 )) -eq 0 ]]; then
       bridge_agent_write_crash_report "$AGENT" "$ENGINE" "$FAIL_COUNT" "$EXIT_CODE" "$ERRFILE" "$LAUNCH_CMD"
       bridge_audit_log daemon crash_loop_detected "$AGENT" \
@@ -384,10 +478,31 @@ while true; do
         --detail exit_code="$EXIT_CODE" \
         --detail stderr_file="$ERRFILE"
     fi
-    log_line "비정상 종료 (코드: ${EXIT_CODE}, 연속실패: ${FAIL_COUNT}회). 5초 후 재시작..."
+    if [[ $rapid_failure -eq 1 && "$RAPID_FAIL_COUNT" =~ ^[0-9]+$ && "$MAX_RAPID_FAILS" =~ ^[0-9]+$ && $RAPID_FAIL_COUNT -ge $MAX_RAPID_FAILS ]]; then
+      bridge_agent_write_crash_report "$AGENT" "$ENGINE" "$FAIL_COUNT" "$EXIT_CODE" "$ERRFILE" "$LAUNCH_CMD"
+      bridge_agent_write_broken_launch_state "$AGENT" "$ENGINE" "$FAIL_COUNT" "$EXIT_CODE" "$ERRFILE" "$LAUNCH_CMD" "$local_err_size_before"
+      bridge_audit_log daemon crash_loop_broken "$AGENT" \
+        --detail engine="$ENGINE" \
+        --detail fail_count="$FAIL_COUNT" \
+        --detail exit_code="$EXIT_CODE" \
+        --detail rapid_fail_count="$RAPID_FAIL_COUNT" \
+        --detail rapid_fail_window="$RAPID_FAIL_WINDOW"
+      log_line "[fail] ${RAPID_FAIL_COUNT} consecutive rapid failures under ${RAPID_FAIL_WINDOW}s. Circuit breaker opened."
+      log_line "[fail] recovery: agent-bridge agent safe-mode ${AGENT}"
+      log_loop_help
+      exit 1
+    fi
+    if [[ $rapid_failure -eq 1 ]]; then
+      sleep_seconds="$(bridge_run_fail_backoff_seconds "$RAPID_FAIL_COUNT")"
+      log_line "비정상 종료 (코드: ${EXIT_CODE}, 연속실패: ${FAIL_COUNT}회, rapid=${RAPID_FAIL_COUNT}/${MAX_RAPID_FAILS}, 실행시간: ${run_duration}s). ${sleep_seconds}초 후 재시작..."
+    else
+      log_line "비정상 종료 (코드: ${EXIT_CODE}, 연속실패: ${FAIL_COUNT}회, 실행시간: ${run_duration}s). 5초 후 재시작..."
+    fi
     log_loop_help
     RESTART_COUNT=$((RESTART_COUNT + 1))
-    if [[ $FAIL_COUNT -ge 10 ]]; then
+    if [[ $rapid_failure -eq 1 ]]; then
+      sleep "$sleep_seconds"
+    elif [[ $FAIL_COUNT -ge 10 ]]; then
       log_line "연속 ${FAIL_COUNT}회 실패. 60초 대기..."
       sleep 60
     else
@@ -401,6 +516,7 @@ while true; do
         --detail previous_fail_count="$FAIL_COUNT"
     fi
     FAIL_COUNT=0
+    RAPID_FAIL_COUNT=0
     log_line "정상 종료. 5초 후 재시작..."
     log_loop_help
     RESTART_COUNT=$((RESTART_COUNT + 1))

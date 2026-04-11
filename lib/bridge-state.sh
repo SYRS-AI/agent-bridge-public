@@ -191,6 +191,80 @@ bridge_build_resume_launch_cmd() {
   esac
 }
 
+bridge_safe_mode_resume_mode() {
+  local agent="$1"
+  local engine=""
+  local continue_mode=""
+  local session_id=""
+
+  engine="$(bridge_agent_engine "$agent")"
+  continue_mode="$(bridge_agent_continue "$agent")"
+  if [[ "$continue_mode" != "1" ]]; then
+    printf '%s' "fresh"
+    return 0
+  fi
+
+  case "$engine" in
+    codex)
+      bridge_normalize_agent_session_id "$agent"
+      session_id="$(bridge_agent_session_id "$agent")"
+      if [[ -n "$session_id" ]]; then
+        printf '%s' "resume:${session_id}"
+      else
+        printf '%s' "fresh"
+      fi
+      ;;
+    claude)
+      session_id="$(bridge_claude_resume_session_id_for_agent "$agent" || true)"
+      if [[ -n "$session_id" ]]; then
+        printf '%s' "resume:${session_id}"
+      else
+        printf '%s' "continue"
+      fi
+      ;;
+    *)
+      printf '%s' "fresh"
+      ;;
+  esac
+}
+
+bridge_build_safe_launch_cmd() {
+  local agent="$1"
+  local engine=""
+  local continue_mode=""
+  local session_id=""
+
+  engine="$(bridge_agent_engine "$agent")"
+  continue_mode="$(bridge_agent_continue "$agent")"
+
+  case "$engine" in
+    codex)
+      bridge_normalize_agent_session_id "$agent"
+      session_id="$(bridge_agent_session_id "$agent")"
+      if [[ "$continue_mode" == "1" && -n "$session_id" ]]; then
+        bridge_join_quoted codex resume "$session_id" -c "features.codex_hooks=true" --dangerously-bypass-approvals-and-sandbox --no-alt-screen
+      else
+        bridge_join_quoted codex -c "features.codex_hooks=true" --dangerously-bypass-approvals-and-sandbox --no-alt-screen
+      fi
+      ;;
+    claude)
+      if [[ "$continue_mode" == "1" ]]; then
+        session_id="$(bridge_claude_resume_session_id_for_agent "$agent" || true)"
+        if [[ -n "$session_id" ]]; then
+          bridge_join_quoted claude --resume "$session_id" --dangerously-skip-permissions --name "$agent"
+        else
+          bridge_join_quoted claude --continue --dangerously-skip-permissions --name "$agent"
+        fi
+      else
+        bridge_join_quoted claude --dangerously-skip-permissions --name "$agent"
+      fi
+      ;;
+    *)
+      bridge_die "safe-mode launch is only supported for claude/codex agents: $agent"
+      ;;
+  esac
+}
+
 bridge_clear_agent_session_id() {
   local agent="$1"
   BRIDGE_AGENT_SESSION_ID["$agent"]=""
@@ -1074,6 +1148,11 @@ bridge_agent_crash_state_file() {
   printf '%s/crash-report/%s.state.env' "$BRIDGE_STATE_DIR" "$agent"
 }
 
+bridge_agent_broken_launch_file() {
+  local agent="$1"
+  printf '%s/broken-launch' "$(bridge_agent_idle_marker_dir "$agent")"
+}
+
 bridge_agent_stall_state_file() {
   local agent="$1"
   printf '%s/stall/%s.env' "$BRIDGE_STATE_DIR" "$agent"
@@ -1131,12 +1210,61 @@ CRASH_REPORTED_AT=$(printf '%q' "$(bridge_now_iso)")
 EOF
 }
 
+bridge_agent_write_broken_launch_state() {
+  local agent="$1"
+  local engine="$2"
+  local fail_count="$3"
+  local exit_code="$4"
+  local stderr_file="$5"
+  local launch_cmd="$6"
+  local stderr_offset="${7:-0}"
+  local report_file=""
+  local excerpt=""
+  local offset_start=1
+
+  report_file="$(bridge_agent_broken_launch_file "$agent")"
+  mkdir -p "$(dirname "$report_file")"
+
+  if [[ -f "$stderr_file" ]]; then
+    if [[ "$stderr_offset" =~ ^[0-9]+$ ]] && (( stderr_offset > 0 )); then
+      offset_start=$((stderr_offset + 1))
+      excerpt="$(tail -c +${offset_start} "$stderr_file" 2>/dev/null | head -n 30 || true)"
+    fi
+    if [[ -z "$excerpt" ]]; then
+      excerpt="$(tail -n 30 "$stderr_file" 2>/dev/null || true)"
+    fi
+  fi
+
+  cat >"$report_file" <<EOF
+timestamp: $(bridge_now_iso)
+agent: ${agent}
+engine: ${engine}
+fail_count: ${fail_count}
+exit_code: ${exit_code}
+stderr_file: ${stderr_file}
+launch_cmd: ${launch_cmd}
+
+recovery:
+- run 'agent-bridge agent safe-mode ${agent}'
+- or edit the roster and run 'agent-bridge agent restart ${agent}'
+
+stderr_excerpt:
+${excerpt}
+EOF
+}
+
+bridge_agent_clear_broken_launch_state() {
+  local agent="$1"
+  rm -f "$(bridge_agent_broken_launch_file "$agent")"
+}
+
 bridge_agent_clear_crash_report() {
   local agent="$1"
   rm -f \
     "$(bridge_agent_crash_report_file "$agent")" \
     "$(bridge_agent_crash_tail_file "$agent")" \
     "$(bridge_agent_crash_state_file "$agent")"
+  bridge_agent_clear_broken_launch_state "$agent"
 }
 
 bridge_agent_memory_daily_refresh_pending() {

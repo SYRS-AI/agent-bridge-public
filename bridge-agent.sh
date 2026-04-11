@@ -14,9 +14,10 @@ Usage:
   $(basename "$0") create <agent> [options]
   $(basename "$0") list [--json]
   $(basename "$0") show <agent> [--json]
-  $(basename "$0") start <agent> [--attach] [--replace] [--continue|--no-continue] [--dry-run]
+  $(basename "$0") start <agent> [--attach|--no-attach] [--replace] [--continue|--no-continue] [--dry-run]
+  $(basename "$0") safe-mode <agent> [--attach|--no-attach] [--replace] [--continue|--no-continue] [--dry-run]
   $(basename "$0") stop <agent>
-  $(basename "$0") restart <agent> [--attach] [--continue|--no-continue] [--dry-run]
+  $(basename "$0") restart <agent> [--attach|--no-attach] [--continue|--no-continue] [--dry-run]
   $(basename "$0") attach <agent>
 
 Options:
@@ -49,6 +50,7 @@ Examples:
   $(basename "$0") show reviewer --json
   $(basename "$0") start reviewer --dry-run
   $(basename "$0") restart reviewer --attach
+  $(basename "$0") safe-mode reviewer --attach
   $(basename "$0") stop reviewer
   $(basename "$0") attach reviewer
 EOF
@@ -1045,6 +1047,14 @@ run_start() {
   exec "$BRIDGE_BASH_BIN" "$SCRIPT_DIR/bridge-start.sh" "$agent" "$@"
 }
 
+run_safe_mode() {
+  local agent="${1:-}"
+  shift || true
+  [[ -n "$agent" ]] || bridge_die "Usage: $(basename "$0") safe-mode <agent> [...]"
+  bridge_require_agent "$agent"
+  exec "$BRIDGE_BASH_BIN" "$SCRIPT_DIR/bridge-start.sh" "$agent" --safe-mode "$@"
+}
+
 run_stop() {
   local agent="${1:-}"
   local session=""
@@ -1128,6 +1138,9 @@ case "$subcommand" in
     ;;
   start)
     run_start "$@"
+    ;;
+  safe-mode)
+    run_safe_mode "$@"
     ;;
   stop)
     run_stop "$@"

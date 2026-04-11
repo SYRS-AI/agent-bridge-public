@@ -1294,6 +1294,7 @@ bridge_agent_session_health_json() {
   local onboarding_state=""
   local attached_exit_behavior="exit"
   local restart_readiness="not-looped"
+  local broken_launch_file=""
 
   session="$(bridge_agent_session "$agent")"
   if bridge_agent_is_active "$agent"; then
@@ -1302,8 +1303,11 @@ bridge_agent_session_health_json() {
   loop_mode="$(bridge_agent_loop "$agent")"
   continue_mode="$(bridge_agent_continue "$agent")"
   onboarding_state="$(bridge_agent_onboarding_state "$agent")"
+  broken_launch_file="$(bridge_agent_broken_launch_file "$agent")"
 
-  if [[ "$loop_mode" == "1" ]]; then
+  if [[ -f "$broken_launch_file" ]]; then
+    restart_readiness="broken-launch"
+  elif [[ "$loop_mode" == "1" ]]; then
     if bridge_agent_should_stop_on_attached_clean_exit "$agent"; then
       attached_exit_behavior="stop-until-next-admin-command"
       restart_readiness="onboarding-pending"
@@ -1318,11 +1322,11 @@ bridge_agent_session_health_json() {
   fi
 
   bridge_require_python
-  python3 - "$agent" "$session" "$active" "$loop_mode" "$continue_mode" "$onboarding_state" "$attached_exit_behavior" "$restart_readiness" <<'PY'
+  python3 - "$agent" "$session" "$active" "$loop_mode" "$continue_mode" "$onboarding_state" "$attached_exit_behavior" "$restart_readiness" "$broken_launch_file" <<'PY'
 import json
 import sys
 
-agent, session, active, loop_mode, continue_mode, onboarding_state, attached_exit_behavior, restart_readiness = sys.argv[1:]
+agent, session, active, loop_mode, continue_mode, onboarding_state, attached_exit_behavior, restart_readiness, broken_launch_file = sys.argv[1:]
 payload = {
     "session": session or None,
     "tmux_active": active == "yes",
@@ -1334,6 +1338,8 @@ payload = {
     "detach_hint": "Ctrl-b then d",
     "stop_command": f"agent-bridge kill {agent}",
 }
+if broken_launch_file:
+    payload["broken_launch_file"] = broken_launch_file
 if session:
     payload["attach_command"] = f"tmux attach -t ={session}"
 print(json.dumps(payload, ensure_ascii=False, separators=(",", ":")))
@@ -1349,6 +1355,7 @@ bridge_agent_session_guidance_text() {
   local onboarding_state=""
   local exit_behavior=""
   local restart_readiness=""
+  local broken_launch_file=""
 
   session="$(bridge_agent_session "$agent")"
   if bridge_agent_is_active "$agent"; then
@@ -1357,9 +1364,12 @@ bridge_agent_session_guidance_text() {
   loop_mode="$(bridge_agent_loop "$agent")"
   continue_mode="$(bridge_agent_continue "$agent")"
   onboarding_state="$(bridge_agent_onboarding_state "$agent")"
+  broken_launch_file="$(bridge_agent_broken_launch_file "$agent")"
   exit_behavior="exit"
   restart_readiness="not-looped"
-  if [[ "$loop_mode" == "1" ]]; then
+  if [[ -f "$broken_launch_file" ]]; then
+    restart_readiness="broken-launch"
+  elif [[ "$loop_mode" == "1" ]]; then
     if bridge_agent_should_stop_on_attached_clean_exit "$agent"; then
       exit_behavior="stop-until-next-admin-command"
       restart_readiness="onboarding-pending"
@@ -1380,6 +1390,10 @@ bridge_agent_session_guidance_text() {
   printf -- '- onboarding_state: %s\n' "$onboarding_state"
   printf -- '- attached_exit_behavior: %s\n' "$exit_behavior"
   printf -- '- restart_readiness: %s\n' "$restart_readiness"
+  if [[ -f "$broken_launch_file" ]]; then
+    printf -- '- broken_launch_file: %s\n' "$broken_launch_file"
+    printf -- '- recovery: agent-bridge agent safe-mode %s\n' "$agent"
+  fi
   if [[ -n "$session" ]]; then
     printf -- '- attach: tmux attach -t =%s\n' "$session"
   fi
