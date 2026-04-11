@@ -85,6 +85,11 @@ bridge_tmux_claude_blocker_state_from_text() {
     return 0
   fi
 
+  if [[ "$text" == *"WARNING: Loading development channels"* && "$text" == *"I am using this for local development"* ]]; then
+    printf '%s' "devchannels"
+    return 0
+  fi
+
   printf '%s' "none"
 }
 
@@ -170,12 +175,6 @@ bridge_tmux_session_has_prompt_from_text() {
 
   bridge_tmux_engine_requires_prompt "$engine" || return 0
   [[ -n "$recent" ]] || return 1
-
-  if [[ "$engine" == "claude" ]]; then
-    if [[ "$(bridge_tmux_claude_blocker_state_from_text "$recent")" != "none" ]]; then
-      return 1
-    fi
-  fi
 
   while IFS= read -r line; do
     line="${line//$'\r'/}"
@@ -280,6 +279,7 @@ bridge_tmux_session_inject_busy() {
 
 bridge_tmux_claude_advance_blocker() {
   local session="$1"
+  local allow_devchannels="${2:-0}"
   local state=""
 
   state="$(bridge_tmux_claude_blocker_state "$session")"
@@ -288,6 +288,14 @@ bridge_tmux_claude_advance_blocker() {
       tmux send-keys -t "$(bridge_tmux_pane_target "$session")" C-m
       sleep 0.3
       return 0
+      ;;
+    devchannels)
+      if [[ "$allow_devchannels" == "1" ]]; then
+        tmux send-keys -t "$(bridge_tmux_pane_target "$session")" C-m
+        sleep 0.3
+        return 0
+      fi
+      return 1
       ;;
     *)
       return 1
@@ -299,6 +307,7 @@ bridge_tmux_wait_for_prompt() {
   local session="$1"
   local engine="$2"
   local timeout="${3:-$BRIDGE_TMUX_PROMPT_WAIT_SECONDS}"
+  local allow_devchannels="${4:-0}"
   local start_ts
   local elapsed
   local bootstrap_actions=0
@@ -313,7 +322,7 @@ bridge_tmux_wait_for_prompt() {
   start_ts="$(date +%s)"
   while true; do
     if [[ "$engine" == "claude" ]]; then
-      if bridge_tmux_claude_advance_blocker "$session"; then
+      if bridge_tmux_claude_advance_blocker "$session" "$allow_devchannels"; then
         bootstrap_actions=$((bootstrap_actions + 1))
         if (( bootstrap_actions >= 4 )); then
           return 1

@@ -391,11 +391,13 @@ bridge_setup_ensure_development_channels_launch_flag() {
   local agent="$1"
   local current=""
   local updated=""
+  local dev_channels=""
 
   current="$(bridge_agent_launch_cmd_raw "$agent")"
   [[ -n "$current" ]] || return 1
 
-  updated="$(bridge_claude_launch_with_development_channels "$current" "$(bridge_agent_channels_csv "$agent")")"
+  dev_channels="$(bridge_agent_dev_channels_csv "$agent")"
+  updated="$(bridge_claude_launch_with_development_channels "$current" "$dev_channels")"
   if [[ "$updated" == "$current" ]]; then
     return 1
   fi
@@ -606,9 +608,9 @@ run_teams() {
   if [[ $dry_run -eq 0 ]]; then
     bridge_setup_add_agent_channel "$agent" "plugin:teams"
     if bridge_setup_ensure_development_channels_launch_flag "$agent"; then
-      bridge_info "[info] added --dangerously-load-development-channels to $agent launch (local marketplace channel detected)"
+      bridge_info "[info] added --dangerously-load-development-channels $(bridge_agent_dev_channels_csv "$agent") to $agent launch"
     else
-      bridge_info "[info] $agent launch already allows development channels for local marketplace plugins"
+      bridge_info "[info] $agent launch already allows development channels: $(bridge_agent_dev_channels_csv "$agent")"
     fi
     if [[ -n "$channel_account" ]]; then
       bridge_setup_sync_runtime_account "$runtime_config" "$compat_config" "teams" "$channel_account"

@@ -28,6 +28,7 @@ import {
 } from 'fs'
 import { homedir } from 'os'
 import { join } from 'path'
+import { createRecentMessageDeduper } from './dedupe.ts'
 
 type GroupPolicy = {
   requireMention?: boolean
@@ -204,6 +205,8 @@ const adapter = new BotFrameworkAdapter({
   appPassword: APP_PASSWORD,
   channelAuthTenant: TENANT_ID || undefined,
 })
+const recentMessageIds = createRecentMessageDeduper(256)
+let duplicateDropLogs = 0
 
 const mcp = new Server(
   { name: 'teams', version: '0.1.0' },
@@ -284,10 +287,18 @@ async function handleActivity(context: TurnContext): Promise<void> {
   if (activity.type !== ActivityTypes.Message) return
   if (!gate(activity)) return
 
-  storeReference(activity)
-
   const chatId = referenceKey(activity)
   const messageId = String(activity.id ?? randomUUID())
+  if (recentMessageIds.seen(messageId)) {
+    if (duplicateDropLogs < 10) {
+      process.stderr.write(`teams channel: dropped duplicate message_id=${messageId}\n`)
+      duplicateDropLogs += 1
+    }
+    return
+  }
+
+  storeReference(activity)
+
   const userName = String(activity.from?.name ?? activity.from?.id ?? 'teams-user')
   const userIds = idsFor(activity)
   const aad = userIds[0] ?? ''

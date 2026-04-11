@@ -572,6 +572,28 @@ bridge_qualify_channel_item() {
   printf '%s' "$item"
 }
 
+bridge_channel_item_marketplace() {
+  local item="${1-}"
+
+  item="$(bridge_qualify_channel_item "$item")"
+  [[ "$item" == plugin:*@* ]] || {
+    printf '%s' ""
+    return 0
+  }
+
+  printf '%s' "${item#*@}"
+}
+
+bridge_channel_item_is_development() {
+  local item="${1-}"
+  local marketplace=""
+
+  item="$(bridge_qualify_channel_item "$item")"
+  [[ "$item" == plugin:*@* ]] || return 1
+  marketplace="$(bridge_channel_item_marketplace "$item")"
+  [[ -n "$marketplace" && "$marketplace" != "claude-plugins-official" ]]
+}
+
 bridge_normalize_channels_csv() {
   local raw="${1:-}"
   local normalized=""
@@ -609,6 +631,58 @@ bridge_extract_channels_from_command() {
   done
 
   printf '%s' "$csv"
+}
+
+bridge_extract_development_channels_from_command() {
+  local command="${1:-}"
+
+  bridge_require_python
+  python3 - "$command" <<'PY'
+import shlex
+import sys
+
+command = sys.argv[1]
+
+def normalize(raw: str):
+    values = []
+    seen = set()
+    for chunk in raw.split(","):
+        item = chunk.strip()
+        if not item or item in seen:
+            continue
+        seen.add(item)
+        values.append(item)
+    return values
+
+try:
+    tokens = shlex.split(command)
+except ValueError:
+    print("")
+    raise SystemExit(0)
+
+items = []
+seen = set()
+i = 0
+while i < len(tokens):
+    token = tokens[i]
+    if token == "--dangerously-load-development-channels":
+        i += 1
+        while i < len(tokens) and not tokens[i].startswith("-"):
+            for item in normalize(tokens[i]):
+                if item not in seen:
+                    seen.add(item)
+                    items.append(item)
+            i += 1
+        continue
+    if token.startswith("--dangerously-load-development-channels="):
+        for item in normalize(token.split("=", 1)[1]):
+            if item not in seen:
+                seen.add(item)
+                items.append(item)
+    i += 1
+
+print(",".join(items))
+PY
 }
 
 bridge_channel_csv_contains() {
@@ -669,6 +743,54 @@ bridge_filter_claude_plugin_channels_csv() {
   printf '%s' "$filtered"
 }
 
+bridge_filter_development_channels_csv() {
+  local csv="${1:-}"
+  local item=""
+  local filtered=""
+  local -a items=()
+
+  [[ -n "$csv" ]] || {
+    printf '%s' ""
+    return 0
+  }
+
+  IFS=',' read -r -a items <<<"$csv"
+  for item in "${items[@]}"; do
+    item="$(bridge_trim_whitespace "$item")"
+    [[ -n "$item" ]] || continue
+    item="$(bridge_qualify_channel_item "$item")"
+    if bridge_channel_item_is_development "$item"; then
+      filtered="$(bridge_append_csv_unique "$filtered" "$item")"
+    fi
+  done
+
+  printf '%s' "$filtered"
+}
+
+bridge_filter_approved_channels_csv() {
+  local csv="${1:-}"
+  local item=""
+  local filtered=""
+  local -a items=()
+
+  [[ -n "$csv" ]] || {
+    printf '%s' ""
+    return 0
+  }
+
+  IFS=',' read -r -a items <<<"$csv"
+  for item in "${items[@]}"; do
+    item="$(bridge_trim_whitespace "$item")"
+    [[ -n "$item" ]] || continue
+    item="$(bridge_qualify_channel_item "$item")"
+    if ! bridge_channel_item_is_development "$item"; then
+      filtered="$(bridge_append_csv_unique "$filtered" "$item")"
+    fi
+  done
+
+  printf '%s' "$filtered"
+}
+
 bridge_channel_csv_is_subset() {
   local required_csv="${1:-}"
   local actual_csv="${2:-}"
@@ -701,6 +823,7 @@ bridge_agent_channels_csv() {
   local agent="$1"
   local explicit=""
   local inferred=""
+  local inferred_dev=""
 
   explicit="${BRIDGE_AGENT_CHANNELS[$agent]-}"
   if [[ -n "$explicit" ]]; then
@@ -709,12 +832,31 @@ bridge_agent_channels_csv() {
   fi
 
   inferred="$(bridge_extract_channels_from_command "$(bridge_agent_launch_cmd_raw "$agent")")"
+  inferred_dev="$(bridge_extract_development_channels_from_command "$(bridge_agent_launch_cmd_raw "$agent")")"
+  inferred="$(bridge_merge_channels_csv "$inferred" "$inferred_dev")"
   if [[ -n "$inferred" ]]; then
     printf '%s' "$inferred"
     return 0
   fi
 
   printf '%s' ""
+}
+
+bridge_agent_dev_channels_csv() {
+  local agent="$1"
+  bridge_filter_development_channels_csv "$(bridge_agent_channels_csv "$agent")"
+}
+
+bridge_agent_auto_accept_dev_channels_csv() {
+  local agent="$1"
+  local explicit="${BRIDGE_AGENT_AUTO_ACCEPT_DEV_CHANNELS[$agent]-}"
+
+  if [[ -n "$explicit" ]]; then
+    bridge_normalize_channels_csv "$explicit"
+    return 0
+  fi
+
+  bridge_normalize_channels_csv "${BRIDGE_AUTO_ACCEPT_DEV_CHANNELS_DEFAULT:-plugin:teams@agent-bridge}"
 }
 
 bridge_agent_uses_discord_plugin() {
@@ -969,7 +1111,7 @@ bridge_agent_channel_launch_allowlisted_for_item() {
   local item="$2"
   local generated=""
   local effective=""
-  local marketplace=""
+  local effective_dev=""
 
   [[ "$(bridge_agent_engine "$agent")" == "claude" ]] || {
     printf '%s' "n/a"
@@ -978,15 +1120,19 @@ bridge_agent_channel_launch_allowlisted_for_item() {
 
   item="$(bridge_qualify_channel_item "$item")"
   generated="$(bridge_claude_launch_with_channels "$agent" "$(bridge_agent_launch_cmd_raw "$agent")")"
+  generated="$(bridge_claude_launch_with_development_channels "$generated" "$(bridge_agent_dev_channels_csv "$agent")")"
   effective="$(bridge_extract_channels_from_command "$generated")"
-  if bridge_channel_csv_is_subset "$item" "$effective"; then
-    if [[ "$item" == plugin:*@* ]]; then
-      marketplace="${item#*@}"
-      if [[ "$marketplace" != "claude-plugins-official" && "$generated" != *"--dangerously-load-development-channels"* ]]; then
-        printf '%s' "no"
-        return 0
-      fi
+  effective_dev="$(bridge_extract_development_channels_from_command "$generated")"
+  if bridge_channel_item_is_development "$item"; then
+    if bridge_channel_csv_is_subset "$item" "$effective_dev"; then
+      printf '%s' "yes"
+      return 0
     fi
+    printf '%s' "no"
+    return 0
+  fi
+
+  if bridge_channel_csv_is_subset "$item" "$effective"; then
     printf '%s' "yes"
     return 0
   fi
@@ -1296,17 +1442,42 @@ bridge_agent_launch_channels_csv() {
   local channels=""
 
   if [[ "${BRIDGE_AGENT_SUPPRESS_MISSING_CHANNELS:-0}" == "1" ]]; then
-    channels="$(bridge_agent_ready_channels_csv "$agent")"
+    channels="$(bridge_filter_approved_channels_csv "$(bridge_agent_ready_channels_csv "$agent")")"
   else
-    channels="$(bridge_agent_channels_csv "$agent")"
+    channels="$(bridge_filter_approved_channels_csv "$(bridge_agent_channels_csv "$agent")")"
   fi
   bridge_filter_claude_plugin_channels_csv "$channels"
+}
+
+bridge_agent_effective_dev_channels_csv() {
+  local agent="$1"
+
+  if [[ "${BRIDGE_AGENT_SUPPRESS_MISSING_CHANNELS:-0}" == "1" ]]; then
+    bridge_filter_development_channels_csv "$(bridge_agent_ready_channels_csv "$agent")"
+    return 0
+  fi
+
+  bridge_agent_dev_channels_csv "$agent"
+}
+
+bridge_agent_effective_launch_plugin_channels_csv() {
+  local agent="$1"
+  local merged=""
+
+  merged="$(bridge_merge_channels_csv "$(bridge_agent_launch_channels_csv "$agent")" "$(bridge_agent_effective_dev_channels_csv "$agent")")"
+  bridge_filter_claude_plugin_channels_csv "$merged"
 }
 
 bridge_agent_required_launch_channels_csv() {
   local agent="$1"
 
-  bridge_filter_claude_plugin_channels_csv "$(bridge_agent_channels_csv "$agent")"
+  bridge_filter_claude_plugin_channels_csv "$(bridge_filter_approved_channels_csv "$(bridge_agent_channels_csv "$agent")")"
+}
+
+bridge_agent_required_dev_channels_csv() {
+  local agent="$1"
+
+  bridge_filter_claude_plugin_channels_csv "$(bridge_agent_dev_channels_csv "$agent")"
 }
 
 bridge_agent_required_runtime_channels_csv() {
@@ -1318,19 +1489,30 @@ bridge_agent_required_runtime_channels_csv() {
 bridge_agent_launch_channel_status_reason() {
   local agent="$1"
   local required=""
+  local required_dev=""
   local effective=""
+  local effective_dev=""
   local generated=""
 
   required="$(bridge_agent_required_launch_channels_csv "$agent")"
+  required_dev="$(bridge_agent_required_dev_channels_csv "$agent")"
+  generated="$(bridge_claude_launch_with_channels "$agent" "$(bridge_agent_launch_cmd_raw "$agent")")"
+  generated="$(bridge_claude_launch_with_development_channels "$generated" "$required_dev")"
+  effective_dev="$(bridge_extract_development_channels_from_command "$generated")"
   [[ -n "$required" ]] || {
-    printf '%s' ""
-    return 0
+    if [[ -z "$required_dev" ]]; then
+      printf '%s' ""
+      return 0
+    fi
   }
 
-  generated="$(bridge_claude_launch_with_channels "$agent" "$(bridge_agent_launch_cmd_raw "$agent")")"
   effective="$(bridge_extract_channels_from_command "$generated")"
-  if ! bridge_channel_csv_is_subset "$required" "$effective"; then
+  if [[ -n "$required" ]] && ! bridge_channel_csv_is_subset "$required" "$effective"; then
     printf 'launch command missing required Claude --channels (%s)' "$required"
+    return 0
+  fi
+  if [[ -n "$required_dev" ]] && ! bridge_channel_csv_is_subset "$required_dev" "$effective_dev"; then
+    printf 'launch command missing required development channels (%s)' "$required_dev"
     return 0
   fi
 
@@ -1624,10 +1806,12 @@ bridge_claude_channel_plugins_ready_for_csv() {
 
 bridge_agent_channel_setup_complete() {
   local agent="$1"
+  local plugins=""
 
   [[ "$(bridge_agent_channel_status "$agent")" == "ok" || "$(bridge_agent_channel_status "$agent")" == "-" ]] || return 1
   [[ "$(bridge_agent_engine "$agent")" == "claude" ]] || return 0
-  bridge_claude_channel_plugins_ready_for_csv "$(bridge_agent_launch_channels_csv "$agent")"
+  plugins="$(bridge_merge_channels_csv "$(bridge_agent_required_launch_channels_csv "$agent")" "$(bridge_agent_required_dev_channels_csv "$agent")")"
+  bridge_claude_channel_plugins_ready_for_csv "$plugins"
 }
 
 bridge_ensure_agent_bridge_claude_marketplace() {
@@ -1676,7 +1860,7 @@ bridge_ensure_claude_launch_channel_plugins() {
   local agent="$1"
 
   [[ "$(bridge_agent_engine "$agent")" == "claude" ]] || return 0
-  bridge_ensure_claude_channel_plugins_for_csv "$(bridge_agent_launch_channels_csv "$agent")"
+  bridge_ensure_claude_channel_plugins_for_csv "$(bridge_agent_effective_launch_plugin_channels_csv "$agent")"
 }
 
 bridge_agent_notify_kind() {

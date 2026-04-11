@@ -274,6 +274,47 @@ bridge_run_schedule_idle_marker_and_inbox_bootstrap() {
   ) >/dev/null 2>&1 &
 }
 
+bridge_run_should_auto_accept_dev_channels() {
+  local launch_cmd="$1"
+  local allowed=""
+  local effective=""
+  local item=""
+  local -a items=()
+
+  [[ "$ENGINE" == "claude" ]] || return 1
+  effective="$(bridge_extract_development_channels_from_command "$launch_cmd")"
+  [[ -n "$effective" ]] || return 1
+  allowed="$(bridge_agent_auto_accept_dev_channels_csv "$AGENT")"
+  [[ -n "$allowed" ]] || return 1
+
+  IFS=',' read -r -a items <<<"$allowed"
+  for item in "${items[@]}"; do
+    item="$(bridge_trim_whitespace "$item")"
+    [[ -n "$item" ]] || continue
+    if bridge_channel_csv_contains "$effective" "$item"; then
+      return 0
+    fi
+  done
+
+  return 1
+}
+
+bridge_run_schedule_dev_channels_accept() {
+  local launch_cmd="$1"
+
+  bridge_run_should_auto_accept_dev_channels "$launch_cmd" || return 0
+  log_line "[info] auto-accepting Claude development-channels prompt for allowlisted dev channel(s)"
+  (
+    "$BRIDGE_BASH_BIN" -lc '
+      set -euo pipefail
+      script_dir="$1"
+      session="$2"
+      source "$script_dir/bridge-lib.sh"
+      bridge_tmux_wait_for_prompt "$session" claude 15 1 >/dev/null 2>&1 || true
+    ' -- "$SCRIPT_DIR" "$SESSION"
+  ) >/dev/null 2>&1 &
+}
+
 log_line "${AGENT} 에이전트 시작 (engine=${ENGINE}, dir=${WORK_DIR})"
 BRIDGE_RUN_ROSTER_SIGNATURE="$(bridge_run_roster_signature)"
 
@@ -290,6 +331,7 @@ while true; do
 
   if [[ "$ENGINE" == "claude" ]]; then
     bridge_ensure_claude_launch_channel_plugins "$AGENT"
+    bridge_run_schedule_dev_channels_accept "$LAUNCH_CMD"
     bridge_run_schedule_idle_marker_and_inbox_bootstrap
     bridge_run_schedule_next_session_prompt
   fi

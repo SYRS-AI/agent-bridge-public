@@ -284,14 +284,16 @@ bridge_claude_launch_with_channels() {
   local agent="$1"
   local original="$2"
   local required=""
+  local dev_required=""
 
   required="$(bridge_agent_launch_channels_csv "$agent")"
-  if [[ -z "$required" ]]; then
+  dev_required="$(bridge_agent_effective_dev_channels_csv "$agent")"
+  if [[ -z "$required" && -z "$dev_required" ]]; then
     printf '%s' "$original"
     return 0
   fi
 
-  original="$(bridge_claude_launch_with_development_channels "$original" "$required")"
+  original="$(bridge_claude_launch_with_development_channels "$original" "$dev_required")"
 
   bridge_require_python
   python3 - "$original" "$required" <<'PY'
@@ -366,7 +368,7 @@ bridge_claude_launch_with_development_channels() {
   local original="$1"
   local required_csv="${2:-}"
 
-  [[ -n "$required_csv" ]] || {
+  [[ -n "$required_csv" || "$original" == *"--dangerously-load-development-channels"* ]] || {
     printf '%s' "$original"
     return 0
   }
@@ -394,11 +396,6 @@ def is_dev_channel(item: str) -> bool:
     return item.startswith("plugin:") and "@" in item and not item.endswith("@claude-plugins-official")
 
 required = normalize(required_csv)
-needs_dev_flag = any(is_dev_channel(item) for item in required)
-if not needs_dev_flag:
-    print(original)
-    raise SystemExit(0)
-
 match = re.match(r"^(?P<prefix>.*?)(?P<command>claude(?:\s|$).*)$", original)
 if not match:
     print(original)
@@ -412,12 +409,18 @@ if not args or args[0] != "claude":
 
 rest = args[1:]
 filtered = []
-has_dev_flag = False
+existing = []
 i = 0
 while i < len(rest):
     token = rest[i]
     if token == "--dangerously-load-development-channels":
-        has_dev_flag = True
+        i += 1
+        while i < len(rest) and not rest[i].startswith("-"):
+            existing.extend(normalize(rest[i]))
+            i += 1
+        continue
+    if token.startswith("--dangerously-load-development-channels="):
+        existing.extend(normalize(token.split("=", 1)[1]))
         i += 1
         continue
     filtered.append(token)
@@ -427,9 +430,18 @@ while i < len(rest):
         continue
     i += 1
 
+merged = []
+seen = set()
+for item in [*existing, *required]:
+    if not is_dev_channel(item) or item in seen:
+        continue
+    seen.add(item)
+    merged.append(item)
+
 rebuilt = ["claude"]
-if needs_dev_flag or has_dev_flag:
+if merged:
     rebuilt.append("--dangerously-load-development-channels")
+    rebuilt.extend(merged)
 rebuilt.extend(filtered)
 
 quoted = " ".join(shlex.quote(token) for token in rebuilt)
@@ -441,12 +453,14 @@ bridge_claude_launch_with_channel_state_dirs() {
   local agent="$1"
   local original="$2"
   local required=""
+  local dev_channels=""
   local discord_dir=""
   local telegram_dir=""
   local teams_dir=""
 
   required="$(bridge_agent_launch_channels_csv "$agent")"
-  if [[ -z "$required" ]]; then
+  dev_channels="$(bridge_extract_development_channels_from_command "$original")"
+  if [[ -z "$required" && -z "$dev_channels" ]]; then
     printf '%s' "$original"
     return 0
   fi
@@ -456,12 +470,12 @@ bridge_claude_launch_with_channel_state_dirs() {
   teams_dir="$(bridge_agent_teams_state_dir "$agent")"
 
   bridge_require_python
-  python3 - "$original" "$required" "$discord_dir" "$telegram_dir" "$teams_dir" <<'PY'
+  python3 - "$original" "$required" "$dev_channels" "$discord_dir" "$telegram_dir" "$teams_dir" <<'PY'
 import re
 import shlex
 import sys
 
-original, required_csv, discord_dir, telegram_dir, teams_dir = sys.argv[1:]
+original, required_csv, dev_channels_csv, discord_dir, telegram_dir, teams_dir = sys.argv[1:]
 
 def normalize(raw: str):
     values = []
@@ -475,7 +489,16 @@ def normalize(raw: str):
     return values
 
 required = normalize(required_csv)
-if not required:
+dev_channels = normalize(dev_channels_csv)
+all_channels = []
+seen = set()
+for item in [*required, *dev_channels]:
+    if item in seen:
+        continue
+    seen.add(item)
+    all_channels.append(item)
+
+if not all_channels:
     print(original)
     raise SystemExit(0)
 
@@ -488,11 +511,11 @@ env_prefix = match.group("prefix")
 command = match.group("command")
 assignments = []
 
-if any(item == "plugin:discord" or item.startswith("plugin:discord@") for item in required):
+if any(item == "plugin:discord" or item.startswith("plugin:discord@") for item in all_channels):
     assignments.append(("DISCORD_STATE_DIR", discord_dir))
-if any(item == "plugin:telegram" or item.startswith("plugin:telegram@") for item in required):
+if any(item == "plugin:telegram" or item.startswith("plugin:telegram@") for item in all_channels):
     assignments.append(("TELEGRAM_STATE_DIR", telegram_dir))
-if any(item == "plugin:teams" or item.startswith("plugin:teams@") for item in required):
+if any(item == "plugin:teams" or item.startswith("plugin:teams@") for item in all_channels):
     assignments.append(("TEAMS_STATE_DIR", teams_dir))
 
 for name, value in assignments:
@@ -864,6 +887,7 @@ bridge_load_roster() {
   : "${BRIDGE_USAGE_CRITICAL_PERCENT:=100}"
   : "${BRIDGE_USAGE_MONITOR_INTERVAL_SECONDS:=300}"
   : "${BRIDGE_USAGE_MONITOR_STATE_FILE:=$BRIDGE_STATE_DIR/usage/monitor-state.json}"
+  : "${BRIDGE_AUTO_ACCEPT_DEV_CHANNELS_DEFAULT:=plugin:teams@agent-bridge}"
   : "${BRIDGE_NEXT_SESSION_AUTO_CLEAR_SECONDS:=300}"
   : "${BRIDGE_STALL_SCAN_ENABLED:=1}"
   : "${BRIDGE_STALL_SCAN_INTERVAL_SECONDS:=30}"

@@ -1990,7 +1990,7 @@ SETUP_TEAMS_OUTPUT="$("$BASH4_BIN" "$REPO_ROOT/bridge-setup.sh" teams "$CREATED_
 assert_contains "$SETUP_TEAMS_OUTPUT" "teams_dir: $BRIDGE_AGENT_HOME_ROOT/$CREATED_AGENT/.teams"
 assert_contains "$SETUP_TEAMS_OUTPUT" "credential_source: channel:smoke"
 assert_contains "$SETUP_TEAMS_OUTPUT" "validation: local"
-assert_contains "$SETUP_TEAMS_OUTPUT" "--dangerously-load-development-channels"
+assert_contains "$SETUP_TEAMS_OUTPUT" "--dangerously-load-development-channels plugin:teams@agent-bridge"
 assert_contains "$(cat "$BRIDGE_AGENT_HOME_ROOT/$CREATED_AGENT/.teams/.env")" "TEAMS_APP_ID=smoke-teams-app-id"
 assert_contains "$(cat "$BRIDGE_AGENT_HOME_ROOT/$CREATED_AGENT/.teams/access.json")" "19:smoke@thread.v2"
 CREATED_TEAMS_LAUNCH="$("$BASH4_BIN" -c '
@@ -2000,7 +2000,16 @@ CREATED_TEAMS_LAUNCH="$("$BASH4_BIN" -c '
 ')"
 assert_contains "$CREATED_TEAMS_LAUNCH" "TEAMS_STATE_DIR=$BRIDGE_AGENT_HOME_ROOT/$CREATED_AGENT/.teams"
 assert_contains "$CREATED_TEAMS_LAUNCH" "plugin:teams@agent-bridge"
-assert_contains "$CREATED_TEAMS_LAUNCH" "--dangerously-load-development-channels"
+assert_contains "$CREATED_TEAMS_LAUNCH" "--dangerously-load-development-channels plugin:teams@agent-bridge"
+assert_not_contains "$CREATED_TEAMS_LAUNCH" "--channels plugin:teams@agent-bridge"
+TEAMS_DEV_STATE_DIR_LAUNCH="$("$BASH4_BIN" -c '
+  source "'"$REPO_ROOT"'/bridge-lib.sh"
+  bridge_load_roster
+  BRIDGE_AGENT_CHANNELS["'"$CREATED_AGENT"'"]="plugin:discord@claude-plugins-official"
+  raw="claude --dangerously-load-development-channels plugin:teams@agent-bridge --dangerously-skip-permissions --name '"$CREATED_AGENT"' --channels plugin:discord@claude-plugins-official"
+  bridge_claude_launch_with_channel_state_dirs "'"$CREATED_AGENT"'" "$raw"
+')"
+assert_contains "$TEAMS_DEV_STATE_DIR_LAUNCH" "TEAMS_STATE_DIR=$BRIDGE_AGENT_HOME_ROOT/$CREATED_AGENT/.teams"
 
 if command -v bun >/dev/null 2>&1; then
   log "exercising Teams channel plugin health"
@@ -2054,6 +2063,8 @@ if payload.get("ok") is not True or payload.get("channel") != "teams":
     raise SystemExit("Teams health payload mismatch")
 PY
   assert_contains "$(cat "$TEAMS_PLUGIN_LOG")" "http://0.0.0.0:$TEAMS_SMOKE_PORT/api/messages"
+  TEAMS_DEDUPE_OUTPUT="$(cd "$REPO_ROOT/plugins/teams" && bun -e 'import { createRecentMessageDeduper } from "./dedupe.ts"; const dedupe = createRecentMessageDeduper(2); console.log(JSON.stringify([dedupe.seen("1775901127484"), dedupe.seen("1775901127484"), dedupe.seen("1775901127485"), dedupe.seen("1775901127486"), dedupe.seen("1775901127484")]))')"
+  assert_contains "$TEAMS_DEDUPE_OUTPUT" "[false,true,false,false,false]"
   kill "$TEAMS_PLUGIN_PID" >/dev/null 2>&1 || true
   wait "$TEAMS_PLUGIN_PID" >/dev/null 2>&1 || true
   TEAMS_PLUGIN_PID=""
@@ -2313,6 +2324,29 @@ grep -Fq 'mark=after' "$FAKE_CLAUDE_LOG" || die "expected bridge-run loop to rel
 grep -Fq 'roster changed on disk; reloading before next relaunch' "$ROSTER_RELOAD_RUN_LOG" || die "expected bridge-run to log roster reload"
 kill "$ROSTER_RELOAD_PID" >/dev/null 2>&1 || true
 wait "$ROSTER_RELOAD_PID" >/dev/null 2>&1 || true
+
+log "auto-accepting Claude development-channel warnings for allowlisted dev plugins"
+DEV_CHANNELS_PROMPT_SESSION="dev-channels-prompt-$SESSION_NAME"
+DEV_CHANNELS_PROMPT_ACK="$TMP_ROOT/dev-channels-prompt-ack.txt"
+DEV_CHANNELS_PROMPT_SCRIPT="$TMP_ROOT/dev-channels-prompt.sh"
+cat >"$DEV_CHANNELS_PROMPT_SCRIPT" <<EOF
+#!/usr/bin/env bash
+printf 'WARNING: Loading development channels\n'
+printf 'I am using this for local development\n'
+printf 'Enter to confirm · Esc to cancel\n'
+IFS= read -r line
+printf '%s\n' "\${line:-<enter>}" >"$DEV_CHANNELS_PROMPT_ACK"
+printf '❯ \n'
+sleep 2
+EOF
+chmod +x "$DEV_CHANNELS_PROMPT_SCRIPT"
+tmux new-session -d -s "$DEV_CHANNELS_PROMPT_SESSION" "$DEV_CHANNELS_PROMPT_SCRIPT"
+"$BASH4_BIN" -c '
+  source "'"$REPO_ROOT"'/bridge-lib.sh"
+  bridge_tmux_wait_for_prompt "'"$DEV_CHANNELS_PROMPT_SESSION"'" claude 5 1
+' >/dev/null
+assert_contains "$(cat "$DEV_CHANNELS_PROMPT_ACK")" "<enter>"
+tmux kill-session -t "=$DEV_CHANNELS_PROMPT_SESSION" >/dev/null 2>&1 || true
 
 log "classifying admin foreground exit by onboarding state"
 ONBOARDING_ADMIN_WORKDIR="$TMP_ROOT/onboarding-admin"
