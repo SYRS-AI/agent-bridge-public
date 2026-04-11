@@ -9,8 +9,10 @@ import json
 import os
 import re
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlencode, urlparse
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
@@ -240,8 +242,10 @@ def inspect_telegram_dir(telegram_dir: Path) -> dict[str, Any]:
 def inspect_teams_dir(teams_dir: Path) -> dict[str, Any]:
     env_path = teams_dir / ".env"
     access_path = teams_dir / "access.json"
+    state_path = teams_dir / "state.json"
     env = load_dotenv(env_path)
     access_payload = load_json(access_path, {})
+    state_payload = load_json(state_path, {})
     groups = access_payload.get("groups") or {}
     conversations = [str(key) for key in groups.keys() if str(key).strip()]
     allow_from = normalize_teams_id_list(access_payload.get("allowFrom") or [], "allow_from")
@@ -253,15 +257,144 @@ def inspect_teams_dir(teams_dir: Path) -> dict[str, Any]:
     return {
         "env_path": env_path,
         "access_path": access_path,
+        "state_path": state_path,
         "app_id": env.get("TEAMS_APP_ID", "").strip(),
         "app_password": env.get("TEAMS_APP_PASSWORD", "").strip(),
         "tenant_id": env.get("TEAMS_TENANT_ID", "").strip(),
         "service_url": env.get("TEAMS_SERVICE_URL", "").strip(),
+        "webhook_host": env.get("TEAMS_WEBHOOK_HOST", "").strip(),
+        "webhook_port": env.get("TEAMS_WEBHOOK_PORT", "").strip(),
         "conversations": conversations,
         "allow_from": allow_from,
         "require_mention": require_mention,
         "access_payload": access_payload if isinstance(access_payload, dict) else {},
+        "state_payload": state_payload if isinstance(state_payload, dict) else {},
     }
+
+
+def teams_login_base_url() -> str:
+    return os.environ.get("BRIDGE_TEAMS_LOGIN_BASE_URL", "https://login.microsoftonline.com").rstrip("/")
+
+
+def teams_validation_scope() -> str:
+    return os.environ.get("BRIDGE_TEAMS_VALIDATION_SCOPE", "https://api.botframework.com/.default").strip()
+
+
+def validate_teams_credentials(app_id: str, app_password: str, tenant_id: str) -> dict[str, Any]:
+    tenant = tenant_id.strip()
+    if not tenant:
+        return {
+            "status": "skipped",
+            "reason": "tenant_id_unset",
+        }
+
+    scope = teams_validation_scope()
+    token_url = f"{teams_login_base_url()}/{tenant}/oauth2/v2.0/token"
+    body = urlencode(
+        {
+            "client_id": app_id,
+            "client_secret": app_password,
+            "grant_type": "client_credentials",
+            "scope": scope,
+        }
+    ).encode("utf-8")
+    request = Request(
+        token_url,
+        data=body,
+        headers={
+            "Content-Type": "application/x-www-form-urlencoded",
+            "User-Agent": "agent-bridge-setup/0.1",
+        },
+        method="POST",
+    )
+    try:
+        with urlopen(request, timeout=15) as response:
+            payload = json.loads(response.read().decode("utf-8") or "{}")
+    except HTTPError as exc:
+        details = exc.read().decode("utf-8", errors="replace")
+        try:
+            parsed = json.loads(details)
+        except json.JSONDecodeError:
+            parsed = {}
+        error_detail = str(parsed.get("error_description") or parsed.get("error") or details).strip()
+        raise SetupError(f"Teams credential validation failed: HTTP {exc.code}: {error_detail}") from exc
+    except URLError as exc:
+        raise SetupError(f"Teams credential validation failed: {exc.reason}") from exc
+
+    access_token = str(payload.get("access_token") or "").strip()
+    if not access_token:
+        raise SetupError("Teams credential validation failed: token endpoint returned no access_token")
+
+    return {
+        "status": "ok",
+        "tenant_id": tenant,
+        "token_endpoint": token_url,
+        "scope": scope,
+        "expires_in": int(payload.get("expires_in") or 0),
+    }
+
+
+def probe_teams_messaging_endpoint(url: str) -> dict[str, Any]:
+    endpoint = str(url or "").strip()
+    if not endpoint:
+        return {"status": "skipped"}
+
+    request = Request(
+        endpoint,
+        data=b"{}",
+        headers={
+            "Content-Type": "application/json",
+            "User-Agent": "agent-bridge-setup/0.1",
+        },
+        method="POST",
+    )
+    try:
+        with urlopen(request, timeout=10) as response:
+            status_code = int(response.getcode() or 0)
+            body = response.read().decode("utf-8", errors="replace")
+    except HTTPError as exc:
+        status_code = int(exc.code or 0)
+        body = exc.read().decode("utf-8", errors="replace")
+    except URLError as exc:
+        return {
+            "status": "unreachable",
+            "detail": str(exc.reason),
+        }
+
+    if 200 <= status_code < 300:
+        status = "ok"
+    elif status_code in {401, 403, 404, 405, 500}:
+        status = "backend_reached"
+    elif status_code in {502, 503, 504}:
+        status = "gateway_upstream_unreachable"
+    else:
+        status = f"http_{status_code}"
+
+    return {
+        "status": status,
+        "http_status": status_code,
+        "detail": body.strip()[:240],
+    }
+
+
+def summarize_teams_validation(
+    credentials: dict[str, Any],
+    endpoint_probe: dict[str, Any],
+) -> str:
+    credential_status = str(credentials.get("status") or "skipped")
+    probe_status = str(endpoint_probe.get("status") or "skipped")
+
+    if credential_status == "ok" and probe_status in {"ok", "backend_reached", "skipped"}:
+        return "ok"
+    if credential_status == "ok" and probe_status == "gateway_upstream_unreachable":
+        return "warning"
+    if credential_status == "ok" and probe_status == "unreachable":
+        return "warning"
+    if credential_status == "skipped" and probe_status in {"ok", "backend_reached"}:
+        return "probe_only"
+    if credential_status == "skipped" and probe_status == "skipped":
+        return "local"
+    return "warning"
 
 
 def http_json(token: str, url: str, method: str = "GET", payload: dict[str, Any] | None = None) -> Any:
@@ -483,7 +616,18 @@ def print_teams_result(result: dict[str, Any], *, stream: Any = sys.stdout) -> N
     print(f"teams_dir: {result['teams_dir']}", file=stream)
     print(f"env_file: {result['env_file']}", file=stream)
     print(f"access_file: {result['access_file']}", file=stream)
+    print(f"state_file: {result['state_file']}", file=stream)
     print(f"credential_source: {result['credential_source']}", file=stream)
+    print(f"webhook_host: {result['webhook_host']}", file=stream)
+    print(f"webhook_port: {result['webhook_port']}", file=stream)
+    if result["ingress_port"]:
+        print(f"ingress_port: {result['ingress_port']}", file=stream)
+    else:
+        print("ingress_port: (unset)", file=stream)
+    if result["messaging_endpoint"]:
+        print(f"messaging_endpoint: {result['messaging_endpoint']}", file=stream)
+    else:
+        print("messaging_endpoint: (unset)", file=stream)
     if result["allow_from"]:
         print(f"allow_from: {', '.join(result['allow_from'])}", file=stream)
     else:
@@ -496,6 +640,14 @@ def print_teams_result(result: dict[str, Any], *, stream: Any = sys.stdout) -> N
     print(f"write_status: {result['write_status']}", file=stream)
     validation = result.get("validation") or {}
     print(f"validation: {validation.get('status', 'skipped')}", file=stream)
+    credentials = validation.get("credentials") or {}
+    print(f"credential_validation: {credentials.get('status', 'skipped')}", file=stream)
+    if credentials.get("token_endpoint"):
+        print(f"token_endpoint: {credentials['token_endpoint']}", file=stream)
+    probe = validation.get("endpoint_probe") or {}
+    print(f"endpoint_probe: {probe.get('status', 'skipped')}", file=stream)
+    if probe.get("http_status"):
+        print(f"endpoint_http_status: {probe['http_status']}", file=stream)
     for warning in result.get("warnings") or []:
         print(f"warning: {warning}", file=stream)
     if result.get("error"):
@@ -767,6 +919,7 @@ def cmd_teams(args: argparse.Namespace) -> int:
     teams_dir = Path(args.teams_dir).expanduser()
     inspected = inspect_teams_dir(teams_dir)
     access_payload = inspected["access_payload"]
+    state_payload = inspected["state_payload"]
     warnings: list[str] = []
     interactive = sys.stdin.isatty() and sys.stdout.isatty() and not args.yes
 
@@ -775,7 +928,12 @@ def cmd_teams(args: argparse.Namespace) -> int:
         "teams_dir": str(teams_dir),
         "env_file": str(inspected["env_path"]),
         "access_file": str(inspected["access_path"]),
+        "state_file": str(inspected["state_path"]),
         "credential_source": "",
+        "webhook_host": "",
+        "webhook_port": "",
+        "ingress_port": "",
+        "messaging_endpoint": "",
         "allow_from": [],
         "conversations": [],
         "require_mention": False,
@@ -822,6 +980,10 @@ def cmd_teams(args: argparse.Namespace) -> int:
         ).strip()
         tenant_id = str(args.tenant_id or account_cfg.get("tenantId") or account_cfg.get("tenant_id") or inspected["tenant_id"]).strip()
         service_url = str(args.service_url or account_cfg.get("serviceUrl") or account_cfg.get("service_url") or inspected["service_url"]).strip()
+        webhook_host = str(args.webhook_host or inspected["webhook_host"] or "127.0.0.1").strip()
+        webhook_port = str(args.webhook_port or inspected["webhook_port"] or "3978").strip()
+        ingress_port = str(args.ingress_port or "").strip()
+        messaging_endpoint = str(args.messaging_endpoint or "").strip()
 
         if not credential_source:
             if args.app_id or args.app_password or args.tenant_id:
@@ -840,9 +1002,25 @@ def cmd_teams(args: argparse.Namespace) -> int:
             credential_source = credential_source or "prompt"
         if not service_url and interactive:
             service_url = prompt_text("Optional Teams service URL for proactive replies", inspected["service_url"])
+        if interactive and not args.webhook_host and not inspected["webhook_host"]:
+            webhook_host = prompt_text("Webhook listen host", webhook_host)
+        if interactive and not args.webhook_port and not inspected["webhook_port"]:
+            webhook_port = prompt_text("Webhook listen port", webhook_port)
+        if interactive and not args.messaging_endpoint:
+            messaging_endpoint = prompt_text("Optional public messaging endpoint URL", messaging_endpoint)
+        if interactive and not args.ingress_port:
+            ingress_port = prompt_text("Optional reverse proxy/backend target port", ingress_port)
 
         if not app_id or not app_password:
             raise SetupError("Teams app id and app password are required. Pass --app-id/--app-password, --channel-account, or run in an interactive TTY.")
+        if not re.fullmatch(r"\d{2,5}", webhook_port):
+            raise SetupError(f"Webhook port must be a TCP port number: {webhook_port}")
+        if ingress_port and not re.fullmatch(r"\d{2,5}", ingress_port):
+            raise SetupError(f"Ingress port must be a TCP port number: {ingress_port}")
+        if messaging_endpoint:
+            parsed_endpoint = urlparse(messaging_endpoint)
+            if parsed_endpoint.scheme not in {"http", "https"} or not parsed_endpoint.netloc:
+                raise SetupError(f"Messaging endpoint must be a full http(s) URL: {messaging_endpoint}")
 
         explicit_allow_from = normalize_teams_id_list(args.allow_from or [], "allow_from")
         if interactive and not explicit_allow_from:
@@ -869,6 +1047,10 @@ def cmd_teams(args: argparse.Namespace) -> int:
             warnings.append("TEAMS_TENANT_ID is unset. Single-tenant Azure Bot deployments should set --tenant-id.")
 
         result["credential_source"] = credential_source or "existing:.teams/.env"
+        result["webhook_host"] = webhook_host
+        result["webhook_port"] = webhook_port
+        result["ingress_port"] = ingress_port
+        result["messaging_endpoint"] = messaging_endpoint
         result["allow_from"] = allow_from
         result["conversations"] = conversations
         result["require_mention"] = require_mention
@@ -901,6 +1083,8 @@ def cmd_teams(args: argparse.Namespace) -> int:
         env_lines = [
             f"TEAMS_APP_ID={app_id}",
             f"TEAMS_APP_PASSWORD={app_password}",
+            f"TEAMS_WEBHOOK_HOST={webhook_host}",
+            f"TEAMS_WEBHOOK_PORT={webhook_port}",
         ]
         if tenant_id:
             env_lines.append(f"TEAMS_TENANT_ID={tenant_id}")
@@ -908,8 +1092,52 @@ def cmd_teams(args: argparse.Namespace) -> int:
             env_lines.append(f"TEAMS_SERVICE_URL={service_url}")
         save_text(inspected["env_path"], "\n".join(env_lines) + "\n")
         save_json(inspected["access_path"], access_doc)
+        credential_validation = {"status": "skipped"}
+        if not args.skip_validate:
+            credential_validation = validate_teams_credentials(app_id, app_password, tenant_id)
+
+        endpoint_probe = {"status": "skipped"}
+        if messaging_endpoint and not args.skip_send_test:
+            endpoint_probe = probe_teams_messaging_endpoint(messaging_endpoint)
+
+        if webhook_host in {"127.0.0.1", "localhost"} and messaging_endpoint:
+            warnings.append(
+                "Webhook is listening on loopback only. External reverse proxies will not reach the plugin until TEAMS_WEBHOOK_HOST is set to 0.0.0.0 or another non-loopback interface."
+            )
+        if ingress_port and ingress_port != webhook_port:
+            warnings.append(
+                f"Reverse proxy target port {ingress_port} does not match Teams webhook port {webhook_port}. If your proxy cannot target {webhook_port} directly, add an iptables redirect such as: sudo iptables -t nat -I PREROUTING -p tcp --dport {ingress_port} -j REDIRECT --to-ports {webhook_port}"
+            )
+        if messaging_endpoint and endpoint_probe.get("status") == "unreachable":
+            warnings.append(
+                "Messaging endpoint did not respond. Check DNS, TLS, and reverse proxy reachability before restarting the agent."
+            )
+        if endpoint_probe.get("status") == "gateway_upstream_unreachable":
+            warnings.append(
+                "Messaging endpoint returned 502/503/504. The public proxy is up, but the backend listener or port mapping is not. Check TEAMS_WEBHOOK_HOST/PORT and any ALB/nginx/iptables wiring."
+            )
+        if endpoint_probe.get("status") == "backend_reached":
+            warnings.append(
+                "Messaging endpoint reached the backend. A 401/404/405/500 response is acceptable for the setup probe because it confirms traffic is arriving at the plugin path."
+            )
+        if messaging_endpoint and urlparse(messaging_endpoint).path.rstrip("/") != "/api/messages":
+            warnings.append("Messaging endpoint path is not /api/messages. Azure Bot Service normally posts to /api/messages.")
+
+        state_doc = dict(state_payload)
+        validation_state = dict(state_doc.get("validation") or {})
+        validation_state["last_checked_at"] = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        validation_state["credentials"] = credential_validation
+        validation_state["endpoint_probe"] = endpoint_probe
+        validation_state["status"] = summarize_teams_validation(credential_validation, endpoint_probe)
+        validation_state["messaging_endpoint"] = messaging_endpoint
+        state_doc["validation"] = validation_state
+        save_json(inspected["state_path"], state_doc)
         result["write_status"] = "ok"
-        result["validation"] = {"status": "local"}
+        result["validation"] = {
+            "status": validation_state["status"],
+            "credentials": credential_validation,
+            "endpoint_probe": endpoint_probe,
+        }
         print_teams_result(result)
         return 0
     except SetupError as exc:
@@ -972,6 +1200,10 @@ def build_parser() -> argparse.ArgumentParser:
     teams_parser.add_argument("--app-password", default="")
     teams_parser.add_argument("--tenant-id", default="")
     teams_parser.add_argument("--service-url", default="")
+    teams_parser.add_argument("--messaging-endpoint", default="")
+    teams_parser.add_argument("--webhook-host", default="")
+    teams_parser.add_argument("--webhook-port", default="")
+    teams_parser.add_argument("--ingress-port", default="")
     teams_parser.add_argument("--allow-from", action="append", default=[])
     teams_parser.add_argument("--conversation", action="append", default=[])
     teams_parser.add_argument("--require-mention", action="store_true")

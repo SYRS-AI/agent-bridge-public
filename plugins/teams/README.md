@@ -8,6 +8,7 @@ By default the plugin reads:
 
 - `~/.claude/channels/teams/.env`
 - `~/.claude/channels/teams/access.json`
+- `~/.claude/channels/teams/state.json`
 
 When Agent Bridge starts an agent with `plugin:teams@agent-bridge`, it sets `TEAMS_STATE_DIR` to the agent-local directory, for example:
 
@@ -21,11 +22,13 @@ When Agent Bridge starts an agent with `plugin:teams@agent-bridge`, it sets `TEA
 TEAMS_APP_ID=<azure-bot-app-id>
 TEAMS_APP_PASSWORD=<azure-bot-client-secret>
 TEAMS_TENANT_ID=<azure-tenant-id>
-TEAMS_WEBHOOK_HOST=127.0.0.1
+TEAMS_WEBHOOK_HOST=0.0.0.0
 TEAMS_WEBHOOK_PORT=3978
 ```
 
 Expose `http://<host>:3978/api/messages` through HTTPS and set it as the Azure Bot Service messaging endpoint.
+
+For the full operator guide, including ALB / nginx / iptables paths and setup validation, see [docs/channels/teams-setup.md](../../docs/channels/teams-setup.md).
 
 ## Tools
 
@@ -54,7 +57,7 @@ Expose `http://<host>:3978/api/messages` through HTTPS and set it as the Azure B
 Agent Bridge writes this file through:
 
 ```bash
-agb setup teams <agent> --app-id ... --app-password ... --tenant-id ... --allow-from ...
+agb setup teams <agent> --app-id ... --app-password ... --tenant-id ... --allow-from ... --messaging-endpoint https://bot.example.com/api/messages --webhook-host 0.0.0.0
 ```
 
 ## Current Scope

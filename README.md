@@ -323,6 +323,10 @@ agb setup teams patch \
   --app-id "<azure-bot-app-id>" \
   --app-password "<client-secret>" \
   --tenant-id "<tenant-id>" \
+  --messaging-endpoint "https://bot.example.com/api/messages" \
+  --webhook-host "0.0.0.0" \
+  --webhook-port "3978" \
+  --ingress-port "80" \
   --allow-from "<aad-object-id-or-teams-user-id>" \
   --yes
 ```
@@ -340,6 +344,8 @@ agb setup teams patch \
 ```
 
 자세한 플러그인 동작은 [plugins/teams/README.md](./plugins/teams/README.md)를 참고하세요.
+
+운영 환경의 전체 bring-up 절차와 reverse proxy 예시는 [docs/channels/teams-setup.md](./docs/channels/teams-setup.md)를 참고하세요.
 
 ### 채널 MCP 연결 오류가 날 때
 

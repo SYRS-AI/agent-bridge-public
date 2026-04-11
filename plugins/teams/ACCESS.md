@@ -28,3 +28,5 @@ agb setup teams patch \
   --require-mention \
   --yes
 ```
+
+For full production bring-up, including messaging endpoint probing, `TEAMS_WEBHOOK_HOST`, reverse proxy examples, and iptables guidance, see [docs/channels/teams-setup.md](../../docs/channels/teams-setup.md).

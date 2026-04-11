@@ -61,9 +61,10 @@ const MESSAGES_FILE = join(STATE_DIR, 'messages.jsonl')
 
 try {
   chmodSync(ENV_FILE, 0o600)
+  const inheritedEnv = new Set(Object.keys(process.env))
   for (const line of readFileSync(ENV_FILE, 'utf8').split('\n')) {
     const m = line.match(/^(\w+)=(.*)$/)
-    if (m && process.env[m[1]] === undefined) process.env[m[1]] = m[2]
+    if (m && !inheritedEnv.has(m[1])) process.env[m[1]] = m[2]
   }
 } catch {}
 

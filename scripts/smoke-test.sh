@@ -191,6 +191,7 @@ FAKE_TELEGRAM_PORT_FILE="$TMP_ROOT/fake-telegram.port"
 FAKE_TELEGRAM_REQUESTS="$TMP_ROOT/fake-telegram-requests.jsonl"
 FAKE_TELEGRAM_PID=""
 TEAMS_PLUGIN_PID=""
+TEAMS_SETUP_MOCK_PID=""
 MCP_ORPHAN_PID=""
 MCP_ATTACHED_PARENT_PID=""
 MCP_ATTACHED_CHILD_PID=""
@@ -232,6 +233,10 @@ cleanup() {
   if [[ -n "$TEAMS_PLUGIN_PID" ]]; then
     kill "$TEAMS_PLUGIN_PID" >/dev/null 2>&1 || true
     wait "$TEAMS_PLUGIN_PID" >/dev/null 2>&1 || true
+  fi
+  if [[ -n "$TEAMS_SETUP_MOCK_PID" ]]; then
+    kill "$TEAMS_SETUP_MOCK_PID" >/dev/null 2>&1 || true
+    wait "$TEAMS_SETUP_MOCK_PID" >/dev/null 2>&1 || true
   fi
   if [[ -n "$MCP_ORPHAN_PID" ]]; then
     kill "$MCP_ORPHAN_PID" >/dev/null 2>&1 || true
@@ -1986,13 +1991,99 @@ assert_contains "$SETUP_TELEGRAM_DOTENV_OUTPUT" "token_source: channel:dotenv"
 assert_contains "$(cat "$BRIDGE_AGENT_HOME_ROOT/$CREATED_AGENT/.telegram/.env")" "TELEGRAM_BOT_TOKEN=dotenv-telegram-token"
 
 log "running guided Teams setup"
-SETUP_TEAMS_OUTPUT="$("$BASH4_BIN" "$REPO_ROOT/bridge-setup.sh" teams "$CREATED_AGENT" --channel-account smoke --runtime-config "$TMP_ROOT/openclaw.json" --allow-from 00000000-0000-0000-0000-000000000000 --conversation "19:smoke@thread.v2" --require-mention --yes 2>&1)"
+TEAMS_SETUP_PORT="$(python3 - <<'PY'
+import socket
+s = socket.socket()
+s.bind(("127.0.0.1", 0))
+print(s.getsockname()[1])
+s.close()
+PY
+)"
+TEAMS_SETUP_MOCK_SCRIPT="$TMP_ROOT/teams-setup-mock.py"
+cat >"$TEAMS_SETUP_MOCK_SCRIPT" <<'PY'
+#!/usr/bin/env python3
+import json
+import sys
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+PORT = int(sys.argv[1])
+
+class Handler(BaseHTTPRequestHandler):
+    def log_message(self, format, *args):
+        return
+
+    def do_GET(self):
+        if self.path == "/health":
+            data = json.dumps({"ok": True}).encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
+            return
+        self.send_response(404)
+        self.end_headers()
+
+    def do_POST(self):
+        length = int(self.headers.get("Content-Length", "0"))
+        _body = self.rfile.read(length)
+        if self.path.endswith("/oauth2/v2.0/token"):
+            payload = {
+                "access_token": "smoke-teams-token",
+                "expires_in": 3600,
+                "token_type": "Bearer",
+            }
+            data = json.dumps(payload).encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
+            return
+        if self.path == "/api/messages":
+            data = json.dumps({"ok": False, "probe": "backend"}).encode("utf-8")
+            self.send_response(500)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
+            return
+        self.send_response(404)
+        self.end_headers()
+
+server = ThreadingHTTPServer(("127.0.0.1", PORT), Handler)
+server.serve_forever()
+PY
+python3 "$TEAMS_SETUP_MOCK_SCRIPT" "$TEAMS_SETUP_PORT" >/dev/null 2>&1 &
+TEAMS_SETUP_MOCK_PID=$!
+for _ in {1..40}; do
+  if python3 - "$TEAMS_SETUP_PORT" <<'PY' >/dev/null 2>&1
+import sys
+import urllib.request
+with urllib.request.urlopen(f"http://127.0.0.1:{sys.argv[1]}/health", timeout=0.2) as _:
+    pass
+PY
+  then
+    break
+  fi
+  if ! kill -0 "$TEAMS_SETUP_MOCK_PID" >/dev/null 2>&1; then
+    die "teams setup mock exited before startup"
+  fi
+  sleep 0.1
+done
+SETUP_TEAMS_OUTPUT="$(BRIDGE_TEAMS_LOGIN_BASE_URL="http://127.0.0.1:$TEAMS_SETUP_PORT" "$BASH4_BIN" "$REPO_ROOT/bridge-setup.sh" teams "$CREATED_AGENT" --channel-account smoke --runtime-config "$TMP_ROOT/openclaw.json" --allow-from 00000000-0000-0000-0000-000000000000 --conversation "19:smoke@thread.v2" --require-mention --messaging-endpoint "http://127.0.0.1:$TEAMS_SETUP_PORT/api/messages" --webhook-host 0.0.0.0 --webhook-port 3978 --ingress-port 80 --yes 2>&1)"
 assert_contains "$SETUP_TEAMS_OUTPUT" "teams_dir: $BRIDGE_AGENT_HOME_ROOT/$CREATED_AGENT/.teams"
 assert_contains "$SETUP_TEAMS_OUTPUT" "credential_source: channel:smoke"
-assert_contains "$SETUP_TEAMS_OUTPUT" "validation: local"
+assert_contains "$SETUP_TEAMS_OUTPUT" "validation: ok"
+assert_contains "$SETUP_TEAMS_OUTPUT" "credential_validation: ok"
+assert_contains "$SETUP_TEAMS_OUTPUT" "endpoint_probe: backend_reached"
+assert_contains "$SETUP_TEAMS_OUTPUT" "warning: Reverse proxy target port 80 does not match Teams webhook port 3978."
 assert_contains "$SETUP_TEAMS_OUTPUT" "--dangerously-load-development-channels plugin:teams@agent-bridge"
 assert_contains "$(cat "$BRIDGE_AGENT_HOME_ROOT/$CREATED_AGENT/.teams/.env")" "TEAMS_APP_ID=smoke-teams-app-id"
+assert_contains "$(cat "$BRIDGE_AGENT_HOME_ROOT/$CREATED_AGENT/.teams/.env")" "TEAMS_WEBHOOK_HOST=0.0.0.0"
+assert_contains "$(cat "$BRIDGE_AGENT_HOME_ROOT/$CREATED_AGENT/.teams/.env")" "TEAMS_WEBHOOK_PORT=3978"
 assert_contains "$(cat "$BRIDGE_AGENT_HOME_ROOT/$CREATED_AGENT/.teams/access.json")" "19:smoke@thread.v2"
+assert_contains "$(cat "$BRIDGE_AGENT_HOME_ROOT/$CREATED_AGENT/.teams/state.json")" "\"status\": \"ok\""
 CREATED_TEAMS_LAUNCH="$("$BASH4_BIN" -c '
   source "'"$REPO_ROOT"'/bridge-lib.sh"
   bridge_load_roster
