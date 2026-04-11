@@ -77,7 +77,7 @@ const CLIENT_SECRET = process.env.MS365_CLIENT_SECRET ?? ''
 const DEFAULT_UPN = process.env.MS365_DEFAULT_UPN ?? ''
 const DEFAULT_SCOPES =
   process.env.MS365_DEFAULT_SCOPES ??
-  'openid profile offline_access User.Read Mail.Read Mail.Send Calendars.Read Calendars.ReadWrite People.Read User.Read.All Directory.Read.All'
+  'openid profile offline_access User.Read Mail.Read Mail.Send Calendars.Read Calendars.ReadWrite People.Read User.Read.All Directory.Read.All Chat.ReadWrite'
 const REDIRECT_URI =
   process.env.MS365_REDIRECT_URI ?? 'http://localhost:3978/auth/callback'
 

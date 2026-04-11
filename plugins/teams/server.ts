@@ -53,11 +53,22 @@ type StoredMessage = {
   ts: string
 }
 
+type Ms365CallbackPayload = {
+  state: string
+  code?: string
+  error?: string
+  error_description?: string
+  received_at: number
+}
+
 const STATE_DIR = process.env.TEAMS_STATE_DIR ?? join(homedir(), '.claude', 'channels', 'teams')
 const ACCESS_FILE = join(STATE_DIR, 'access.json')
 const ENV_FILE = join(STATE_DIR, '.env')
 const REFERENCES_FILE = join(STATE_DIR, 'conversations.json')
 const MESSAGES_FILE = join(STATE_DIR, 'messages.jsonl')
+const BRIDGE_HOME = process.env.BRIDGE_HOME ?? join(homedir(), '.agent-bridge')
+const MS365_CALLBACK_DIR =
+  process.env.MS365_CALLBACK_SHARED_DIR ?? join(BRIDGE_HOME, 'shared', 'ms365-callbacks')
 
 try {
   chmodSync(ENV_FILE, 0o600)
@@ -93,6 +104,7 @@ process.on('uncaughtException', err => {
 
 function ensureStateDir(): void {
   mkdirSync(STATE_DIR, { recursive: true, mode: 0o700 })
+  mkdirSync(MS365_CALLBACK_DIR, { recursive: true, mode: 0o700 })
 }
 
 function loadJson<T>(path: string, fallback: T): T {
@@ -111,6 +123,50 @@ function saveJson(path: string, payload: unknown): void {
   writeFileSync(tmp, JSON.stringify(payload, null, 2) + '\n', { mode: 0o600 })
   renameSync(tmp, path)
   chmodSync(path, 0o600)
+}
+
+function ms365CallbackStateValid(state: string): boolean {
+  return /^[A-Za-z0-9_-]{8,128}$/.test(state)
+}
+
+function ms365CallbackPath(state: string): string {
+  return join(MS365_CALLBACK_DIR, `${state}.json`)
+}
+
+function handleMs365AuthCallback(url: URL, res: import('http').ServerResponse): void {
+  const state = String(url.searchParams.get('state') ?? '').trim()
+  const code = String(url.searchParams.get('code') ?? '').trim()
+  const error = String(url.searchParams.get('error') ?? '').trim()
+  const errorDescription = String(url.searchParams.get('error_description') ?? '').trim()
+
+  if (!ms365CallbackStateValid(state)) {
+    res.writeHead(400, { 'Content-Type': 'text/plain; charset=utf-8' })
+    res.end('invalid or missing state')
+    return
+  }
+  if (!code && !error) {
+    res.writeHead(400, { 'Content-Type': 'text/plain; charset=utf-8' })
+    res.end('missing code or error')
+    return
+  }
+
+  const payload: Ms365CallbackPayload = {
+    state,
+    received_at: Math.floor(Date.now() / 1000),
+  }
+  if (code) payload.code = code
+  if (error) payload.error = error
+  if (errorDescription) payload.error_description = errorDescription
+  saveJson(ms365CallbackPath(state), payload)
+
+  const body = error
+    ? '<html><body><h1>Microsoft 365 pairing failed</h1><p>Return to Claude Code and run pair_poll to inspect the error.</p></body></html>'
+    : '<html><body><h1>Microsoft 365 pairing received</h1><p>Return to Claude Code and run pair_poll to finish pairing.</p></body></html>'
+  res.writeHead(error ? 400 : 200, {
+    'Content-Type': 'text/html; charset=utf-8',
+    'Content-Length': Buffer.byteLength(body),
+  })
+  res.end(body)
 }
 
 function defaultAccess(): Access {
@@ -338,13 +394,18 @@ async function handleActivity(context: TurnContext): Promise<void> {
 }
 
 const httpServer = createServer((req, res) => {
-  if (req.method === 'GET' && req.url === '/health') {
+  const url = new URL(req.url ?? '/', `http://${req.headers.host ?? 'localhost'}`)
+  if (req.method === 'GET' && url.pathname === '/health') {
     const body = JSON.stringify({ ok: true, channel: 'teams', port: PORT })
     res.writeHead(200, { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(body) })
     res.end(body)
     return
   }
-  if (req.method === 'POST' && req.url === '/api/messages') {
+  if (req.method === 'GET' && url.pathname === '/auth/callback') {
+    handleMs365AuthCallback(url, res)
+    return
+  }
+  if (req.method === 'POST' && url.pathname === '/api/messages') {
     adapter.processActivity(req, res, async context => {
       await handleActivity(context)
     }).catch(err => {
@@ -361,7 +422,7 @@ const httpServer = createServer((req, res) => {
 })
 
 httpServer.listen(PORT, HOST, () => {
-  process.stderr.write(`teams channel: listening on http://${HOST}:${PORT}/api/messages\n`)
+  process.stderr.write(`teams channel: listening on http://${HOST}:${PORT} (/api/messages, /auth/callback)\n`)
 })
 
 await mcp.connect(new StdioServerTransport())
