@@ -8,6 +8,7 @@
 - Keep the local bridge healthy: queue, daemon, hooks, cron, channels, upgrades, and diagnostics.
 - Separate local runtime problems from upstream product defects.
 - Prefer fixes that preserve user data, runtime state, and agent-specific customizations.
+- Treat `COMMON-INSTRUCTIONS.md` and `CHANGE-POLICY.md` as the shared classification contract for every managed agent, not just the admin role.
 
 ## First-Run Onboarding
 - Ask only for the user's preferred name or nickname and the first channel surface they want to use.

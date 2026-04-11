@@ -1564,6 +1564,8 @@ assert_contains "$(cat "$BRIDGE_ROSTER_LOCAL_FILE")" "BRIDGE_AGENT_CHANNELS[\"$C
 assert_contains "$(cat "$BRIDGE_ROSTER_LOCAL_FILE")" "plugin:telegram@claude-plugins-official"
 [[ -f "$BRIDGE_AGENT_HOME_ROOT/$CREATED_AGENT/CLAUDE.md" ]] || die "agent create did not scaffold CLAUDE.md"
 [[ -f "$BRIDGE_AGENT_HOME_ROOT/$CREATED_AGENT/SOUL.md" ]] || die "agent create did not scaffold SOUL.md"
+[[ -L "$BRIDGE_AGENT_HOME_ROOT/$CREATED_AGENT/COMMON-INSTRUCTIONS.md" ]] || die "agent create did not link COMMON-INSTRUCTIONS.md"
+[[ -L "$BRIDGE_AGENT_HOME_ROOT/$CREATED_AGENT/CHANGE-POLICY.md" ]] || die "agent create did not link CHANGE-POLICY.md"
 [[ -f "$BRIDGE_AGENT_HOME_ROOT/$CREATED_AGENT/TOOLS.md" ]] || die "agent create did not scaffold TOOLS.md"
 [[ -f "$BRIDGE_AGENT_HOME_ROOT/$CREATED_AGENT/SKILLS.md" ]] || die "agent create did not scaffold SKILLS.md"
 [[ -f "$BRIDGE_AGENT_HOME_ROOT/$CREATED_AGENT/MEMORY.md" ]] || die "agent create did not scaffold MEMORY.md"
@@ -1580,6 +1582,10 @@ assert_contains "$(cat "$BRIDGE_AGENT_HOME_ROOT/$CREATED_AGENT/SESSION-TYPE.md")
 assert_contains "$(cat "$BRIDGE_AGENT_HOME_ROOT/$CREATED_AGENT/CLAUDE.md")" "SESSION-TYPE.md"
 assert_contains "$(cat "$BRIDGE_AGENT_HOME_ROOT/$CREATED_AGENT/CLAUDE.md")" "Onboarding State: pending"
 assert_contains "$(cat "$BRIDGE_AGENT_HOME_ROOT/$CREATED_AGENT/CLAUDE.md")" "shared/wiki/people.md"
+assert_contains "$(cat "$BRIDGE_AGENT_HOME_ROOT/$CREATED_AGENT/CLAUDE.md")" "COMMON-INSTRUCTIONS.md"
+assert_contains "$(cat "$BRIDGE_AGENT_HOME_ROOT/$CREATED_AGENT/CLAUDE.md")" "CHANGE-POLICY.md"
+assert_contains "$(cat "$BRIDGE_HOME/shared/COMMON-INSTRUCTIONS.md")" "## Technical Change Reporting"
+assert_contains "$(cat "$BRIDGE_HOME/shared/CHANGE-POLICY.md")" "## Default Routing"
 assert_contains "$(cat "$BRIDGE_AGENT_HOME_ROOT/$CREATED_AGENT/SKILLS.md")" "## Shared Claude Skills"
 assert_contains "$(cat "$BRIDGE_AGENT_HOME_ROOT/$CREATED_AGENT/SKILLS.md")" "## Mapped Runtime Skills"
 assert_contains "$(cat "$BRIDGE_HOME/shared/SKILLS.md")" "## Runtime Skill Catalog"
@@ -3194,6 +3200,47 @@ assert_contains "$(cat "$BRIDGE_HOME/state/skill-registry.json")" "\"sample-skil
 "$BASH4_BIN" -lc "source \"$REPO_ROOT/bridge-lib.sh\"; bridge_load_roster; BRIDGE_AGENT_SKILLS[\"claude-static\"]=''; bridge_bootstrap_claude_shared_skills 'claude-static' '$CLAUDE_STATIC_WORKDIR'"
 "$BASH4_BIN" -lc "source \"$REPO_ROOT/bridge-lib.sh\"; bridge_load_roster; BRIDGE_AGENT_SKILLS[\"claude-static\"]=''; bridge_sync_skill_docs 'claude-static'"
 [[ ! -e "$CLAUDE_STATIC_WORKDIR/.claude/skills/sample-skill" ]] || die "expected runtime skill symlink pruning when roster mapping is removed"
+
+log "rendering concise dashboard state-change notifications"
+DASHBOARD_PATCH_DIR="$TMP_ROOT/dashboard-patch"
+DASHBOARD_SHOP_DIR="$TMP_ROOT/dashboard-shop"
+DASHBOARD_SUMMARY_TSV="$TMP_ROOT/dashboard-summary.tsv"
+DASHBOARD_ROSTER_TSV="$TMP_ROOT/dashboard-roster.tsv"
+DASHBOARD_STATE_JSON="$TMP_ROOT/dashboard-state.json"
+DASHBOARD_TASK_DB="$TMP_ROOT/dashboard-tasks.db"
+mkdir -p "$DASHBOARD_PATCH_DIR" "$DASHBOARD_SHOP_DIR"
+cat >"$DASHBOARD_PATCH_DIR/SOUL.md" <<'EOF'
+# 패치 — Admin
+EOF
+cat >"$DASHBOARD_SHOP_DIR/SOUL.md" <<'EOF'
+# 쇼피 — Commerce
+EOF
+BRIDGE_TASK_DB="$DASHBOARD_TASK_DB" python3 "$REPO_ROOT/bridge-queue.py" init >/dev/null
+BRIDGE_TASK_DB="$DASHBOARD_TASK_DB" python3 "$REPO_ROOT/bridge-queue.py" create --to patch --title "[MAIL] CS 문의 처리" --from smoke --body "dashboard test" >/dev/null
+cat >"$DASHBOARD_SUMMARY_TSV" <<EOF
+patch	0	1	0	1	60	0	0	patch	claude	$DASHBOARD_PATCH_DIR
+shop	0	0	0	1	2400	0	0	shop	claude	$DASHBOARD_SHOP_DIR
+smoke-agent	1	0	0	1	10	0	0	smoke-agent	claude	$TMP_ROOT/dashboard-smoke
+EOF
+cat >"$DASHBOARD_ROSTER_TSV" <<EOF
+agent	engine	session	cwd	source	loop	continue	queued	claimed	session_id	updated_at
+patch	claude	patch	$DASHBOARD_PATCH_DIR	static	1	1	0	1	session-patch	2026-04-11T00:00:00+09:00
+shop	claude	shop	$DASHBOARD_SHOP_DIR	static	1	1	0	0	session-shop	2026-04-11T00:00:00+09:00
+EOF
+cat >"$DASHBOARD_STATE_JSON" <<'EOF'
+{
+  "fingerprint": "prev",
+  "last_summary_ts": 9999999999,
+  "agents": {
+    "patch": {"display": "패치", "state": "idle", "queued": 0, "claimed": 0, "blocked": 0, "idle_seconds": 3600, "task_title": ""},
+    "shop": {"display": "쇼피", "state": "working", "queued": 0, "claimed": 1, "blocked": 0, "idle_seconds": 60, "task_title": "이전 작업"}
+  }
+}
+EOF
+DASHBOARD_OUTPUT="$(python3 "$REPO_ROOT/bridge-dashboard.py" --summary-tsv "$DASHBOARD_SUMMARY_TSV" --state-file "$DASHBOARD_STATE_JSON" --roster-tsv "$DASHBOARD_ROSTER_TSV" --task-db "$DASHBOARD_TASK_DB" --idle-threshold-seconds 900 --summary-interval-seconds 3600 --dry-run)"
+assert_contains "$DASHBOARD_OUTPUT" "🟢 패치 작업 시작 — CS 문의 처리"
+assert_contains "$DASHBOARD_OUTPUT" "⏸️ 쇼피 idle (40분)"
+assert_not_contains "$DASHBOARD_OUTPUT" "smoke-agent"
 
 RUNTIME_COMPAT_PATHS_OUTPUT="$("$BASH4_BIN" -c "source \"$REPO_ROOT/bridge-lib.sh\"; bridge_load_roster; printf '%s\n%s\n%s\n' \"\$(bridge_compat_config_file)\" \"\$(bridge_compat_credentials_dir)\" \"\$(bridge_compat_secrets_dir)\"")"
 assert_contains "$RUNTIME_COMPAT_PATHS_OUTPUT" "$BRIDGE_HOME/runtime/bridge-config.json"

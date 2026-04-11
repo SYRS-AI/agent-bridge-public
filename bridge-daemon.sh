@@ -1567,6 +1567,10 @@ bridge_dashboard_post_if_changed() {
     --summary-tsv "$summary_file" \
     --state-file "$BRIDGE_DASHBOARD_STATE_FILE" \
     --webhook-url "$BRIDGE_DASHBOARD_WEBHOOK_URL" \
+    --roster-tsv "$BRIDGE_ACTIVE_ROSTER_TSV" \
+    --task-db "$BRIDGE_TASK_DB" \
+    --idle-threshold-seconds "$BRIDGE_DASHBOARD_IDLE_SECONDS" \
+    --summary-interval-seconds "$BRIDGE_DASHBOARD_SUMMARY_SECONDS" \
     >/dev/null 2>&1 || true
 
   rm -f "$summary_file"

@@ -9,6 +9,8 @@
 - `MEMORY-SCHEMA.md`는 memory wiki를 어떻게 유지할지 정의한다.
 - `MEMORY.md`와 `memory/`는 작업 메모리이자 장기 기억 위키다. `HEARTBEAT.md`는 필요할 때만 읽는 운영 참고 문서다.
 - `~/.agent-bridge/shared/wiki/`가 있으면 팀 전체가 공유하는 knowledge SSOT다. `index.md`와 관련 페이지만 읽고, 필요하면 `agent-bridge knowledge search`로 찾는다.
+- `COMMON-INSTRUCTIONS.md`는 전 에이전트 공통 규칙 SSOT다.
+- `CHANGE-POLICY.md`는 기술 변경의 upstream/downstream 분류 계약이다.
 - `TOOLS.md`와 `SKILLS.md`는 현재 bridge-native runtime reference다.
 
 ## Queue & Delivery
@@ -99,7 +101,7 @@ task를 수신하면 아래 순서를 반드시 따른다:
 너는 **<Agent Name>**야. <한 줄 역할 설명>.
 
 ## Common vs Core vs Custom
-- `SOUL.md`, `SESSION-TYPE.md`, `MEMORY-SCHEMA.md`, `MEMORY.md`, `TOOLS.md`, `SKILLS.md`는 공통 운영 파일이다.
+- `SOUL.md`, `SESSION-TYPE.md`, `MEMORY-SCHEMA.md`, `MEMORY.md`, `COMMON-INSTRUCTIONS.md`, `CHANGE-POLICY.md`, `TOOLS.md`, `SKILLS.md`는 공통 운영 파일이다.
 - 위의 `<!-- BEGIN/END AGENT BRIDGE DOC MIGRATION -->` 블록은 Agent Bridge 코어 동작 정의다. 업그레이드 시 갱신될 수 있다.
 - 이 아래부터는 에이전트 고유의 커스텀 계약 영역이다. 역할, 말투, 도메인 지식, 승인 규칙은 여기서 관리한다.
 
@@ -119,8 +121,9 @@ task를 수신하면 아래 순서를 반드시 따른다:
 6. `MEMORY-SCHEMA.md` 읽기
 7. 현재 대화 상대의 `users/<user-id>/USER.md`와 최근 메모가 있으면 먼저 확인
 8. `MEMORY.md`와 `memory/` 확인
-9. `TOOLS.md`, `SKILLS.md` 확인
-10. 필요하면 `HEARTBEAT.md`와 로컬 `references/` 확인
+9. `COMMON-INSTRUCTIONS.md`, `CHANGE-POLICY.md` 확인
+10. `TOOLS.md`, `SKILLS.md` 확인
+11. 필요하면 `HEARTBEAT.md`와 로컬 `references/` 확인
 
 ## First Session Onboarding
 - `SESSION-TYPE.md`에 `Onboarding State: pending`이 남아 있거나 템플릿 placeholder가 그대로 있으면, 일반 작업 전에 온보딩부터 수행한다.
