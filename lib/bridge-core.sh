@@ -100,6 +100,14 @@ bridge_queue_cli() {
   python3 "$BRIDGE_SCRIPT_DIR/bridge-queue.py" "$@"
 }
 
+bridge_queue_source_shell() {
+  local queue_output=""
+
+  queue_output="$(bridge_queue_cli "$@")" || return $?
+  # shellcheck disable=SC1090
+  source /dev/stdin <<<"$queue_output"
+}
+
 bridge_reset_roster_maps() {
   unset BRIDGE_ADMIN_AGENT_ID
   unset BRIDGE_AGENT_IDS BRIDGE_AGENT_DESC BRIDGE_AGENT_ENGINE BRIDGE_AGENT_SESSION

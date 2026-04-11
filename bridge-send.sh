@@ -142,8 +142,7 @@ CREATE_ARGS=(create --to "$TARGET" --title "$TITLE" --from "$ACTOR" --priority u
 if [[ -n "$BODY" ]]; then
   CREATE_ARGS+=(--body "$BODY")
 fi
-# shellcheck disable=SC1090
-source <(bridge_queue_cli "${CREATE_ARGS[@]}")
+bridge_queue_source_shell "${CREATE_ARGS[@]}"
 
 SESSION="$(bridge_agent_session "$TARGET")"
 NOTICE_MESSAGE="agb inbox ${TARGET}"

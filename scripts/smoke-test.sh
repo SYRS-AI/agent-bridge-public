@@ -1637,6 +1637,23 @@ assert_contains "$TASK_BODY_PATH" "shared/raw/intake/$INTAKE_CAPTURE_ID.md"
 "$REPO_ROOT/agent-bridge" claim "$INTAKE_TASK_ID" --agent "$REQUESTER_AGENT" >/dev/null
 "$REPO_ROOT/agent-bridge" done "$INTAKE_TASK_ID" --agent "$REQUESTER_AGENT" --note "intake processed" >/dev/null
 
+log "warning on suspicious inline task bodies and rejecting explicit empty bodies"
+TASK_WARN_OUTPUT="$("$REPO_ROOT/agent-bridge" task create --to "$REQUESTER_AGENT" --title "var warning" --body 'literal ${HTML_BODY}' --from smoke 2>&1)"
+assert_contains "$TASK_WARN_OUTPUT" 'warning: --body contains unexpanded shell variable "${HTML_BODY}"'
+WARN_TASK_ID="$(printf '%s\n' "$TASK_WARN_OUTPUT" | sed -n 's/^created task #\([0-9][0-9]*\).*/\1/p' | head -1)"
+[[ -n "$WARN_TASK_ID" ]] || die "warning task create did not return task id"
+python3 "$REPO_ROOT/bridge-queue.py" cancel "$WARN_TASK_ID" --actor smoke >/dev/null
+EMPTY_BODY_STDOUT="$TMP_ROOT/task-empty.stdout"
+EMPTY_BODY_STDERR="$TMP_ROOT/task-empty.stderr"
+if "$REPO_ROOT/agent-bridge" task create --to "$REQUESTER_AGENT" --title "empty explicit body" --body "" --from smoke >"$EMPTY_BODY_STDOUT" 2>"$EMPTY_BODY_STDERR"; then
+  die "explicit empty --body should require --allow-empty-body"
+fi
+assert_contains "$(cat "$EMPTY_BODY_STDERR")" "empty --body after trimming whitespace"
+ALLOW_EMPTY_OUTPUT="$("$REPO_ROOT/agent-bridge" task create --to "$REQUESTER_AGENT" --title "empty allowed" --body "" --allow-empty-body --from smoke 2>&1)"
+ALLOW_EMPTY_TASK_ID="$(printf '%s\n' "$ALLOW_EMPTY_OUTPUT" | sed -n 's/^created task #\([0-9][0-9]*\).*/\1/p' | head -1)"
+[[ -n "$ALLOW_EMPTY_TASK_ID" ]] || die "allow-empty-body task create did not return task id"
+python3 "$REPO_ROOT/bridge-queue.py" cancel "$ALLOW_EMPTY_TASK_ID" --actor smoke >/dev/null
+
 log "requesting and completing a queue-backed review gate"
 cat >"$BRIDGE_REVIEW_POLICY_FILE" <<EOF
 {

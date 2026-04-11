@@ -190,8 +190,7 @@ PY
 )"
 
     if [[ $route -eq 1 && $dry_run -eq 0 ]]; then
-      # shellcheck disable=SC1090
-      source <(bridge_queue_cli create --to "$owner" --title "[intake] $summary" --from bridge --priority "$importance" --body-file "$triage_markdown_path" --format shell)
+      bridge_queue_source_shell create --to "$owner" --title "[intake] $summary" --from bridge --priority "$importance" --body-file "$triage_markdown_path" --format shell
       run_python attach-task --shared-root "$shared_root" --capture "$capture_id" --task-id "$TASK_ID" --task-title "$TASK_TITLE" --task-priority "$TASK_PRIORITY" >/dev/null
       bridge_dispatch_notification "$owner" "$TASK_TITLE" "agb inbox ${owner}" "$TASK_ID" "$importance" >/dev/null 2>&1 || true
       triage_json="$(run_python show --shared-root "$shared_root" --capture "$capture_id")"

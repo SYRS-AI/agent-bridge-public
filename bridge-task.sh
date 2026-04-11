@@ -19,7 +19,7 @@ ensure_roster_loaded() {
 usage() {
   cat <<EOF
 Usage:
-  bash $SCRIPT_DIR/bridge-task.sh create --to <agent> --title <title> [--body <text> | --body-file <path>] [--from <agent>] [--priority low|normal|high|urgent]
+  bash $SCRIPT_DIR/bridge-task.sh create --to <agent> --title <title> [--body <text> | --body-file <path>] [--allow-empty-body] [--from <agent>] [--priority low|normal|high|urgent]
   bash $SCRIPT_DIR/bridge-task.sh inbox [agent] [--all]
   bash $SCRIPT_DIR/bridge-task.sh show <task-id>
   bash $SCRIPT_DIR/bridge-task.sh claim <task-id> [--agent <agent>] [--lease <seconds>]
@@ -77,8 +77,7 @@ notify_task_requester() {
   local ORIG_TASK_PRIORITY=""
 
   ensure_roster_loaded
-  # shellcheck disable=SC1090
-  source <(bridge_queue_cli show "$task_id" --format shell)
+  bridge_queue_source_shell show "$task_id" --format shell
 
   creator="$TASK_CREATED_BY"
   [[ -n "$creator" ]] || return 0
@@ -103,8 +102,7 @@ notify_task_requester() {
   TASK_ID=""
   TASK_TITLE=""
   TASK_PRIORITY=""
-  # shellcheck disable=SC1090
-  source <(bridge_queue_cli create --to "$creator" --title "$completion_title" --from bridge --priority "$ORIG_TASK_PRIORITY" --body "$completion_body" --format shell)
+  bridge_queue_source_shell create --to "$creator" --title "$completion_title" --from bridge --priority "$ORIG_TASK_PRIORITY" --body "$completion_body" --format shell
 
   if [[ "$creator_engine" != "claude" ]] && ! bridge_agent_is_active "$creator"; then
     return 0
@@ -121,7 +119,9 @@ cmd_create() {
   local explicit_actor=""
   local priority="normal"
   local body=""
+  local body_was_set=0
   local body_file=""
+  local allow_empty_body=0
   local TASK_ID=""
   local TASK_ASSIGNED_TO=""
   local TASK_PRIORITY=""
@@ -153,12 +153,17 @@ cmd_create() {
       --body)
         [[ $# -lt 2 ]] && bridge_die "--body 뒤에 본문을 지정하세요."
         body="$2"
+        body_was_set=1
         shift 2
         ;;
       --body-file)
         [[ $# -lt 2 ]] && bridge_die "--body-file 뒤에 파일 경로를 지정하세요."
         body_file="$2"
         shift 2
+        ;;
+      --allow-empty-body)
+        allow_empty_body=1
+        shift
         ;;
       -h|--help)
         usage
@@ -179,15 +184,17 @@ cmd_create() {
   emit_inferred_actor_hint "$explicit_actor" "$actor"
 
   args=(create --to "$target" --title "$title" --from "$actor" --priority "$priority")
-  if [[ -n "$body" ]]; then
+  if [[ "$body_was_set" -eq 1 ]]; then
     args+=(--body "$body")
   fi
   if [[ -n "$body_file" ]]; then
     args+=(--body-file "$body_file")
   fi
+  if [[ "$allow_empty_body" -eq 1 ]]; then
+    args+=(--allow-empty-body)
+  fi
 
-  # shellcheck disable=SC1090
-  source <(bridge_queue_cli "${args[@]}" --format shell)
+  bridge_queue_source_shell "${args[@]}" --format shell
   printf 'created task #%s for %s [%s] %s\n' "$TASK_ID" "$TASK_ASSIGNED_TO" "$TASK_PRIORITY" "$TASK_TITLE"
 
   if [[ "$target" != "$actor" ]]; then

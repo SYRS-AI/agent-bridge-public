@@ -2095,8 +2095,7 @@ cmd_run_cron_worker() {
   echo "$$" >"$pid_file"
   trap "rm -f '$pid_file'" EXIT
 
-  # shellcheck disable=SC1090
-  source <(bridge_queue_cli show "$task_id" --format shell)
+  bridge_queue_source_shell show "$task_id" --format shell
 
   if [[ -z "$TASK_ASSIGNED_TO" ]]; then
     bridge_warn "cron worker task #${task_id} missing assigned agent"

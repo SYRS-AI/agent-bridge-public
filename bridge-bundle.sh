@@ -223,8 +223,7 @@ PY
       exit 0
     fi
 
-    # shellcheck disable=SC1090
-    source <(bridge_queue_cli create --to "$target" --title "[handoff] $title" --from "$actor" --priority "$priority" --body-file "$task_body_path" --format shell)
+    bridge_queue_source_shell create --to "$target" --title "[handoff] $title" --from "$actor" --priority "$priority" --body-file "$task_body_path" --format shell
     run_python attach-task --shared-root "$shared_root" --bundle-id "$bundle_id" --task-id "$TASK_ID" --task-title "$TASK_TITLE" --task-priority "$TASK_PRIORITY" >/dev/null
 
     if [[ "$target" != "$actor" ]]; then

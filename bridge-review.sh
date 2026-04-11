@@ -334,8 +334,7 @@ cmd_request() {
   } >"$task_body_file"
 
   task_title="[review-request] $subject"
-  # shellcheck disable=SC1090
-  source <(bridge_queue_cli create --to "$reviewer" --title "$task_title" --from "$actor" --priority "$priority" --body-file "$task_body_file" --format shell)
+  bridge_queue_source_shell create --to "$reviewer" --title "$task_title" --from "$actor" --priority "$priority" --body-file "$task_body_file" --format shell
   printf 'created review task #%s for %s [%s] %s\n' "$TASK_ID" "$TASK_ASSIGNED_TO" "$TASK_PRIORITY" "$TASK_TITLE"
   printf 'review_body_file: %s\n' "$task_body_file"
   notice_message="agb inbox ${reviewer}"

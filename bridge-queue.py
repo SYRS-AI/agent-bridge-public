@@ -7,6 +7,7 @@ import argparse
 import csv
 import json
 import os
+import re
 import shlex
 import sqlite3
 import sys
@@ -35,6 +36,8 @@ FAMILY_RULES = (
     "event-reminder",
     "weekly-review",
 )
+
+UNEXPANDED_SHELL_VAR_RE = re.compile(r"(?<!\\)(\$\{[A-Za-z_][A-Za-z0-9_]*\}|\$[A-Za-z_][A-Za-z0-9_]*)")
 
 
 def now_ts() -> int:
@@ -170,6 +173,15 @@ def normalize_open_status(status: str | None) -> str | None:
             f"(choose from {', '.join(OPEN_STATUSES)}; alias in_progress maps to claimed)"
         )
     return normalized
+
+
+def detect_unexpanded_shell_variable(body_text: str | None) -> str | None:
+    if body_text is None:
+        return None
+    match = UNEXPANDED_SHELL_VAR_RE.search(body_text)
+    if not match:
+        return None
+    return match.group(1)
 
 
 def emit_event(
@@ -375,6 +387,20 @@ def cmd_create(args: argparse.Namespace) -> int:
     body_path = normalize_path(args.body_file)
     body_text = args.body
     created_ts = now_ts()
+
+    if body_text is not None:
+        shell_var = detect_unexpanded_shell_variable(body_text)
+        if shell_var:
+            print(
+                f'warning: --body contains unexpanded shell variable "{shell_var}" - '
+                "did you forget to export it, or should you use --body-file?",
+                file=sys.stderr,
+            )
+        if not args.allow_empty_body and not body_text.strip():
+            raise SystemExit(
+                "empty --body after trimming whitespace; omit --body, use --body-file, "
+                "or pass --allow-empty-body"
+            )
 
     with closing(connect()) as conn, conn:
         cursor = conn.execute(
@@ -1313,6 +1339,7 @@ def build_parser() -> argparse.ArgumentParser:
     create_parser.add_argument("--from", dest="actor")
     create_parser.add_argument("--priority", choices=PRIORITY_CHOICES, default="normal")
     create_parser.add_argument("--format", choices=("text", "shell"), default="text")
+    create_parser.add_argument("--allow-empty-body", action="store_true")
     body_group = create_parser.add_mutually_exclusive_group()
     body_group.add_argument("--body")
     body_group.add_argument("--body-file")
