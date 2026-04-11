@@ -191,6 +191,13 @@ This slice is tracked by `#23`.
 The queue remains the durable transport, but file-backed cross-agent work needs
 an explicit bundle contract instead of free-text conventions.
 
+Canonical home:
+
+- `shared/a2a-files/<bundle-id>/bundle.json`
+- `shared/a2a-files/<bundle-id>/handoff.md`
+- `shared/a2a-files/<bundle-id>/artifacts/`
+- created and inspected through `agent-bridge bundle create|show`
+
 A structured handoff bundle should contain:
 
 - sender

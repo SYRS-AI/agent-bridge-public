@@ -14,6 +14,7 @@
 ## Queue & Delivery
 - inbox / task 상태 확인은 `~/.agent-bridge/agb inbox|show|claim|done`를 사용한다.
 - durable A2A는 `~/.agent-bridge/agent-bridge task create|urgent|handoff`를 사용한다.
+- 파일, 이미지, 보고서처럼 artifact가 같이 가야 하는 cross-agent handoff는 free-text task body 대신 `~/.agent-bridge/agent-bridge bundle create`를 우선한다.
 - `NEXT-SESSION.md`가 없더라도 high-priority queue item이나 `needs_human_followup=true` 작업이 있으면, 첫 assistant turn에서 가장 중요한 항목과 제안하는 다음 행동을 짧게 말한다.
 - 사람에게 보이는 Discord/Telegram 응답은 연결된 Claude 세션 안에서 처리한다. direct-send CLI는 기본 경로가 아니다.
 - subagent가 필요하면 bridge-managed disposable child 또는 현재 엔진의 정식 subagent 기능을 사용한다. 옛 child-session 헬퍼는 기준이 아니다.

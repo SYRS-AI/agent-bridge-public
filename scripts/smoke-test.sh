@@ -1436,6 +1436,36 @@ assert_contains "$KNOWLEDGE_SEARCH_JSON" "\"wiki/people.md\""
 KNOWLEDGE_LINT_JSON="$("$REPO_ROOT/agent-bridge" knowledge lint --json)"
 assert_contains "$KNOWLEDGE_LINT_JSON" "\"ok\": true"
 
+log "creating and completing a file-backed handoff bundle"
+HANDOFF_ARTIFACT="$BRIDGE_SHARED_DIR/handoff-artifact.md"
+cat >"$HANDOFF_ARTIFACT" <<'EOF'
+draft report for queue-backed bundle handoff
+EOF
+HANDOFF_BUNDLE_JSON="$("$REPO_ROOT/agent-bridge" bundle create --to "$REQUESTER_AGENT" --title "bundle smoke" --summary "Review the attached draft report." --action "Read the artifact and report blockers." --artifact "$HANDOFF_ARTIFACT::draft report" --expected-output "Return blockers or approval." --human-followup "If blockers remain, send a short human-facing summary." --json)"
+HANDOFF_BUNDLE_ID="$(python3 - "$HANDOFF_BUNDLE_JSON" <<'PY'
+import json
+import sys
+print(json.loads(sys.argv[1])["bundle_id"])
+PY
+)"
+HANDOFF_TASK_ID="$(python3 - "$HANDOFF_BUNDLE_JSON" <<'PY'
+import json
+import sys
+print(json.loads(sys.argv[1])["task"]["id"])
+PY
+)"
+HANDOFF_SHOW_JSON="$("$REPO_ROOT/agent-bridge" bundle show "$HANDOFF_BUNDLE_ID" --json)"
+assert_contains "$HANDOFF_SHOW_JSON" "\"bundle_id\": \"$HANDOFF_BUNDLE_ID\""
+assert_contains "$HANDOFF_SHOW_JSON" "\"to_agent\": \"$REQUESTER_AGENT\""
+assert_contains "$HANDOFF_SHOW_JSON" "\"path\": \"$HANDOFF_ARTIFACT\""
+TASK_SHELL="$(python3 "$REPO_ROOT/bridge-queue.py" show "$HANDOFF_TASK_ID" --format shell)"
+# shellcheck disable=SC1090
+source <(printf '%s\n' "$TASK_SHELL")
+assert_contains "$TASK_TITLE" "[handoff] bundle smoke"
+assert_contains "$TASK_BODY_PATH" "shared/a2a-files/$HANDOFF_BUNDLE_ID/handoff.md"
+"$REPO_ROOT/agent-bridge" claim "$HANDOFF_TASK_ID" --agent "$REQUESTER_AGENT" >/dev/null
+"$REPO_ROOT/agent-bridge" done "$HANDOFF_TASK_ID" --agent "$REQUESTER_AGENT" --note "bundle processed" >/dev/null
+
 log "requesting and completing a queue-backed review gate"
 cat >"$BRIDGE_REVIEW_POLICY_FILE" <<EOF
 {

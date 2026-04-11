@@ -8,6 +8,7 @@
 - `~/.agent-bridge/agb claim <task-id> --agent <agent>`
 - `~/.agent-bridge/agb done <task-id> --agent <agent> --note "..."`
 - `~/.agent-bridge/agent-bridge task create --to <agent> ...`
+- `~/.agent-bridge/agent-bridge bundle create --to <agent> ...`
 - `~/.agent-bridge/agent-bridge urgent <agent> "..."`
 - `~/.agent-bridge/agent-bridge escalate question --agent <agent> --question "..." --context "..."`
 - `~/.agent-bridge/agent-bridge cron ...`
