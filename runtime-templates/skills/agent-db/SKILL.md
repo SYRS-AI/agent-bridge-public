@@ -1,6 +1,9 @@
 ---
 name: agent-db
 description: Manage structured data in Railway PostgreSQL — emails, calendar events, tasks, facts, reminders, projects, and notifications. Use when tracking emails, scheduling reminders, managing tasks/todos, recording important facts from conversations, syncing calendar events, generating daily digests, or querying historical data.
+type: shell-script
+category: data
+entry: scripts/email-sync.py
 ---
 
 # Agent DB

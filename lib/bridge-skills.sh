@@ -184,6 +184,42 @@ bridge_bootstrap_claude_shared_skills() {
   fi
 }
 
+bridge_agent_skills_registry_json() {
+  local entry=()
+  local agent=""
+
+  for agent in "${!BRIDGE_AGENT_SKILLS[@]}"; do
+    entry+=("$agent=${BRIDGE_AGENT_SKILLS[$agent]-}")
+  done
+
+  bridge_require_python
+  python3 - "${entry[@]}" <<'PY'
+import json
+import sys
+
+payload = {}
+for raw in sys.argv[1:]:
+    agent, _, skills = raw.partition("=")
+    normalized = [item for item in skills.replace(",", " ").split() if item]
+    if normalized:
+        payload[agent] = normalized
+
+print(json.dumps(payload, ensure_ascii=False, sort_keys=True))
+PY
+}
+
+bridge_sync_skill_docs() {
+  local skills_json=""
+
+  [[ -f "$BRIDGE_SCRIPT_DIR/bridge-docs.py" ]] || return 0
+  bridge_require_python
+  skills_json="$(bridge_agent_skills_registry_json)"
+  BRIDGE_AGENT_SKILLS_JSON="$skills_json" python3 "$BRIDGE_SCRIPT_DIR/bridge-docs.py" apply "$@" \
+    --bridge-home "$BRIDGE_HOME" \
+    --target-root "$BRIDGE_AGENT_HOME_ROOT" \
+    --source-shared "$BRIDGE_OPENCLAW_HOME/shared" >/dev/null
+}
+
 bridge_is_managed_markdown() {
   local file="$1"
   grep -Fq "$BRIDGE_MANAGED_MARKER" "$file"

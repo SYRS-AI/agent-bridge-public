@@ -794,6 +794,7 @@ run_agent() {
     bridge_ensure_project_claude_guidance "$workdir" >/dev/null 2>&1 || true
     bridge_bootstrap_project_skill "$engine" "$workdir" >/dev/null 2>&1 || true
     bridge_bootstrap_claude_shared_skills "$agent" "$workdir" >/dev/null 2>&1 || true
+    bridge_sync_skill_docs "$agent" >/dev/null 2>&1 || true
     printf 'claude_bridge_guidance: %s\n' "$workdir/CLAUDE.md"
     printf 'project_skill: %s\n' "$workdir/.claude/skills/agent-bridge/SKILL.md"
     printf 'runtime_skill: %s\n' "$workdir/.claude/skills/agent-bridge-runtime/SKILL.md"
@@ -848,6 +849,7 @@ run_agent() {
     echo
     echo "== Codex Skills =="
     bridge_bootstrap_project_skill "$engine" "$workdir" >/dev/null 2>&1 || true
+    bridge_sync_skill_docs "$agent" >/dev/null 2>&1 || true
     printf 'project_skill: %s\n' "$workdir/.codex/skills/agent-bridge/SKILL.md"
 
     echo

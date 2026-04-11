@@ -999,6 +999,7 @@ run_create() {
       "$continue_mode" \
       "$always_on" >/dev/null
     bridge_load_roster
+    bridge_sync_skill_docs "$agent" >/dev/null 2>&1 || true
     start_dry_run="$("$BRIDGE_BASH_BIN" "$SCRIPT_DIR/bridge-start.sh" "$agent" --dry-run 2>&1)"
   fi
 

@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import re
 import shutil
@@ -17,11 +18,13 @@ MANAGED_END = "<!-- END AGENT BRIDGE DOC MIGRATION -->"
 TODAY = datetime.now().strftime("%Y-%m-%d")
 HOME_DIR = str(Path.home())
 HOME_DIR_RE = re.escape(HOME_DIR)
+REPO_ROOT = Path(__file__).resolve().parent
 
 REMOVABLE_DOCS = ("AGENTS.md", "IDENTITY.md", "BOOTSTRAP.md")
 SHARED_SOURCE_FILES = ("ROSTER.md", "SYRS-CONTEXT.md", "SYRS-RULES.md", "SYRS-USER.md")
 AGENT_SHARED_LINKS = ("TOOLS.md", "ROSTER.md", "SYRS-CONTEXT.md", "SYRS-RULES.md", "SYRS-USER.md")
 AGENT_RUNTIME_REWRITE_FILES = ("SOUL.md", "HEARTBEAT.md", "CHECKLIST.md", "MEMORY.md")
+SHARED_CLAUDE_SKILL_NAMES = ("agent-bridge-runtime", "cron-manager", "memory-wiki")
 LEGACY_PATTERNS = (
     "openclaw message send",
     "sessions_send",
@@ -43,6 +46,243 @@ class AgentAudit:
     local_skills: list[str]
     reference_files: list[str]
     claude_legacy_hits: list[str]
+
+
+@dataclass
+class SkillEntry:
+    name: str
+    description: str
+    category: str
+    kind: str
+    type: str
+    path: str
+    doc_path: str
+    entry: str
+    mcp_plugin: str
+    target_agents: list[str]
+    source_dir: Path
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "name": self.name,
+            "description": self.description,
+            "category": self.category,
+            "kind": self.kind,
+            "type": self.type,
+            "path": self.path,
+            "doc_path": self.doc_path,
+            "entry": self.entry,
+            "mcp_plugin": self.mcp_plugin,
+            "target_agents": list(self.target_agents),
+        }
+
+
+def parse_frontmatter_scalar(raw: str) -> object:
+    value = raw.strip().strip("\"'")
+    if value.startswith("[") and value.endswith("]"):
+        inner = value[1:-1].strip()
+        if not inner:
+            return []
+        return [item.strip().strip("\"'") for item in inner.split(",") if item.strip()]
+    if value.lower() in {"true", "false"}:
+        return value.lower() == "true"
+    return value
+
+
+def parse_frontmatter(text: str) -> dict[str, object]:
+    if not text.startswith("---\n"):
+        return {}
+    marker = "\n---\n"
+    end_index = text.find(marker, 4)
+    if end_index == -1:
+        return {}
+    block = text[4:end_index]
+    lines = block.splitlines()
+    data: dict[str, object] = {}
+    index = 0
+    while index < len(lines):
+        raw = lines[index]
+        line = raw.strip()
+        if not line or line.startswith("#") or ":" not in raw:
+            index += 1
+            continue
+        key, value = raw.split(":", 1)
+        key = key.strip()
+        value = value.strip()
+        if not value:
+            items: list[str] = []
+            index += 1
+            while index < len(lines):
+                nested = lines[index].strip()
+                if not nested.startswith("- "):
+                    break
+                items.append(nested[2:].strip().strip("\"'"))
+                index += 1
+            data[key] = items
+            continue
+        data[key] = parse_frontmatter_scalar(value)
+        index += 1
+    return data
+
+
+def strip_frontmatter(text: str) -> str:
+    if not text.startswith("---\n"):
+        return text
+    marker = "\n---\n"
+    end_index = text.find(marker, 4)
+    if end_index == -1:
+        return text
+    return text[end_index + len(marker) :]
+
+
+def first_body_paragraph(text: str) -> str:
+    body = strip_frontmatter(text)
+    for raw in body.splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#") or line.startswith("- ") or line.startswith("```"):
+            continue
+        return line
+    return ""
+
+
+def normalize_string_list(value: object) -> list[str]:
+    if value is None:
+        return []
+    if isinstance(value, str):
+        items = [item.strip() for item in value.replace(",", " ").split()]
+        return [item for item in items if item]
+    if isinstance(value, list):
+        return [str(item).strip() for item in value if str(item).strip()]
+    return [str(value).strip()]
+
+
+def load_roster_skill_map() -> dict[str, list[str]]:
+    raw = os.environ.get("BRIDGE_AGENT_SKILLS_JSON", "").strip()
+    if not raw:
+        return {}
+    try:
+        payload = json.loads(raw)
+    except json.JSONDecodeError:
+        return {}
+    result: dict[str, list[str]] = {}
+    if not isinstance(payload, dict):
+        return result
+    for agent, skills in payload.items():
+        normalized = normalize_string_list(skills)
+        if normalized:
+            result[str(agent)] = sorted(set(normalized))
+    return result
+
+
+def invert_roster_skill_map(roster_map: dict[str, list[str]]) -> dict[str, list[str]]:
+    inverted: dict[str, list[str]] = {}
+    for agent, skills in roster_map.items():
+        for skill in skills:
+            inverted.setdefault(skill, []).append(agent)
+    for skill, agents in list(inverted.items()):
+        inverted[skill] = sorted(set(agents))
+    return inverted
+
+
+def skill_runtime_root(bridge_home: Path) -> tuple[Path, str]:
+    runtime_root = bridge_home / "runtime" / "skills"
+    if runtime_root.exists():
+        return runtime_root, "~/.agent-bridge/runtime/skills"
+    return REPO_ROOT / "runtime-templates" / "skills", "~/.agent-bridge/runtime/skills"
+
+
+def shared_skill_root(bridge_home: Path) -> tuple[Path, str]:
+    live_root = bridge_home / ".claude" / "skills"
+    if live_root.exists():
+        return live_root, "~/.agent-bridge/.claude/skills"
+    return REPO_ROOT / ".claude" / "skills", "~/.agent-bridge/.claude/skills"
+
+
+def discover_skill_entry(
+    skill_dir: Path,
+    *,
+    kind: str,
+    category: str,
+    canonical_prefix: str,
+    mapped_agents: list[str],
+) -> SkillEntry:
+    skill_file = skill_dir / "SKILL.md"
+    text = read_text(skill_file) if skill_file.exists() else ""
+    meta = parse_frontmatter(text) if text else {}
+    name = str(meta.get("name") or skill_dir.name)
+    description = str(meta.get("description") or first_body_paragraph(text) or f"{name} skill")
+    declared_agents = normalize_string_list(meta.get("target_agents"))
+    target_agents = sorted(set(mapped_agents + declared_agents))
+    entry = str(meta.get("entry") or "")
+    if not entry:
+        script_paths = sorted(
+            str(path.relative_to(skill_dir))
+            for path in skill_dir.rglob("*")
+            if path.is_file() and path.name != "SKILL.md"
+        )
+        entry = script_paths[0] if script_paths else "SKILL.md"
+    doc_path = f"{canonical_prefix}/{skill_dir.name}/SKILL.md" if skill_file.exists() else ""
+    return SkillEntry(
+        name=name,
+        description=description,
+        category=str(meta.get("category") or category),
+        kind=kind,
+        type=str(meta.get("type") or ("claude-shared" if kind == "shared" else "shell-script")),
+        path=f"{canonical_prefix}/{skill_dir.name}",
+        doc_path=doc_path,
+        entry=entry,
+        mcp_plugin=str(meta.get("mcp_plugin") or ""),
+        target_agents=target_agents,
+        source_dir=skill_dir,
+    )
+
+
+def build_skill_registry(bridge_home: Path) -> dict[str, SkillEntry]:
+    roster_map = load_roster_skill_map()
+    mapped_agents = invert_roster_skill_map(roster_map)
+    registry: dict[str, SkillEntry] = {}
+
+    shared_root, shared_prefix = shared_skill_root(bridge_home)
+    if shared_root.exists():
+        for skill_dir in sorted(path for path in shared_root.iterdir() if path.is_dir()):
+            if not (skill_dir / "SKILL.md").exists():
+                continue
+            entry = discover_skill_entry(
+                skill_dir,
+                kind="shared",
+                category="bridge-core",
+                canonical_prefix=shared_prefix,
+                mapped_agents=mapped_agents.get(skill_dir.name, []),
+            )
+            registry[entry.name] = entry
+
+    runtime_root, runtime_prefix = skill_runtime_root(bridge_home)
+    if runtime_root.exists():
+        for skill_dir in sorted(path for path in runtime_root.iterdir() if path.is_dir()):
+            entry = discover_skill_entry(
+                skill_dir,
+                kind="runtime",
+                category="runtime",
+                canonical_prefix=runtime_prefix,
+                mapped_agents=mapped_agents.get(skill_dir.name, []),
+            )
+            registry[entry.name] = entry
+
+    return dict(sorted(registry.items()))
+
+
+def write_skill_registry(bridge_home: Path, registry: dict[str, SkillEntry], dry_run: bool) -> tuple[Path, bool]:
+    payload = {
+        "generated_at": datetime.now().astimezone().isoformat(timespec="seconds"),
+        "skills": {name: entry.to_dict() for name, entry in registry.items()},
+    }
+    path = bridge_home / "state" / "skill-registry.json"
+    text = json.dumps(payload, ensure_ascii=False, indent=2) + "\n"
+    old = read_text(path) if path.exists() else None
+    if old != text:
+        write_text(path, text, dry_run)
+        return path, True
+    return path, False
 
 
 def read_text(path: Path) -> str:
@@ -242,27 +482,64 @@ def render_shared_tools_md(bridge_home: Path) -> str:
 """
 
 
-def render_shared_skills_md(bridge_home: Path) -> str:
+def render_shared_skills_md(bridge_home: Path, registry: dict[str, SkillEntry]) -> str:
     home = pretty_path(bridge_home)
-    return f"""# SKILLS.md — Agent Bridge Shared Skill Guide
+    shared_skills = [entry for entry in registry.values() if entry.kind == "shared"]
+    runtime_skills = [entry for entry in registry.values() if entry.kind == "runtime"]
 
-<!-- Managed by agent-bridge. Regenerated by agent-bridge. -->
+    lines = [
+        "# SKILLS.md — Agent Bridge Shared Skill Catalog",
+        "",
+        "<!-- Managed by agent-bridge. Regenerated by agent-bridge. -->",
+        "",
+        "## Usage Rules",
+        "- 먼저 각 에이전트의 `CLAUDE.md`, `SOUL.md`, agent-local `SKILLS.md`를 읽고 현재 역할 문맥을 확인한다.",
+        "- 공용 스킬 카탈로그는 이 파일이 SSOT다. agent-local `skills/`는 추가 private extension으로만 본다.",
+        "- `references/`는 supporting material이지 실행 명령 목록이 아니다.",
+        "- 예전 외부 skill 경로가 남아 있어도 canonical runtime은 bridge-local registry와 `~/.agent-bridge/runtime/skills/`다.",
+        "",
+        "## Shared Claude Skills",
+    ]
 
-## Bridge-Native Skills
-- bridge coordination skill: `<agent>/.claude/skills/agent-bridge/`
-- agent-local skills: `<agent>/skills/`
-- shared references: `{home}/shared/references/`
+    if shared_skills:
+        lines.extend(
+            [
+                "| Skill | Description | Type | Path |",
+                "| --- | --- | --- | --- |",
+            ]
+        )
+        for entry in shared_skills:
+            lines.append(
+                f"| `{entry.name}` | {entry.description} | `{entry.type}` | `{entry.path}` |"
+            )
+    else:
+        lines.append("- none")
 
-## Usage Rules
-- 먼저 각 에이전트의 `CLAUDE.md`와 `SOUL.md`를 읽고, 필요한 경우 이 파일과 local `skills/`를 확인한다.
-- `skills/`에 있는 문서형 스킬은 해당 파일을 먼저 읽고 절차를 따른다.
-- `references/`는 supporting material이지 실행 명령 목록이 아니다.
+    lines.extend(["", "## Runtime Skill Catalog"])
+    if runtime_skills:
+        lines.extend(
+            [
+                "| Skill | Description | Mapped Agents | Entry |",
+                "| --- | --- | --- | --- |",
+            ]
+        )
+        for entry in runtime_skills:
+            mapped = ", ".join(f"`{agent}`" for agent in entry.target_agents) if entry.target_agents else "-"
+            entry_hint = f"`{entry.entry}`" if entry.entry else "-"
+            lines.append(f"| `{entry.name}` | {entry.description} | {mapped} | {entry_hint} |")
+    else:
+        lines.append("- no runtime skills discovered")
 
-## Migration Compatibility
-- 예전 메모나 참고 문서에 외부 skill 경로가 남아 있더라도 canonical runtime은 bridge-local skill registry다.
-- bridge-local 대체가 있으면 그쪽을 우선한다.
-- 아직 외부 위치에 남은 스킬은 실행 전 현재 동작 여부를 검증하고 migration debt로 기록한다.
-"""
+    lines.extend(
+        [
+            "",
+            "## Discovery Contract",
+            f"- Registry snapshot: `{home}/state/skill-registry.json`",
+            f"- Shared references: `{home}/shared/references/`",
+            "- Per-agent `SKILLS.md` files are derived from the same registry plus local `skills/` files.",
+        ]
+    )
+    return "\n".join(lines).rstrip() + "\n"
 
 
 def rewrite_shared_legacy_text(name: str, bridge_home: Path, text: str) -> str:
@@ -376,7 +653,7 @@ def normalize_agent_runtime_file(path: Path, agent_dir: Path, dry_run: bool, bac
     return True
 
 
-def sync_shared_docs(bridge_home: Path, source_shared: Path, dry_run: bool) -> list[str]:
+def sync_shared_docs(bridge_home: Path, source_shared: Path, dry_run: bool, registry: dict[str, SkillEntry]) -> list[str]:
     changed: list[str] = []
     target_shared = bridge_home / "shared"
     target_refs = target_shared / "references"
@@ -407,7 +684,7 @@ def sync_shared_docs(bridge_home: Path, source_shared: Path, dry_run: bool) -> l
                 copy_path(ref, dst, dry_run)
                 changed.append(str(dst))
 
-    for name, renderer in (("TOOLS.md", render_shared_tools_md), ("SKILLS.md", render_shared_skills_md)):
+    for name, renderer in (("TOOLS.md", render_shared_tools_md), ("SKILLS.md", lambda home: render_shared_skills_md(home, registry))):
         dst = target_shared / name
         text = renderer(bridge_home)
         old = read_text(dst) if dst.exists() else None
@@ -605,11 +882,18 @@ def normalize_claude(agent_dir: Path, dry_run: bool, backup_root: Path) -> bool:
     return False
 
 
-def render_agent_skills_md(agent_dir: Path) -> str:
+def render_agent_skills_md(agent_dir: Path, registry: dict[str, SkillEntry]) -> str:
+    agent_name = agent_dir.name
     skill_files = collect_relative_files(agent_dir, "skills")
     reference_files = collect_relative_files(agent_dir, "references")
+    shared_skills = [
+        entry for entry in registry.values() if entry.kind == "shared" and entry.name in SHARED_CLAUDE_SKILL_NAMES
+    ]
+    mapped_runtime_skills = [
+        entry for entry in registry.values() if entry.kind == "runtime" and agent_name in entry.target_agents
+    ]
     lines = [
-        f"# SKILLS.md — {agent_dir.name}",
+        f"# SKILLS.md — {agent_name}",
         "",
         "<!-- Managed by agent-bridge. Regenerated by agent-bridge. -->",
         "",
@@ -618,8 +902,31 @@ def render_agent_skills_md(agent_dir: Path) -> str:
         "- local `skills/`가 있으면 해당 파일을 먼저 읽고 절차를 따른다.",
         "- 예전 외부 skill 경로는 compatibility note로만 본다. bridge-local 대체가 있으면 그쪽이 우선이다.",
         "",
-        "## Local Inventory",
+        "## Shared Claude Skills",
     ]
+    if shared_skills:
+        for entry in shared_skills:
+            lines.append(f"- `{entry.name}` — {entry.description}")
+    else:
+        lines.append("- shared Claude skills are not available")
+    lines.extend(
+        [
+            "",
+            "## Mapped Runtime Skills",
+        ]
+    )
+    if mapped_runtime_skills:
+        for entry in mapped_runtime_skills:
+            entry_hint = f" (entry: `{entry.entry}`)" if entry.entry else ""
+            lines.append(f"- `{entry.name}` — {entry.description}{entry_hint}")
+    else:
+        lines.append("- no runtime skills are mapped to this agent")
+    lines.extend(
+        [
+            "",
+            "## Local Inventory",
+        ]
+    )
     if skill_files:
         lines.extend([f"- `{entry}`" for entry in skill_files])
     else:
@@ -644,7 +951,7 @@ def ensure_agent_shared_links(agent_dir: Path, dry_run: bool, backup_root: Path)
     return changed
 
 
-def sync_agent_docs(agent_dir: Path, bridge_home: Path, dry_run: bool, stamp: str) -> list[str]:
+def sync_agent_docs(agent_dir: Path, bridge_home: Path, dry_run: bool, stamp: str, registry: dict[str, SkillEntry]) -> list[str]:
     changed: list[str] = []
     backup_root = bridge_home / "state" / "doc-migration" / "backups" / stamp / agent_dir.name
 
@@ -654,7 +961,7 @@ def sync_agent_docs(agent_dir: Path, bridge_home: Path, dry_run: bool, stamp: st
         changed.append(str(agent_dir / "CLAUDE.md"))
 
     skills_path = agent_dir / "SKILLS.md"
-    skills_text = render_agent_skills_md(agent_dir)
+    skills_text = render_agent_skills_md(agent_dir, registry)
     old_skills = read_text(skills_path) if skills_path.exists() else None
     if old_skills != skills_text:
         if skills_path.exists():
@@ -685,6 +992,10 @@ def sync_agent_docs(agent_dir: Path, bridge_home: Path, dry_run: bool, stamp: st
 
 
 def render_audit(audits: list[AgentAudit], bridge_home: Path, source_shared: Path) -> str:
+    registry = build_skill_registry(bridge_home)
+    shared_count = sum(1 for entry in registry.values() if entry.kind == "shared")
+    runtime_count = sum(1 for entry in registry.values() if entry.kind == "runtime")
+    mapped_count = sum(1 for entry in registry.values() if entry.kind == "runtime" and entry.target_agents)
     lines = [
         "# Agent Doc Audit",
         "",
@@ -696,6 +1007,9 @@ def render_audit(audits: list[AgentAudit], bridge_home: Path, source_shared: Pat
         f"- removable legacy docs: {sum(len(audit.removable_docs) for audit in audits)}",
         f"- broken links: {sum(len(audit.broken_links) for audit in audits)}",
         f"- CLAUDE legacy hits: {sum(len(audit.claude_legacy_hits) for audit in audits)}",
+        f"- shared skills discovered: {shared_count}",
+        f"- runtime skills discovered: {runtime_count}",
+        f"- runtime skills with explicit agent mapping: {mapped_count}",
         "",
     ]
     for audit in audits:
@@ -744,6 +1058,7 @@ def main() -> int:
     bridge_home = args.bridge_home.expanduser().resolve()
     target_root = args.target_root.expanduser().resolve()
     source_shared = args.source_shared.expanduser().resolve()
+    registry = build_skill_registry(bridge_home)
     agent_dirs = list_agent_dirs(target_root, args.agents, args.all_agents)
 
     if args.command == "audit":
@@ -755,9 +1070,11 @@ def main() -> int:
         return 0
 
     stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
-    changed = sync_shared_docs(bridge_home, source_shared, args.dry_run)
+    registry_path, registry_changed = write_skill_registry(bridge_home, registry, args.dry_run)
+    changed = [str(registry_path)] if registry_changed else []
+    changed.extend(sync_shared_docs(bridge_home, source_shared, args.dry_run, registry))
     for agent_dir in agent_dirs:
-        changed.extend(sync_agent_docs(agent_dir, bridge_home, args.dry_run, stamp))
+        changed.extend(sync_agent_docs(agent_dir, bridge_home, args.dry_run, stamp, registry))
 
     audits = [audit_agent(agent_dir) for agent_dir in agent_dirs]
     report_lines = [
