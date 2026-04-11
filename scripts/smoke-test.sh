@@ -139,6 +139,7 @@ export BRIDGE_CLAUDE_USAGE_CACHE="$TMP_ROOT/claude-usage-empty.json"
 export BRIDGE_CODEX_SESSIONS_DIR="$TMP_ROOT/codex-sessions-empty"
 export BRIDGE_CLAUDE_INSTALLED_PLUGINS_FILE="$TMP_ROOT/installed_plugins.json"
 export BRIDGE_CLAUDE_CHANNELS_HOME="$TMP_ROOT/claude-channels"
+export BRIDGE_CLAUDE_PLUGIN_CACHE_ROOT="$TMP_ROOT/claude-plugin-cache"
 export BRIDGE_REVIEW_POLICY_FILE="$BRIDGE_HOME/review-policy.json"
 export BRIDGE_MCP_ORPHAN_CLEANUP_ENABLED=0
 export BRIDGE_WEBHOOK_PORT_RANGE_START=9301
@@ -927,6 +928,22 @@ assert_contains "$CODEX_LAUNCH_DRY_RUN" "launch=codex -c features.codex_hooks=tr
 CODEX_SESSION_START_OUTPUT="$(BRIDGE_AGENT_ID="$SMOKE_AGENT" python3 "$REPO_ROOT/hooks/codex-session-start.py")"
 assert_contains "$CODEX_SESSION_START_OUTPUT" "\"hookEventName\": \"SessionStart\""
 assert_contains "$CODEX_SESSION_START_OUTPUT" "agb inbox $SMOKE_AGENT"
+cat >"$CLAUDE_STATIC_WORKDIR/NEXT-SESSION.md" <<'EOF'
+# Resume Checklist
+
+- Verify the last restart result.
+- Report the result to the user.
+EOF
+cat >"$CLAUDE_STATIC_WORKDIR/SESSION-TYPE.md" <<'EOF'
+- Session Type: admin
+- Onboarding State: pending
+EOF
+CLAUDE_SESSION_START_OUTPUT="$(BRIDGE_AGENT_ID="claude-static" BRIDGE_AGENT_WORKDIR="$CLAUDE_STATIC_WORKDIR" BRIDGE_AGENT_HOME_ROOT="$BRIDGE_HOME/agents" python3 "$REPO_ROOT/hooks/session_start.py")"
+assert_contains "$CLAUDE_SESSION_START_OUTPUT" "Handoff present: NEXT-SESSION.md exists"
+assert_contains "$CLAUDE_SESSION_START_OUTPUT" "Resume Checklist"
+assert_contains "$CLAUDE_SESSION_START_OUTPUT" "Onboarding pending:"
+assert_contains "$CLAUDE_SESSION_START_OUTPUT" "agb inbox claude-static"
+rm -f "$CLAUDE_STATIC_WORKDIR/NEXT-SESSION.md" "$CLAUDE_STATIC_WORKDIR/SESSION-TYPE.md"
 CODEX_PROMPT_OUTPUT="$(BRIDGE_AGENT_ID="$SMOKE_AGENT" BRIDGE_HOME="$BRIDGE_HOME" python3 "$REPO_ROOT/hooks/prompt_timestamp.py" --format codex)"
 assert_contains "$CODEX_PROMPT_OUTPUT" "\"hookEventName\": \"UserPromptSubmit\""
 assert_contains "$CODEX_PROMPT_OUTPUT" "now:"
@@ -2162,6 +2179,38 @@ PY
 else
   log "bun not installed; skipping Teams channel plugin runtime smoke"
 fi
+
+log "syncing dev-loaded plugin cache to live marketplace sources"
+TEAMS_CACHE_VERSION_DIR="$BRIDGE_CLAUDE_PLUGIN_CACHE_ROOT/agent-bridge/teams/0.1.0"
+mkdir -p "$TEAMS_CACHE_VERSION_DIR"
+printf 'stale cache\n' >"$TEAMS_CACHE_VERSION_DIR/server.ts"
+printf 'orphaned\n' >"$TEAMS_CACHE_VERSION_DIR/.orphaned_at"
+DEV_PLUGIN_CACHE_JSON="$(python3 "$REPO_ROOT/bridge-dev-plugin-cache.py" sync --channels "plugin:teams@agent-bridge" --json)"
+python3 - "$DEV_PLUGIN_CACHE_JSON" "$REPO_ROOT/plugins/teams" "$TEAMS_CACHE_VERSION_DIR" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+payload = json.loads(sys.argv[1])
+source = Path(sys.argv[2]).resolve()
+cache_version = Path(sys.argv[3])
+results = payload["results"]
+assert len(results) == 1, results
+row = results[0]
+assert row["plugin"] == "teams", row
+assert row["status"] in {"linked", "updated", "unchanged"}, row
+assert cache_version.is_symlink(), cache_version
+assert cache_version.resolve() == source, (cache_version, source)
+assert not (cache_version / ".orphaned_at").exists()
+PY
+DEV_PLUGIN_CACHE_JSON_AGAIN="$(python3 "$REPO_ROOT/bridge-dev-plugin-cache.py" sync --channels "plugin:teams@agent-bridge" --json)"
+python3 - "$DEV_PLUGIN_CACHE_JSON_AGAIN" <<'PY'
+import json
+import sys
+
+payload = json.loads(sys.argv[1])
+assert payload["results"][0]["status"] == "unchanged", payload
+PY
 
 BOOTSTRAP_FAIL_HOME="$TMP_ROOT/bootstrap-fail-home"
 mkdir -p "$BOOTSTRAP_FAIL_HOME"

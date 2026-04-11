@@ -115,6 +115,7 @@ fi
 
 export PATH="$HOME/.local/bin:$HOME/.nix-profile/bin:/usr/local/bin:$PATH"
 export BRIDGE_AGENT_ID="$AGENT"
+export BRIDGE_AGENT_WORKDIR="$WORK_DIR"
 export BRIDGE_AGENT_INJECT_TIMESTAMP="$(bridge_agent_inject_timestamp "$AGENT")"
 
 mkdir -p "$BRIDGE_LOG_DIR" "$BRIDGE_SHARED_DIR"
@@ -333,6 +334,30 @@ bridge_run_schedule_dev_channels_accept() {
   ) >/dev/null 2>&1 &
 }
 
+bridge_run_sync_dev_plugin_cache() {
+  local channels=""
+  local output=""
+  local line=""
+
+  [[ "$ENGINE" == "claude" ]] || return 0
+  [[ $SAFE_MODE -eq 0 ]] || return 0
+  channels="$(bridge_agent_effective_dev_channels_csv "$AGENT")"
+  [[ -n "$channels" ]] || return 0
+
+  if output="$(python3 "$SCRIPT_DIR/bridge-dev-plugin-cache.py" sync --channels "$channels" 2>&1)"; then
+    while IFS= read -r line; do
+      [[ -n "$line" ]] || continue
+      log_line "[dev-plugin-cache] $line"
+    done <<<"$output"
+  else
+    while IFS= read -r line; do
+      [[ -n "$line" ]] || continue
+      log_line "[dev-plugin-cache] $line"
+    done <<<"$output"
+    bridge_warn "development plugin cache sync failed for ${AGENT}"
+  fi
+}
+
 bridge_run_safe_mode_resume_hint() {
   local mode=""
   local admin_agent=""
@@ -408,6 +433,7 @@ while true; do
   [[ -n "$LAUNCH_CMD" ]] || bridge_die "'$AGENT'의 launch command가 비어 있습니다."
 
   if [[ "$ENGINE" == "claude" && $SAFE_MODE -eq 0 ]]; then
+    bridge_run_sync_dev_plugin_cache
     bridge_ensure_claude_launch_channel_plugins "$AGENT"
     bridge_run_schedule_dev_channels_accept "$LAUNCH_CMD"
     bridge_run_schedule_idle_marker_and_inbox_bootstrap

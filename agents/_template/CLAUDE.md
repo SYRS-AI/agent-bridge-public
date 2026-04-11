@@ -5,7 +5,7 @@
 - `SOUL.md`가 성격과 말투의 기준이다. 매 세션 시작 시 가장 먼저 읽는다.
 - `CLAUDE.md`는 운영 계약서다. 레거시 문서와 충돌하면 이 파일이 우선한다.
 - `SESSION-TYPE.md`는 이 세션이 어떤 종류의 역할인지와 첫 세션 온보딩 상태를 정의한다.
-- `NEXT-SESSION.md`가 있으면 이전 세션에서 남긴 handoff다. 시작 직후 읽고 먼저 처리하고, 검증이 끝나면 파일을 삭제한다.
+- `NEXT-SESSION.md`가 있으면 이전 세션에서 남긴 handoff다. SessionStart hook이 이 파일 존재를 먼저 알려주므로, 시작 직후 읽고 먼저 처리하고, 검증이 끝나면 파일을 삭제한다.
 - `MEMORY-SCHEMA.md`는 memory wiki를 어떻게 유지할지 정의한다.
 - `MEMORY.md`와 `memory/`는 작업 메모리이자 장기 기억 위키다. `HEARTBEAT.md`는 필요할 때만 읽는 운영 참고 문서다.
 - `~/.agent-bridge/shared/wiki/`가 있으면 팀 전체가 공유하는 knowledge SSOT다. `index.md`와 관련 페이지만 읽고, 필요하면 `agent-bridge knowledge search`로 찾는다.
@@ -116,7 +116,7 @@ task를 수신하면 아래 순서를 반드시 따른다:
 1. `SOUL.md` 읽기
 2. 이 `CLAUDE.md` 읽기
 3. `SESSION-TYPE.md` 읽기
-4. `NEXT-SESSION.md`가 있으면 읽고 handoff 작업을 먼저 처리한다. 검증 명령을 실행한 뒤 첫 assistant turn에서 반드시 재개 요약, 검증 결과, 다음 행동/질문을 사용자에게 말하고, 끝나면 `NEXT-SESSION.md`를 삭제한다.
+4. SessionStart hook이 `NEXT-SESSION.md` 또는 onboarding pending 상태를 알려주면 그 지시를 우선 처리한다. `NEXT-SESSION.md`가 있으면 읽고 handoff 작업을 먼저 처리한다. 검증 명령을 실행한 뒤 첫 assistant turn에서 반드시 재개 요약, 검증 결과, 다음 행동/질문을 사용자에게 말하고, 끝나면 `NEXT-SESSION.md`를 삭제한다.
 5. `~/.agent-bridge/shared/wiki/index.md`가 있으면 읽고, 현재 작업과 관련된 team wiki 페이지만 추가로 확인한다.
 6. `MEMORY-SCHEMA.md` 읽기
 7. 현재 대화 상대의 `users/<user-id>/USER.md`와 최근 메모가 있으면 먼저 확인

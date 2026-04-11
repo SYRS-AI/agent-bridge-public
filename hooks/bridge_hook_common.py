@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
@@ -30,6 +31,103 @@ def bridge_state_dir() -> Path:
     if bridge_home:
         return Path(bridge_home).expanduser() / "state"
     return Path.home() / ".agent-bridge" / "state"
+
+
+def bridge_home_dir() -> Path:
+    explicit = os.environ.get("BRIDGE_HOME", "").strip()
+    if explicit:
+        return Path(explicit).expanduser()
+    return Path.home() / ".agent-bridge"
+
+
+def agent_home_root() -> Path:
+    explicit = os.environ.get("BRIDGE_AGENT_HOME_ROOT", "").strip()
+    if explicit:
+        return Path(explicit).expanduser()
+    return bridge_home_dir() / "agents"
+
+
+def agent_default_home(agent: str) -> Path:
+    return agent_home_root() / agent
+
+
+def agent_workdir(agent: str) -> Path:
+    explicit = os.environ.get("BRIDGE_AGENT_WORKDIR", "").strip()
+    if explicit:
+        return Path(explicit).expanduser()
+    return agent_default_home(agent)
+
+
+def first_existing_path(candidates: list[Path]) -> Path | None:
+    for path in candidates:
+        if path.is_file():
+            return path
+    return None
+
+
+def short_file_excerpt(path: Path, limit: int = 600) -> str:
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError:
+        return ""
+    lines = [line.rstrip() for line in text.splitlines() if line.strip()]
+    if not lines:
+        return ""
+    excerpt = "\n".join(lines[:6]).strip()
+    if len(excerpt) > limit:
+        excerpt = excerpt[: limit - 3].rstrip() + "..."
+    return excerpt
+
+
+def onboarding_state_from_file(path: Path | None) -> str:
+    if path is None:
+        return "missing"
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError:
+        return "missing"
+    match = re.search(r"Onboarding\s+State:\s*([A-Za-z0-9._-]+)", text)
+    if not match:
+        return "missing"
+    return match.group(1)
+
+
+def bootstrap_artifact_context(agent: str) -> str:
+    workdir = agent_workdir(agent)
+    default_home = agent_default_home(agent)
+    lines: list[str] = []
+
+    next_session = first_existing_path(
+        [
+            workdir / "NEXT-SESSION.md",
+            default_home / "NEXT-SESSION.md",
+        ]
+    )
+    if next_session is not None:
+        lines.append(
+            f"Handoff present: {next_session.name} exists at {next_session}. "
+            "Read this file first and execute its checklist before anything else."
+        )
+        excerpt = short_file_excerpt(next_session)
+        if excerpt:
+            lines.append("Handoff excerpt:")
+            lines.append(excerpt)
+
+    session_type = first_existing_path(
+        [
+            workdir / "SESSION-TYPE.md",
+            default_home / "SESSION-TYPE.md",
+        ]
+    )
+    if onboarding_state_from_file(session_type) == "pending":
+        lines.append(
+            f"Onboarding pending: {session_type} says Onboarding State: pending. "
+            "Stay in onboarding flow until it is complete before doing unrelated work."
+        )
+
+    if not lines:
+        return ""
+    return "\n".join(lines)
 
 
 def timestamp_state_path(agent: str) -> Path:
@@ -125,7 +223,7 @@ def prompt_timestamp_context(agent: str, now: datetime | None = None) -> str:
 
 
 def session_start_context(agent: str) -> str:
-    return (
+    queue_context = (
         f"Agent Bridge queue protocol applies to {agent}. "
         f"Queue DB is source of truth. "
         f"When a task boundary is reached or Agent Bridge asks for attention, "
@@ -133,6 +231,10 @@ def session_start_context(agent: str) -> str:
         f"If a task is queued, claim the highest-priority one first. "
         f"If a task is already claimed by you, continue that task."
     )
+    bootstrap_context = bootstrap_artifact_context(agent)
+    if bootstrap_context:
+        return f"{bootstrap_context}\n\n{queue_context}"
+    return queue_context
 
 
 def queue_summary(agent: str) -> tuple[int, sqlite3.Row | None]:
