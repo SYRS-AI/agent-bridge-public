@@ -2500,8 +2500,12 @@ CLAUDE_STALE_NEXT_CLEAR_AGE="$("$BASH4_BIN" -c '
 
 FAKE_CLAUDE_HOME="$TMP_ROOT/fake-claude-home"
 mkdir -p "$FAKE_CLAUDE_HOME/.claude/sessions"
+mkdir -p "$FAKE_CLAUDE_HOME/.claude/projects/smoke"
 cat >"$FAKE_CLAUDE_HOME/.claude/sessions/static-existing.json" <<EOF
 {"sessionId":"static-existing-session-id","cwd":"$CLAUDE_STATIC_WORKDIR","startedAt":1760000000000}
+EOF
+cat >"$FAKE_CLAUDE_HOME/.claude/projects/smoke/static-existing-session-id.jsonl" <<'EOF'
+{"type":"custom-title","customTitle":"claude-static","sessionId":"static-existing-session-id"}
 EOF
 CLAUDE_LAUNCH_EXISTING_SESSION="$(HOME="$FAKE_CLAUDE_HOME" "$BASH4_BIN" -c '
   source "'"$REPO_ROOT"'/bridge-lib.sh"
@@ -2520,6 +2524,21 @@ CLAUDE_SAFE_MODE_RESUME="$(HOME="$FAKE_CLAUDE_HOME" "$BASH4_BIN" -c '
 ')"
 assert_contains "$CLAUDE_SAFE_MODE_RESUME" "claude --resume static-existing-session-id --dangerously-skip-permissions --name claude-static"
 assert_not_contains "$CLAUDE_SAFE_MODE_RESUME" "--channels"
+FAKE_CLAUDE_STALE_HOME="$TMP_ROOT/fake-claude-stale-home"
+mkdir -p "$FAKE_CLAUDE_STALE_HOME/.claude/sessions"
+cat >"$FAKE_CLAUDE_STALE_HOME/.claude/sessions/stale-existing.json" <<EOF
+{"sessionId":"stale-detected-session-id","cwd":"$CLAUDE_STATIC_WORKDIR","startedAt":1760000000100}
+EOF
+CLAUDE_LAUNCH_STALE_DETECTED_SESSION="$(HOME="$FAKE_CLAUDE_STALE_HOME" "$BASH4_BIN" -c '
+  source "'"$REPO_ROOT"'/bridge-lib.sh"
+  bridge_load_roster
+  BRIDGE_AGENT_CONTINUE["claude-static"]="1"
+  BRIDGE_AGENT_LOOP_RESTART_COUNT=1
+  unset BRIDGE_AGENT_SESSION_ID["claude-static"]
+  bridge_agent_launch_cmd "claude-static"
+')"
+assert_contains "$CLAUDE_LAUNCH_STALE_DETECTED_SESSION" "claude --continue --dangerously-skip-permissions --name claude-static --channels plugin:discord@claude-plugins-official"
+assert_not_contains "$CLAUDE_LAUNCH_STALE_DETECTED_SESSION" "--resume stale-detected-session-id"
 cat >"$CLAUDE_STATIC_WORKDIR/NEXT-SESSION.md" <<'EOF'
 # SAFE MODE NEXT SESSION
 

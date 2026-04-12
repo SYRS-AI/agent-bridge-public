@@ -1431,6 +1431,35 @@ if 0 < since_ms < 10**11:
 exclude = {x for x in sys.argv[3].split(",") if x}
 best = None
 
+def transcript_exists(session_id: str) -> bool:
+    pattern = os.path.expanduser(f"~/.claude/projects/**/{session_id}.jsonl")
+    for transcript in glob.glob(pattern, recursive=True):
+        try:
+            if os.path.getsize(transcript) <= 0:
+                continue
+            with open(transcript, "r", encoding="utf-8") as fh:
+                seen = 0
+                for raw in fh:
+                    line = raw.strip()
+                    if not line:
+                        continue
+                    seen += 1
+                    try:
+                        obj = json.loads(line)
+                    except Exception:
+                        if seen >= 10:
+                            break
+                        continue
+                    if isinstance(obj, dict):
+                        found = obj.get("sessionId")
+                        if not found or found == session_id:
+                            return True
+                    if seen >= 10:
+                        break
+        except Exception:
+            continue
+    return False
+
 for path in glob.glob(os.path.expanduser("~/.claude/sessions/*.json")):
     try:
         with open(path, "r", encoding="utf-8") as fh:
@@ -1443,6 +1472,8 @@ for path in glob.glob(os.path.expanduser("~/.claude/sessions/*.json")):
     if cwd != workdir or not sid or sid in exclude:
         continue
     if since_ms and started < max(0, since_ms - 300000):
+        continue
+    if not transcript_exists(sid):
         continue
     if best is None or started > best[0]:
         best = (started, sid)
@@ -1466,6 +1497,35 @@ import sys
 session_id = sys.argv[1]
 workdir = os.path.realpath(sys.argv[2])
 
+def transcript_exists(session_id: str) -> bool:
+    pattern = os.path.expanduser(f"~/.claude/projects/**/{session_id}.jsonl")
+    for transcript in glob.glob(pattern, recursive=True):
+        try:
+            if os.path.getsize(transcript) <= 0:
+                continue
+            with open(transcript, "r", encoding="utf-8") as fh:
+                seen = 0
+                for raw in fh:
+                    line = raw.strip()
+                    if not line:
+                        continue
+                    seen += 1
+                    try:
+                        obj = json.loads(line)
+                    except Exception:
+                        if seen >= 10:
+                            break
+                        continue
+                    if isinstance(obj, dict):
+                        found = obj.get("sessionId")
+                        if not found or found == session_id:
+                            return True
+                    if seen >= 10:
+                        break
+        except Exception:
+            continue
+    return False
+
 for path in glob.glob(os.path.expanduser("~/.claude/sessions/*.json")):
     try:
         with open(path, "r", encoding="utf-8") as fh:
@@ -1475,6 +1535,8 @@ for path in glob.glob(os.path.expanduser("~/.claude/sessions/*.json")):
     if data.get("sessionId") != session_id:
         continue
     if os.path.realpath(str(data.get("cwd") or "")) != workdir:
+        continue
+    if not transcript_exists(session_id):
         continue
     raise SystemExit(0)
 
