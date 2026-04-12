@@ -158,6 +158,18 @@ bridge_run_stop_foreground_session() {
   bridge_agent_clear_idle_marker "$AGENT"
 }
 
+bridge_run_cleanup_mcp_orphans() {
+  local min_age="${BRIDGE_MCP_ORPHAN_SESSION_STOP_MIN_AGE_SECONDS:-0}"
+
+  [[ "${BRIDGE_MCP_ORPHAN_CLEANUP_ENABLED:-1}" == "1" ]] || return 0
+  [[ "$min_age" =~ ^[0-9]+$ ]] || min_age=0
+
+  # Give orphaned MCP grandchildren a brief chance to be reparented to init
+  # before scanning, otherwise the conservative detector can miss them.
+  sleep 0.2
+  bridge_mcp_orphan_cleanup "session-exit:${AGENT}" "$min_age" 1 >/dev/null 2>&1 || true
+}
+
 bridge_run_roster_signature() {
   local payload=""
   local file=""
@@ -457,6 +469,8 @@ while true; do
   if [[ -f "$ERRFILE" ]]; then
     local_err_size_after="$(wc -c <"$ERRFILE" 2>/dev/null || echo 0)"
   fi
+
+  bridge_run_cleanup_mcp_orphans
 
   if [[ $ONCE -eq 1 ]]; then
     if [[ $local_err_size_after -gt $local_err_size_before ]]; then

@@ -1282,6 +1282,92 @@ wait "$MCP_ATTACHED_PARENT_PID" >/dev/null 2>&1 || true
 MCP_ATTACHED_CHILD_PID=""
 MCP_ATTACHED_PARENT_PID=""
 
+log "cleaning orphan MCP processes immediately before bridge-run relaunch"
+MCP_RESTART_AGENT="mcp-restart-$SESSION_NAME"
+MCP_RESTART_SESSION="mcp-restart-session-$SESSION_NAME"
+MCP_RESTART_WORKDIR="$TMP_ROOT/mcp-restart-workdir"
+MCP_RESTART_BIN_DIR="$TMP_ROOT/mcp-restart-bin"
+MCP_RESTART_COUNT_FILE="$TMP_ROOT/mcp-restart-count.txt"
+MCP_RESTART_LOG="$TMP_ROOT/mcp-restart.log"
+MCP_RESTART_PATTERN="agent-bridge-smoke-restart-mcp-$SESSION_NAME"
+MCP_RESTART_PID_FILE="$TMP_ROOT/mcp-restart-orphan.pid"
+mkdir -p "$MCP_RESTART_WORKDIR" "$MCP_RESTART_BIN_DIR"
+cat >"$MCP_RESTART_BIN_DIR/claude" <<EOF
+#!/usr/bin/env bash
+set -euo pipefail
+count_file="$MCP_RESTART_COUNT_FILE"
+log_file="$MCP_RESTART_LOG"
+pattern="$MCP_RESTART_PATTERN"
+pid_file="$MCP_RESTART_PID_FILE"
+count=0
+if [[ -f "\$count_file" ]]; then
+  count="\$(cat "\$count_file" 2>/dev/null || printf '0')"
+fi
+if [[ ! "\$count" =~ ^[0-9]+$ ]]; then
+  count=0
+fi
+count=\$((count + 1))
+printf '%s\n' "\$count" >"\$count_file"
+printf 'launch=%s\n' "\$count" >>"\$log_file"
+if [[ "\$count" == "1" ]]; then
+  python3 - "\$pattern" "\$pid_file" <<'PY'
+import subprocess
+import sys
+from pathlib import Path
+
+pattern, pid_file = sys.argv[1], sys.argv[2]
+proc = subprocess.Popen(
+    [pattern, "600"],
+    executable="/bin/sleep",
+    stdout=subprocess.DEVNULL,
+    stderr=subprocess.DEVNULL,
+    start_new_session=True,
+)
+Path(pid_file).write_text(str(proc.pid), encoding="utf-8")
+PY
+fi
+exit 0
+EOF
+chmod +x "$MCP_RESTART_BIN_DIR/claude"
+cat >>"$BRIDGE_ROSTER_LOCAL_FILE" <<EOF
+
+# BEGIN AGENT BRIDGE MANAGED ROLE: $MCP_RESTART_AGENT
+bridge_add_agent_id_if_missing "$MCP_RESTART_AGENT"
+BRIDGE_AGENT_DESC["$MCP_RESTART_AGENT"]="Restart orphan cleanup smoke role"
+BRIDGE_AGENT_ENGINE["$MCP_RESTART_AGENT"]="claude"
+BRIDGE_AGENT_SESSION["$MCP_RESTART_AGENT"]="$MCP_RESTART_SESSION"
+BRIDGE_AGENT_WORKDIR["$MCP_RESTART_AGENT"]="$MCP_RESTART_WORKDIR"
+BRIDGE_AGENT_LAUNCH_CMD["$MCP_RESTART_AGENT"]='PATH=$MCP_RESTART_BIN_DIR:$PATH claude --dangerously-skip-permissions --name $MCP_RESTART_AGENT'
+BRIDGE_AGENT_LOOP["$MCP_RESTART_AGENT"]="1"
+BRIDGE_AGENT_CONTINUE["$MCP_RESTART_AGENT"]="0"
+# END AGENT BRIDGE MANAGED ROLE: $MCP_RESTART_AGENT
+EOF
+BRIDGE_MCP_ORPHAN_CLEANUP_ENABLED=1 \
+BRIDGE_MCP_ORPHAN_SESSION_STOP_MIN_AGE_SECONDS=0 \
+BRIDGE_MCP_ORPHAN_PATTERNS="$MCP_RESTART_PATTERN" \
+  "$BASH4_BIN" "$REPO_ROOT/bridge-run.sh" "$MCP_RESTART_AGENT" >/dev/null 2>&1 &
+MCP_RESTART_RUN_PID="$!"
+for _ in {1..40}; do
+  if [[ -f "$MCP_RESTART_LOG" ]] && grep -Fq 'launch=2' "$MCP_RESTART_LOG"; then
+    break
+  fi
+  sleep 0.25
+done
+grep -Fq 'launch=2' "$MCP_RESTART_LOG" || die "expected bridge-run to relaunch the restart orphan cleanup smoke role"
+[[ -f "$MCP_RESTART_PID_FILE" ]] || die "expected fake orphan MCP pid file for restart smoke role"
+MCP_RESTART_ORPHAN_PID="$(cat "$MCP_RESTART_PID_FILE")"
+for _ in {1..40}; do
+  if ! kill -0 "$MCP_RESTART_ORPHAN_PID" >/dev/null 2>&1; then
+    break
+  fi
+  sleep 0.25
+done
+if kill -0 "$MCP_RESTART_ORPHAN_PID" >/dev/null 2>&1; then
+  die "expected bridge-run restart path to clean orphan MCP process before relaunch"
+fi
+kill "$MCP_RESTART_RUN_PID" >/dev/null 2>&1 || true
+wait "$MCP_RESTART_RUN_PID" >/dev/null 2>&1 || true
+
 log "refreshing a static Claude session after memory-daily when prompt is free"
 MEMORY_REFRESH_OUTPUT="$("$BASH4_BIN" -lc '
   set -euo pipefail
