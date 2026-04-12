@@ -21,6 +21,8 @@ REQUESTED_REF=""
 CHECK_ONLY=0
 DRY_RUN=0
 RESTART_DAEMON=1
+RESTART_AGENTS=1
+RESTART_AGENTS_EXPLICIT=0
 JSON=0
 ALLOW_DIRTY=0
 STRICT_MERGE=0
@@ -38,9 +40,9 @@ SOURCE_HEAD=""
 usage() {
   cat <<EOF
 Usage:
-  $(basename "$0") [--source <repo-dir>] [--target <bridge-home>] [--check] [--channel stable|dev|current] [--version <semver>] [--ref <git-ref>] [--pull|--no-pull] [--restart-daemon|--no-restart-daemon] [--dry-run] [--json] [--allow-dirty] [--strict-merge] [--no-backup] [--no-migrate-agents]
+  $(basename "$0") [--source <repo-dir>] [--target <bridge-home>] [--check] [--channel stable|dev|current] [--version <semver>] [--ref <git-ref>] [--pull|--no-pull] [--restart-daemon|--no-restart-daemon] [--restart-agents|--no-restart-agents] [--dry-run] [--json] [--allow-dirty] [--strict-merge] [--no-backup] [--no-migrate-agents]
   $(basename "$0") analyze [--source <repo-dir>] [--target <bridge-home>] [--json]
-  $(basename "$0") rollback [--target <bridge-home>] [--backup-root <dir>] [--restart-daemon|--no-restart-daemon] [--dry-run] [--json]
+  $(basename "$0") rollback [--target <bridge-home>] [--backup-root <dir>] [--restart-daemon|--no-restart-daemon] [--restart-agents|--no-restart-agents] [--dry-run] [--json]
 
 Updates a live Agent Bridge install from a repo checkout while preserving user-owned
 customizations such as:
@@ -110,6 +112,141 @@ bridge_upgrade_version_at_ref() {
   else
     bridge_upgrade_version_from_file "$root"
   fi
+}
+
+bridge_upgrade_collect_agent_restart_report() {
+  local target_root="$1"
+  local dry_run="${2:-0}"
+
+  "$BRIDGE_BASH_BIN" -lc '
+    set -euo pipefail
+    target_root="$1"
+    dry_run="$2"
+    export BRIDGE_HOME="$target_root"
+    source "$target_root/bridge-lib.sh"
+    bridge_load_roster
+
+    agent=""
+    session=""
+    attached=0
+    status=""
+    reason=""
+
+    for agent in "${BRIDGE_AGENT_IDS[@]}"; do
+      [[ "$(bridge_agent_source "$agent")" == "static" ]] || continue
+
+      session="$(bridge_agent_session "$agent")"
+      attached=0
+      status="skipped"
+      reason="inactive"
+
+      if [[ "$(bridge_agent_loop "$agent")" != "1" ]]; then
+        reason="not-loop"
+      elif bridge_agent_manual_stop_active "$agent"; then
+        reason="manual-stop"
+      elif [[ -z "$session" ]]; then
+        reason="no-session"
+      elif ! bridge_tmux_session_exists "$session"; then
+        reason="inactive"
+      else
+        attached="$(bridge_tmux_session_attached_count "$session" 2>/dev/null || printf "0")"
+        [[ "$attached" =~ ^[0-9]+$ ]] || attached=0
+        if (( attached > 0 )); then
+          reason="attached"
+        elif [[ "$dry_run" == "1" ]]; then
+          status="would-restart"
+          reason="eligible"
+        elif "$BRIDGE_BASH_BIN" "$target_root/bridge-agent.sh" restart "$agent" >/dev/null 2>&1; then
+          status="restarted"
+          reason="eligible"
+        else
+          status="failed"
+          reason="restart-failed"
+        fi
+      fi
+
+      printf "%s\t%s\t%s\t%s\t%s\n" "$agent" "$status" "$reason" "$attached" "$session"
+    done
+  ' -- "$target_root" "$dry_run"
+}
+
+bridge_upgrade_agent_restart_json() {
+  local report="$1"
+  local enabled="$2"
+  local dry_run="${3:-0}"
+
+  python3 - "$enabled" "$dry_run" "$report" <<'PY'
+import json
+import sys
+
+enabled = sys.argv[1] == "1"
+dry_run = sys.argv[2] == "1"
+report = sys.argv[3]
+payload = {
+    "enabled": enabled,
+    "dry_run": dry_run,
+    "considered": 0,
+    "eligible": 0,
+    "would_restart": 0,
+    "restarted": 0,
+    "failed": 0,
+    "skipped": 0,
+    "restarted_agents": [],
+    "would_restart_agents": [],
+    "failed_agents": [],
+    "skipped_reasons": {},
+}
+
+for raw in report.splitlines():
+    raw = raw.rstrip("\n")
+    if not raw:
+        continue
+    agent, status, reason, _attached, _session = (raw.split("\t", 4) + ["", "", "", "", ""])[:5]
+    payload["considered"] += 1
+    if reason == "eligible":
+        payload["eligible"] += 1
+    if status == "would-restart":
+        payload["would_restart"] += 1
+        payload["would_restart_agents"].append(agent)
+    elif status == "restarted":
+        payload["restarted"] += 1
+        payload["restarted_agents"].append(agent)
+    elif status == "failed":
+        payload["failed"] += 1
+        payload["failed_agents"].append(agent)
+    else:
+        payload["skipped"] += 1
+        payload["skipped_reasons"][reason] = payload["skipped_reasons"].get(reason, 0) + 1
+
+print(json.dumps(payload, ensure_ascii=False))
+PY
+}
+
+bridge_upgrade_print_agent_restart_summary() {
+  local payload="$1"
+
+  python3 - "$payload" <<'PY'
+import json
+import sys
+
+payload = json.loads(sys.argv[1])
+print(f"agent_restart_enabled: {'yes' if payload.get('enabled') else 'no'}")
+print(f"agent_restart_considered: {payload.get('considered', 0)}")
+print(f"agent_restart_eligible: {payload.get('eligible', 0)}")
+print(f"agent_restart_restarted: {payload.get('restarted', 0)}")
+print(f"agent_restart_failed: {payload.get('failed', 0)}")
+print(f"agent_restart_skipped: {payload.get('skipped', 0)}")
+if payload.get("would_restart"):
+    print(f"agent_restart_would_restart: {payload.get('would_restart', 0)}")
+if payload.get("restarted_agents"):
+    print(f"agent_restart_agents: {','.join(payload['restarted_agents'])}")
+if payload.get("would_restart_agents"):
+    print(f"agent_restart_would_agents: {','.join(payload['would_restart_agents'])}")
+if payload.get("failed_agents"):
+    print(f"agent_restart_failed_agents: {','.join(payload['failed_agents'])}")
+for reason in sorted(payload.get("skipped_reasons", {})):
+    print(f"agent_restart_skipped_{reason}: {payload['skipped_reasons'][reason]}")
+PY
 }
 
 bridge_upgrade_installed_field() {
@@ -201,6 +338,16 @@ while [[ $# -gt 0 ]]; do
       ;;
     --no-restart-daemon)
       RESTART_DAEMON=0
+      shift
+      ;;
+    --restart-agents)
+      RESTART_AGENTS=1
+      RESTART_AGENTS_EXPLICIT=1
+      shift
+      ;;
+    --no-restart-agents)
+      RESTART_AGENTS=0
+      RESTART_AGENTS_EXPLICIT=1
       shift
       ;;
     --dry-run)
@@ -450,6 +597,13 @@ if [[ $DRY_RUN -eq 0 || -z "$TARGET_VERSION" ]]; then
   TARGET_HEAD="$SOURCE_HEAD"
 fi
 
+if [[ $RESTART_DAEMON -eq 0 && $RESTART_AGENTS_EXPLICIT -eq 0 ]]; then
+  RESTART_AGENTS=0
+fi
+if [[ $CHECK_ONLY -eq 1 ]]; then
+  RESTART_AGENTS=0
+fi
+
 ANALYSIS_JSON="$(python3 "$SOURCE_ROOT/bridge-upgrade.py" analyze-live --source-root "$SOURCE_ROOT" --target-root "$TARGET_ROOT")"
 
 if [[ "$SUBCOMMAND" == "analyze" ]]; then
@@ -472,6 +626,7 @@ PY
 fi
 
 if [[ "$SUBCOMMAND" == "rollback" ]]; then
+  ROLLBACK_AGENT_RESTART_JSON="$(bridge_upgrade_agent_restart_json "" 0 "$DRY_RUN")"
   rollback_args=(rollback-live --target-root "$TARGET_ROOT")
   if [[ -n "$BACKUP_ROOT" ]]; then
     rollback_args+=(--backup-root "$BACKUP_ROOT")
@@ -484,8 +639,21 @@ if [[ "$SUBCOMMAND" == "rollback" ]]; then
     bash "$TARGET_ROOT/bridge-daemon.sh" stop >/dev/null 2>&1 || true
     bash "$TARGET_ROOT/bridge-daemon.sh" ensure >/dev/null
   fi
+  if [[ $RESTART_AGENTS -eq 1 ]]; then
+    ROLLBACK_AGENT_RESTART_REPORT="$(bridge_upgrade_collect_agent_restart_report "$TARGET_ROOT" "$DRY_RUN")"
+    ROLLBACK_AGENT_RESTART_JSON="$(bridge_upgrade_agent_restart_json "$ROLLBACK_AGENT_RESTART_REPORT" 1 "$DRY_RUN")"
+  fi
   if [[ $JSON -eq 1 ]]; then
-    printf '%s\n' "$ROLLBACK_JSON"
+    python3 - "$ROLLBACK_JSON" "$ROLLBACK_AGENT_RESTART_JSON" "$RESTART_DAEMON" "$RESTART_AGENTS" <<'PY'
+import json
+import sys
+
+payload = json.loads(sys.argv[1])
+payload["restart_daemon"] = sys.argv[3] == "1"
+payload["restart_agents"] = sys.argv[4] == "1"
+payload["agent_restart"] = json.loads(sys.argv[2])
+print(json.dumps(payload, ensure_ascii=False, indent=2))
+PY
   else
     python3 - "$ROLLBACK_JSON" <<'PY'
 import json, sys
@@ -496,6 +664,7 @@ print(f"backup_root: {payload.get('backup_root')}")
 print(f"restored: {'yes' if payload.get('restored') else 'no'}")
 print(f"removed_entries: {payload.get('removed_entries', 0)}")
 PY
+    bridge_upgrade_print_agent_restart_summary "$ROLLBACK_AGENT_RESTART_JSON"
   fi
   exit 0
 fi
@@ -550,6 +719,7 @@ if [[ $STRICT_MERGE -eq 1 ]]; then
   apply_args+=(--strict-merge)
 fi
 APPLY_JSON="$(python3 "$SOURCE_ROOT/bridge-upgrade.py" "${apply_args[@]}")"
+AGENT_RESTART_JSON="$(bridge_upgrade_agent_restart_json "" 0 "$DRY_RUN")"
 
 if [[ $MIGRATE_AGENTS -eq 1 ]]; then
   if [[ $DRY_RUN -eq 1 ]]; then
@@ -586,14 +756,20 @@ if [[ $DRY_RUN -eq 0 ]]; then
     --channel "$CHANNEL" >/dev/null
 fi
 
+if [[ $RESTART_AGENTS -eq 1 ]]; then
+  AGENT_RESTART_REPORT="$(bridge_upgrade_collect_agent_restart_report "$TARGET_ROOT" "$DRY_RUN")"
+  AGENT_RESTART_JSON="$(bridge_upgrade_agent_restart_json "$AGENT_RESTART_REPORT" 1 "$DRY_RUN")"
+fi
+
 if [[ $JSON -eq 1 ]]; then
-  python3 - "$SOURCE_ROOT" "$TARGET_ROOT" "$PULL" "$DRY_RUN" "$RESTART_DAEMON" "$BACKUP" "$MIGRATE_AGENTS" "$BACKUP_ROOT" "$BACKUP_JSON" "$MIGRATION_JSON" "$APPLY_JSON" "$ANALYSIS_JSON" "$STRICT_MERGE" "$CHANNEL" "$SOURCE_VERSION" "$SOURCE_REF" "$SOURCE_HEAD" "$TARGET_REF" "$TARGET_VERSION" "$TARGET_HEAD" <<'PY'
+  python3 - "$SOURCE_ROOT" "$TARGET_ROOT" "$PULL" "$DRY_RUN" "$RESTART_DAEMON" "$RESTART_AGENTS" "$BACKUP" "$MIGRATE_AGENTS" "$BACKUP_ROOT" "$BACKUP_JSON" "$MIGRATION_JSON" "$APPLY_JSON" "$ANALYSIS_JSON" "$AGENT_RESTART_JSON" "$STRICT_MERGE" "$CHANNEL" "$SOURCE_VERSION" "$SOURCE_REF" "$SOURCE_HEAD" "$TARGET_REF" "$TARGET_VERSION" "$TARGET_HEAD" <<'PY'
 import json, sys
-source_root, target_root, pull, dry_run, restart_daemon, backup_enabled, migrate_agents, backup_root, backup_json, migration_json, apply_json, analysis_json, strict_merge, channel, source_version, source_ref, source_head, target_ref, target_version, target_head = sys.argv[1:]
+source_root, target_root, pull, dry_run, restart_daemon, restart_agents, backup_enabled, migrate_agents, backup_root, backup_json, migration_json, apply_json, analysis_json, agent_restart_json, strict_merge, channel, source_version, source_ref, source_head, target_ref, target_version, target_head = sys.argv[1:]
 backup_payload = json.loads(backup_json)
 migration_payload = json.loads(migration_json)
 apply_payload = json.loads(apply_json)
 analysis_payload = json.loads(analysis_json)
+agent_restart_payload = json.loads(agent_restart_json)
 payload = {
     "mode": "upgrade",
     "version": source_version,
@@ -608,6 +784,7 @@ payload = {
     "pull": pull == "1",
     "dry_run": dry_run == "1",
     "restart_daemon": restart_daemon == "1",
+    "restart_agents": restart_agents == "1",
     "backup_enabled": backup_enabled == "1",
     "migrate_agents": migrate_agents == "1",
     "strict_merge": strict_merge == "1",
@@ -624,6 +801,7 @@ payload = {
     "backup": backup_payload,
     "apply": apply_payload,
     "analysis": analysis_payload,
+    "agent_restart": agent_restart_payload,
     "agent_migration": migration_payload,
   }
 print(json.dumps(payload, ensure_ascii=False, indent=2))
@@ -641,6 +819,7 @@ echo "source_root: $SOURCE_ROOT"
 echo "target_root: $TARGET_ROOT"
 echo "preserved_customizations: agent-roster.local.sh, state/, logs/, shared/, backups/, worktrees/, agents/<agent>/"
 echo "strict_merge: $([[ $STRICT_MERGE -eq 1 ]] && printf yes || printf no)"
+echo "restart_agents: $([[ $RESTART_AGENTS -eq 1 ]] && printf yes || printf no)"
 if [[ $BACKUP -eq 1 ]]; then
   echo "backup_root: $BACKUP_ROOT"
   python3 - "$BACKUP_JSON" <<'PY'
@@ -677,3 +856,4 @@ print(f"agents_migrated: {payload.get('agents_with_additions', 0)}")
 print(f"migrated_files: {payload.get('added_files', 0)}")
 PY
 fi
+bridge_upgrade_print_agent_restart_summary "$AGENT_RESTART_JSON"

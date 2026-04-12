@@ -3311,6 +3311,28 @@ UPGRADE_ANALYZE_JSON="$("$REPO_ROOT/agent-bridge" upgrade analyze --target "$BRI
 assert_contains "$UPGRADE_ANALYZE_JSON" "\"mode\": \"upgrade-analyze\""
 assert_contains "$UPGRADE_ANALYZE_JSON" "\"base_ref\""
 
+log "upgrade restarts active static loop agents so bridge-run reloads fresh code"
+UPGRADE_RESTART_PANE_BEFORE="$(tmux list-panes -t "$(tmux_session_target "$ALWAYS_ON_SESSION")" -F '#{pane_pid}' 2>/dev/null | head -n 1)"
+[[ -n "$UPGRADE_RESTART_PANE_BEFORE" ]] || die "expected active always-on pane before upgrade restart"
+UPGRADE_RESTART_JSON="$("$REPO_ROOT/agent-bridge" upgrade --source "$REPO_ROOT" --target "$BRIDGE_HOME" --allow-dirty --json)"
+assert_contains "$UPGRADE_RESTART_JSON" "\"restart_agents\": true"
+wait_for_tmux_session "$ALWAYS_ON_SESSION" up 40 0.2 || die "always-on role did not come back after upgrade restart"
+UPGRADE_RESTART_PANE_AFTER="$(tmux list-panes -t "$(tmux_session_target "$ALWAYS_ON_SESSION")" -F '#{pane_pid}' 2>/dev/null | head -n 1)"
+[[ -n "$UPGRADE_RESTART_PANE_AFTER" ]] || die "expected active always-on pane after upgrade restart"
+[[ "$UPGRADE_RESTART_PANE_AFTER" != "$UPGRADE_RESTART_PANE_BEFORE" ]] || die "upgrade should restart active static loop agents"
+python3 - "$UPGRADE_RESTART_JSON" "$ALWAYS_ON_AGENT" <<'PY'
+import json
+import sys
+
+payload = json.loads(sys.argv[1])
+agent = sys.argv[2]
+restart = payload["agent_restart"]
+
+assert restart["enabled"] is True, restart
+assert restart["restarted"] >= 1, restart
+assert agent in restart["restarted_agents"], restart
+PY
+
 log "rolling back from an upgrade backup snapshot"
 ROLLBACK_ROOT="$TMP_ROOT/rollback-root"
 mkdir -p "$ROLLBACK_ROOT"
