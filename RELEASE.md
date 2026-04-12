@@ -21,6 +21,18 @@ This release line means:
 - User-owned runtime files are preserved during upgrade.
 - `agb admin` starts the default admin agent and continues onboarding.
 
+## Current Stable Release
+
+The current stable release is `v0.2.0`.
+
+This release line adds:
+
+- shared team knowledge and operator profiles
+- queue-backed handoff bundles, intake triage, and review gates
+- Teams and Microsoft 365 channel/plugin support
+- safer restart continuity, plugin cache sync, and crash-loop recovery
+- MCP orphan cleanup and stronger smoke coverage for restart/cleanup regressions
+
 ## Patch Releases
 
 After `v0.1.0`, publish user-facing fixes as patch releases such as `v0.1.1`.
@@ -58,7 +70,7 @@ agb version
 agb upgrade --check
 agb upgrade
 agb upgrade --channel dev
-agb upgrade --version 0.1.2
+agb upgrade --version 0.2.0
 ```
 
 Default `agb upgrade` should use `stable`, not `main`, so normal users only receive tagged releases.

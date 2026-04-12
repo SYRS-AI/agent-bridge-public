@@ -484,7 +484,7 @@ agb knowledge search --query "primary operator"
 
 ```bash
 agb review policy --agent patch --family release
-agb review request --subject "release 0.1.0" --reviewer reviewer --body-file /tmp/release-plan.md
+agb review request --subject "release 0.2.0" --reviewer reviewer --body-file /tmp/release-plan.md
 agb review complete <task-id> --reviewer reviewer --decision approved --note "No blockers."
 ```
 
