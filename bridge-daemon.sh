@@ -1313,11 +1313,6 @@ PY
   return 1
 }
 
-bridge_crash_report_body_file() {
-  local agent="$1"
-  printf '%s/crash-reports/%s.md' "$BRIDGE_SHARED_DIR" "$agent"
-}
-
 bridge_clear_crash_report_state() {
   local agent="$1"
   rm -f "$(bridge_agent_crash_state_file "$agent")"
@@ -1378,6 +1373,8 @@ process_crash_reports() {
   local state_file=""
   local last_hash=""
   local last_report_ts=0
+  local ack_hash=""
+  local ack_ts=0
   local now_ts=0
   local cooldown="${BRIDGE_CRASH_REPORT_COOLDOWN_SECONDS:-1800}"
   local body_file=""
@@ -1414,13 +1411,18 @@ process_crash_reports() {
     state_file="$(bridge_agent_crash_state_file "$agent")"
     last_hash=""
     last_report_ts=0
+    ack_hash=""
+    ack_ts=0
     if [[ -f "$state_file" ]]; then
       # shellcheck source=/dev/null
       source "$state_file"
       last_hash="${CRASH_LAST_HASH:-}"
       last_report_ts="${CRASH_LAST_REPORT_TS:-0}"
+      ack_hash="${CRASH_ACK_HASH:-}"
+      ack_ts="${CRASH_ACK_TS:-0}"
     fi
     [[ "$last_report_ts" =~ ^[0-9]+$ ]] || last_report_ts=0
+    [[ "$ack_ts" =~ ^[0-9]+$ ]] || ack_ts=0
     now_ts="$(date +%s)"
     fail_count="${CRASH_FAIL_COUNT:-0}"
     exit_code="${CRASH_EXIT_CODE:-0}"
@@ -1446,33 +1448,37 @@ process_crash_reports() {
         reported=1
       fi
     else
-      body_file="$(bridge_crash_report_body_file "$agent")"
-      bridge_write_crash_report_body "$agent" "$body_file" "$fail_count" "$exit_code" "$engine" "$stderr_file" "$tail_file" "$launch_cmd"
       title="[crash-loop] ${agent} (${fail_count} failures)"
       title_prefix="[crash-loop] ${agent} "
       existing_id="$(bridge_queue_cli find-open --agent "$admin_agent" --title-prefix "$title_prefix" 2>/dev/null || true)"
-      if [[ "$existing_id" =~ ^[0-9]+$ ]]; then
-        bridge_queue_cli update "$existing_id" --actor daemon --title "$title" --priority urgent --body-file "$body_file" >/dev/null 2>&1 || true
-        bridge_audit_log daemon crash_loop_report "$admin_agent" \
-          --detail agent="$agent" \
-          --detail mode=refresh \
-          --detail fail_count="$fail_count" \
-          --detail exit_code="$exit_code" \
-          --detail error_hash="$error_hash" \
-          --detail body_file="$body_file"
-        reported=1
-      elif [[ "$error_hash" != "$last_hash" || $(( now_ts - last_report_ts )) -ge "$cooldown" ]]; then
-        create_output="$(bridge_queue_cli create --to "$admin_agent" --from daemon --priority urgent --title "$title" --body-file "$body_file" 2>/dev/null || true)"
-        if [[ "$create_output" =~ created\ task\ \#([0-9]+) ]]; then
+      if [[ ! "$existing_id" =~ ^[0-9]+$ && -n "$ack_hash" && "$error_hash" == "$ack_hash" ]]; then
+        :
+      else
+        body_file="$(bridge_agent_crash_report_body_file "$agent")"
+        bridge_write_crash_report_body "$agent" "$body_file" "$fail_count" "$exit_code" "$engine" "$stderr_file" "$tail_file" "$launch_cmd"
+        if [[ "$existing_id" =~ ^[0-9]+$ ]]; then
+          bridge_queue_cli update "$existing_id" --actor daemon --title "$title" --priority urgent --body-file "$body_file" >/dev/null 2>&1 || true
           bridge_audit_log daemon crash_loop_report "$admin_agent" \
             --detail agent="$agent" \
-            --detail mode=create \
-            --detail task_id="${BASH_REMATCH[1]}" \
+            --detail mode=refresh \
             --detail fail_count="$fail_count" \
             --detail exit_code="$exit_code" \
             --detail error_hash="$error_hash" \
             --detail body_file="$body_file"
           reported=1
+        elif [[ "$error_hash" != "$last_hash" || $(( now_ts - last_report_ts )) -ge "$cooldown" ]]; then
+          create_output="$(bridge_queue_cli create --to "$admin_agent" --from daemon --priority urgent --title "$title" --body-file "$body_file" 2>/dev/null || true)"
+          if [[ "$create_output" =~ created\ task\ \#([0-9]+) ]]; then
+            bridge_audit_log daemon crash_loop_report "$admin_agent" \
+              --detail agent="$agent" \
+              --detail mode=create \
+              --detail task_id="${BASH_REMATCH[1]}" \
+              --detail fail_count="$fail_count" \
+              --detail exit_code="$exit_code" \
+              --detail error_hash="$error_hash" \
+              --detail body_file="$body_file"
+            reported=1
+          fi
         fi
       fi
     fi
@@ -1482,6 +1488,8 @@ process_crash_reports() {
       cat >"$state_file" <<EOF
 CRASH_LAST_HASH=$(printf '%q' "$error_hash")
 CRASH_LAST_REPORT_TS=$(printf '%q' "$now_ts")
+CRASH_ACK_HASH=$(printf '%q' "${ack_hash:-}")
+CRASH_ACK_TS=$(printf '%q' "${ack_ts:-0}")
 EOF
       changed=0
     fi

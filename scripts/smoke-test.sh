@@ -4207,10 +4207,15 @@ bash "$REPO_ROOT/bridge-daemon.sh" sync >/dev/null
 CRASH_OPEN_ID="$(python3 "$REPO_ROOT/bridge-queue.py" find-open --agent "$SMOKE_AGENT" --title-prefix "[crash-loop] $BROKEN_CHANNEL_AGENT " 2>/dev/null || true)"
 [[ "$CRASH_OPEN_ID" =~ ^[0-9]+$ ]] || die "expected crash-loop task for $BROKEN_CHANNEL_AGENT"
 bash "$REPO_ROOT/bridge-task.sh" done "$CRASH_OPEN_ID" --agent "$SMOKE_AGENT" --note "crash report handled" >/dev/null
-bash "$REPO_ROOT/bridge-daemon.sh" sync >/dev/null
+CRASH_STATE_FILE="$("$BASH4_BIN" -lc "source \"$REPO_ROOT/bridge-lib.sh\"; bridge_load_roster; bridge_agent_crash_state_file \"$BROKEN_CHANNEL_AGENT\"")"
+[[ -f "$CRASH_STATE_FILE" ]] || die "expected crash state file for $BROKEN_CHANNEL_AGENT"
+grep -q "CRASH_ACK_HASH=" "$CRASH_STATE_FILE" || die "expected crash report ack hash to be recorded"
+BRIDGE_CRASH_REPORT_COOLDOWN_SECONDS=0 bash "$REPO_ROOT/bridge-daemon.sh" sync >/dev/null
 CRASH_OPEN_ID_AGAIN="$(python3 "$REPO_ROOT/bridge-queue.py" find-open --agent "$SMOKE_AGENT" --title-prefix "[crash-loop] $BROKEN_CHANNEL_AGENT " 2>/dev/null || true)"
-[[ -z "$CRASH_OPEN_ID_AGAIN" ]] || die "crash-loop report should be deduped while error hash is unchanged"
+[[ -z "$CRASH_OPEN_ID_AGAIN" ]] || die "crash-loop report should stay acked while error hash is unchanged"
 "$BASH4_BIN" -lc "source \"$REPO_ROOT/bridge-lib.sh\"; bridge_load_roster; bridge_agent_clear_crash_report \"$BROKEN_CHANNEL_AGENT\""
+CRASH_BODY_FILE="$("$BASH4_BIN" -lc "source \"$REPO_ROOT/bridge-lib.sh\"; bridge_load_roster; bridge_agent_crash_report_body_file \"$BROKEN_CHANNEL_AGENT\"")"
+[[ ! -f "$CRASH_BODY_FILE" ]] || die "expected crash report body file to be removed on clear"
 
 log "directly alerting on admin crash loops"
 ADMIN_CRASH_ERRFILE="$TMP_ROOT/admin-crash-loop.err"

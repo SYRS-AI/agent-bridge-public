@@ -1138,6 +1138,11 @@ bridge_agent_crash_report_file() {
   printf '%s/crash-report/%s.env' "$BRIDGE_STATE_DIR" "$agent"
 }
 
+bridge_agent_crash_report_body_file() {
+  local agent="$1"
+  printf '%s/crash-reports/%s.md' "$BRIDGE_SHARED_DIR" "$agent"
+}
+
 bridge_agent_crash_tail_file() {
   local agent="$1"
   printf '%s/crash-report/%s.tail.log' "$BRIDGE_STATE_DIR" "$agent"
@@ -1262,9 +1267,43 @@ bridge_agent_clear_crash_report() {
   local agent="$1"
   rm -f \
     "$(bridge_agent_crash_report_file "$agent")" \
+    "$(bridge_agent_crash_report_body_file "$agent")" \
     "$(bridge_agent_crash_tail_file "$agent")" \
     "$(bridge_agent_crash_state_file "$agent")"
   bridge_agent_clear_broken_launch_state "$agent"
+}
+
+bridge_agent_ack_crash_report() {
+  local agent="$1"
+  local report_file=""
+  local state_file=""
+  local CRASH_AGENT=""
+  local CRASH_ERROR_HASH=""
+  local CRASH_LAST_HASH=""
+  local CRASH_LAST_REPORT_TS=""
+  local now_ts=0
+
+  report_file="$(bridge_agent_crash_report_file "$agent")"
+  [[ -f "$report_file" ]] || return 1
+  # shellcheck source=/dev/null
+  source "$report_file"
+  [[ "${CRASH_AGENT:-}" == "$agent" ]] || return 1
+  [[ -n "${CRASH_ERROR_HASH:-}" ]] || return 1
+
+  state_file="$(bridge_agent_crash_state_file "$agent")"
+  if [[ -f "$state_file" ]]; then
+    # shellcheck source=/dev/null
+    source "$state_file"
+  fi
+
+  now_ts="$(date +%s)"
+  mkdir -p "$(dirname "$state_file")"
+  cat >"$state_file" <<EOF
+CRASH_LAST_HASH=$(printf '%q' "${CRASH_LAST_HASH:-$CRASH_ERROR_HASH}")
+CRASH_LAST_REPORT_TS=$(printf '%q' "${CRASH_LAST_REPORT_TS:-$now_ts}")
+CRASH_ACK_HASH=$(printf '%q' "$CRASH_ERROR_HASH")
+CRASH_ACK_TS=$(printf '%q' "$now_ts")
+EOF
 }
 
 bridge_agent_memory_daily_refresh_pending() {

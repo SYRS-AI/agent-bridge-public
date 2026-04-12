@@ -58,6 +58,22 @@ emit_inferred_actor_hint() {
   echo "[hint] --from omitted; inferred sender: ${inferred_actor}. Use --from <agent> to override." >&2
 }
 
+ack_crash_loop_task_if_needed() {
+  local task_id="$1"
+  local task_shell=""
+  local TASK_TITLE=""
+  local agent=""
+
+  task_shell="$(bridge_queue_cli show "$task_id" --format shell 2>/dev/null || true)"
+  [[ -n "$task_shell" ]] || return 0
+  # shellcheck disable=SC1091
+  source /dev/stdin <<<"$task_shell"
+  [[ "${TASK_TITLE:-}" =~ ^\[crash-loop\]\ ([^[:space:]]+)\ \([0-9]+\ failures\)$ ]] || return 0
+  agent="${BASH_REMATCH[1]}"
+  bridge_agent_exists "$agent" || return 0
+  bridge_agent_ack_crash_report "$agent" >/dev/null 2>&1 || true
+}
+
 notify_task_requester() {
   local task_id="$1"
   local actor="$2"
@@ -344,6 +360,7 @@ cmd_done() {
     args+=(--note-file "$note_file")
   fi
   bridge_queue_cli "${args[@]}"
+  ack_crash_loop_task_if_needed "$task_id"
   notify_task_requester "$task_id" "$agent" "$note" "$note_file"
 }
 
@@ -424,6 +441,7 @@ cmd_cancel() {
     args+=(--note-file "$note_file")
   fi
   bridge_queue_cli "${args[@]}"
+  ack_crash_loop_task_if_needed "$task_id"
   if [[ -n "$task_target" ]]; then
     bridge_audit_log queue task_cancelled "$task_target" \
       --detail task_id="$task_id" \
