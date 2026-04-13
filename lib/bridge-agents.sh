@@ -1500,6 +1500,69 @@ bridge_agent_required_runtime_channels_csv() {
   bridge_agent_channels_csv "$agent"
 }
 
+bridge_claude_channel_banner_present_from_text() {
+  local channels="$1"
+  local recent="$2"
+  local item=""
+  local found=0
+  local -a items=()
+
+  channels="$(bridge_filter_claude_plugin_channels_csv "$channels")"
+  [[ -n "$channels" ]] || return 0
+  [[ "$recent" == *"Listening for channel messages from:"* ]] || return 1
+
+  IFS=',' read -r -a items <<<"$channels"
+  for item in "${items[@]}"; do
+    item="$(bridge_trim_whitespace "$item")"
+    [[ -n "$item" ]] || continue
+    [[ "$recent" == *"$item"* ]] || return 1
+    found=1
+  done
+
+  [[ "$found" == "1" ]]
+}
+
+bridge_tmux_session_has_claude_channel_banner() {
+  local session="$1"
+  local channels="$2"
+  local recent=""
+
+  channels="$(bridge_filter_claude_plugin_channels_csv "$channels")"
+  [[ -n "$channels" ]] || return 0
+  recent="$(bridge_capture_recent "$session" 80 2>/dev/null || true)"
+  [[ -n "$recent" ]] || return 1
+  bridge_claude_channel_banner_present_from_text "$channels" "$recent"
+}
+
+bridge_tmux_wait_for_claude_channel_banner() {
+  local session="$1"
+  local channels="$2"
+  local timeout="${3:-12}"
+  local start_ts=0
+  local elapsed=0
+
+  channels="$(bridge_filter_claude_plugin_channels_csv "$channels")"
+  [[ -n "$channels" ]] || return 0
+  [[ "$timeout" =~ ^[0-9]+$ ]] || timeout=12
+  (( timeout > 0 )) || timeout=12
+
+  if bridge_tmux_session_has_claude_channel_banner "$session" "$channels"; then
+    return 0
+  fi
+
+  start_ts="$(date +%s)"
+  while true; do
+    if bridge_tmux_session_has_claude_channel_banner "$session" "$channels"; then
+      return 0
+    fi
+    sleep 0.2
+    elapsed=$(( $(date +%s) - start_ts ))
+    if (( elapsed >= timeout )); then
+      return 1
+    fi
+  done
+}
+
 bridge_agent_launch_channel_status_reason() {
   local agent="$1"
   local required=""

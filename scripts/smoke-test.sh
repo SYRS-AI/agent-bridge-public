@@ -2078,6 +2078,41 @@ READY_CHANNEL_PLUGIN_CHECK="$(BRIDGE_CLAUDE_INSTALLED_PLUGINS_FILE="$TMP_ROOT/mi
   bridge_ensure_claude_launch_channel_plugins "'"$CREATED_AGENT"'"
 ' 2>&1 || true)"
 assert_contains "$READY_CHANNEL_PLUGIN_CHECK" "Claude plugin registry is missing 'telegram@claude-plugins-official' in test mode."
+CHANNEL_BANNER_POSITIVE_TEXT=$'Listening for channel messages from: plugin:telegram@claude-plugins-official\nExperimental banner'
+CHANNEL_BANNER_NEGATIVE_TEXT=$'Listening for channel messages from: plugin:discord@claude-plugins-official\nExperimental banner'
+CHANNEL_BANNER_CHECK="$("$BASH4_BIN" -c '
+  source "'"$REPO_ROOT"'/bridge-lib.sh"
+  bridge_load_roster
+  if bridge_claude_channel_banner_present_from_text "plugin:telegram@claude-plugins-official" "$1"; then
+    printf ready
+  else
+    printf missing
+  fi
+' _ "$CHANNEL_BANNER_POSITIVE_TEXT")"
+[[ "$CHANNEL_BANNER_CHECK" == "ready" ]] || die "expected telegram channel banner helper to accept matching banner text"
+CHANNEL_BANNER_CHECK="$("$BASH4_BIN" -c '
+  source "'"$REPO_ROOT"'/bridge-lib.sh"
+  bridge_load_roster
+  if bridge_claude_channel_banner_present_from_text "plugin:telegram@claude-plugins-official" "$1"; then
+    printf ready
+  else
+    printf missing
+  fi
+' _ "$CHANNEL_BANNER_NEGATIVE_TEXT")"
+[[ "$CHANNEL_BANNER_CHECK" == "missing" ]] || die "expected telegram channel banner helper to reject mismatched banner text"
+CHANNEL_BANNER_SESSION="channel-banner-smoke-$$"
+tmux new-session -d -s "$CHANNEL_BANNER_SESSION" "printf 'Listening for channel messages from: plugin:telegram@claude-plugins-official\n'; sleep 5"
+CHANNEL_BANNER_WAIT="$("$BASH4_BIN" -c '
+  source "'"$REPO_ROOT"'/bridge-lib.sh"
+  bridge_load_roster
+  if bridge_tmux_wait_for_claude_channel_banner "$1" "plugin:telegram@claude-plugins-official" 3; then
+    printf ready
+  else
+    printf missing
+  fi
+' _ "$CHANNEL_BANNER_SESSION")"
+[[ "$CHANNEL_BANNER_WAIT" == "ready" ]] || die "expected tmux banner wait helper to observe telegram banner"
+tmux kill-session -t "$CHANNEL_BANNER_SESSION" >/dev/null 2>&1 || true
 FAKE_CLAUDE_BIN_DIR="$TMP_ROOT/fake-claude-bin"
 FAKE_CLAUDE_PLUGIN_STATE="$TMP_ROOT/fake-claude-plugin-state"
 FAKE_CLAUDE_PLUGIN_LOG="$TMP_ROOT/fake-claude-plugin.log"

@@ -1078,12 +1078,17 @@ run_restart() {
   local session=""
   local start_args=()
   local attach_mode=0
+  local dry_run_mode=0
+  local engine=""
+  local launch_channels=""
+  local verify_timeout="${BRIDGE_AGENT_RESTART_CHANNEL_VERIFY_SECONDS:-12}"
 
   shift || true
   [[ -n "$agent" ]] || bridge_die "Usage: $(basename "$0") restart <agent> [...]"
   bridge_require_agent "$agent"
   session="$(bridge_agent_session "$agent")"
   [[ -n "$session" ]] || bridge_die "세션 이름이 없습니다: $agent"
+  engine="$(bridge_agent_engine "$agent")"
 
   while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -1093,6 +1098,9 @@ run_restart() {
         shift
         ;;
       --continue|--no-continue|--dry-run)
+        if [[ "$1" == "--dry-run" ]]; then
+          dry_run_mode=1
+        fi
         start_args+=("$1")
         shift
         ;;
@@ -1110,7 +1118,44 @@ run_restart() {
     bridge_kill_agent_session "$agent"
     bridge_refresh_runtime_state
   fi
-  exec "$BRIDGE_BASH_BIN" "$SCRIPT_DIR/bridge-start.sh" "$agent" --replace "${start_args[@]}"
+
+  if [[ $attach_mode -eq 1 || $dry_run_mode -eq 1 ]]; then
+    exec "$BRIDGE_BASH_BIN" "$SCRIPT_DIR/bridge-start.sh" "$agent" --replace "${start_args[@]}"
+  fi
+
+  restart_once() {
+    "$BRIDGE_BASH_BIN" "$SCRIPT_DIR/bridge-start.sh" "$agent" --replace "${start_args[@]}"
+  }
+
+  if ! restart_once; then
+    return 1
+  fi
+
+  if [[ "$engine" != "claude" ]]; then
+    return 0
+  fi
+
+  launch_channels="$(bridge_agent_effective_launch_plugin_channels_csv "$agent")"
+  if ! bridge_tmux_wait_for_claude_channel_banner "$session" "$launch_channels" "$verify_timeout"; then
+    bridge_warn "Claude channel runtime banner missing after restart for '$agent'. Retrying once with a fresh session."
+    if bridge_tmux_session_exists "$session"; then
+      bridge_kill_agent_session "$agent" >/dev/null 2>&1 || true
+      bridge_refresh_runtime_state
+    fi
+    if ! restart_once; then
+      return 1
+    fi
+    if ! bridge_tmux_wait_for_claude_channel_banner "$session" "$launch_channels" "$verify_timeout"; then
+      bridge_warn "Claude channel runtime banner still missing after retry for '$agent'. Stopping the session to avoid a half-ready channel agent."
+      if bridge_tmux_session_exists "$session"; then
+        bridge_kill_agent_session "$agent" >/dev/null 2>&1 || true
+        bridge_refresh_runtime_state
+      fi
+      return 1
+    fi
+  fi
+
+  return 0
 }
 
 run_attach() {
