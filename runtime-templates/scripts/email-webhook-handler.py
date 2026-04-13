@@ -26,39 +26,17 @@ QUEUE_HELPER = BRIDGE_HOME / "bridge-queue.py"
 
 sys.path.insert(0, str(RUNTIME_ROOT / "scripts"))
 from creds import load_creds
+from gmail_accounts import (
+    gmail_accounts_config_source,
+    load_gmail_accounts,
+)
 from gws_helper import gws_api
 
-DEFAULT_GMAIL_ACCOUNTS_FILE = RUNTIME_ROOT / "credentials" / "gmail-accounts.json"
+EMPTY_ACCOUNTS_MARKER = BRIDGE_HOME / "state" / "runtime-alerts" / "gmail-empty-accounts.json"
+EMPTY_ACCOUNTS_TTL_SECONDS = 6 * 60 * 60  # 6 hours
 
 
-def load_accounts() -> dict[str, str]:
-    raw_json = os.environ.get("BRIDGE_GMAIL_ACCOUNTS_JSON", "").strip()
-    if raw_json:
-        try:
-            payload = json.loads(raw_json)
-        except json.JSONDecodeError as exc:
-            raise RuntimeError("BRIDGE_GMAIL_ACCOUNTS_JSON must be valid JSON") from exc
-    else:
-        config_path = Path(
-            os.environ.get("BRIDGE_GMAIL_ACCOUNTS_FILE", str(DEFAULT_GMAIL_ACCOUNTS_FILE))
-        ).expanduser()
-        if not config_path.exists():
-            return {}
-        payload = json.loads(config_path.read_text(encoding="utf-8"))
-
-    if isinstance(payload, dict) and isinstance(payload.get("accounts"), dict):
-        payload = payload["accounts"]
-    if not isinstance(payload, dict):
-        raise RuntimeError("gmail account config must be a JSON object")
-
-    return {
-        str(name): str(address).strip()
-        for name, address in payload.items()
-        if str(name).strip() and str(address).strip()
-    }
-
-
-ACCOUNTS = load_accounts()
+ACCOUNTS = load_gmail_accounts()
 
 TRIAGE_TITLE = "[MAIL] Gmail webhook triage"
 
@@ -70,6 +48,66 @@ def log(msg):
     LOG_FILE.parent.mkdir(parents=True, exist_ok=True)
     with LOG_FILE.open("a", encoding="utf-8") as f:
         f.write(line + "\n")
+
+
+def _escalate_empty_accounts() -> None:
+    """Escalate missing Gmail accounts config with file-backed dedupe."""
+    now = datetime.now(timezone.utc)
+    try:
+        EMPTY_ACCOUNTS_MARKER.parent.mkdir(parents=True, exist_ok=True)
+        if EMPTY_ACCOUNTS_MARKER.exists():
+            try:
+                existing = json.loads(EMPTY_ACCOUNTS_MARKER.read_text(encoding="utf-8"))
+                last = existing.get("last_sent_at", "")
+                if last:
+                    last_dt = datetime.fromisoformat(last)
+                    if (now - last_dt).total_seconds() < EMPTY_ACCOUNTS_TTL_SECONDS:
+                        log("  empty-accounts escalation: suppressed (within TTL)")
+                        return
+            except (json.JSONDecodeError, ValueError):
+                pass
+
+        admin = os.environ.get("BRIDGE_ADMIN_AGENT_ID", "patch")
+        config_source = gmail_accounts_config_source()
+        cmd = [
+            str(AGENT_BRIDGE),
+            "task",
+            "create",
+            "--to",
+            admin,
+            "--from",
+            "email-webhook-handler",
+            "--priority",
+            "urgent",
+            "--title",
+            "[SILENT-DEATH] Gmail accounts 설정 누락 — webhook sync 중단",
+            "--body",
+            (
+                f"email-webhook-handler.py가 ACCOUNTS empty로 webhook sync를 건너뛰고 있습니다.\n"
+                f"확인 경로: {config_source}\n"
+                f"즉시 계정 설정을 복구하거나 handler를 비활성화 해주세요.\n"
+                f"감지 시각: {now.isoformat()}\n"
+                f"(중복 escalation은 {EMPTY_ACCOUNTS_TTL_SECONDS // 3600}시간 suppress)"
+            ),
+        ]
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=15)
+        if result.returncode == 0:
+            log(f"  escalated empty accounts to {admin} (urgent task created)")
+        else:
+            log(f"  escalate failed: {(result.stderr or result.stdout)[:300]}")
+
+        EMPTY_ACCOUNTS_MARKER.write_text(
+            json.dumps(
+                {
+                    "last_sent_at": now.isoformat(),
+                    "config_source": config_source,
+                },
+                ensure_ascii=False,
+            ),
+            encoding="utf-8",
+        )
+    except Exception as exc:
+        log(f"  escalate empty accounts exception: {exc}")
 
 
 def get_supabase_db():
@@ -270,8 +308,9 @@ def queue_mailbot_triage(new_emails):
 def main():
     log("Email webhook handler started")
     if not ACCOUNTS:
-        log("No configured Gmail accounts; skipping webhook sync.")
-        return
+        log("ERROR: No configured Gmail accounts — webhook sync cannot proceed.")
+        _escalate_empty_accounts()
+        sys.exit(2)
     conn = get_supabase_db()
     all_new = []
     try:

@@ -3921,6 +3921,7 @@ RUNTIME_CANON_OUTPUT="$("$REPO_ROOT/agent-bridge" migrate runtime canonicalize -
 assert_contains "$RUNTIME_CANON_OUTPUT" "overlay[scripts/call-shopify.sh]"
 assert_contains "$RUNTIME_CANON_OUTPUT" "overlay[scripts/creds.py]"
 assert_contains "$RUNTIME_CANON_OUTPUT" "overlay[scripts/email-webhook-handler.py]"
+assert_contains "$RUNTIME_CANON_OUTPUT" "overlay[scripts/gmail_accounts.py]"
 assert_contains "$RUNTIME_CANON_OUTPUT" "overlay[scripts/webhook_utils.py]"
 assert_contains "$RUNTIME_CANON_OUTPUT" "overlay[skills/agent-db/scripts/email-sync.py]"
 grep -q 'task create' "$BRIDGE_HOME/runtime/scripts/call-shopify.sh" || die "expected bridge-native task delivery in call-shopify"
@@ -3929,9 +3930,11 @@ grep -q '\[cron-failure\] recurring failures detected' "$BRIDGE_HOME/runtime/scr
 grep -q 'queue-based A2A is the source of truth' "$BRIDGE_HOME/runtime/scripts/patch-a2a-bridge.sh" || die "expected deprecated A2A bridge stub"
 grep -q 'agent-bridge setup agent' "$BRIDGE_HOME/runtime/skills/agent-factory/scripts/create-agent.sh" || die "expected bridge-native setup guidance in create-agent"
 grep -q 'agent-bridge task create' "$BRIDGE_HOME/runtime/scripts/email-webhook-handler.py" || die "expected queue handoff in email webhook handler"
+grep -q 'load_gmail_accounts' "$BRIDGE_HOME/runtime/scripts/email-webhook-handler.py" || die "expected shared gmail accounts loader in email webhook handler"
 grep -q 'queue-dispatch' "$BRIDGE_HOME/runtime/scripts/webhook_utils.py" || die "expected bridge-native one-shot cron helper in webhook utils"
 grep -q 'BRIDGE_RUNTIME_CREDENTIALS_DIR' "$BRIDGE_HOME/runtime/scripts/creds.py" || die "expected bridge-native credential loader"
 grep -q 'gws_api' "$BRIDGE_HOME/runtime/skills/agent-db/scripts/email-sync.py" || die "expected gws-backed email sync script"
+grep -q 'load_gmail_accounts' "$BRIDGE_HOME/runtime/skills/agent-db/scripts/email-sync.py" || die "expected shared gmail accounts loader in agent-db email sync"
 python3 - "$BRIDGE_HOME/runtime/scripts" <<'PY'
 import sys
 sys.path.insert(0, sys.argv[1])
