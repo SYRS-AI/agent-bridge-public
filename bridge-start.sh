@@ -115,8 +115,12 @@ fi
 
 if bridge_tmux_session_exists "$SESSION"; then
   if [[ $REPLACE -eq 1 ]]; then
-    bridge_tmux_kill_session "$SESSION"
-    echo "[info] 기존 세션 '$SESSION' 제거"
+    if [[ $DRY_RUN -eq 1 ]]; then
+      echo "[info] 기존 세션 '$SESSION' would be replaced"
+    else
+      bridge_tmux_kill_session "$SESSION"
+      echo "[info] 기존 세션 '$SESSION' 제거"
+    fi
   else
     echo "[info] 세션 '$SESSION'이 이미 실행 중입니다."
     if [[ $ATTACH -eq 1 ]]; then

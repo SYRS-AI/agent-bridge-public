@@ -1081,6 +1081,7 @@ run_restart() {
   local dry_run_mode=0
   local engine=""
   local launch_channels=""
+  local preflight_reason=""
   local verify_timeout="${BRIDGE_AGENT_RESTART_CHANNEL_VERIFY_SECONDS:-12}"
 
   shift || true
@@ -1114,12 +1115,21 @@ run_restart() {
     :
   fi
 
+  if [[ $dry_run_mode -eq 1 ]]; then
+    exec "$BRIDGE_BASH_BIN" "$SCRIPT_DIR/bridge-start.sh" "$agent" --replace "${start_args[@]}"
+  fi
+
+  preflight_reason="$(bridge_agent_restart_preflight_reason "$agent")"
+  if [[ -n "$preflight_reason" ]]; then
+    bridge_die "$(bridge_agent_restart_preflight_guidance "$agent" "$preflight_reason")"
+  fi
+
   if bridge_tmux_session_exists "$session"; then
     bridge_kill_agent_session "$agent"
     bridge_refresh_runtime_state
   fi
 
-  if [[ $attach_mode -eq 1 || $dry_run_mode -eq 1 ]]; then
+  if [[ $attach_mode -eq 1 ]]; then
     exec "$BRIDGE_BASH_BIN" "$SCRIPT_DIR/bridge-start.sh" "$agent" --replace "${start_args[@]}"
   fi
 

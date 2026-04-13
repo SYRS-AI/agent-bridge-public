@@ -1285,6 +1285,11 @@ bridge_agent_channel_diagnostics_text() {
   fi
 }
 
+bridge_agent_broken_launch_file() {
+  local agent="$1"
+  printf '%s/agents/%s/broken-launch' "$BRIDGE_STATE_DIR" "$agent"
+}
+
 bridge_agent_session_health_json() {
   local agent="$1"
   local session=""
@@ -1449,6 +1454,31 @@ bridge_agent_missing_channels_csv() {
   done
 
   printf '%s' "$missing"
+}
+
+bridge_agent_channel_runtime_drift_reason() {
+  local agent="$1"
+  local required=""
+  local missing=""
+  local ready=""
+
+  required="$(bridge_agent_channels_csv "$agent")"
+  [[ -n "$required" ]] || {
+    printf '%s' ""
+    return 0
+  }
+
+  missing="$(bridge_agent_missing_channels_csv "$agent")"
+  [[ -n "$missing" ]] || {
+    printf '%s' ""
+    return 0
+  }
+
+  ready="$(bridge_agent_ready_channels_csv "$agent")"
+  printf 'declared channels (%s) do not match configured runtime (ready=%s missing=%s)' \
+    "$required" \
+    "${ready:--}" \
+    "$missing"
 }
 
 bridge_agent_launch_channels_csv() {
@@ -1657,6 +1687,7 @@ bridge_agent_channel_setup_guidance() {
   local reason="${2:-$(bridge_agent_channel_status_reason "$agent")}"
   local required=""
   local cli="$BRIDGE_HOME/agent-bridge"
+  local roster_local="$BRIDGE_HOME/agent-roster.local.sh"
 
   required="$(bridge_agent_channels_csv "$agent")"
   printf "Channel runtime is not configured for '%s': %s" "$agent" "$reason"
@@ -1669,6 +1700,7 @@ bridge_agent_channel_setup_guidance() {
   if bridge_channel_csv_contains "$required" "plugin:teams"; then
     printf "\nRun: %s setup teams %s --app-id <TEAMS_APP_ID> --app-password <TEAMS_APP_PASSWORD> --allow-from <TEAMS_USER_ID>" "$cli" "$agent"
   fi
+  printf "\nIf this agent intentionally runs with fewer channels, update %s so BRIDGE_AGENT_CHANNELS[\"%s\"] matches the live runtime before restarting." "$roster_local" "$agent"
 }
 
 bridge_agent_channel_status_reason() {
@@ -1688,6 +1720,56 @@ bridge_agent_channel_status_reason() {
   fi
 
   printf '%s' ""
+}
+
+bridge_agent_restart_preflight_reason() {
+  local agent="$1"
+  local session=""
+  local reason=""
+  local drift=""
+
+  [[ "$(bridge_agent_engine "$agent")" == "claude" ]] || {
+    printf '%s' ""
+    return 0
+  }
+
+  session="$(bridge_agent_session "$agent")"
+  [[ -n "$session" ]] || {
+    printf '%s' ""
+    return 0
+  }
+  bridge_tmux_session_exists "$session" || {
+    printf '%s' ""
+    return 0
+  }
+
+  reason="$(bridge_agent_channel_status_reason "$agent")"
+  [[ -n "$reason" ]] || {
+    printf '%s' ""
+    return 0
+  }
+
+  drift="$(bridge_agent_channel_runtime_drift_reason "$agent")"
+  if [[ -n "$drift" ]]; then
+    printf '%s' "$drift"
+    return 0
+  fi
+
+  printf '%s' "$reason"
+}
+
+bridge_agent_restart_preflight_guidance() {
+  local agent="$1"
+  local reason="${2:-$(bridge_agent_restart_preflight_reason "$agent")}"
+
+  [[ -n "$reason" ]] || {
+    printf '%s' ""
+    return 0
+  }
+
+  printf "Restart is blocked for '%s': %s" "$agent" "$reason"
+  printf "\nThe running session was left intact to avoid downtime."
+  printf "\n%s" "$(bridge_agent_channel_setup_guidance "$agent" "$reason")"
 }
 
 bridge_agent_channel_status() {

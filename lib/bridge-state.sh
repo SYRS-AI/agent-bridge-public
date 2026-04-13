@@ -1541,6 +1541,7 @@ bridge_write_roster_status_snapshot() {
   local active
   local wake
   local channels
+  local channel_reason
   local session
   local activity_state
   local loop_mode
@@ -1548,11 +1549,20 @@ bridge_write_roster_status_snapshot() {
   local recent
 
   {
-    echo -e "agent\tengine\tsession\tworkdir\tsource\tloop\tactive\twake\tchannels\tactivity_state"
+    echo -e "agent\tengine\tsession\tworkdir\tsource\tloop\tactive\twake\tchannels\tchannel_reason\tactivity_state"
     for agent in "${BRIDGE_AGENT_IDS[@]}"; do
       active=0
       wake="-"
       channels="$(bridge_agent_channel_status "$agent")"
+      channel_reason=""
+      if [[ "$channels" == "miss" ]]; then
+        channel_reason="$(bridge_agent_channel_runtime_drift_reason "$agent")"
+        if [[ -z "$channel_reason" ]]; then
+          channel_reason="$(bridge_agent_channel_status_reason "$agent")"
+        fi
+        channel_reason="${channel_reason//$'\t'/ }"
+        channel_reason="${channel_reason//$'\n'/ }"
+      fi
       activity_state="stopped"
       session="$(bridge_agent_session "$agent")"
       engine="$(bridge_agent_engine "$agent")"
@@ -1580,7 +1590,7 @@ bridge_write_roster_status_snapshot() {
         fi
       fi
 
-      echo -e "${agent}\t${engine}\t${session}\t$(bridge_agent_workdir "$agent")\t$(bridge_agent_source "$agent")\t${loop_mode}\t${active}\t${wake}\t${channels}\t${activity_state}"
+      echo -e "${agent}\t${engine}\t${session}\t$(bridge_agent_workdir "$agent")\t$(bridge_agent_source "$agent")\t${loop_mode}\t${active}\t${wake}\t${channels}\t${channel_reason}\t${activity_state}"
     done
   } >"$file"
 }

@@ -249,6 +249,98 @@ for reason in sorted(payload.get("skipped_reasons", {})):
 PY
 }
 
+bridge_upgrade_channel_guard_report() {
+  local source_root="$1"
+  local target_root="$2"
+
+  "$BRIDGE_BASH_BIN" -s -- "$source_root" "$target_root" <<'EOF'
+set -euo pipefail
+source_root="$1"
+target_root="$2"
+export BRIDGE_HOME="$target_root"
+source "$source_root/bridge-lib.sh"
+bridge_load_roster
+
+agent=""
+session=""
+active="no"
+reason=""
+required=""
+
+for agent in "${BRIDGE_AGENT_IDS[@]}"; do
+  if [[ "$(bridge_agent_channel_status "$agent")" != "miss" ]]; then
+    continue
+  fi
+  session="$(bridge_agent_session "$agent")"
+  active="no"
+  if [[ -n "$session" ]] && bridge_tmux_session_exists "$session"; then
+    active="yes"
+  fi
+  reason="$(bridge_agent_channel_runtime_drift_reason "$agent")"
+  if [[ -z "$reason" ]]; then
+    reason="$(bridge_agent_channel_status_reason "$agent")"
+  fi
+  reason="${reason//$'\t'/ }"
+  reason="${reason//$'\n'/ }"
+  required="$(bridge_agent_channels_csv "$agent")"
+  printf "%s\t%s\t%s\t%s\n" "$agent" "$active" "$required" "$reason"
+done
+EOF
+}
+
+bridge_upgrade_channel_guard_json() {
+  local report="$1"
+
+  python3 - "$report" <<'PY'
+import json
+import sys
+
+items = []
+active_count = 0
+for raw in sys.argv[1].splitlines():
+    raw = raw.rstrip("\n")
+    if not raw:
+        continue
+    agent, active, required, reason = (raw.split("\t", 3) + ["", "", "", ""])[:4]
+    is_active = active == "yes"
+    if is_active:
+        active_count += 1
+    items.append(
+        {
+            "agent": agent,
+            "active": is_active,
+            "required_channels": required,
+            "reason": reason,
+        }
+    )
+
+print(json.dumps({"count": len(items), "active_count": active_count, "agents": items}, ensure_ascii=False))
+PY
+}
+
+bridge_upgrade_print_channel_guard_summary() {
+  local payload="$1"
+
+  python3 - "$payload" <<'PY'
+import json
+import sys
+
+payload = json.loads(sys.argv[1])
+items = payload.get("agents", [])
+if not items:
+    raise SystemExit(0)
+
+print(f"channel_guard_miss: {payload.get('count', 0)}")
+print(f"channel_guard_active_miss: {payload.get('active_count', 0)}")
+print("[warn] live roster has channel/runtime mismatches that can block restart:")
+for item in items[:10]:
+    suffix = " (active)" if item.get("active") else ""
+    print(f"  - {item.get('agent')}{suffix}: {item.get('reason')}")
+if len(items) > 10:
+    print(f"  ... +{len(items) - 10} more")
+PY
+}
+
 bridge_upgrade_installed_field() {
   local target_root="$1"
   local field="$2"
@@ -605,10 +697,19 @@ if [[ $CHECK_ONLY -eq 1 ]]; then
 fi
 
 ANALYSIS_JSON="$(python3 "$SOURCE_ROOT/bridge-upgrade.py" analyze-live --source-root "$SOURCE_ROOT" --target-root "$TARGET_ROOT")"
+CHANNEL_GUARD_REPORT="$(bridge_upgrade_channel_guard_report "$SOURCE_ROOT" "$TARGET_ROOT")"
+CHANNEL_GUARD_JSON="$(bridge_upgrade_channel_guard_json "$CHANNEL_GUARD_REPORT")"
 
 if [[ "$SUBCOMMAND" == "analyze" ]]; then
   if [[ $JSON -eq 1 ]]; then
-    printf '%s\n' "$ANALYSIS_JSON"
+    python3 - "$ANALYSIS_JSON" "$CHANNEL_GUARD_JSON" <<'PY'
+import json
+import sys
+
+payload = json.loads(sys.argv[1])
+payload["channel_guard"] = json.loads(sys.argv[2])
+print(json.dumps(payload, ensure_ascii=False, indent=2))
+PY
   else
     python3 - "$ANALYSIS_JSON" <<'PY'
 import json, sys
@@ -621,6 +722,7 @@ print(f"base_ref: {payload.get('base_ref') or '-'}")
 for key in ("missing_live", "upstream_only", "live_only", "merge_required", "unknown_base_live_diff"):
     print(f"{key}: {counts.get(key, 0)}")
 PY
+    bridge_upgrade_print_channel_guard_summary "$CHANNEL_GUARD_JSON"
   fi
   exit 0
 fi
@@ -762,14 +864,15 @@ if [[ $RESTART_AGENTS -eq 1 ]]; then
 fi
 
 if [[ $JSON -eq 1 ]]; then
-  python3 - "$SOURCE_ROOT" "$TARGET_ROOT" "$PULL" "$DRY_RUN" "$RESTART_DAEMON" "$RESTART_AGENTS" "$BACKUP" "$MIGRATE_AGENTS" "$BACKUP_ROOT" "$BACKUP_JSON" "$MIGRATION_JSON" "$APPLY_JSON" "$ANALYSIS_JSON" "$AGENT_RESTART_JSON" "$STRICT_MERGE" "$CHANNEL" "$SOURCE_VERSION" "$SOURCE_REF" "$SOURCE_HEAD" "$TARGET_REF" "$TARGET_VERSION" "$TARGET_HEAD" <<'PY'
+  python3 - "$SOURCE_ROOT" "$TARGET_ROOT" "$PULL" "$DRY_RUN" "$RESTART_DAEMON" "$RESTART_AGENTS" "$BACKUP" "$MIGRATE_AGENTS" "$BACKUP_ROOT" "$BACKUP_JSON" "$MIGRATION_JSON" "$APPLY_JSON" "$ANALYSIS_JSON" "$AGENT_RESTART_JSON" "$STRICT_MERGE" "$CHANNEL" "$SOURCE_VERSION" "$SOURCE_REF" "$SOURCE_HEAD" "$TARGET_REF" "$TARGET_VERSION" "$TARGET_HEAD" "$CHANNEL_GUARD_JSON" <<'PY'
 import json, sys
-source_root, target_root, pull, dry_run, restart_daemon, restart_agents, backup_enabled, migrate_agents, backup_root, backup_json, migration_json, apply_json, analysis_json, agent_restart_json, strict_merge, channel, source_version, source_ref, source_head, target_ref, target_version, target_head = sys.argv[1:]
+source_root, target_root, pull, dry_run, restart_daemon, restart_agents, backup_enabled, migrate_agents, backup_root, backup_json, migration_json, apply_json, analysis_json, agent_restart_json, strict_merge, channel, source_version, source_ref, source_head, target_ref, target_version, target_head, channel_guard_json = sys.argv[1:]
 backup_payload = json.loads(backup_json)
 migration_payload = json.loads(migration_json)
 apply_payload = json.loads(apply_json)
 analysis_payload = json.loads(analysis_json)
 agent_restart_payload = json.loads(agent_restart_json)
+channel_guard_payload = json.loads(channel_guard_json)
 payload = {
     "mode": "upgrade",
     "version": source_version,
@@ -801,6 +904,7 @@ payload = {
     "backup": backup_payload,
     "apply": apply_payload,
     "analysis": analysis_payload,
+    "channel_guard": channel_guard_payload,
     "agent_restart": agent_restart_payload,
     "agent_migration": migration_payload,
   }
@@ -839,6 +943,7 @@ print(f"analysis_live_only: {counts.get('live_only', 0)}")
 print(f"analysis_merge_required: {counts.get('merge_required', 0)}")
 print(f"analysis_unknown_base_live_diff: {counts.get('unknown_base_live_diff', 0)}")
 PY
+bridge_upgrade_print_channel_guard_summary "$CHANNEL_GUARD_JSON"
 python3 - "$APPLY_JSON" <<'PY'
 import json, sys
 payload = json.loads(sys.argv[1])

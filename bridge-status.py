@@ -255,6 +255,11 @@ def render_dashboard(args: argparse.Namespace) -> str:
     wake_missing_count = sum(1 for row in roster if row.get("wake") == "miss")
     channel_missing_count = sum(1 for row in roster if row.get("channels") == "miss")
     zombie_count = sum(1 for metric in metrics.values() if int(metric.get("zombie", 0) or 0) == 1)
+    channel_warning_rows = [
+        row
+        for row in roster
+        if row.get("channels") == "miss"
+    ]
 
     for row in roster:
         metric = metrics.get(row["agent"], {})
@@ -348,6 +353,15 @@ def render_dashboard(args: argparse.Namespace) -> str:
             f"{load_bar:<12}  "
             f"{(row.get('session') or '-')[:12]:<12}  {short_path(row.get('workdir', ''))}"
         )
+
+    if channel_warning_rows:
+        lines.append("")
+        lines.append("Channel Warnings")
+        for row in channel_warning_rows[:8]:
+            reason = (row.get("channel_reason") or "unknown channel mismatch").strip()
+            lines.append(f"- {row['agent']}: {reason}")
+        if len(channel_warning_rows) > 8:
+            lines.append(f"- ... +{len(channel_warning_rows) - 8} more")
 
     lines.append("")
     lines.append("Open Tasks")
