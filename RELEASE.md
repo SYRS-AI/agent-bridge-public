@@ -21,19 +21,6 @@ This release line means:
 - User-owned runtime files are preserved during upgrade.
 - `agb admin` starts the default admin agent and continues onboarding.
 
-## Current Stable Release
-
-The current stable release is `v0.2.1`.
-
-This release line adds:
-
-- shared team knowledge and operator profiles
-- queue-backed handoff bundles, intake triage, and review gates
-- Teams and Microsoft 365 channel/plugin support
-- safer restart continuity, plugin cache sync, and crash-loop recovery
-- MCP orphan cleanup and stronger smoke coverage for restart/cleanup regressions
-- discord relay hardening so legacy DM aliases cannot block state persistence or repeat wake loops
-
 ## Patch Releases
 
 After `v0.1.0`, publish user-facing fixes as patch releases such as `v0.1.1`.
@@ -62,6 +49,8 @@ stable releases unless they explicitly opt into `--channel dev`.
    ```
 
 6. Create a GitHub Release from the tag.
+   - The GitHub Release body is canonical. Write real release notes there every time.
+   - The daemon release notifier reads the latest stable GitHub Release body and hands it to the admin agent.
 7. Verify a clean install from the public README.
 
 ## Upgrade Commands
@@ -75,3 +64,16 @@ agb upgrade --version 0.2.1
 ```
 
 Default `agb upgrade` should use `stable`, not `main`, so normal users only receive tagged releases.
+
+## Release Notes Requirement
+
+Every stable release must include user-facing release notes in the GitHub Release body.
+
+Minimum content:
+
+- what changed
+- why it matters to operators/users
+- whether any manual action is required after upgrade
+- known caveats or rollout notes
+
+Long-lived installs poll the latest stable release daily and create a `[release] Agent Bridge ... available` task for the admin agent. That task embeds the GitHub Release body, so empty or low-signal release notes directly reduce the usefulness of the notification.

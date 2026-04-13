@@ -4055,6 +4055,14 @@ except creds.CredentialNotFoundError as err:
 else:
     raise AssertionError("missing credential should raise CredentialNotFoundError")
 PY
+python3 - "$BRIDGE_HOME/runtime/credentials/gmail-accounts.example.json" <<'PY'
+import os
+import stat
+import sys
+
+actual = stat.S_IMODE(os.stat(sys.argv[1]).st_mode)
+assert actual == 0o600, f"{sys.argv[1]}: expected 0o600, got {oct(actual)}"
+PY
 
 log "prioritizing idle memory-daily dispatch over busy sessions"
 MEMORY_DAILY_READY_OUTPUT="$("$BASH4_BIN" -lc '
@@ -4323,6 +4331,57 @@ alerts = json.loads(sys.argv[1])
 assert any(row["detail"]["provider"] == "claude" and row["detail"]["window"] == "5h" for row in alerts), alerts
 assert any(row["detail"]["provider"] == "codex" and row["detail"]["window"] == "5h" for row in alerts), alerts
 PY
+
+log "monitoring stable releases and deduping release alerts"
+FAKE_RELEASE_ROOT="$(mktemp -d)"
+FAKE_RELEASE_JSON="$FAKE_RELEASE_ROOT/latest-release.json"
+FAKE_RELEASE_STATE="$FAKE_RELEASE_ROOT/release-state.json"
+FAKE_RELEASE_DAEMON_STATE="$FAKE_RELEASE_ROOT/release-daemon-state.json"
+cat >"$FAKE_RELEASE_JSON" <<'EOF'
+{
+  "tag_name": "v9.9.9",
+  "name": "Agent Bridge v9.9.9",
+  "html_url": "https://github.com/SYRS-AI/agent-bridge-public/releases/tag/v9.9.9",
+  "published_at": "2026-04-10T14:18:41Z",
+  "body": "## Highlights\n- Stable release smoke fixture\n- Release notes carried into daemon task body"
+}
+EOF
+RELEASE_MONITOR_FIRST="$(python3 "$REPO_ROOT/bridge-release.py" monitor --repo SYRS-AI/agent-bridge-public --installed-version "$EXPECTED_VERSION" --state-file "$FAKE_RELEASE_STATE" --mock-json-file "$FAKE_RELEASE_JSON" --json)"
+python3 - "$RELEASE_MONITOR_FIRST" <<'PY'
+import json, sys
+payload = json.loads(sys.argv[1])
+alerts = payload["alerts"]
+assert len(alerts) == 1, alerts
+assert alerts[0]["latest_tag"] == "v9.9.9", alerts
+PY
+RELEASE_MONITOR_SECOND="$(python3 "$REPO_ROOT/bridge-release.py" monitor --repo SYRS-AI/agent-bridge-public --installed-version "$EXPECTED_VERSION" --state-file "$FAKE_RELEASE_STATE" --mock-json-file "$FAKE_RELEASE_JSON" --json)"
+python3 - "$RELEASE_MONITOR_SECOND" <<'PY'
+import json, sys
+payload = json.loads(sys.argv[1])
+assert payload["alerts"] == [], payload["alerts"]
+PY
+BRIDGE_RELEASE_CHECK_ENABLED=1 \
+BRIDGE_RELEASE_CHECK_INTERVAL_SECONDS=0 \
+BRIDGE_RELEASE_CHECK_STATE_FILE="$FAKE_RELEASE_DAEMON_STATE" \
+BRIDGE_RELEASE_MOCK_JSON_FILE="$FAKE_RELEASE_JSON" \
+BRIDGE_RELEASE_REPO="SYRS-AI/agent-bridge-public" \
+bash "$REPO_ROOT/bridge-daemon.sh" sync >/dev/null
+RELEASE_OPEN_ID="$(python3 "$REPO_ROOT/bridge-queue.py" find-open --agent "$SMOKE_AGENT" --title-prefix "[release] Agent Bridge " 2>/dev/null || true)"
+[[ "$RELEASE_OPEN_ID" =~ ^[0-9]+$ ]] || die "expected release-available task for $SMOKE_AGENT"
+RELEASE_BODY_FILE="$BRIDGE_HOME/shared/releases/v9.9.9.md"
+[[ -f "$RELEASE_BODY_FILE" ]] || die "expected release body file"
+grep -q 'Stable Release Available' "$RELEASE_BODY_FILE" || die "expected release alert heading"
+grep -q '## Release Notes' "$RELEASE_BODY_FILE" || die "expected release notes section"
+grep -q 'Stable release smoke fixture' "$RELEASE_BODY_FILE" || die "expected release notes content"
+bash "$REPO_ROOT/bridge-task.sh" done "$RELEASE_OPEN_ID" --agent "$SMOKE_AGENT" --note "release alert handled" >/dev/null
+BRIDGE_RELEASE_CHECK_ENABLED=1 \
+BRIDGE_RELEASE_CHECK_INTERVAL_SECONDS=0 \
+BRIDGE_RELEASE_CHECK_STATE_FILE="$FAKE_RELEASE_DAEMON_STATE" \
+BRIDGE_RELEASE_MOCK_JSON_FILE="$FAKE_RELEASE_JSON" \
+BRIDGE_RELEASE_REPO="SYRS-AI/agent-bridge-public" \
+bash "$REPO_ROOT/bridge-daemon.sh" sync >/dev/null
+RELEASE_OPEN_ID_AGAIN="$(python3 "$REPO_ROOT/bridge-queue.py" find-open --agent "$SMOKE_AGENT" --title-prefix "[release] Agent Bridge " 2>/dev/null || true)"
+[[ -z "$RELEASE_OPEN_ID_AGAIN" ]] || die "release alert should be deduped for the same tag"
 
 log "escalating crash-loop reports to the admin role"
 CRASH_ERRFILE="$TMP_ROOT/crash-loop.err"

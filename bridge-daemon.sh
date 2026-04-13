@@ -258,6 +258,136 @@ bridge_write_usage_alert_body() {
 EOF
 }
 
+bridge_release_poll_state_file() {
+  printf '%s/release-check.env' "$BRIDGE_STATE_DIR"
+}
+
+bridge_release_due() {
+  local interval="${BRIDGE_RELEASE_CHECK_INTERVAL_SECONDS:-86400}"
+  local file=""
+  local now=0
+  local next_ts=0
+
+  [[ "$interval" =~ ^[0-9]+$ ]] || interval=86400
+  (( interval > 0 )) || return 0
+  file="$(bridge_release_poll_state_file)"
+  [[ -f "$file" ]] || return 0
+  # shellcheck source=/dev/null
+  source "$file"
+  [[ "${RELEASE_NEXT_TS:-0}" =~ ^[0-9]+$ ]] || return 0
+  now="$(date +%s)"
+  next_ts="${RELEASE_NEXT_TS:-0}"
+  (( now >= next_ts ))
+}
+
+bridge_note_release_poll() {
+  local interval="${BRIDGE_RELEASE_CHECK_INTERVAL_SECONDS:-86400}"
+  local file=""
+  local now=0
+  local next_ts=0
+
+  [[ "$interval" =~ ^[0-9]+$ ]] || interval=86400
+  (( interval > 0 )) || interval=86400
+  file="$(bridge_release_poll_state_file)"
+  mkdir -p "$(dirname "$file")"
+  now="$(date +%s)"
+  next_ts=$(( now + interval ))
+  cat >"$file" <<EOF
+RELEASE_UPDATED_TS=$now
+RELEASE_NEXT_TS=$next_ts
+EOF
+}
+
+bridge_release_alert_body_file() {
+  local tag="${1:-latest}"
+  local safe_tag=""
+
+  safe_tag="$(printf '%s' "$tag" | sed 's/[^[:alnum:]._-]/-/g')"
+  [[ -n "$safe_tag" ]] || safe_tag="latest"
+  printf '%s/releases/%s.md' "$BRIDGE_SHARED_DIR" "$safe_tag"
+}
+
+bridge_write_release_alert_body() {
+  local body_file="$1"
+  local monitor_json="$2"
+  local upgrade_check_json="${3:-{}}"
+
+  python3 - "$body_file" "$monitor_json" "$upgrade_check_json" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+body_file = Path(sys.argv[1])
+monitor_payload = json.loads(sys.argv[2])
+try:
+    upgrade_payload = json.loads(sys.argv[3])
+except Exception:
+    upgrade_payload = {}
+
+alerts = monitor_payload.get("alerts") or []
+if not alerts:
+    raise SystemExit(1)
+alert = alerts[0]
+release = monitor_payload.get("release") or {}
+tag = str(alert.get("latest_tag") or release.get("latest_tag") or "")
+version = str(alert.get("latest_version") or release.get("latest_version") or "")
+installed_version = str(alert.get("installed_version") or release.get("installed_version") or "")
+release_name = str(alert.get("release_name") or release.get("release_name") or tag or version)
+repo = str(alert.get("repo") or release.get("repo") or "")
+release_url = str(alert.get("html_url") or release.get("html_url") or "")
+published_at = str(alert.get("published_at") or release.get("published_at") or "")
+notes = str(alert.get("body") or release.get("body") or "").strip()
+
+upgrade_target_ref = str(upgrade_payload.get("target_ref") or "")
+upgrade_target_version = str(upgrade_payload.get("target_version") or "")
+upgrade_available = bool(upgrade_payload.get("update_available"))
+local_upgrade_ready = bool(
+    upgrade_available
+    and (
+        (tag and upgrade_target_ref == tag)
+        or (version and upgrade_target_version == version)
+    )
+)
+
+if local_upgrade_ready:
+    readiness_note = "Direct `agb upgrade` on this server should target the same stable release."
+else:
+    readiness_note = (
+        "This server's local source checkout is not yet pointing at the same stable release. "
+        "Downstream/source sync may be required before `agb upgrade` can apply it."
+    )
+
+body_file.parent.mkdir(parents=True, exist_ok=True)
+with body_file.open("w", encoding="utf-8") as fh:
+    fh.write("# Stable Release Available\n\n")
+    fh.write(f"- release: {release_name}\n")
+    fh.write(f"- tag: {tag or '-'}\n")
+    fh.write(f"- version: {version or '-'}\n")
+    fh.write(f"- installed_version: {installed_version or '-'}\n")
+    fh.write(f"- repo: {repo or '-'}\n")
+    fh.write(f"- published_at: {published_at or '-'}\n")
+    fh.write(f"- release_url: {release_url or '-'}\n")
+    fh.write(f"- detected_at: {monitor_payload.get('generated_at') or '-'}\n")
+    fh.write("\n## Patch Action\n\n")
+    fh.write("1. Read the release notes below.\n")
+    fh.write("2. Summarize the user-facing changes to the admin user in Korean.\n")
+    fh.write("3. Ask whether to apply the upgrade now.\n")
+    fh.write("4. If the local upgrade path is not ready, explain that source/downstream sync is required first.\n")
+    fh.write("\n## Local Upgrade Readiness\n\n")
+    fh.write(f"- local_upgrade_ready: {'yes' if local_upgrade_ready else 'no'}\n")
+    fh.write(f"- local_upgrade_target_ref: {upgrade_target_ref or '-'}\n")
+    fh.write(f"- local_upgrade_target_version: {upgrade_target_version or '-'}\n")
+    fh.write(f"- local_upgrade_update_available: {'yes' if upgrade_available else 'no'}\n")
+    fh.write(f"- note: {readiness_note}\n")
+    fh.write("\n## Release Notes\n\n")
+    if notes:
+        fh.write(notes)
+        fh.write("\n")
+    else:
+        fh.write("_No release notes were published in the GitHub release body._\n")
+PY
+}
+
 process_usage_monitor() {
   local admin_agent="${BRIDGE_ADMIN_AGENT_ID:-}"
   local monitor_json=""
@@ -338,6 +468,96 @@ PY
 
   bridge_note_usage_poll
   (( alert_count > 0 ))
+}
+
+process_release_monitor() {
+  local admin_agent="${BRIDGE_ADMIN_AGENT_ID:-}"
+  local monitor_json=""
+  local alert_row=""
+  local body_file=""
+  local title=""
+  local title_prefix="[release] Agent Bridge "
+  local existing_id=""
+  local create_output=""
+  local reported=0
+  local tag=""
+  local version=""
+  local published_at=""
+  local release_url=""
+  local release_name=""
+  local upgrade_check_json="{}"
+
+  [[ "${BRIDGE_RELEASE_CHECK_ENABLED:-1}" == "1" ]] || return 1
+  [[ -n "$admin_agent" ]] || return 1
+  bridge_agent_exists "$admin_agent" || return 1
+  bridge_release_due || return 1
+
+  if ! monitor_json="$(python3 "$SCRIPT_DIR/bridge-release.py" monitor --repo "$BRIDGE_RELEASE_REPO" --installed-version "$(bridge_version)" --state-file "$BRIDGE_RELEASE_CHECK_STATE_FILE" --json 2>/dev/null)"; then
+    bridge_note_release_poll
+    return 1
+  fi
+
+  alert_row="$(python3 - "$monitor_json" <<'PY'
+import json
+import sys
+
+payload = json.loads(sys.argv[1])
+alerts = payload.get("alerts") or []
+if not alerts:
+    raise SystemExit(0)
+alert = alerts[0]
+print(
+    "\t".join(
+        [
+            str(alert.get("latest_tag") or ""),
+            str(alert.get("latest_version") or ""),
+            str(alert.get("release_name") or ""),
+            str(alert.get("published_at") or ""),
+            str(alert.get("html_url") or ""),
+        ]
+    )
+)
+PY
+)"
+
+  bridge_note_release_poll
+  [[ -n "$alert_row" ]] || return 1
+  IFS=$'\t' read -r tag version release_name published_at release_url <<<"$alert_row"
+  [[ -n "$tag" ]] || return 1
+
+  if ! upgrade_check_json="$("$BRIDGE_BASH_BIN" "$SCRIPT_DIR/agent-bridge" upgrade --check --json --no-restart-daemon --target "$BRIDGE_HOME" 2>/dev/null)"; then
+    upgrade_check_json="{}"
+  fi
+
+  body_file="$(bridge_release_alert_body_file "$tag")"
+  if ! bridge_write_release_alert_body "$body_file" "$monitor_json" "$upgrade_check_json"; then
+    return 1
+  fi
+
+  title="[release] Agent Bridge ${tag} available"
+  existing_id="$(bridge_queue_cli find-open --agent "$admin_agent" --title-prefix "$title_prefix" 2>/dev/null || true)"
+  if [[ "$existing_id" =~ ^[0-9]+$ ]]; then
+    if bridge_queue_cli update "$existing_id" --actor daemon --title "$title" --priority normal --body-file "$body_file" >/dev/null 2>&1; then
+      reported=1
+    fi
+  else
+    create_output="$(bridge_queue_cli create --to "$admin_agent" --from daemon --priority normal --title "$title" --body-file "$body_file" 2>/dev/null || true)"
+    if [[ "$create_output" == task_id=* ]]; then
+      reported=1
+    fi
+  fi
+
+  if (( reported == 1 )); then
+    bridge_audit_log daemon release_available "$admin_agent" \
+      --detail tag="$tag" \
+      --detail version="$version" \
+      --detail published_at="$published_at" \
+      --detail release_url="$release_url"
+    daemon_info "release alert queued for ${admin_agent}: ${tag}"
+    return 0
+  fi
+
+  return 1
 }
 
 bridge_stall_retry_seconds() {
@@ -2591,6 +2811,9 @@ cmd_sync_cycle() {
     changed=0
   fi
   if process_usage_monitor; then
+    changed=0
+  fi
+  if process_release_monitor; then
     changed=0
   fi
   if [[ -n "$summary_output" ]] && process_on_demand_agents "$summary_output"; then

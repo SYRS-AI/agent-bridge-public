@@ -6,72 +6,6 @@ bridge_agent_next_session_file() {
   printf '%s/NEXT-SESSION.md' "$(bridge_agent_workdir "$agent")"
 }
 
-bridge_agent_next_session_marker_file() {
-  local agent="$1"
-  printf '%s/next-session-prompts/%s.sha' "$BRIDGE_STATE_DIR" "$agent"
-}
-
-bridge_path_age_seconds() {
-  local path="$1"
-
-  [[ -e "$path" ]] || return 1
-  bridge_require_python
-  python3 - "$path" <<'PY'
-import os
-import sys
-import time
-
-print(max(0, int(time.time() - os.path.getmtime(sys.argv[1]))))
-PY
-}
-
-bridge_agent_next_session_digest() {
-  local agent="$1"
-  local next_file=""
-
-  next_file="$(bridge_agent_next_session_file "$agent")"
-  [[ -f "$next_file" ]] || return 1
-  bridge_sha1 "$(cat "$next_file")"
-}
-
-bridge_agent_next_session_is_delivered() {
-  local agent="$1"
-  local marker_file=""
-  local digest=""
-  local marker=""
-
-  marker_file="$(bridge_agent_next_session_marker_file "$agent")"
-  [[ -f "$marker_file" ]] || return 1
-  digest="$(bridge_agent_next_session_digest "$agent" || true)"
-  [[ -n "$digest" ]] || return 1
-  marker="$(cat "$marker_file" 2>/dev/null || true)"
-  [[ -n "$marker" && "$marker" == "$digest" ]]
-}
-
-bridge_agent_next_session_age_seconds() {
-  local agent="$1"
-  bridge_path_age_seconds "$(bridge_agent_next_session_file "$agent")"
-}
-
-bridge_agent_clear_next_session_state() {
-  local agent="$1"
-  rm -f "$(bridge_agent_next_session_file "$agent")" "$(bridge_agent_next_session_marker_file "$agent")"
-}
-
-bridge_agent_maybe_expire_next_session() {
-  local agent="$1"
-  local ttl_seconds="${2:-${BRIDGE_NEXT_SESSION_AUTO_CLEAR_SECONDS:-300}}"
-  local age_seconds=0
-
-  [[ "$ttl_seconds" =~ ^[0-9]+$ ]] || ttl_seconds=300
-  bridge_agent_next_session_is_delivered "$agent" || return 1
-  age_seconds="$(bridge_agent_next_session_age_seconds "$agent" || echo 0)"
-  [[ "$age_seconds" =~ ^[0-9]+$ ]] || age_seconds=0
-  (( age_seconds >= ttl_seconds )) || return 1
-  bridge_agent_clear_next_session_state "$agent"
-  printf '%s' "$age_seconds"
-}
-
 bridge_agent_claude_effective_engine_continue() {
   local agent="$1"
   local onboarding_state=""
@@ -89,27 +23,24 @@ bridge_agent_claude_effective_engine_continue() {
 
 bridge_build_dynamic_launch_cmd() {
   local agent="$1"
-  local engine continue_mode session_id continue_fallback effective_continue session_hint
+  local engine continue_mode session_id continue_fallback effective_continue
 
   engine="$(bridge_agent_engine "$agent")"
   continue_mode="$(bridge_agent_continue "$agent")"
   continue_fallback=0
   effective_continue=0
   if [[ "$engine" == "claude" ]]; then
-    session_hint="$(bridge_agent_session_id "$agent")"
     if bridge_agent_claude_effective_engine_continue "$agent"; then
       effective_continue=1
       session_id="$(bridge_claude_resume_session_id_for_agent "$agent" || true)"
     else
       session_id=""
     fi
-    if [[ "$effective_continue" == "1" && -z "$session_id" ]]; then
-      if [[ -n "$session_hint" ]] || {
-        [[ "${BRIDGE_AGENT_LOOP_RESTART_COUNT:-0}" =~ ^[0-9]+$ ]] \
-          && [[ "${BRIDGE_AGENT_LOOP_RESTART_COUNT:-0}" -gt 0 ]]
-      }; then
-        continue_fallback=1
-      fi
+    if [[ "$effective_continue" == "1" \
+      && -z "$session_id" \
+      && "${BRIDGE_AGENT_LOOP_RESTART_COUNT:-0}" =~ ^[0-9]+$ \
+      && "${BRIDGE_AGENT_LOOP_RESTART_COUNT:-0}" -gt 0 ]]; then
+      continue_fallback=1
     fi
   else
     bridge_normalize_agent_session_id "$agent"
@@ -152,12 +83,8 @@ bridge_build_resume_launch_cmd() {
   if [[ "$engine" == "claude" ]] && ! bridge_agent_claude_effective_engine_continue "$agent"; then
     return 1
   fi
-  if [[ "$engine" == "claude" ]]; then
-    session_id="$(bridge_claude_resume_session_id_for_agent "$agent" || true)"
-  else
-    bridge_normalize_agent_session_id "$agent"
-    session_id="$(bridge_agent_session_id "$agent")"
-  fi
+  bridge_normalize_agent_session_id "$agent"
+  session_id="$(bridge_agent_session_id "$agent")"
 
   if [[ "$continue_mode" != "1" || -z "$session_id" ]]; then
     return 1
@@ -187,80 +114,6 @@ bridge_build_resume_launch_cmd() {
       ;;
     *)
       return 1
-      ;;
-  esac
-}
-
-bridge_safe_mode_resume_mode() {
-  local agent="$1"
-  local engine=""
-  local continue_mode=""
-  local session_id=""
-
-  engine="$(bridge_agent_engine "$agent")"
-  continue_mode="$(bridge_agent_continue "$agent")"
-  if [[ "$continue_mode" != "1" ]]; then
-    printf '%s' "fresh"
-    return 0
-  fi
-
-  case "$engine" in
-    codex)
-      bridge_normalize_agent_session_id "$agent"
-      session_id="$(bridge_agent_session_id "$agent")"
-      if [[ -n "$session_id" ]]; then
-        printf '%s' "resume:${session_id}"
-      else
-        printf '%s' "fresh"
-      fi
-      ;;
-    claude)
-      session_id="$(bridge_claude_resume_session_id_for_agent "$agent" || true)"
-      if [[ -n "$session_id" ]]; then
-        printf '%s' "resume:${session_id}"
-      else
-        printf '%s' "continue"
-      fi
-      ;;
-    *)
-      printf '%s' "fresh"
-      ;;
-  esac
-}
-
-bridge_build_safe_launch_cmd() {
-  local agent="$1"
-  local engine=""
-  local continue_mode=""
-  local session_id=""
-
-  engine="$(bridge_agent_engine "$agent")"
-  continue_mode="$(bridge_agent_continue "$agent")"
-
-  case "$engine" in
-    codex)
-      bridge_normalize_agent_session_id "$agent"
-      session_id="$(bridge_agent_session_id "$agent")"
-      if [[ "$continue_mode" == "1" && -n "$session_id" ]]; then
-        bridge_join_quoted codex resume "$session_id" -c "features.codex_hooks=true" --dangerously-bypass-approvals-and-sandbox --no-alt-screen
-      else
-        bridge_join_quoted codex -c "features.codex_hooks=true" --dangerously-bypass-approvals-and-sandbox --no-alt-screen
-      fi
-      ;;
-    claude)
-      if [[ "$continue_mode" == "1" ]]; then
-        session_id="$(bridge_claude_resume_session_id_for_agent "$agent" || true)"
-        if [[ -n "$session_id" ]]; then
-          bridge_join_quoted claude --resume "$session_id" --dangerously-skip-permissions --name "$agent"
-        else
-          bridge_join_quoted claude --continue --dangerously-skip-permissions --name "$agent"
-        fi
-      else
-        bridge_join_quoted claude --dangerously-skip-permissions --name "$agent"
-      fi
-      ;;
-    *)
-      bridge_die "safe-mode launch is only supported for claude/codex agents: $agent"
       ;;
   esac
 }
@@ -304,11 +157,9 @@ bridge_normalize_agent_session_id() {
   case "$engine" in
     claude)
       if ! bridge_claude_session_id_exists "$session_id" "$workdir"; then
-        BRIDGE_AGENT_SESSION_STALE_HINT["$agent"]="1"
         bridge_clear_agent_session_id "$agent"
         return 0
       fi
-      BRIDGE_AGENT_SESSION_STALE_HINT["$agent"]="0"
       ;;
   esac
 }
@@ -358,16 +209,12 @@ bridge_claude_launch_with_channels() {
   local agent="$1"
   local original="$2"
   local required=""
-  local dev_required=""
 
   required="$(bridge_agent_launch_channels_csv "$agent")"
-  dev_required="$(bridge_agent_effective_dev_channels_csv "$agent")"
-  if [[ -z "$required" && -z "$dev_required" ]]; then
+  if [[ -z "$required" ]]; then
     printf '%s' "$original"
     return 0
   fi
-
-  original="$(bridge_claude_launch_with_development_channels "$original" "$dev_required")"
 
   bridge_require_python
   python3 - "$original" "$required" <<'PY'
@@ -438,103 +285,16 @@ print(f"{env_prefix}{quoted}" if env_prefix else quoted)
 PY
 }
 
-bridge_claude_launch_with_development_channels() {
-  local original="$1"
-  local required_csv="${2:-}"
-
-  [[ -n "$required_csv" || "$original" == *"--dangerously-load-development-channels"* ]] || {
-    printf '%s' "$original"
-    return 0
-  }
-
-  bridge_require_python
-  python3 - "$original" "$required_csv" <<'PY'
-import re
-import shlex
-import sys
-
-original, required_csv = sys.argv[1:]
-
-def normalize(raw: str):
-    values = []
-    seen = set()
-    for chunk in raw.split(","):
-        item = chunk.strip()
-        if not item or item in seen:
-            continue
-        seen.add(item)
-        values.append(item)
-    return values
-
-def is_dev_channel(item: str) -> bool:
-    return item.startswith("plugin:") and "@" in item and not item.endswith("@claude-plugins-official")
-
-required = normalize(required_csv)
-match = re.match(r"^(?P<prefix>.*?)(?P<command>claude(?:\s|$).*)$", original)
-if not match:
-    print(original)
-    raise SystemExit(0)
-
-env_prefix = match.group("prefix")
-args = shlex.split(match.group("command"))
-if not args or args[0] != "claude":
-    print(original)
-    raise SystemExit(0)
-
-rest = args[1:]
-filtered = []
-existing = []
-i = 0
-while i < len(rest):
-    token = rest[i]
-    if token == "--dangerously-load-development-channels":
-        i += 1
-        while i < len(rest) and not rest[i].startswith("-"):
-            existing.extend(normalize(rest[i]))
-            i += 1
-        continue
-    if token.startswith("--dangerously-load-development-channels="):
-        existing.extend(normalize(token.split("=", 1)[1]))
-        i += 1
-        continue
-    filtered.append(token)
-    if token.startswith("--") and i + 1 < len(rest) and not rest[i + 1].startswith("-"):
-        filtered.append(rest[i + 1])
-        i += 2
-        continue
-    i += 1
-
-merged = []
-seen = set()
-for item in [*existing, *required]:
-    if not is_dev_channel(item) or item in seen:
-        continue
-    seen.add(item)
-    merged.append(item)
-
-rebuilt = ["claude"]
-if merged:
-    rebuilt.append("--dangerously-load-development-channels")
-    rebuilt.extend(merged)
-rebuilt.extend(filtered)
-
-quoted = " ".join(shlex.quote(token) for token in rebuilt)
-print(f"{env_prefix}{quoted}" if env_prefix else quoted)
-PY
-}
-
 bridge_claude_launch_with_channel_state_dirs() {
   local agent="$1"
   local original="$2"
   local required=""
-  local dev_channels=""
   local discord_dir=""
   local telegram_dir=""
   local teams_dir=""
 
   required="$(bridge_agent_launch_channels_csv "$agent")"
-  dev_channels="$(bridge_extract_development_channels_from_command "$original")"
-  if [[ -z "$required" && -z "$dev_channels" ]]; then
+  if [[ -z "$required" ]]; then
     printf '%s' "$original"
     return 0
   fi
@@ -544,12 +304,12 @@ bridge_claude_launch_with_channel_state_dirs() {
   teams_dir="$(bridge_agent_teams_state_dir "$agent")"
 
   bridge_require_python
-  python3 - "$original" "$required" "$dev_channels" "$discord_dir" "$telegram_dir" "$teams_dir" <<'PY'
+  python3 - "$original" "$required" "$discord_dir" "$telegram_dir" "$teams_dir" <<'PY'
 import re
 import shlex
 import sys
 
-original, required_csv, dev_channels_csv, discord_dir, telegram_dir, teams_dir = sys.argv[1:]
+original, required_csv, discord_dir, telegram_dir, teams_dir = sys.argv[1:]
 
 def normalize(raw: str):
     values = []
@@ -563,16 +323,7 @@ def normalize(raw: str):
     return values
 
 required = normalize(required_csv)
-dev_channels = normalize(dev_channels_csv)
-all_channels = []
-seen = set()
-for item in [*required, *dev_channels]:
-    if item in seen:
-        continue
-    seen.add(item)
-    all_channels.append(item)
-
-if not all_channels:
+if not required:
     print(original)
     raise SystemExit(0)
 
@@ -585,11 +336,11 @@ env_prefix = match.group("prefix")
 command = match.group("command")
 assignments = []
 
-if any(item == "plugin:discord" or item.startswith("plugin:discord@") for item in all_channels):
+if any(item == "plugin:discord" or item.startswith("plugin:discord@") for item in required):
     assignments.append(("DISCORD_STATE_DIR", discord_dir))
-if any(item == "plugin:telegram" or item.startswith("plugin:telegram@") for item in all_channels):
+if any(item == "plugin:telegram" or item.startswith("plugin:telegram@") for item in required):
     assignments.append(("TELEGRAM_STATE_DIR", telegram_dir))
-if any(item == "plugin:teams" or item.startswith("plugin:teams@") for item in all_channels):
+if any(item == "plugin:teams" or item.startswith("plugin:teams@") for item in required):
     assignments.append(("TEAMS_STATE_DIR", teams_dir))
 
 for name, value in assignments:
@@ -608,25 +359,19 @@ bridge_build_static_claude_launch_cmd() {
   local session_id=""
   local continue_fallback=0
   local effective_continue=0
-  local session_hint=""
-  local stale_session_hint="0"
 
   fallback="${BRIDGE_AGENT_LAUNCH_CMD[$agent]-}"
   [[ -n "$fallback" ]] || return 1
 
   continue_mode="$(bridge_agent_continue "$agent")"
-  session_hint="$(bridge_agent_session_id "$agent")"
-  stale_session_hint="${BRIDGE_AGENT_SESSION_STALE_HINT[$agent]-0}"
   if bridge_agent_claude_effective_engine_continue "$agent"; then
     effective_continue=1
     session_id="$(bridge_claude_resume_session_id_for_agent "$agent" || true)"
-    if [[ "$effective_continue" == "1" && -z "$session_id" ]]; then
-      if [[ -n "$session_hint" || "$stale_session_hint" == "1" ]] || {
-        [[ "${BRIDGE_AGENT_LOOP_RESTART_COUNT:-0}" =~ ^[0-9]+$ ]] \
-          && [[ "${BRIDGE_AGENT_LOOP_RESTART_COUNT:-0}" -gt 0 ]]
-      }; then
-        continue_fallback=1
-      fi
+    if [[ "$effective_continue" == "1" \
+      && -z "$session_id" \
+      && "${BRIDGE_AGENT_LOOP_RESTART_COUNT:-0}" =~ ^[0-9]+$ \
+      && "${BRIDGE_AGENT_LOOP_RESTART_COUNT:-0}" -gt 0 ]]; then
+      continue_fallback=1
     fi
   fi
 
@@ -770,7 +515,6 @@ bridge_load_dynamic_agent_file() {
 
   if bridge_agent_exists "$AGENT_ID" && [[ "$(bridge_agent_source "$AGENT_ID")" == "static" ]]; then
     BRIDGE_AGENT_SESSION_ID["$AGENT_ID"]="${AGENT_SESSION_ID:-${BRIDGE_AGENT_SESSION_ID[$AGENT_ID]-}}"
-    BRIDGE_AGENT_SESSION_STALE_HINT["$AGENT_ID"]="${BRIDGE_AGENT_SESSION_STALE_HINT[$AGENT_ID]-0}"
     BRIDGE_AGENT_HISTORY_KEY["$AGENT_ID"]="${AGENT_HISTORY_KEY:-${BRIDGE_AGENT_HISTORY_KEY[$AGENT_ID]-}}"
     BRIDGE_AGENT_CREATED_AT["$AGENT_ID"]="${AGENT_CREATED_AT:-${BRIDGE_AGENT_CREATED_AT[$AGENT_ID]-}}"
     BRIDGE_AGENT_UPDATED_AT["$AGENT_ID"]="${AGENT_UPDATED_AT:-${BRIDGE_AGENT_UPDATED_AT[$AGENT_ID]-}}"
@@ -788,10 +532,8 @@ bridge_load_dynamic_agent_file() {
   BRIDGE_AGENT_CONTINUE["$AGENT_ID"]="${AGENT_CONTINUE:-1}"
   if [[ -n "$AGENT_SESSION_ID" && "$AGENT_ENGINE" == "claude" ]] && ! bridge_claude_session_id_exists "$AGENT_SESSION_ID" "$AGENT_WORKDIR"; then
     BRIDGE_AGENT_SESSION_ID["$AGENT_ID"]=""
-    BRIDGE_AGENT_SESSION_STALE_HINT["$AGENT_ID"]="1"
   else
     BRIDGE_AGENT_SESSION_ID["$AGENT_ID"]="${AGENT_SESSION_ID:-}"
-    BRIDGE_AGENT_SESSION_STALE_HINT["$AGENT_ID"]="0"
   fi
   BRIDGE_AGENT_HISTORY_KEY["$AGENT_ID"]="${AGENT_HISTORY_KEY:-}"
   BRIDGE_AGENT_CREATED_AT["$AGENT_ID"]="${AGENT_CREATED_AT:-}"
@@ -859,10 +601,8 @@ bridge_restore_dynamic_agents_from_history() {
     BRIDGE_AGENT_CONTINUE["$AGENT_ID"]="${AGENT_CONTINUE:-1}"
     if [[ -n "$AGENT_SESSION_ID" && "$AGENT_ENGINE" == "claude" ]] && ! bridge_claude_session_id_exists "$AGENT_SESSION_ID" "$AGENT_WORKDIR"; then
       BRIDGE_AGENT_SESSION_ID["$AGENT_ID"]=""
-      BRIDGE_AGENT_SESSION_STALE_HINT["$AGENT_ID"]="1"
     else
       BRIDGE_AGENT_SESSION_ID["$AGENT_ID"]="${AGENT_SESSION_ID:-}"
-      BRIDGE_AGENT_SESSION_STALE_HINT["$AGENT_ID"]="0"
     fi
     BRIDGE_AGENT_HISTORY_KEY["$AGENT_ID"]="${AGENT_HISTORY_KEY:-}"
     BRIDGE_AGENT_CREATED_AT["$AGENT_ID"]="${AGENT_CREATED_AT:-}"
@@ -901,9 +641,6 @@ bridge_load_static_agent_history() {
     AGENT_WORKDIR="${AGENT_WORKDIR:-$(bridge_agent_workdir "$agent")}"
     if [[ "$AGENT_ENGINE" != "claude" ]] || bridge_claude_session_id_exists "$AGENT_SESSION_ID" "$AGENT_WORKDIR"; then
       BRIDGE_AGENT_SESSION_ID["$agent"]="$AGENT_SESSION_ID"
-      BRIDGE_AGENT_SESSION_STALE_HINT["$agent"]="0"
-    else
-      BRIDGE_AGENT_SESSION_STALE_HINT["$agent"]="1"
     fi
   fi
   if [[ -n "$AGENT_HISTORY_KEY" ]]; then
@@ -961,8 +698,10 @@ bridge_load_roster() {
   : "${BRIDGE_USAGE_CRITICAL_PERCENT:=100}"
   : "${BRIDGE_USAGE_MONITOR_INTERVAL_SECONDS:=300}"
   : "${BRIDGE_USAGE_MONITOR_STATE_FILE:=$BRIDGE_STATE_DIR/usage/monitor-state.json}"
-  : "${BRIDGE_AUTO_ACCEPT_DEV_CHANNELS_DEFAULT:=plugin:teams@agent-bridge}"
-  : "${BRIDGE_NEXT_SESSION_AUTO_CLEAR_SECONDS:=300}"
+  : "${BRIDGE_RELEASE_CHECK_ENABLED:=1}"
+  : "${BRIDGE_RELEASE_CHECK_INTERVAL_SECONDS:=86400}"
+  : "${BRIDGE_RELEASE_CHECK_STATE_FILE:=$BRIDGE_STATE_DIR/release-check/monitor-state.json}"
+  : "${BRIDGE_RELEASE_REPO:=SYRS-AI/agent-bridge-public}"
   : "${BRIDGE_STALL_SCAN_ENABLED:=1}"
   : "${BRIDGE_STALL_SCAN_INTERVAL_SECONDS:=30}"
   : "${BRIDGE_STALL_CAPTURE_LINES:=120}"
@@ -1153,11 +892,6 @@ bridge_agent_crash_state_file() {
   printf '%s/crash-report/%s.state.env' "$BRIDGE_STATE_DIR" "$agent"
 }
 
-bridge_agent_broken_launch_file() {
-  local agent="$1"
-  printf '%s/broken-launch' "$(bridge_agent_idle_marker_dir "$agent")"
-}
-
 bridge_agent_stall_state_file() {
   local agent="$1"
   printf '%s/stall/%s.env' "$BRIDGE_STATE_DIR" "$agent"
@@ -1215,54 +949,6 @@ CRASH_REPORTED_AT=$(printf '%q' "$(bridge_now_iso)")
 EOF
 }
 
-bridge_agent_write_broken_launch_state() {
-  local agent="$1"
-  local engine="$2"
-  local fail_count="$3"
-  local exit_code="$4"
-  local stderr_file="$5"
-  local launch_cmd="$6"
-  local stderr_offset="${7:-0}"
-  local report_file=""
-  local excerpt=""
-  local offset_start=1
-
-  report_file="$(bridge_agent_broken_launch_file "$agent")"
-  mkdir -p "$(dirname "$report_file")"
-
-  if [[ -f "$stderr_file" ]]; then
-    if [[ "$stderr_offset" =~ ^[0-9]+$ ]] && (( stderr_offset > 0 )); then
-      offset_start=$((stderr_offset + 1))
-      excerpt="$(tail -c +${offset_start} "$stderr_file" 2>/dev/null | head -n 30 || true)"
-    fi
-    if [[ -z "$excerpt" ]]; then
-      excerpt="$(tail -n 30 "$stderr_file" 2>/dev/null || true)"
-    fi
-  fi
-
-  cat >"$report_file" <<EOF
-timestamp: $(bridge_now_iso)
-agent: ${agent}
-engine: ${engine}
-fail_count: ${fail_count}
-exit_code: ${exit_code}
-stderr_file: ${stderr_file}
-launch_cmd: ${launch_cmd}
-
-recovery:
-- run 'agent-bridge agent safe-mode ${agent}'
-- or edit the roster and run 'agent-bridge agent restart ${agent}'
-
-stderr_excerpt:
-${excerpt}
-EOF
-}
-
-bridge_agent_clear_broken_launch_state() {
-  local agent="$1"
-  rm -f "$(bridge_agent_broken_launch_file "$agent")"
-}
-
 bridge_agent_clear_crash_report() {
   local agent="$1"
   rm -f \
@@ -1270,7 +956,6 @@ bridge_agent_clear_crash_report() {
     "$(bridge_agent_crash_report_body_file "$agent")" \
     "$(bridge_agent_crash_tail_file "$agent")" \
     "$(bridge_agent_crash_state_file "$agent")"
-  bridge_agent_clear_broken_launch_state "$agent"
 }
 
 bridge_agent_ack_crash_report() {
