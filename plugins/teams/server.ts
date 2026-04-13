@@ -360,6 +360,11 @@ const httpServer = createServer((req, res) => {
   res.end()
 })
 
+httpServer.on('error', err => {
+  process.stderr.write(`teams channel: http listen failed on ${HOST}:${PORT}: ${err}\n`)
+  process.exit(1)
+})
+
 httpServer.listen(PORT, HOST, () => {
   process.stderr.write(`teams channel: listening on http://${HOST}:${PORT}/api/messages\n`)
 })

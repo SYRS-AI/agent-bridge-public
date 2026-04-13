@@ -369,11 +369,18 @@ bridge_claude_launch_with_channel_state_dirs() {
   local agent="$1"
   local original="$2"
   local required=""
+  local launch_channels=""
+  local launch_dev_channels=""
   local discord_dir=""
   local telegram_dir=""
   local teams_dir=""
 
-  required="$(bridge_agent_launch_channels_csv "$agent")"
+  required="$(bridge_agent_effective_launch_plugin_channels_csv "$agent")"
+  launch_channels="$(bridge_extract_channels_from_command "$original")"
+  launch_dev_channels="$(bridge_extract_development_channels_from_command "$original")"
+  required="$(bridge_merge_channels_csv "$required" "$launch_channels")"
+  required="$(bridge_merge_channels_csv "$required" "$launch_dev_channels")"
+  required="$(bridge_filter_claude_plugin_channels_csv "$required")"
   if [[ -z "$required" ]]; then
     printf '%s' "$original"
     return 0

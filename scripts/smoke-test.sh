@@ -2528,6 +2528,20 @@ if payload.get("ok") is not True or payload.get("channel") != "teams":
     raise SystemExit("Teams health payload mismatch")
 PY
   assert_contains "$(cat "$TEAMS_PLUGIN_LOG")" "http://0.0.0.0:$TEAMS_SMOKE_PORT/api/messages"
+  TEAMS_PLUGIN_CONFLICT_LOG="$TMP_ROOT/teams-plugin-conflict.log"
+  (
+    cd "$REPO_ROOT/plugins/teams"
+    TEAMS_STATE_DIR="$BRIDGE_AGENT_HOME_ROOT/$CREATED_AGENT/.teams" \
+      bun run --shell=bun --silent start >"$TEAMS_PLUGIN_CONFLICT_LOG" 2>&1
+  ) &
+  TEAMS_PLUGIN_CONFLICT_PID=$!
+  sleep 1
+  if kill -0 "$TEAMS_PLUGIN_CONFLICT_PID" >/dev/null 2>&1; then
+    kill "$TEAMS_PLUGIN_CONFLICT_PID" >/dev/null 2>&1 || true
+    wait "$TEAMS_PLUGIN_CONFLICT_PID" >/dev/null 2>&1 || true
+    die "Teams plugin unexpectedly stayed alive on duplicate port bind"
+  fi
+  assert_contains "$(cat "$TEAMS_PLUGIN_CONFLICT_LOG")" "teams channel: http listen failed on 0.0.0.0:$TEAMS_SMOKE_PORT"
   TEAMS_DEDUPE_OUTPUT="$(cd "$REPO_ROOT/plugins/teams" && bun -e 'import { createRecentMessageDeduper } from "./dedupe.ts"; const dedupe = createRecentMessageDeduper(2); console.log(JSON.stringify([dedupe.seen("1775901127484"), dedupe.seen("1775901127484"), dedupe.seen("1775901127485"), dedupe.seen("1775901127486"), dedupe.seen("1775901127484")]))')"
   assert_contains "$TEAMS_DEDUPE_OUTPUT" "[false,true,false,false,false]"
   kill "$TEAMS_PLUGIN_PID" >/dev/null 2>&1 || true
