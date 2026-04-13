@@ -298,6 +298,23 @@ RELEASE_NEXT_TS=$next_ts
 EOF
 }
 
+bridge_release_paths_valid() {
+  local shared_ok="0"
+  local state_ok="0"
+  local task_db_ok="0"
+
+  shared_ok="$(bridge_path_is_within_root "$BRIDGE_SHARED_DIR" "$BRIDGE_HOME")"
+  state_ok="$(bridge_path_is_within_root "$BRIDGE_STATE_DIR" "$BRIDGE_HOME")"
+  task_db_ok="$(bridge_path_is_within_root "$BRIDGE_TASK_DB" "$BRIDGE_STATE_DIR")"
+
+  if [[ "$shared_ok" != "1" || "$state_ok" != "1" || "$task_db_ok" != "1" ]]; then
+    daemon_info "skipping release alert due to mixed bridge paths: home=$BRIDGE_HOME state=$BRIDGE_STATE_DIR shared=$BRIDGE_SHARED_DIR task_db=$BRIDGE_TASK_DB"
+    return 1
+  fi
+
+  return 0
+}
+
 bridge_release_alert_body_file() {
   local tag="${1:-latest}"
   local safe_tag=""
@@ -490,6 +507,7 @@ process_release_monitor() {
   [[ "${BRIDGE_RELEASE_CHECK_ENABLED:-1}" == "1" ]] || return 1
   [[ -n "$admin_agent" ]] || return 1
   bridge_agent_exists "$admin_agent" || return 1
+  bridge_release_paths_valid || return 1
   bridge_release_due || return 1
 
   if ! monitor_json="$(python3 "$SCRIPT_DIR/bridge-release.py" monitor --repo "$BRIDGE_RELEASE_REPO" --installed-version "$(bridge_version)" --state-file "$BRIDGE_RELEASE_CHECK_STATE_FILE" --json 2>/dev/null)"; then
@@ -530,6 +548,10 @@ PY
   fi
 
   body_file="$(bridge_release_alert_body_file "$tag")"
+  if [[ "$(bridge_path_is_within_root "$body_file" "$BRIDGE_SHARED_DIR")" != "1" ]]; then
+    daemon_info "skipping release alert because body_file escaped shared dir: body_file=$body_file shared=$BRIDGE_SHARED_DIR"
+    return 1
+  fi
   if ! bridge_write_release_alert_body "$body_file" "$monitor_json" "$upgrade_check_json"; then
     return 1
   fi

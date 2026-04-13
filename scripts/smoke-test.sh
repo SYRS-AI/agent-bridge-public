@@ -4365,6 +4365,12 @@ BRIDGE_RELEASE_CHECK_INTERVAL_SECONDS=0 \
 BRIDGE_RELEASE_CHECK_STATE_FILE="$FAKE_RELEASE_DAEMON_STATE" \
 BRIDGE_RELEASE_MOCK_JSON_FILE="$FAKE_RELEASE_JSON" \
 BRIDGE_RELEASE_REPO="SYRS-AI/agent-bridge-public" \
+BRIDGE_HOME="$BRIDGE_HOME" \
+BRIDGE_STATE_DIR="$BRIDGE_STATE_DIR" \
+BRIDGE_SHARED_DIR="$BRIDGE_SHARED_DIR" \
+BRIDGE_TASK_DB="$BRIDGE_TASK_DB" \
+BRIDGE_ROSTER_FILE="$BRIDGE_ROSTER_FILE" \
+BRIDGE_ROSTER_LOCAL_FILE="$BRIDGE_ROSTER_LOCAL_FILE" \
 bash "$REPO_ROOT/bridge-daemon.sh" sync >/dev/null
 RELEASE_OPEN_ID="$(python3 "$REPO_ROOT/bridge-queue.py" find-open --agent "$SMOKE_AGENT" --title-prefix "[release] Agent Bridge " 2>/dev/null || true)"
 [[ "$RELEASE_OPEN_ID" =~ ^[0-9]+$ ]] || die "expected release-available task for $SMOKE_AGENT"
@@ -4374,11 +4380,32 @@ grep -q 'Stable Release Available' "$RELEASE_BODY_FILE" || die "expected release
 grep -q '## Release Notes' "$RELEASE_BODY_FILE" || die "expected release notes section"
 grep -q 'Stable release smoke fixture' "$RELEASE_BODY_FILE" || die "expected release notes content"
 bash "$REPO_ROOT/bridge-task.sh" done "$RELEASE_OPEN_ID" --agent "$SMOKE_AGENT" --note "release alert handled" >/dev/null
+LEAK_TASK_DB="$FAKE_RELEASE_ROOT/leak/tasks.db"
 BRIDGE_RELEASE_CHECK_ENABLED=1 \
 BRIDGE_RELEASE_CHECK_INTERVAL_SECONDS=0 \
 BRIDGE_RELEASE_CHECK_STATE_FILE="$FAKE_RELEASE_DAEMON_STATE" \
 BRIDGE_RELEASE_MOCK_JSON_FILE="$FAKE_RELEASE_JSON" \
 BRIDGE_RELEASE_REPO="SYRS-AI/agent-bridge-public" \
+BRIDGE_HOME="$BRIDGE_HOME" \
+BRIDGE_STATE_DIR="$BRIDGE_STATE_DIR" \
+BRIDGE_SHARED_DIR="$BRIDGE_SHARED_DIR" \
+BRIDGE_TASK_DB="$LEAK_TASK_DB" \
+BRIDGE_ROSTER_FILE="$BRIDGE_ROSTER_FILE" \
+BRIDGE_ROSTER_LOCAL_FILE="$BRIDGE_ROSTER_LOCAL_FILE" \
+bash "$REPO_ROOT/bridge-daemon.sh" sync >/dev/null
+LEAK_RELEASE_OPEN_ID="$(BRIDGE_TASK_DB="$LEAK_TASK_DB" python3 "$REPO_ROOT/bridge-queue.py" find-open --agent "$SMOKE_AGENT" --title-prefix "[release] Agent Bridge " 2>/dev/null || true)"
+[[ -z "$LEAK_RELEASE_OPEN_ID" ]] || die "release alert should not be created when task db escapes BRIDGE_STATE_DIR"
+BRIDGE_RELEASE_CHECK_ENABLED=1 \
+BRIDGE_RELEASE_CHECK_INTERVAL_SECONDS=0 \
+BRIDGE_RELEASE_CHECK_STATE_FILE="$FAKE_RELEASE_DAEMON_STATE" \
+BRIDGE_RELEASE_MOCK_JSON_FILE="$FAKE_RELEASE_JSON" \
+BRIDGE_RELEASE_REPO="SYRS-AI/agent-bridge-public" \
+BRIDGE_HOME="$BRIDGE_HOME" \
+BRIDGE_STATE_DIR="$BRIDGE_STATE_DIR" \
+BRIDGE_SHARED_DIR="$BRIDGE_SHARED_DIR" \
+BRIDGE_TASK_DB="$BRIDGE_TASK_DB" \
+BRIDGE_ROSTER_FILE="$BRIDGE_ROSTER_FILE" \
+BRIDGE_ROSTER_LOCAL_FILE="$BRIDGE_ROSTER_LOCAL_FILE" \
 bash "$REPO_ROOT/bridge-daemon.sh" sync >/dev/null
 RELEASE_OPEN_ID_AGAIN="$(python3 "$REPO_ROOT/bridge-queue.py" find-open --agent "$SMOKE_AGENT" --title-prefix "[release] Agent Bridge " 2>/dev/null || true)"
 [[ -z "$RELEASE_OPEN_ID_AGAIN" ]] || die "release alert should be deduped for the same tag"
