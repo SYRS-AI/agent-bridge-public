@@ -285,6 +285,86 @@ print(f"{env_prefix}{quoted}" if env_prefix else quoted)
 PY
 }
 
+bridge_claude_launch_with_development_channels() {
+  local original="$1"
+  local required_csv="${2:-}"
+
+  if [[ -z "$required_csv" ]]; then
+    printf '%s' "$original"
+    return 0
+  fi
+
+  bridge_require_python
+  python3 - "$original" "$required_csv" <<'PY'
+import re
+import shlex
+import sys
+
+original, required_csv = sys.argv[1:]
+
+def normalize(raw: str):
+    values = []
+    seen = set()
+    for chunk in raw.split(","):
+        item = chunk.strip()
+        if not item or item in seen:
+            continue
+        seen.add(item)
+        values.append(item)
+    return values
+
+required = normalize(required_csv)
+if not required:
+    print(original)
+    raise SystemExit(0)
+
+match = re.match(r"^(?P<prefix>.*?)(?P<command>claude(?:\s|$).*)$", original)
+if not match:
+    print(original)
+    raise SystemExit(0)
+
+env_prefix = match.group("prefix")
+args = shlex.split(match.group("command"))
+if not args or args[0] != "claude":
+    print(original)
+    raise SystemExit(0)
+
+rest = args[1:]
+existing = []
+filtered = []
+i = 0
+while i < len(rest):
+    token = rest[i]
+    if token == "--dangerously-load-development-channels":
+        i += 1
+        while i < len(rest) and not rest[i].startswith("-"):
+            existing.extend(normalize(rest[i]))
+            i += 1
+        continue
+    if token.startswith("--dangerously-load-development-channels="):
+        existing.extend(normalize(token.split("=", 1)[1]))
+        i += 1
+        continue
+    filtered.append(token)
+    i += 1
+
+merged = []
+seen = set()
+for item in [*existing, *required]:
+    if item in seen:
+        continue
+    seen.add(item)
+    merged.append(item)
+
+rebuilt = ["claude", *filtered]
+for item in merged:
+    rebuilt.extend(["--dangerously-load-development-channels", item])
+
+quoted = " ".join(shlex.quote(token) for token in rebuilt)
+print(f"{env_prefix}{quoted}" if env_prefix else quoted)
+PY
+}
+
 bridge_claude_launch_with_channel_state_dirs() {
   local agent="$1"
   local original="$2"

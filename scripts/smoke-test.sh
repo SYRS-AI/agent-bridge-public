@@ -2432,6 +2432,20 @@ assert_contains "$CREATED_TEAMS_LAUNCH" "TEAMS_STATE_DIR=$BRIDGE_AGENT_HOME_ROOT
 assert_contains "$CREATED_TEAMS_LAUNCH" "plugin:teams@agent-bridge"
 assert_contains "$CREATED_TEAMS_LAUNCH" "--dangerously-load-development-channels plugin:teams@agent-bridge"
 assert_not_contains "$CREATED_TEAMS_LAUNCH" "--channels plugin:teams@agent-bridge"
+TEAMS_DEV_MERGED_LAUNCH="$("$BASH4_BIN" -c '
+  source "'"$REPO_ROOT"'/bridge-lib.sh"
+  bridge_claude_launch_with_development_channels "BRIDGE_SENTINEL=1 claude --dangerously-load-development-channels plugin:teams@agent-bridge --dangerously-skip-permissions --channels plugin:discord@claude-plugins-official" "plugin:teams@agent-bridge,plugin:custom-dev@agent-bridge"
+')"
+assert_contains "$TEAMS_DEV_MERGED_LAUNCH" "BRIDGE_SENTINEL=1 claude"
+assert_contains "$TEAMS_DEV_MERGED_LAUNCH" "--dangerously-load-development-channels plugin:teams@agent-bridge"
+assert_contains "$TEAMS_DEV_MERGED_LAUNCH" "--dangerously-load-development-channels plugin:custom-dev@agent-bridge"
+python3 - "$TEAMS_DEV_MERGED_LAUNCH" <<'PY'
+import sys
+
+command = sys.argv[1]
+assert command.count("plugin:teams@agent-bridge") == 1, command
+assert command.count("plugin:custom-dev@agent-bridge") == 1, command
+PY
 TEAMS_DEV_STATE_DIR_LAUNCH="$("$BASH4_BIN" -c '
   source "'"$REPO_ROOT"'/bridge-lib.sh"
   bridge_load_roster

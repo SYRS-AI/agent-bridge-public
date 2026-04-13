@@ -847,6 +847,14 @@ print(f"files_copied: {counts.get('files_copied', 0)}")
 print(f"files_merged_clean: {counts.get('files_merged_clean', 0)}")
 print(f"files_merged_conflict: {counts.get('files_merged_conflict', 0)}")
 print(f"files_preserved_live: {counts.get('files_preserved_live', 0)}")
+conflicts = payload.get("conflict_backups") or []
+print(f"conflict_backups: {len(conflicts)}")
+if conflicts:
+    print("[warn] unresolved merge conflicts were backed up; review these files:")
+    for path in conflicts[:10]:
+        print(f"  - {path}")
+    if len(conflicts) > 10:
+        print(f"  ... +{len(conflicts) - 10} more")
 PY
 if [[ $MIGRATE_AGENTS -eq 1 ]]; then
   python3 - "$MIGRATION_JSON" <<'PY'
