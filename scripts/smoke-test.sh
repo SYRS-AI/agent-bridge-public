@@ -657,6 +657,109 @@ RELAY_ROWS="$("$BASH4_BIN" -c '
 ')"
 assert_contains "$RELAY_ROWS" "$SMOKE_AGENT"$'\t'"123456789012345678"
 
+log "verifying discord relay skips legacy dm agents and persists state"
+python3 - "$REPO_ROOT/bridge-discord-relay.py" "$TMP_ROOT/relay-state.json" "$TMP_ROOT/relay-snapshot.tsv" "$TMP_ROOT/relay-home" <<'PY'
+import argparse
+import importlib.util
+import json
+import sys
+from pathlib import Path
+
+script_path = Path(sys.argv[1])
+state_path = Path(sys.argv[2])
+snapshot_path = Path(sys.argv[3])
+bridge_home = Path(sys.argv[4])
+
+spec = importlib.util.spec_from_file_location("bridge_discord_relay", script_path)
+module = importlib.util.module_from_spec(spec)
+assert spec.loader is not None
+spec.loader.exec_module(module)
+
+(bridge_home / "agents" / "ghost" / ".discord").mkdir(parents=True, exist_ok=True)
+(bridge_home / "agents" / "ghost" / ".discord" / ".env").write_text("TOKEN=ghost\n", encoding="utf-8")
+(bridge_home / "agents" / "ghost" / ".discord" / "access.json").write_text(
+    json.dumps({"allowFrom": ["123"], "groups": {}, "pending": {}}),
+    encoding="utf-8",
+)
+(bridge_home / "agents" / "smoke-agent" / ".discord").mkdir(parents=True, exist_ok=True)
+(bridge_home / "agents" / "smoke-agent" / ".discord" / ".env").write_text("TOKEN=smoke\n", encoding="utf-8")
+(bridge_home / "agents" / "smoke-agent" / ".discord" / "access.json").write_text(
+    json.dumps({"allowFrom": ["123"], "groups": {}, "pending": {}}),
+    encoding="utf-8",
+)
+
+snapshot_path.write_text(
+    "agent\tchannel_id\tactive\tidle_timeout\tsession\n"
+    "smoke-agent\t111\t0\t900\tsmoke-session\n",
+    encoding="utf-8",
+)
+state_path.write_text(
+    json.dumps(
+        {
+            "channels": {
+                "111": {
+                    "agent": "smoke-agent",
+                    "last_seen_id": "100",
+                }
+            },
+            "dm_channels": {
+                "dm:ghost:123": {
+                    "agent": "ghost",
+                    "user_id": "123",
+                    "channel_id": "222",
+                },
+                "dm:smoke-agent:123": {
+                    "agent": "smoke-agent",
+                    "user_id": "123",
+                    "channel_id": "333",
+                    "last_seen_id": "100",
+                },
+            },
+        }
+    ),
+    encoding="utf-8",
+)
+
+module.load_token = lambda *_args: "token"
+module.load_registered_agents = lambda _bridge_home: {"smoke-agent"}
+module.has_open_wake_task = lambda _bridge_home, _agent: False
+module.tmux_session_active = lambda _session: False
+module.open_dm_channel = lambda _token, _user_id: "333"
+
+def fake_fetch(_token: str, channel_id: str, _limit: int):
+    if channel_id == "111":
+        return [{"id": "101", "content": "wake", "author": {"bot": False, "username": "Sean"}}]
+    if channel_id == "333":
+        return [{"id": "101", "content": "dm wake", "author": {"bot": False, "username": "Sean"}}]
+    return []
+
+enqueued = []
+
+def fake_enqueue(_bridge_home: Path, agent: str, channel_id: str, messages: list[dict[str, object]]) -> str:
+    enqueued.append((agent, channel_id, len(messages)))
+    return "ok"
+
+module.fetch_channel_messages = fake_fetch
+module.enqueue_task = fake_enqueue
+
+args = argparse.Namespace(
+    agent_snapshot=str(snapshot_path),
+    bridge_home=str(bridge_home),
+    state_file=str(state_path),
+    runtime_config=str(state_path),
+    relay_account="default",
+    poll_limit=5,
+    cooldown_seconds=60,
+)
+
+assert module.cmd_sync(args) == 0
+state = json.loads(state_path.read_text(encoding="utf-8"))
+assert "dm:ghost:123" not in state["dm_channels"], state
+assert state["channels"]["111"]["last_seen_id"] == "101", state
+assert state["dm_channels"]["dm:smoke-agent:123"]["last_seen_id"] == "101", state
+assert enqueued == [("smoke-agent", "111", 1), ("smoke-agent", "333", 1)], enqueued
+PY
+
 log "verifying session alias resolution and worktree replace"
 tmux new-session -d -s "$WORKTREE_AGENT" -c "$PROJECT_ROOT" 'python3 -c "import time; print(\"worker active\", flush=True); time.sleep(30)"'
 cat >>"$BRIDGE_ROSTER_LOCAL_FILE" <<EOF

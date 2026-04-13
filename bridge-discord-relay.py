@@ -126,6 +126,32 @@ def load_dm_allowlist(agent_home_root: str, agent: str) -> list[str]:
         return []
 
 
+def load_registered_agents(bridge_home: Path) -> set[str] | None:
+    cmd = [str(bridge_home / "agent-bridge"), "agent", "list", "--json"]
+    try:
+        result = subprocess.run(cmd, check=True, capture_output=True, text=True)
+    except (OSError, subprocess.CalledProcessError) as err:
+        print(f"[discord-relay] failed to load registered agents: {err}", file=sys.stderr)
+        return None
+
+    try:
+        payload = json.loads(result.stdout or "[]")
+    except json.JSONDecodeError as err:
+        print(f"[discord-relay] failed to decode registered agents: {err}", file=sys.stderr)
+        return None
+
+    agents = {str(item.get("agent")) for item in payload if item.get("agent")}
+    return agents or None
+
+
+def note_relay_issue(state: dict[str, Any], now_ts: int, reason: str, detail: str = "") -> None:
+    state["last_suppressed_ts"] = now_ts
+    state["last_suppressed_reason"] = reason
+    state["last_error_ts"] = now_ts
+    if detail:
+        state["last_error"] = detail[:500]
+
+
 def fetch_channel_messages(token: str, channel_id: str, limit: int) -> list[dict[str, Any]]:
     query = urlencode({"limit": str(limit)})
     url = f"https://discord.com/api/v10/channels/{channel_id}/messages?{query}"
@@ -262,125 +288,34 @@ def cmd_sync(args: argparse.Namespace) -> int:
 
     if not args.runtime_config:
         raise SystemExit("--runtime-config is required")
+    bridge_home = Path(args.bridge_home)
     token = load_token(Path(args.runtime_config), args.relay_account)
     state_path = Path(args.state_file)
     state = load_json(state_path, {"channels": {}})
     channels = state.setdefault("channels", {})
-    now_ts = int(time.time())
-
-    for row in snapshot:
-        channel_id = row["channel_id"]
-        channel_state = channels.setdefault(channel_id, {"agent": row["agent"]})
-        channel_state["agent"] = row["agent"]
-
-        try:
-            messages = fetch_channel_messages(token, channel_id, args.poll_limit)
-        except HTTPError as err:
-            print(
-                f"[discord-relay] channel={channel_id} agent={row['agent']} http_error={err.code}",
-                file=sys.stderr,
-            )
-            continue
-        except URLError as err:
-            print(
-                f"[discord-relay] channel={channel_id} agent={row['agent']} url_error={err.reason}",
-                file=sys.stderr,
-            )
-            continue
-
-        if not messages:
-            continue
-
-        messages.sort(key=lambda item: snowflake_int(item.get("id")))
-        latest_id = str(messages[-1].get("id"))
-        last_seen_id = channel_state.get("last_seen_id")
-
-        if not last_seen_id:
-            channel_state["last_seen_id"] = latest_id
-            channel_state["seeded_at"] = now_ts
-            continue
-
-        new_messages = [item for item in messages if snowflake_int(item.get("id")) > snowflake_int(last_seen_id)]
-        if not new_messages:
-            continue
-
-        channel_state["last_seen_id"] = latest_id
-        channel_state["last_seen_ts"] = now_ts
-
-        live_active = row["active"] or tmux_session_active(str(row.get("session") or ""))
-        if live_active:
-            continue
-
-        human_messages = [item for item in new_messages if not ((item.get("author") or {}).get("bot"))]
-        if not human_messages:
-            continue
-
-        if has_open_wake_task(Path(args.bridge_home), row["agent"]):
-            channel_state["last_suppressed_ts"] = now_ts
-            channel_state["last_suppressed_reason"] = "open_wake_task"
-            continue
-
-        last_enqueue_ts = int(channel_state.get("last_enqueue_ts") or 0)
-        if args.cooldown_seconds > 0 and now_ts - last_enqueue_ts < args.cooldown_seconds:
-            channel_state["last_suppressed_ts"] = now_ts
-            channel_state["last_suppressed_reason"] = "cooldown"
-            continue
-
-        output = enqueue_task(Path(args.bridge_home), row["agent"], channel_id, human_messages)
-        channel_state["last_enqueue_ts"] = now_ts
-        channel_state["last_enqueue_message_id"] = str(human_messages[-1].get("id"))
-        channel_state["last_enqueue_preview"] = message_preview(human_messages[-1])
-        print(
-            f"[discord-relay] enqueued agent={row['agent']} channel={channel_id} "
-            f"messages={len(human_messages)} :: {output}"
-        )
-
-    # DM monitoring: open DM channels for allowlisted users and poll them
     dm_channels = state.setdefault("dm_channels", {})
-    agent_home_root = Path(args.bridge_home) / "agents"
+    now_ts = int(time.time())
+    registered_agents = load_registered_agents(bridge_home)
 
-    # Scan ALL agents with .discord dirs — not just snapshot (which only has active agents)
-    all_dm_agents: list[str] = []
-    if agent_home_root.is_dir():
-        for agent_dir in sorted(agent_home_root.iterdir()):
-            if not agent_dir.is_dir() or agent_dir.name.startswith("."):
-                continue
-            if (agent_dir / ".discord" / ".env").exists():
-                all_dm_agents.append(agent_dir.name)
+    try:
+        for row in snapshot:
+            channel_id = row["channel_id"]
+            channel_state = channels.setdefault(channel_id, {"agent": row["agent"]})
+            channel_state["agent"] = row["agent"]
 
-    # Build session lookup from snapshot for active check
-    session_by_agent = {row["agent"]: row.get("session", "") for row in snapshot}
-
-    for agent in all_dm_agents:
-
-        allow_ids = load_dm_allowlist(str(agent_home_root), agent)
-        if not allow_ids:
-            continue
-
-        # Use agent's own bot token if available, otherwise skip
-        agent_env_path = agent_home_root / agent / ".discord" / ".env"
-        if not agent_env_path.exists():
-            continue
-        try:
-            agent_token = agent_env_path.read_text(encoding="utf-8").split("=", 1)[1].strip()
-        except Exception:
-            continue
-
-        for user_id in allow_ids:
-            dm_key = f"dm:{agent}:{user_id}"
-            dm_state = dm_channels.setdefault(dm_key, {"agent": agent, "user_id": user_id})
-
-            # Open/get DM channel if not cached
-            if not dm_state.get("channel_id"):
-                ch_id = open_dm_channel(agent_token, user_id)
-                if not ch_id:
-                    continue
-                dm_state["channel_id"] = ch_id
-
-            channel_id = dm_state["channel_id"]
             try:
-                messages = fetch_channel_messages(agent_token, channel_id, args.poll_limit)
-            except (HTTPError, URLError):
+                messages = fetch_channel_messages(token, channel_id, args.poll_limit)
+            except HTTPError as err:
+                print(
+                    f"[discord-relay] channel={channel_id} agent={row['agent']} http_error={err.code}",
+                    file=sys.stderr,
+                )
+                continue
+            except URLError as err:
+                print(
+                    f"[discord-relay] channel={channel_id} agent={row['agent']} url_error={err.reason}",
+                    file=sys.stderr,
+                )
                 continue
 
             if not messages:
@@ -388,40 +323,163 @@ def cmd_sync(args: argparse.Namespace) -> int:
 
             messages.sort(key=lambda item: snowflake_int(item.get("id")))
             latest_id = str(messages[-1].get("id"))
-            last_seen_id = dm_state.get("last_seen_id")
+            last_seen_id = channel_state.get("last_seen_id")
 
             if not last_seen_id:
-                # DM: don't skip on seed — first message IS the wake signal
-                dm_state["last_seen_id"] = latest_id
-                dm_state["seeded_at"] = now_ts
-                new_messages = messages  # treat all as new on first contact
-            else:
-                new_messages = [item for item in messages if snowflake_int(item.get("id")) > snowflake_int(last_seen_id)]
+                channel_state["last_seen_id"] = latest_id
+                channel_state["seeded_at"] = now_ts
+                continue
+
+            new_messages = [item for item in messages if snowflake_int(item.get("id")) > snowflake_int(last_seen_id)]
             if not new_messages:
                 continue
 
-            dm_state["last_seen_id"] = latest_id
-            dm_state["last_seen_ts"] = now_ts
+            channel_state["last_seen_id"] = latest_id
+            channel_state["last_seen_ts"] = now_ts
 
-            session_name = session_by_agent.get(agent, agent)
-            if tmux_session_active(session_name):
+            if registered_agents is not None and row["agent"] not in registered_agents:
+                note_relay_issue(channel_state, now_ts, "unknown_agent", row["agent"])
+                continue
+
+            live_active = row["active"] or tmux_session_active(str(row.get("session") or ""))
+            if live_active:
                 continue
 
             human_messages = [item for item in new_messages if not ((item.get("author") or {}).get("bot"))]
             if not human_messages:
                 continue
 
-            if has_open_wake_task(Path(args.bridge_home), agent):
+            if has_open_wake_task(bridge_home, row["agent"]):
+                note_relay_issue(channel_state, now_ts, "open_wake_task")
                 continue
 
-            output = enqueue_task(Path(args.bridge_home), agent, channel_id, human_messages)
-            dm_state["last_enqueue_ts"] = now_ts
+            last_enqueue_ts = int(channel_state.get("last_enqueue_ts") or 0)
+            if args.cooldown_seconds > 0 and now_ts - last_enqueue_ts < args.cooldown_seconds:
+                note_relay_issue(channel_state, now_ts, "cooldown")
+                continue
+
+            try:
+                output = enqueue_task(bridge_home, row["agent"], channel_id, human_messages)
+            except (OSError, subprocess.CalledProcessError) as err:
+                detail = (getattr(err, "stderr", "") or getattr(err, "stdout", "") or str(err)).strip()
+                note_relay_issue(channel_state, now_ts, "enqueue_failed", detail)
+                print(
+                    f"[discord-relay] channel={channel_id} agent={row['agent']} enqueue_failed "
+                    f"detail={detail[:240]}",
+                    file=sys.stderr,
+                )
+                continue
+
+            channel_state["last_enqueue_ts"] = now_ts
+            channel_state["last_enqueue_message_id"] = str(human_messages[-1].get("id"))
+            channel_state["last_enqueue_preview"] = message_preview(human_messages[-1])
             print(
-                f"[discord-relay] DM enqueued agent={agent} user={user_id} "
+                f"[discord-relay] enqueued agent={row['agent']} channel={channel_id} "
                 f"messages={len(human_messages)} :: {output}"
             )
 
-    save_json(state_path, state)
+        agent_home_root = bridge_home / "agents"
+
+        if registered_agents is not None:
+            stale_dm_keys = [key for key, value in dm_channels.items() if str((value or {}).get("agent") or "") not in registered_agents]
+            for key in stale_dm_keys:
+                dm_channels.pop(key, None)
+
+        # Scan registered agents with .discord dirs — not just snapshot (which only has active agents)
+        all_dm_agents: list[str] = []
+        if agent_home_root.is_dir():
+            for agent_dir in sorted(agent_home_root.iterdir()):
+                if not agent_dir.is_dir() or agent_dir.name.startswith("."):
+                    continue
+                if registered_agents is not None and agent_dir.name not in registered_agents:
+                    continue
+                if (agent_dir / ".discord" / ".env").exists():
+                    all_dm_agents.append(agent_dir.name)
+
+        session_by_agent = {row["agent"]: row.get("session", "") for row in snapshot}
+
+        for agent in all_dm_agents:
+            allow_ids = load_dm_allowlist(str(agent_home_root), agent)
+            if not allow_ids:
+                continue
+
+            agent_env_path = agent_home_root / agent / ".discord" / ".env"
+            if not agent_env_path.exists():
+                continue
+            try:
+                agent_token = agent_env_path.read_text(encoding="utf-8").split("=", 1)[1].strip()
+            except Exception:
+                continue
+
+            for user_id in allow_ids:
+                dm_key = f"dm:{agent}:{user_id}"
+                dm_state = dm_channels.setdefault(dm_key, {"agent": agent, "user_id": user_id})
+
+                if not dm_state.get("channel_id"):
+                    ch_id = open_dm_channel(agent_token, user_id)
+                    if not ch_id:
+                        continue
+                    dm_state["channel_id"] = ch_id
+
+                channel_id = dm_state["channel_id"]
+                try:
+                    messages = fetch_channel_messages(agent_token, channel_id, args.poll_limit)
+                except (HTTPError, URLError):
+                    continue
+
+                if not messages:
+                    continue
+
+                messages.sort(key=lambda item: snowflake_int(item.get("id")))
+                latest_id = str(messages[-1].get("id"))
+                last_seen_id = dm_state.get("last_seen_id")
+
+                if not last_seen_id:
+                    dm_state["last_seen_id"] = latest_id
+                    dm_state["seeded_at"] = now_ts
+                    new_messages = messages
+                else:
+                    new_messages = [item for item in messages if snowflake_int(item.get("id")) > snowflake_int(last_seen_id)]
+                if not new_messages:
+                    continue
+
+                dm_state["last_seen_id"] = latest_id
+                dm_state["last_seen_ts"] = now_ts
+
+                session_name = session_by_agent.get(agent, agent)
+                if tmux_session_active(session_name):
+                    continue
+
+                human_messages = [item for item in new_messages if not ((item.get("author") or {}).get("bot"))]
+                if not human_messages:
+                    continue
+
+                if has_open_wake_task(bridge_home, agent):
+                    note_relay_issue(dm_state, now_ts, "open_wake_task")
+                    continue
+
+                try:
+                    output = enqueue_task(bridge_home, agent, channel_id, human_messages)
+                except (OSError, subprocess.CalledProcessError) as err:
+                    detail = (getattr(err, "stderr", "") or getattr(err, "stdout", "") or str(err)).strip()
+                    note_relay_issue(dm_state, now_ts, "enqueue_failed", detail)
+                    print(
+                        f"[discord-relay] dm_channel={channel_id} agent={agent} enqueue_failed "
+                        f"detail={detail[:240]}",
+                        file=sys.stderr,
+                    )
+                    continue
+
+                dm_state["last_enqueue_ts"] = now_ts
+                dm_state["last_enqueue_message_id"] = str(human_messages[-1].get("id"))
+                dm_state["last_enqueue_preview"] = message_preview(human_messages[-1])
+                print(
+                    f"[discord-relay] DM enqueued agent={agent} user={user_id} "
+                    f"messages={len(human_messages)} :: {output}"
+                )
+    finally:
+        save_json(state_path, state)
+
     return 0
 
 

@@ -23,7 +23,7 @@ This release line means:
 
 ## Current Stable Release
 
-The current stable release is `v0.2.0`.
+The current stable release is `v0.2.1`.
 
 This release line adds:
 
@@ -32,6 +32,7 @@ This release line adds:
 - Teams and Microsoft 365 channel/plugin support
 - safer restart continuity, plugin cache sync, and crash-loop recovery
 - MCP orphan cleanup and stronger smoke coverage for restart/cleanup regressions
+- discord relay hardening so legacy DM aliases cannot block state persistence or repeat wake loops
 
 ## Patch Releases
 
@@ -70,7 +71,7 @@ agb version
 agb upgrade --check
 agb upgrade
 agb upgrade --channel dev
-agb upgrade --version 0.2.0
+agb upgrade --version 0.2.1
 ```
 
 Default `agb upgrade` should use `stable`, not `main`, so normal users only receive tagged releases.
