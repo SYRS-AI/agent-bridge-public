@@ -60,7 +60,7 @@ agb version
 agb upgrade --check
 agb upgrade
 agb upgrade --channel dev
-agb upgrade --version 0.2.7
+agb upgrade --version 0.2.8
 ```
 
 Default `agb upgrade` should use `stable`, not `main`, so normal users only receive tagged releases.
