@@ -35,6 +35,10 @@ MS365_CLIENT_SECRET=<app-registration-client-secret>
 MS365_DEFAULT_UPN=<default-user-principal-name>
 MS365_DEFAULT_SCOPES="openid profile offline_access User.Read Mail.Read Mail.Send Calendars.Read Calendars.ReadWrite People.Read User.Read.All Directory.Read.All Chat.ReadWrite"
 MS365_REDIRECT_URI=http://localhost:3978/auth/callback
+# Optional: if set, prepended to every outgoing mail_send/mail_reply/mail_reply_all body.
+# Useful for AI-agent disclaimers. Plain text; HTML bodies get the disclaimer as an
+# escaped blockquote-style div at the top.
+MS365_MAIL_DISCLAIMER=
 ```
 
 The Azure AD app registration must have `MS365_REDIRECT_URI` registered as
@@ -83,6 +87,8 @@ restart the flow. `logout(upn=...)` deletes the token.
 - `mail_list(upn, folder?, top?, search?, filter?, select?)`
 - `mail_get(upn, message_id)`
 - `mail_send(upn, to, cc?, subject, body, body_type?)`
+- `mail_reply(upn, message_id, body, body_type?)` — Graph-native `/me/messages/{id}/reply`. Preserves conversation threading.
+- `mail_reply_all(upn, message_id, body, body_type?)` — Graph-native `/me/messages/{id}/replyAll`. Preserves conversation threading and the original To/Cc set.
 
 ### Calendar
 - `calendar_upcoming(upn, days?, top?)` — `/me/calendarview` over the next N days
