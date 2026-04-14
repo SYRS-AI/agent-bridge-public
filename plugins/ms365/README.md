@@ -38,6 +38,14 @@ MS365_REDIRECT_URI=http://localhost:3978/auth/callback
 # Optional: if set, prepended to every outgoing mail_send/mail_reply/mail_reply_all body.
 # Useful for AI-agent disclaimers. Plain text; HTML bodies get the disclaimer as an
 # escaped blockquote-style div at the top.
+#
+# May contain the literal token `{operator}`, which is resolved at send time from
+# Azure AD via Graph `/me` displayName (cached per UPN). Falls back to the UPN
+# local-part if the lookup fails. This lets a single fleet-wide config line
+# personalize the disclaimer per agent without hard-coding names.
+#
+# Example:
+#   MS365_MAIL_DISCLAIMER="{operator}님의 에이전트가 대신 보내는 메시지입니다. 에이전트가 보내는 메시지에는 [AI Agent] 라고 태그가 붙어있고 실수를 할 수 있으니 참고 바랍니다."
 MS365_MAIL_DISCLAIMER=
 ```
 

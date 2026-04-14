@@ -382,13 +382,47 @@ function textResult(data: unknown) {
 /**
  * If MS365_MAIL_DISCLAIMER is set in the environment, prepend it to an outgoing
  * mail body. This is opt-in so upstream users who don't need it are unaffected.
+ *
+ * The env value may contain the literal token `{operator}`, which is replaced at
+ * send time with the display name resolved from Azure AD via Graph `/me`
+ * (cached per UPN). This avoids hard-coding operator names in config files —
+ * the authoritative name always comes from the directory. Falls back to the UPN
+ * local-part if the Graph lookup fails for any reason.
+ *
  * Idempotent: if the disclaimer is already inside the body (e.g. the caller
  * passed a body that already had it), the body is returned unchanged.
  */
-function withDisclaimer(body: string, bodyType: string): string {
+const operatorNameCache = new Map<string, string>()
+
+async function resolveOperatorDisplayName(upn: string): Promise<string> {
+  const cached = operatorNameCache.get(upn)
+  if (cached) return cached
+  try {
+    const me = await graph(upn, 'GET', '/me', undefined, { $select: 'displayName' })
+    const name = String(me?.displayName ?? '').trim()
+    if (name) {
+      operatorNameCache.set(upn, name)
+      return name
+    }
+  } catch {
+    /* fall through to upn fallback */
+  }
+  const fallback = upn.split('@')[0] ?? upn
+  operatorNameCache.set(upn, fallback)
+  return fallback
+}
+
+async function resolveDisclaimer(upn: string): Promise<string> {
   const raw = process.env.MS365_MAIL_DISCLAIMER
-  if (!raw) return body
-  const disclaimer = raw.trim()
+  if (!raw) return ''
+  const trimmed = raw.trim()
+  if (!trimmed) return ''
+  if (!trimmed.includes('{operator}')) return trimmed
+  const name = await resolveOperatorDisplayName(upn)
+  return trimmed.replace(/\{operator\}/g, name)
+}
+
+function withDisclaimer(body: string, bodyType: string, disclaimer: string): string {
   if (!disclaimer) return body
   if (body.includes(disclaimer)) return body
   if (bodyType === 'html') {
@@ -603,11 +637,12 @@ const tools: ToolDef[] = [
       if (to.length === 0) throw new Error('to is required (comma-separated)')
       const cc = String(args.cc ?? '').split(',').map(s => s.trim()).filter(Boolean)
       const bodyType = String(args.body_type ?? 'text')
+      const disclaimer = await resolveDisclaimer(upn)
       const message = {
         subject: String(args.subject ?? ''),
         body: {
           contentType: bodyType,
-          content: withDisclaimer(String(args.body ?? ''), bodyType),
+          content: withDisclaimer(String(args.body ?? ''), bodyType, disclaimer),
         },
         toRecipients: to.map(a => ({ emailAddress: { address: a } })),
         ccRecipients: cc.map(a => ({ emailAddress: { address: a } })),
@@ -635,11 +670,12 @@ const tools: ToolDef[] = [
       const id = String(args.message_id ?? '').trim()
       if (!id) throw new Error('message_id is required')
       const bodyType = String(args.body_type ?? 'text')
+      const disclaimer = await resolveDisclaimer(upn)
       const payload = {
         message: {
           body: {
             contentType: bodyType,
-            content: withDisclaimer(String(args.body ?? ''), bodyType),
+            content: withDisclaimer(String(args.body ?? ''), bodyType, disclaimer),
           },
         },
       }
@@ -666,11 +702,12 @@ const tools: ToolDef[] = [
       const id = String(args.message_id ?? '').trim()
       if (!id) throw new Error('message_id is required')
       const bodyType = String(args.body_type ?? 'text')
+      const disclaimer = await resolveDisclaimer(upn)
       const payload = {
         message: {
           body: {
             contentType: bodyType,
-            content: withDisclaimer(String(args.body ?? ''), bodyType),
+            content: withDisclaimer(String(args.body ?? ''), bodyType, disclaimer),
           },
         },
       }
