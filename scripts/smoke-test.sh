@@ -2544,6 +2544,19 @@ PY
   assert_contains "$(cat "$TEAMS_PLUGIN_CONFLICT_LOG")" "teams channel: http listen failed on 0.0.0.0:$TEAMS_SMOKE_PORT"
   TEAMS_DEDUPE_OUTPUT="$(cd "$REPO_ROOT/plugins/teams" && bun -e 'import { createRecentMessageDeduper } from "./dedupe.ts"; const dedupe = createRecentMessageDeduper(2); console.log(JSON.stringify([dedupe.seen("1775901127484"), dedupe.seen("1775901127484"), dedupe.seen("1775901127485"), dedupe.seen("1775901127486"), dedupe.seen("1775901127484")]))')"
   assert_contains "$TEAMS_DEDUPE_OUTPUT" "[false,true,false,false,false]"
+  log "exercising ms365 human-profile disclosure helper"
+  MS365_DISCLOSURE_OUTPUT="$(cd "$REPO_ROOT/plugins/ms365" && bun -e 'import { mkdtempSync } from "fs"; import { join } from "path"; import { tmpdir } from "os"; import { hasChatDisclaimerBeenSent, markChatDisclaimerSent, prependHumanOutboundDisclaimer } from "./disclosure.ts"; const root = mkdtempSync(join(tmpdir(), "ms365-disclosure-")); const statePath = join(root, "human-outbound-disclosures.json"); const text = prependHumanOutboundDisclaimer("hello", "text", "notice"); const html = prependHumanOutboundDisclaimer("<p>hello</p>", "html", "notice"); const before = hasChatDisclaimerBeenSent(statePath, "owner@example.com", "chat-1"); markChatDisclaimerSent(statePath, "owner@example.com", "chat-1", "msg-1"); const after = hasChatDisclaimerBeenSent(statePath, "owner@example.com", "chat-1"); const other = hasChatDisclaimerBeenSent(statePath, "owner@example.com", "chat-2"); console.log(JSON.stringify({ text, html, before, after, other }));')"
+  python3 - "$MS365_DISCLOSURE_OUTPUT" <<'PY'
+import json
+import sys
+
+payload = json.loads(sys.argv[1])
+assert payload["text"] == "notice\n\nhello", payload
+assert payload["html"].startswith('<div style='), payload
+assert payload["before"] is False, payload
+assert payload["after"] is True, payload
+assert payload["other"] is False, payload
+PY
   kill "$TEAMS_PLUGIN_PID" >/dev/null 2>&1 || true
   wait "$TEAMS_PLUGIN_PID" >/dev/null 2>&1 || true
   TEAMS_PLUGIN_PID=""

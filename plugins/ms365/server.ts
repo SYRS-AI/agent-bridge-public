@@ -44,11 +44,17 @@ import {
 import { homedir } from 'os'
 import { join } from 'path'
 import { randomUUID } from 'crypto'
+import {
+  hasChatDisclaimerBeenSent,
+  markChatDisclaimerSent,
+  prependHumanOutboundDisclaimer,
+} from './disclosure.ts'
 
 const STATE_DIR = process.env.MS365_STATE_DIR ?? join(homedir(), '.claude', 'channels', 'ms365')
 const ENV_FILE = join(STATE_DIR, '.env')
 const TOKENS_DIR = join(STATE_DIR, 'tokens')
 const PENDING_DIR = join(STATE_DIR, 'pending')
+const HUMAN_OUTBOUND_DISCLOSURE_FILE = join(STATE_DIR, 'human-outbound-disclosures.json')
 
 const BRIDGE_HOME = process.env.BRIDGE_HOME ?? join(homedir(), '.agent-bridge')
 const MS365_CALLBACK_DIR =
@@ -412,28 +418,22 @@ async function resolveOperatorDisplayName(upn: string): Promise<string> {
   return fallback
 }
 
-async function resolveDisclaimer(upn: string): Promise<string> {
-  const raw = process.env.MS365_MAIL_DISCLAIMER
-  if (!raw) return ''
+async function resolveDisclaimerTemplate(upn: string, raw: string): Promise<string> {
   const trimmed = raw.trim()
-  if (!trimmed) return ''
   if (!trimmed.includes('{operator}')) return trimmed
   const name = await resolveOperatorDisplayName(upn)
   return trimmed.replace(/\{operator\}/g, name)
 }
 
-function withDisclaimer(body: string, bodyType: string, disclaimer: string): string {
-  if (!disclaimer) return body
-  if (body.includes(disclaimer)) return body
-  if (bodyType === 'html') {
-    const escaped = disclaimer
-      .replace(/&/g, '&amp;')
-      .replace(/</g, '&lt;')
-      .replace(/>/g, '&gt;')
-      .replace(/\n/g, '<br>')
-    return `<div style="color:#666;font-size:0.9em;border-left:3px solid #ccc;padding-left:8px;margin-bottom:12px">${escaped}</div>\n${body}`
+async function resolveConfiguredDisclaimer(upn: string, envKeys: string[]): Promise<string> {
+  for (const key of envKeys) {
+    const raw = process.env[key]
+    if (!raw) continue
+    const trimmed = raw.trim()
+    if (!trimmed) continue
+    return resolveDisclaimerTemplate(upn, trimmed)
   }
-  return `${disclaimer}\n\n${body}`
+  return ''
 }
 
 const tools: ToolDef[] = [
@@ -637,12 +637,15 @@ const tools: ToolDef[] = [
       if (to.length === 0) throw new Error('to is required (comma-separated)')
       const cc = String(args.cc ?? '').split(',').map(s => s.trim()).filter(Boolean)
       const bodyType = String(args.body_type ?? 'text')
-      const disclaimer = await resolveDisclaimer(upn)
+      const disclaimer = await resolveConfiguredDisclaimer(upn, [
+        'MS365_MAIL_DISCLAIMER',
+        'BRIDGE_HUMAN_OUTBOUND_DISCLAIMER',
+      ])
       const message = {
         subject: String(args.subject ?? ''),
         body: {
           contentType: bodyType,
-          content: withDisclaimer(String(args.body ?? ''), bodyType, disclaimer),
+          content: prependHumanOutboundDisclaimer(String(args.body ?? ''), bodyType, disclaimer),
         },
         toRecipients: to.map(a => ({ emailAddress: { address: a } })),
         ccRecipients: cc.map(a => ({ emailAddress: { address: a } })),
@@ -670,12 +673,15 @@ const tools: ToolDef[] = [
       const id = String(args.message_id ?? '').trim()
       if (!id) throw new Error('message_id is required')
       const bodyType = String(args.body_type ?? 'text')
-      const disclaimer = await resolveDisclaimer(upn)
+      const disclaimer = await resolveConfiguredDisclaimer(upn, [
+        'MS365_MAIL_DISCLAIMER',
+        'BRIDGE_HUMAN_OUTBOUND_DISCLAIMER',
+      ])
       const payload = {
         message: {
           body: {
             contentType: bodyType,
-            content: withDisclaimer(String(args.body ?? ''), bodyType, disclaimer),
+            content: prependHumanOutboundDisclaimer(String(args.body ?? ''), bodyType, disclaimer),
           },
         },
       }
@@ -702,12 +708,15 @@ const tools: ToolDef[] = [
       const id = String(args.message_id ?? '').trim()
       if (!id) throw new Error('message_id is required')
       const bodyType = String(args.body_type ?? 'text')
-      const disclaimer = await resolveDisclaimer(upn)
+      const disclaimer = await resolveConfiguredDisclaimer(upn, [
+        'MS365_MAIL_DISCLAIMER',
+        'BRIDGE_HUMAN_OUTBOUND_DISCLAIMER',
+      ])
       const payload = {
         message: {
           body: {
             contentType: bodyType,
-            content: withDisclaimer(String(args.body ?? ''), bodyType, disclaimer),
+            content: prependHumanOutboundDisclaimer(String(args.body ?? ''), bodyType, disclaimer),
           },
         },
       }
@@ -1011,7 +1020,7 @@ const tools: ToolDef[] = [
   {
     name: 'chat_send',
     description:
-      'Send a message to a specific Teams chat as the signed-in user. Requires ChatMessage.Send or Chat.ReadWrite scope.',
+      'Send a message to a specific Teams chat as the signed-in user. Requires ChatMessage.Send or Chat.ReadWrite scope. When MS365_CHAT_DISCLAIMER or BRIDGE_HUMAN_OUTBOUND_DISCLAIMER is set, the disclaimer is prepended only to the first outbound message per chat_id for that human profile.',
     schema: {
       type: 'object',
       required: ['chat_id', 'body'],
@@ -1029,12 +1038,25 @@ const tools: ToolDef[] = [
       const body = String(args.body ?? '')
       if (!body) throw new Error('body is required')
       const contentType = String(args.content_type ?? 'text')
+      const disclaimer = await resolveConfiguredDisclaimer(upn, [
+        'MS365_CHAT_DISCLAIMER',
+        'BRIDGE_HUMAN_OUTBOUND_DISCLAIMER',
+      ])
+      const shouldMarkDisclosure =
+        Boolean(disclaimer) &&
+        !hasChatDisclaimerBeenSent(HUMAN_OUTBOUND_DISCLOSURE_FILE, upn, chatId)
+      const outboundBody = shouldMarkDisclosure
+        ? prependHumanOutboundDisclaimer(body, contentType, disclaimer)
+        : body
       const data = await graph(
         upn,
         'POST',
         `/chats/${encodeURIComponent(chatId)}/messages`,
-        { body: { contentType, content: body } },
+        { body: { contentType, content: outboundBody } },
       )
+      if (shouldMarkDisclosure) {
+        markChatDisclaimerSent(HUMAN_OUTBOUND_DISCLOSURE_FILE, upn, chatId, String(data.id ?? ''))
+      }
       return textResult({
         sent: true,
         chat_id: chatId,

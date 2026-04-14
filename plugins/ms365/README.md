@@ -18,6 +18,7 @@ By default the plugin reads:
 - `~/.claude/channels/ms365/.env`
 - `~/.claude/channels/ms365/tokens/<slug-of-upn>.json`
 - `~/.claude/channels/ms365/pending/<slug-of-upn>.json`
+- `~/.claude/channels/ms365/human-outbound-disclosures.json`
 
 When Agent Bridge starts an agent with `plugin:ms365@agent-bridge`, it
 sets `MS365_STATE_DIR` to the agent-local directory, for example:
@@ -35,9 +36,9 @@ MS365_CLIENT_SECRET=<app-registration-client-secret>
 MS365_DEFAULT_UPN=<default-user-principal-name>
 MS365_DEFAULT_SCOPES="openid profile offline_access User.Read Mail.Read Mail.Send Calendars.Read Calendars.ReadWrite People.Read User.Read.All Directory.Read.All Chat.ReadWrite"
 MS365_REDIRECT_URI=http://localhost:3978/auth/callback
-# Optional: if set, prepended to every outgoing mail_send/mail_reply/mail_reply_all body.
-# Useful for AI-agent disclaimers. Plain text; HTML bodies get the disclaimer as an
-# escaped blockquote-style div at the top.
+# Optional: generic disclosure for outbound messages sent under a real human
+# operator profile. Use this when recipients should be told that an AI agent is
+# acting on behalf of the human account.
 #
 # May contain the literal token `{operator}`, which is resolved at send time from
 # Azure AD via Graph `/me` displayName (cached per UPN). Falls back to the UPN
@@ -45,8 +46,14 @@ MS365_REDIRECT_URI=http://localhost:3978/auth/callback
 # personalize the disclaimer per agent without hard-coding names.
 #
 # Example:
-#   MS365_MAIL_DISCLAIMER="{operator}님의 에이전트가 대신 보내는 메시지입니다. 에이전트가 보내는 메시지에는 [AI Agent] 라고 태그가 붙어있고 실수를 할 수 있으니 참고 바랍니다."
+#   BRIDGE_HUMAN_OUTBOUND_DISCLAIMER="{operator}님의 에이전트가 대신 보내는 메시지입니다. 에이전트가 보내는 메시지에는 [AI Agent] 라고 태그가 붙어있고 실수를 할 수 있으니 참고 바랍니다."
+BRIDGE_HUMAN_OUTBOUND_DISCLAIMER=
+# Optional override for email only. Prepended to every outgoing
+# mail_send/mail_reply/mail_reply_all body.
 MS365_MAIL_DISCLAIMER=
+# Optional override for Teams chat only. Prepended only to the first outbound
+# message per chat_id for the same signed-in human profile.
+MS365_CHAT_DISCLAIMER=
 ```
 
 The Azure AD app registration must have `MS365_REDIRECT_URI` registered as
@@ -105,7 +112,7 @@ restart the flow. `logout(upn=...)` deletes the token.
 ### Teams chat
 - `chat_list(upn, top?, filter?)` — `/me/chats` with member + last message preview
 - `chat_messages(upn, chat_id, top?)`
-- `chat_send(upn, chat_id, body, content_type?)`
+- `chat_send(upn, chat_id, body, content_type?)` — when `MS365_CHAT_DISCLAIMER` or `BRIDGE_HUMAN_OUTBOUND_DISCLAIMER` is set, the disclaimer is prepended only to the first outbound message per chat
 - `chat_create(upn, targets, topic?)` — 1:1 or group; Graph returns the
   existing chat id if the same member set already has one, so this is
   find-or-create rather than always-create
@@ -135,3 +142,17 @@ corresponding tools are not used.
   callback handler: the incoming `state` parameter must match
   `/^[A-Za-z0-9_-]{8,128}$/` before anything is written to
   `shared/ms365-callbacks/`.
+
+## Human-profile disclosure policy
+
+This plugin follows Agent Bridge's human-profile outbound policy:
+
+- Apply disclosure only when the message leaves under a real human identity.
+- Do not apply disclosure to agent-owned bot identities such as Discord bots,
+  Telegram bots, or the Azure Bot-based Teams channel plugin.
+- Email uses the disclaimer on every outbound message.
+- Teams chat uses the disclaimer only on the first outbound message per
+  `chat_id` and per signed-in human profile, tracked in
+  `human-outbound-disclosures.json`.
+
+For the generic contract, see [docs/human-outbound-identity-policy.md](../../docs/human-outbound-identity-policy.md).
