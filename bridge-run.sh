@@ -290,6 +290,12 @@ bridge_run_schedule_idle_marker_and_inbox_bootstrap() {
       next_file="$5"
       source "$script_dir/bridge-lib.sh"
       if bridge_tmux_wait_for_prompt "$session" claude 30; then
+        if [[ -z "$(bridge_agent_session_id "$agent")" ]]; then
+          # Claude session metadata can appear after tmux startup. Refresh once
+          # more at prompt-ready time so static resume state is persisted before
+          # the agent later goes inactive.
+          bridge_refresh_agent_session_id "$agent" 24 0.5 >/dev/null 2>&1 || true
+        fi
         bridge_agent_mark_idle_now "$agent"
         if [[ ! -f "$next_file" && ! -f "$marker_file" ]]; then
           task_id="$(bridge_queue_cli find-open --agent "$agent" 2>/dev/null | head -n 1 || true)"

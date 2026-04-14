@@ -1235,7 +1235,7 @@ import json
 import os
 import sys
 
-workdir = sys.argv[1]
+workdir = os.path.realpath(sys.argv[1])
 since_ms = int(sys.argv[2] or "0")
 if 0 < since_ms < 10**11:
     since_ms *= 1000
@@ -1278,7 +1278,7 @@ for path in glob.glob(os.path.expanduser("~/.claude/sessions/*.json")):
     except Exception:
         continue
     sid = data.get("sessionId")
-    cwd = data.get("cwd")
+    cwd = os.path.realpath(str(data.get("cwd") or ""))
     started = int(data.get("startedAt") or 0)
     if cwd != workdir or not sid or sid in exclude:
         continue

@@ -2807,6 +2807,41 @@ CLAUDE_SAFE_MODE_CONTINUE="$(HOME="$TMP_ROOT/safe-mode-continue-home" "$BASH4_BI
 assert_contains "$CLAUDE_SAFE_MODE_CONTINUE" "claude --continue --dangerously-skip-permissions --name claude-static"
 assert_not_contains "$CLAUDE_SAFE_MODE_CONTINUE" "--channels"
 rm -f "$CLAUDE_STATIC_WORKDIR/NEXT-SESSION.md"
+
+REALPATH_REAL_WORKDIR="$TMP_ROOT/claude-realpath-real"
+REALPATH_LINK_WORKDIR="$TMP_ROOT/claude-realpath-link"
+mkdir -p "$REALPATH_REAL_WORKDIR"
+ln -s "$REALPATH_REAL_WORKDIR" "$REALPATH_LINK_WORKDIR"
+FAKE_CLAUDE_REALPATH_HOME="$TMP_ROOT/fake-claude-realpath-home"
+mkdir -p "$FAKE_CLAUDE_REALPATH_HOME/.claude/sessions"
+mkdir -p "$FAKE_CLAUDE_REALPATH_HOME/.claude/projects/smoke"
+cat >"$FAKE_CLAUDE_REALPATH_HOME/.claude/sessions/realpath-existing.json" <<EOF
+{"sessionId":"realpath-session-id","cwd":"$REALPATH_REAL_WORKDIR","startedAt":1760000000200}
+EOF
+cat >"$FAKE_CLAUDE_REALPATH_HOME/.claude/projects/smoke/realpath-session-id.jsonl" <<'EOF'
+{"type":"custom-title","customTitle":"claude-static","sessionId":"realpath-session-id"}
+EOF
+CLAUDE_REALPATH_REFRESH_OUTPUT="$(HOME="$FAKE_CLAUDE_REALPATH_HOME" "$BASH4_BIN" -c '
+  source "'"$REPO_ROOT"'/bridge-lib.sh"
+  bridge_load_roster
+  BRIDGE_AGENT_CONTINUE["claude-static"]="1"
+  BRIDGE_AGENT_WORKDIR["claude-static"]="'"$REALPATH_LINK_WORKDIR"'"
+  BRIDGE_AGENT_CREATED_AT["claude-static"]="1760000000"
+  unset BRIDGE_AGENT_SESSION_ID["claude-static"]
+  bridge_refresh_agent_session_id "claude-static" 2 0
+  printf "SESSION_ID=%s" "${BRIDGE_AGENT_SESSION_ID["claude-static"]-}"
+')"
+assert_contains "$CLAUDE_REALPATH_REFRESH_OUTPUT" "SESSION_ID=realpath-session-id"
+CLAUDE_REALPATH_LAUNCH_OUTPUT="$(HOME="$FAKE_CLAUDE_REALPATH_HOME" "$BASH4_BIN" -c '
+  source "'"$REPO_ROOT"'/bridge-lib.sh"
+  bridge_load_roster
+  BRIDGE_AGENT_CONTINUE["claude-static"]="1"
+  BRIDGE_AGENT_WORKDIR["claude-static"]="'"$REALPATH_LINK_WORKDIR"'"
+  unset BRIDGE_AGENT_SESSION_ID["claude-static"]
+  bridge_agent_launch_cmd "claude-static"
+')"
+assert_contains "$CLAUDE_REALPATH_LAUNCH_OUTPUT" "claude --resume realpath-session-id --dangerously-skip-permissions --name claude-static"
+
 CLAUDE_CHANNEL_STATUS="$("$BASH4_BIN" -c '
   source "'"$REPO_ROOT"'/bridge-lib.sh"
   bridge_load_roster
