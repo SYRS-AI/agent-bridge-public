@@ -816,6 +816,59 @@ CREATE_OUTPUT="$(bash "$REPO_ROOT/bridge-task.sh" create --to "$SMOKE_AGENT" --t
 assert_contains "$CREATE_OUTPUT" "created task #"
 QUEUE_TASK_ID="$(printf '%s\n' "$CREATE_OUTPUT" | sed -n 's/^created task #\([0-9][0-9]*\).*/\1/p' | head -n1)"
 [[ "$QUEUE_TASK_ID" =~ ^[0-9]+$ ]] || die "could not parse queue task id"
+QUEUE_TASK_SHELL="$(python3 "$REPO_ROOT/bridge-queue.py" show "$QUEUE_TASK_ID" --format shell)"
+assert_contains "$QUEUE_TASK_SHELL" "TASK_BODY_PATH=$BRIDGE_SHARED_DIR/note.md"
+
+log "stabilizing ephemeral body-file payloads inside the queue"
+EPHEMERAL_BODY_FILE="$(mktemp "$TMP_ROOT/queue-body.XXXXXX.md")"
+cat >"$EPHEMERAL_BODY_FILE" <<'EOF'
+# Ephemeral body
+
+payload survives source unlink
+EOF
+EPHEMERAL_CREATE_OUTPUT="$(bash "$REPO_ROOT/bridge-task.sh" create --to "$SMOKE_AGENT" --title "ephemeral queue body" --body-file "$EPHEMERAL_BODY_FILE" --from "$REQUESTER_AGENT")"
+assert_contains "$EPHEMERAL_CREATE_OUTPUT" "created task #"
+EPHEMERAL_TASK_ID="$(printf '%s\n' "$EPHEMERAL_CREATE_OUTPUT" | sed -n 's/^created task #\([0-9][0-9]*\).*/\1/p' | head -n1)"
+[[ "$EPHEMERAL_TASK_ID" =~ ^[0-9]+$ ]] || die "could not parse ephemeral task id"
+rm -f "$EPHEMERAL_BODY_FILE"
+EPHEMERAL_SHOW_OUTPUT="$(python3 "$REPO_ROOT/bridge-queue.py" show "$EPHEMERAL_TASK_ID")"
+assert_contains "$EPHEMERAL_SHOW_OUTPUT" "body: # Ephemeral body"
+assert_contains "$EPHEMERAL_SHOW_OUTPUT" "payload survives source unlink"
+assert_contains "$EPHEMERAL_SHOW_OUTPUT" "body_file: $BRIDGE_STATE_DIR/queue/bodies/"
+
+log "preserving cron-dispatch body paths for run-id semantics"
+CRON_PRESERVE_RUN_ID="smoke-preserve-$$"
+mkdir -p "$BRIDGE_SHARED_DIR/cron-dispatch"
+CRON_PRESERVE_BODY="$BRIDGE_SHARED_DIR/cron-dispatch/$CRON_PRESERVE_RUN_ID.md"
+cat >"$CRON_PRESERVE_BODY" <<EOF
+# [cron-dispatch] preserve
+
+run_id: $CRON_PRESERVE_RUN_ID
+EOF
+CRON_PRESERVE_OUTPUT="$(bash "$REPO_ROOT/bridge-task.sh" create --to "$SMOKE_AGENT" --title "[cron-dispatch] preserve ($CRON_PRESERVE_RUN_ID)" --body-file "$CRON_PRESERVE_BODY" --from smoke-test)"
+assert_contains "$CRON_PRESERVE_OUTPUT" "created task #"
+CRON_PRESERVE_TASK_ID="$(printf '%s\n' "$CRON_PRESERVE_OUTPUT" | sed -n 's/^created task #\([0-9][0-9]*\).*/\1/p' | head -n1)"
+[[ "$CRON_PRESERVE_TASK_ID" =~ ^[0-9]+$ ]] || die "could not parse cron preserve task id"
+CRON_PRESERVE_SHELL="$(python3 "$REPO_ROOT/bridge-queue.py" show "$CRON_PRESERVE_TASK_ID" --format shell)"
+assert_contains "$CRON_PRESERVE_SHELL" "TASK_BODY_PATH=$CRON_PRESERVE_BODY"
+
+log "stabilizing body-file updates from ephemeral tmp paths"
+UPDATE_TASK_OUTPUT="$(python3 "$REPO_ROOT/bridge-queue.py" create --to "$SMOKE_AGENT" --title "ephemeral queue update" --from "$REQUESTER_AGENT" --body "initial")"
+assert_contains "$UPDATE_TASK_OUTPUT" "created task #"
+UPDATE_TASK_ID="$(printf '%s\n' "$UPDATE_TASK_OUTPUT" | sed -n 's/^created task #\([0-9][0-9]*\).*/\1/p' | head -n1)"
+[[ "$UPDATE_TASK_ID" =~ ^[0-9]+$ ]] || die "could not parse update task id"
+UPDATE_BODY_FILE="$(mktemp "$TMP_ROOT/queue-update.XXXXXX.md")"
+cat >"$UPDATE_BODY_FILE" <<'EOF'
+# Updated ephemeral body
+
+updated payload survives source unlink
+EOF
+python3 "$REPO_ROOT/bridge-queue.py" update "$UPDATE_TASK_ID" --body-file "$UPDATE_BODY_FILE" >/dev/null
+rm -f "$UPDATE_BODY_FILE"
+UPDATE_SHOW_OUTPUT="$(python3 "$REPO_ROOT/bridge-queue.py" show "$UPDATE_TASK_ID")"
+assert_contains "$UPDATE_SHOW_OUTPUT" "body: # Updated ephemeral body"
+assert_contains "$UPDATE_SHOW_OUTPUT" "updated payload survives source unlink"
+assert_contains "$UPDATE_SHOW_OUTPUT" "body_file: $BRIDGE_STATE_DIR/queue/bodies/"
 
 log "preferring BRIDGE_AGENT_ID when inferring task sender"
 INFERRED_CREATE_OUTPUT="$(BRIDGE_AGENT_ID="$REQUESTER_AGENT" bash "$REPO_ROOT/bridge-task.sh" create --to "$SMOKE_AGENT" --title "env inferred queue" --body "env inferred body" 2>&1)"

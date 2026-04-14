@@ -163,6 +163,109 @@ def normalize_path(path_value: str | None) -> str | None:
     return str(path.resolve())
 
 
+SYSTEM_TMP_PREFIXES: tuple[str, ...] = (
+    "/tmp",
+    "/var/tmp",
+    "/var/folders",
+    "/private/tmp",
+    "/private/var/tmp",
+    "/private/var/folders",
+)
+
+MAX_INLINE_BODY_BYTES = 1 * 1024 * 1024
+
+
+def get_queue_bodies_dir() -> Path:
+    bridge_home = Path(os.environ.get("BRIDGE_HOME", str(Path.home() / ".agent-bridge")))
+    state_dir = Path(os.environ.get("BRIDGE_STATE_DIR", str(bridge_home / "state")))
+    bodies_dir = state_dir / "queue" / "bodies"
+    bodies_dir.mkdir(parents=True, exist_ok=True)
+    return bodies_dir
+
+
+def bridge_managed_roots() -> list[Path]:
+    bridge_home = Path(os.environ.get("BRIDGE_HOME", str(Path.home() / ".agent-bridge")))
+    state_dir = Path(os.environ.get("BRIDGE_STATE_DIR", str(bridge_home / "state")))
+    shared_dir = Path(os.environ.get("BRIDGE_SHARED_DIR", str(bridge_home / "shared")))
+    roots: list[Path] = []
+    for candidate in (bridge_home, state_dir, shared_dir):
+        try:
+            roots.append(candidate.resolve())
+        except Exception:
+            continue
+    return roots
+
+
+def ephemeral_tmp_roots() -> list[Path]:
+    roots: list[Path] = []
+    tmpdir_env = os.environ.get("TMPDIR", "").strip()
+    if tmpdir_env:
+        try:
+            roots.append(Path(tmpdir_env).resolve())
+        except Exception:
+            pass
+    for prefix in SYSTEM_TMP_PREFIXES:
+        roots.append(Path(prefix))
+    return roots
+
+
+def is_ephemeral_body_path(path: Path) -> bool:
+    try:
+        resolved = path.resolve()
+    except Exception:
+        return False
+    for root in bridge_managed_roots():
+        try:
+            resolved.relative_to(root)
+            return False
+        except ValueError:
+            continue
+    for root in ephemeral_tmp_roots():
+        try:
+            resolved.relative_to(root)
+            return True
+        except ValueError:
+            continue
+    return False
+
+
+def stabilize_body_file(original: str | None) -> tuple[str | None, str | None]:
+    if not original:
+        return None, None
+
+    source = Path(original)
+    try:
+        raw = source.read_bytes()
+    except FileNotFoundError as exc:
+        raise SystemExit(f"body file disappeared before read: {original}") from exc
+    except OSError as exc:
+        raise SystemExit(f"failed to read body file {original}: {exc}") from exc
+
+    try:
+        text = raw.decode("utf-8")
+    except UnicodeDecodeError:
+        text = raw.decode("utf-8", errors="replace")
+
+    inline_text: str | None = text if len(raw) <= MAX_INLINE_BODY_BYTES else None
+    if not is_ephemeral_body_path(source):
+        return inline_text, original
+
+    bodies_dir = get_queue_bodies_dir()
+    stem = source.stem or "body"
+    suffix = source.suffix or ".md"
+    target = bodies_dir / f"{now_ts()}-{os.getpid()}-{stem}{suffix}"
+    counter = 0
+    while target.exists():
+        counter += 1
+        target = bodies_dir / f"{now_ts()}-{os.getpid()}-{counter}-{stem}{suffix}"
+    target.write_bytes(raw)
+    try:
+        os.chmod(target, 0o600)
+    except OSError:
+        pass
+    return inline_text, str(target)
+
+
 def normalize_open_status(status: str | None) -> str | None:
     if status is None:
         return None
@@ -401,6 +504,11 @@ def cmd_create(args: argparse.Namespace) -> int:
                 "empty --body after trimming whitespace; omit --body, use --body-file, "
                 "or pass --allow-empty-body"
             )
+
+    if body_path is not None:
+        inline_text, body_path = stabilize_body_file(body_path)
+        if body_text is None:
+            body_text = inline_text
 
     with closing(connect()) as conn, conn:
         cursor = conn.execute(
@@ -728,6 +836,9 @@ def cmd_cancel(args: argparse.Namespace) -> int:
 def cmd_update(args: argparse.Namespace) -> int:
     actor = args.actor or os.environ.get("USER", "unknown")
     note_path = normalize_path(args.body_file)
+    stabilized_text: str | None = None
+    if note_path is not None:
+        stabilized_text, note_path = stabilize_body_file(note_path)
     current_ts = now_ts()
 
     with closing(connect()) as conn, conn:
@@ -745,7 +856,7 @@ def cmd_update(args: argparse.Namespace) -> int:
             body_text = args.body
             body_path = None
         elif args.body_file is not None:
-            body_text = None
+            body_text = stabilized_text
             body_path = note_path
 
         conn.execute(
