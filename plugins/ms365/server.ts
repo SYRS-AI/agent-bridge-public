@@ -379,6 +379,63 @@ function textResult(data: unknown) {
   return { content: [{ type: 'text', text: typeof data === 'string' ? data : JSON.stringify(data, null, 2) }] }
 }
 
+/**
+ * If MS365_MAIL_DISCLAIMER is set in the environment, prepend it to an outgoing
+ * mail body. This is opt-in so upstream users who don't need it are unaffected.
+ *
+ * The env value may contain the literal token `{operator}`, which is replaced at
+ * send time with the display name resolved from Azure AD via Graph `/me`
+ * (cached per UPN). This avoids hard-coding operator names in config files —
+ * the authoritative name always comes from the directory. Falls back to the UPN
+ * local-part if the Graph lookup fails for any reason.
+ *
+ * Idempotent: if the disclaimer is already inside the body (e.g. the caller
+ * passed a body that already had it), the body is returned unchanged.
+ */
+const operatorNameCache = new Map<string, string>()
+
+async function resolveOperatorDisplayName(upn: string): Promise<string> {
+  const cached = operatorNameCache.get(upn)
+  if (cached) return cached
+  try {
+    const me = await graph(upn, 'GET', '/me', undefined, { $select: 'displayName' })
+    const name = String(me?.displayName ?? '').trim()
+    if (name) {
+      operatorNameCache.set(upn, name)
+      return name
+    }
+  } catch {
+    /* fall through to upn fallback */
+  }
+  const fallback = upn.split('@')[0] ?? upn
+  operatorNameCache.set(upn, fallback)
+  return fallback
+}
+
+async function resolveDisclaimer(upn: string): Promise<string> {
+  const raw = process.env.MS365_MAIL_DISCLAIMER
+  if (!raw) return ''
+  const trimmed = raw.trim()
+  if (!trimmed) return ''
+  if (!trimmed.includes('{operator}')) return trimmed
+  const name = await resolveOperatorDisplayName(upn)
+  return trimmed.replace(/\{operator\}/g, name)
+}
+
+function withDisclaimer(body: string, bodyType: string, disclaimer: string): string {
+  if (!disclaimer) return body
+  if (body.includes(disclaimer)) return body
+  if (bodyType === 'html') {
+    const escaped = disclaimer
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/\n/g, '<br>')
+    return `<div style="color:#666;font-size:0.9em;border-left:3px solid #ccc;padding-left:8px;margin-bottom:12px">${escaped}</div>\n${body}`
+  }
+  return `${disclaimer}\n\n${body}`
+}
+
 const tools: ToolDef[] = [
   {
     name: 'pair_start',
@@ -561,7 +618,7 @@ const tools: ToolDef[] = [
   {
     name: 'mail_send',
     description:
-      'Send an email as the signed-in user. to is a comma-separated list of email addresses. body is plain text by default, set body_type to \"html\" for HTML.',
+      'Send an email as the signed-in user. to is a comma-separated list of email addresses. body is plain text by default, set body_type to \"html\" for HTML. When MS365_MAIL_DISCLAIMER is set, it is automatically prepended to every outgoing message body.',
     schema: {
       type: 'object',
       required: ['to', 'subject', 'body'],
@@ -579,17 +636,83 @@ const tools: ToolDef[] = [
       const to = String(args.to ?? '').split(',').map(s => s.trim()).filter(Boolean)
       if (to.length === 0) throw new Error('to is required (comma-separated)')
       const cc = String(args.cc ?? '').split(',').map(s => s.trim()).filter(Boolean)
+      const bodyType = String(args.body_type ?? 'text')
+      const disclaimer = await resolveDisclaimer(upn)
       const message = {
         subject: String(args.subject ?? ''),
         body: {
-          contentType: String(args.body_type ?? 'text'),
-          content: String(args.body ?? ''),
+          contentType: bodyType,
+          content: withDisclaimer(String(args.body ?? ''), bodyType, disclaimer),
         },
         toRecipients: to.map(a => ({ emailAddress: { address: a } })),
         ccRecipients: cc.map(a => ({ emailAddress: { address: a } })),
       }
       await graph(upn, 'POST', '/me/sendMail', { message, saveToSentItems: true })
       return textResult({ sent: true, to, cc, subject: message.subject })
+    },
+  },
+  {
+    name: 'mail_reply',
+    description:
+      'Reply to the sender of a message, preserving Graph conversation threading. Pass the message_id from mail_list/mail_get. body is plain text by default; set body_type to \"html\" for HTML. The original message is quoted by Graph automatically. When MS365_MAIL_DISCLAIMER is set, it is automatically prepended.',
+    schema: {
+      type: 'object',
+      required: ['message_id', 'body'],
+      properties: {
+        upn: { type: 'string' },
+        message_id: { type: 'string' },
+        body: { type: 'string' },
+        body_type: { type: 'string', enum: ['text', 'html'], description: 'Default text.' },
+      },
+    },
+    handler: async args => {
+      const upn = resolveUpn(args.upn)
+      const id = String(args.message_id ?? '').trim()
+      if (!id) throw new Error('message_id is required')
+      const bodyType = String(args.body_type ?? 'text')
+      const disclaimer = await resolveDisclaimer(upn)
+      const payload = {
+        message: {
+          body: {
+            contentType: bodyType,
+            content: withDisclaimer(String(args.body ?? ''), bodyType, disclaimer),
+          },
+        },
+      }
+      await graph(upn, 'POST', `/me/messages/${encodeURIComponent(id)}/reply`, payload)
+      return textResult({ replied: true, message_id: id })
+    },
+  },
+  {
+    name: 'mail_reply_all',
+    description:
+      'Reply-all to a message, preserving Graph conversation threading and the original To/Cc recipient set. Pass the message_id from mail_list/mail_get. body is plain text by default; set body_type to \"html\" for HTML. The original message is quoted by Graph automatically. When MS365_MAIL_DISCLAIMER is set, it is automatically prepended.',
+    schema: {
+      type: 'object',
+      required: ['message_id', 'body'],
+      properties: {
+        upn: { type: 'string' },
+        message_id: { type: 'string' },
+        body: { type: 'string' },
+        body_type: { type: 'string', enum: ['text', 'html'], description: 'Default text.' },
+      },
+    },
+    handler: async args => {
+      const upn = resolveUpn(args.upn)
+      const id = String(args.message_id ?? '').trim()
+      if (!id) throw new Error('message_id is required')
+      const bodyType = String(args.body_type ?? 'text')
+      const disclaimer = await resolveDisclaimer(upn)
+      const payload = {
+        message: {
+          body: {
+            contentType: bodyType,
+            content: withDisclaimer(String(args.body ?? ''), bodyType, disclaimer),
+          },
+        },
+      }
+      await graph(upn, 'POST', `/me/messages/${encodeURIComponent(id)}/replyAll`, payload)
+      return textResult({ replied_all: true, message_id: id })
     },
   },
   {
