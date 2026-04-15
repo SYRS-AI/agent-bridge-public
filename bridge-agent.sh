@@ -1098,6 +1098,10 @@ run_restart() {
         start_args+=("$1")
         shift
         ;;
+      --no-attach)
+        attach_mode=0
+        shift
+        ;;
       --continue|--no-continue|--dry-run)
         if [[ "$1" == "--dry-run" ]]; then
           dry_run_mode=1

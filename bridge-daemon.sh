@@ -2112,6 +2112,7 @@ bridge_report_plugin_liveness_miss() {
   local attached=0
   local required=""
   local missing=""
+  local restart_output=""
   local key=""
   local now_ts=0
   local cooldown="${BRIDGE_PLUGIN_LIVENESS_RESTART_COOLDOWN_SECONDS:-60}"
@@ -2182,17 +2183,23 @@ bridge_report_plugin_liveness_miss() {
     return 0
   fi
 
-  if "$BRIDGE_BASH_BIN" "$SCRIPT_DIR/agent-bridge" agent restart "$agent" --no-attach --no-continue >/dev/null 2>&1; then
+  if restart_output="$("$BRIDGE_BASH_BIN" "$SCRIPT_DIR/agent-bridge" agent restart "$agent" --no-continue 2>&1)"; then
     bridge_audit_log daemon plugin_mcp_liveness_restart "$agent" \
       --detail missing_channels="$missing" \
       --detail session="$session"
     daemon_info "restarted ${agent} after plugin MCP liveness miss (${missing})"
     last_restart_ts="$now_ts"
   else
+    restart_output="${restart_output//$'\n'/ }"
+    restart_output="$(bridge_trim_whitespace "$restart_output")"
+    if [[ ${#restart_output} -gt 400 ]]; then
+      restart_output="${restart_output:0:400}..."
+    fi
     bridge_audit_log daemon plugin_mcp_liveness_restart_failed "$agent" \
       --detail missing_channels="$missing" \
-      --detail session="$session"
-    daemon_info "plugin MCP liveness restart failed for ${agent} (${missing})"
+      --detail session="$session" \
+      --detail restart_error="$restart_output"
+    daemon_info "plugin MCP liveness restart failed for ${agent} (${missing})${restart_output:+: $restart_output}"
   fi
 
   bridge_note_plugin_liveness_state "$agent" "$key" "$now_ts" "$last_restart_ts"

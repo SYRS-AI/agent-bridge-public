@@ -2327,6 +2327,8 @@ CREATED_AGENT_START_OUTPUT="$("$REPO_ROOT/agent-bridge" agent start "$CREATED_AG
 assert_contains "$CREATED_AGENT_START_OUTPUT" "$CREATED_SESSION"
 CREATED_AGENT_RESTART_OUTPUT="$("$REPO_ROOT/agent-bridge" agent restart "$CREATED_AGENT" --dry-run)"
 assert_contains "$CREATED_AGENT_RESTART_OUTPUT" "$CREATED_SESSION"
+CREATED_AGENT_RESTART_NO_ATTACH_OUTPUT="$("$REPO_ROOT/agent-bridge" agent restart "$CREATED_AGENT" --no-attach --dry-run)"
+assert_contains "$CREATED_AGENT_RESTART_NO_ATTACH_OUTPUT" "$CREATED_SESSION"
 tmux new-session -d -s "$CREATED_SESSION" "sleep 30"
 CREATED_AGENT_RESTART_DRY_RUN_ACTIVE="$("$REPO_ROOT/agent-bridge" agent restart "$CREATED_AGENT" --dry-run)"
 assert_contains "$CREATED_AGENT_RESTART_DRY_RUN_ACTIVE" "$CREATED_SESSION"
@@ -4714,7 +4716,37 @@ PLUGIN_WATCH_OUTPUT="$("$BASH4_BIN" -lc '
 ')"
 PLUGIN_WATCH_RESTART_COUNT="$(printf '%s\n' "$PLUGIN_WATCH_OUTPUT" | sed '/^$/d' | wc -l | tr -d ' ')"
 [[ "$PLUGIN_WATCH_RESTART_COUNT" == "1" ]] || die "expected exactly one plugin watchdog restart, got $PLUGIN_WATCH_RESTART_COUNT"
-assert_contains "$PLUGIN_WATCH_OUTPUT" "agent restart $PLUGIN_WATCH_AGENT --no-attach --no-continue"
+assert_contains "$PLUGIN_WATCH_OUTPUT" "agent restart $PLUGIN_WATCH_AGENT --no-continue"
+
+PLUGIN_WATCH_FAIL_FAKE_SCRIPT_DIR="$TMP_ROOT/plugin-watchdog-fail-scriptdir"
+mkdir -p "$PLUGIN_WATCH_FAIL_FAKE_SCRIPT_DIR"
+cat >"$PLUGIN_WATCH_FAIL_FAKE_SCRIPT_DIR/agent-bridge" <<'EOF'
+#!/usr/bin/env bash
+printf '%s\n' "restart failed: sentinel stderr" >&2
+exit 1
+EOF
+chmod +x "$PLUGIN_WATCH_FAIL_FAKE_SCRIPT_DIR/agent-bridge"
+PLUGIN_WATCH_FAIL_OUTPUT="$("$BASH4_BIN" -lc '
+  set -euo pipefail
+  tmp_daemon="'"$TMP_ROOT"'/daemon-plugin-watchdog-fail.sh"
+  {
+    printf "%s\n" "set -euo pipefail"
+    printf "SCRIPT_DIR=%q\n" "'"$PLUGIN_WATCH_FAIL_FAKE_SCRIPT_DIR"'"
+    printf "%s\n" "source \"'"$REPO_ROOT"'/bridge-lib.sh\""
+    printf "%s\n" "bridge_load_roster"
+    printf "%s\n" "daemon_info() { :; }"
+    printf "%s\n" "bridge_audit_log() { printf \"%s|%s|%s\" \"\$1\" \"\$2\" \"\$3\"; shift 3; for item in \"\$@\"; do printf \"|%s\" \"\$item\"; done; printf \"\\n\"; }"
+    sed -n '"'"'/^bridge_plugin_liveness_state_file()/,/^process_memory_daily_refresh_requests()/p'"'"' "'"$REPO_ROOT"'/bridge-daemon.sh" | sed '"'"'$d'"'"'
+  } >"$tmp_daemon"
+  source "$tmp_daemon"
+  bridge_agent_channel_status() { printf "ok"; }
+  bridge_agent_missing_plugin_mcp_channels_csv() { printf "plugin:telegram@claude-plugins-official"; }
+  bridge_tmux_session_attached_count() { printf "0\n"; }
+  BRIDGE_PLUGIN_LIVENESS_RESTART_COOLDOWN_SECONDS=60
+  process_plugin_liveness || true
+')"
+assert_contains "$PLUGIN_WATCH_FAIL_OUTPUT" "plugin_mcp_liveness_restart_failed"
+assert_contains "$PLUGIN_WATCH_FAIL_OUTPUT" "restart_error=restart failed: sentinel stderr"
 
 log "deduping identical watchdog drift reports"
 BRIDGE_WATCHDOG_INTERVAL_SECONDS=1 BRIDGE_WATCHDOG_COOLDOWN_SECONDS=3600 bash "$REPO_ROOT/bridge-daemon.sh" sync >/dev/null
