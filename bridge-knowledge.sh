@@ -17,7 +17,7 @@ Usage:
   $(basename "$0") operator set [--user <id>] --name <name> [--preferred-address <text>] [--alias <text>]... [--handle <surface=value>]... [--communication-preferences <text>] [--decision-scope <text>] [--escalation-relevance <text>] [--dry-run] [--json]
   $(basename "$0") operator show [--json]
   $(basename "$0") search --query <text> [--scope wiki|raw|all] [--limit <count>] [--json]
-  $(basename "$0") lint [--json]
+  $(basename "$0") lint [--stale-days <days>] [--llm-review] [--llm-model <model>] [--json]
 
 Examples:
   $(basename "$0") init --team-name "Acme"
@@ -368,11 +368,28 @@ case "$command" in
     run_python "${args[@]}"
     ;;
   lint)
+    stale_days=""
+    llm_review=0
+    llm_model=""
     while [[ $# -gt 0 ]]; do
       case "$1" in
         --shared-root)
           [[ $# -ge 2 ]] || bridge_die "옵션 값이 필요합니다: $1"
           shared_root="$2"
+          shift 2
+          ;;
+        --stale-days)
+          [[ $# -ge 2 ]] || bridge_die "옵션 값이 필요합니다: $1"
+          stale_days="$2"
+          shift 2
+          ;;
+        --llm-review)
+          llm_review=1
+          shift
+          ;;
+        --llm-model)
+          [[ $# -ge 2 ]] || bridge_die "옵션 값이 필요합니다: $1"
+          llm_model="$2"
           shift 2
           ;;
         --json)
@@ -389,6 +406,9 @@ case "$command" in
       esac
     done
     args=(lint --shared-root "$shared_root")
+    [[ -n "$stale_days" ]] && args+=(--stale-days "$stale_days")
+    [[ $llm_review -eq 1 ]] && args+=(--llm-review)
+    [[ -n "$llm_model" ]] && args+=(--llm-model "$llm_model")
     [[ $json_mode -eq 1 ]] && args+=(--json)
     run_python "${args[@]}"
     ;;

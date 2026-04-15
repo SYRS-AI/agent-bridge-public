@@ -470,7 +470,11 @@ agb --claude --name one-shot-task
 agb knowledge init
 agb knowledge operator set --user owner --name "Sean" --decision-scope "Final release approval"
 agb knowledge search --query "primary operator"
+agb knowledge lint --stale-days 90
 ```
+
+- `agb knowledge lint`는 shared wiki의 broken link, orphan page, duplicate title, stale page를 점검합니다.
+- 에이전트별 memory hygiene 점검은 `bash ~/.agent-bridge/scripts/memory-enforce.sh --notify --json`로 수행하고, 필요하면 cron payload로 등록할 수 있습니다.
 
 ### 리뷰 게이트
 
@@ -558,6 +562,7 @@ Claude Code가 띄운 MCP 서버는 tmux 세션 종료 후에도 orphan으로 �
 | `agb knowledge operator show` | primary operator profile 확인 |
 | `agb knowledge promote ...` | 팀 공통 SSOT에 durable knowledge 반영 |
 | `agb knowledge search --query "..."` | 팀 공통 지식 검색 |
+| `agb knowledge lint [--stale-days N]` | 팀 공통 wiki hygiene 점검 |
 | `agb bundle create --to <agent> ...` | 파일/리포트가 포함된 cross-agent handoff bundle 생성 + queue task 생성 |
 | `agb bundle show <bundle-id>` | handoff bundle manifest 확인 |
 | `agb intake triage --capture <id> --owner <agent> --route` | raw capture를 triage/extraction 후 queue task로 라우팅 |

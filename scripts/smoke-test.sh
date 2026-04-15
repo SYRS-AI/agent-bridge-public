@@ -1790,6 +1790,49 @@ KNOWLEDGE_SEARCH_JSON="$("$REPO_ROOT/agent-bridge" knowledge search --query "pri
 assert_contains "$KNOWLEDGE_SEARCH_JSON" "\"wiki/people.md\""
 KNOWLEDGE_LINT_JSON="$("$REPO_ROOT/agent-bridge" knowledge lint --json)"
 assert_contains "$KNOWLEDGE_LINT_JSON" "\"ok\": true"
+cat >>"$BRIDGE_SHARED_DIR/wiki/data-sources.md" <<'EOF'
+
+- Broken reference check: [Missing Playbook](playbooks/missing.md)
+EOF
+cat >"$BRIDGE_SHARED_DIR/wiki/projects/orphan-project.md" <<'EOF'
+# Orphan Project
+
+This page is intentionally left without inbound wiki links.
+EOF
+cat >"$BRIDGE_SHARED_DIR/wiki/projects/shared-title-a.md" <<'EOF'
+# Shared Title
+
+Duplicate title fixture A.
+EOF
+cat >"$BRIDGE_SHARED_DIR/wiki/playbooks/shared-title-b.md" <<'EOF'
+# Shared Title
+
+Duplicate title fixture B.
+EOF
+cat >"$BRIDGE_SHARED_DIR/wiki/projects/stale-page.md" <<'EOF'
+# Stale Page
+
+This page is intentionally old so lint can flag stale content.
+EOF
+touch -t 202401010101 "$BRIDGE_SHARED_DIR/wiki/projects/stale-page.md"
+KNOWLEDGE_LINT_ISSUES_JSON="$("$REPO_ROOT/agent-bridge" knowledge lint --stale-days 30 --json 2>/dev/null || true)"
+python3 - "$KNOWLEDGE_LINT_ISSUES_JSON" <<'PY'
+import json
+import sys
+
+payload = json.loads(sys.argv[1])
+assert payload["ok"] is False, payload
+assert any(
+    item["source"] == "wiki/data-sources.md" and item["target"] == "playbooks/missing.md"
+    for item in payload["broken_links"]
+), payload["broken_links"]
+assert "wiki/projects/orphan-project.md" in payload["orphan_pages"], payload["orphan_pages"]
+assert any(
+    set(item["files"]) == {"wiki/playbooks/shared-title-b.md", "wiki/projects/shared-title-a.md"}
+    for item in payload["duplicate_titles"]
+), payload["duplicate_titles"]
+assert any(item["path"] == "wiki/projects/stale-page.md" for item in payload["stale_pages"]), payload["stale_pages"]
+PY
 
 log "creating and completing a file-backed handoff bundle"
 HANDOFF_ARTIFACT="$BRIDGE_SHARED_DIR/handoff-artifact.md"
@@ -2065,6 +2108,41 @@ MEMORY_PROJECT_REMEMBER_JSON="$("$REPO_ROOT/agent-bridge" memory remember --agen
 assert_contains "$MEMORY_PROJECT_REMEMBER_JSON" "\"kind\": \"project\""
 assert_contains "$(cat "$BRIDGE_AGENT_HOME_ROOT/$CREATED_AGENT/memory/projects/derm-roadmap.md")" "Weekly derm roadmap follow-up cadence."
 assert_contains "$(cat "$BRIDGE_AGENT_HOME_ROOT/$CREATED_AGENT/memory/projects/derm-roadmap.md")" "Track dermatologist feedback separately in the project page."
+REVIEWER_MEMORY_FILE="$BRIDGE_AGENT_HOME_ROOT/$CREATED_AGENT/users/reviewer/MEMORY.md"
+MISPLACED_DAILY_NOTE="$BRIDGE_AGENT_HOME_ROOT/$CREATED_AGENT/memory/shared/2024-02-02.md"
+python3 - "$REVIEWER_MEMORY_FILE" <<'PY'
+from pathlib import Path
+import sys
+
+Path(sys.argv[1]).write_text("# Reviewer Memory\n\n" + ("A" * 9000) + "\n", encoding="utf-8")
+PY
+mkdir -p "$(dirname "$MISPLACED_DAILY_NOTE")"
+cat >"$MISPLACED_DAILY_NOTE" <<'EOF'
+# Misplaced Daily Note
+
+This file intentionally violates the allowed daily-note path rule.
+EOF
+MEMORY_ENFORCE_JSON="$(bash "$REPO_ROOT/scripts/memory-enforce.sh" --dry-run --json)"
+python3 - "$MEMORY_ENFORCE_JSON" "$REVIEWER_MEMORY_FILE" "$MISPLACED_DAILY_NOTE" <<'PY'
+import json
+import sys
+
+payload = json.loads(sys.argv[1])
+reviewer_memory = sys.argv[2]
+misplaced_daily = sys.argv[3]
+
+assert payload["ok"] is False, payload
+assert payload["violation_count"] >= 2, payload
+kinds = {item["kind"] for item in payload["violations"]}
+assert "oversize-memory" in kinds, payload["violations"]
+assert "misplaced-daily-note" in kinds, payload["violations"]
+paths = {item["path"] for item in payload["violations"]}
+assert reviewer_memory in paths, payload["violations"]
+assert misplaced_daily in paths, payload["violations"]
+PY
+MEMORY_ENFORCE_CRON_OUTPUT="$(bash "$REPO_ROOT/scripts/memory-enforce.sh" --print-cron-payload)"
+assert_contains "$MEMORY_ENFORCE_CRON_OUTPUT" "memory-enforce.sh"
+assert_contains "$MEMORY_ENFORCE_CRON_OUTPUT" "--notify --json"
 
 LEGACY_MEMORY_DB="$TMP_ROOT/legacy-memory-index.sqlite"
 python3 - "$LEGACY_MEMORY_DB" <<'PY'
@@ -3232,6 +3310,8 @@ assert_contains "$(readlink "$CLAUDE_STATIC_WORKDIR/.claude/skills/memory-wiki")
 assert_contains "$(cat "$REPO_ROOT/.claude/skills/agent-bridge-runtime/SKILL.md")" "Queue Source of Truth"
 assert_contains "$(cat "$REPO_ROOT/.claude/skills/agent-bridge-runtime/SKILL.md")" "Use the Bash tool and run exactly"
 assert_contains "$(cat "$REPO_ROOT/.claude/skills/memory-wiki/SKILL.md")" "memory remember"
+assert_contains "$(cat "$REPO_ROOT/.claude/skills/memory-wiki/SKILL.md")" "Raw-Source Ingest Workflow"
+assert_contains "$(cat "$REPO_ROOT/.claude/skills/memory-wiki/SKILL.md")" "capture -> ingest"
 
 log "ensuring Claude project trust seed and startup blocker detection"
 CLAUDE_USER_FILE="$TMP_ROOT/claude-user.json"

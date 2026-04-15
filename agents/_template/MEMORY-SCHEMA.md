@@ -105,6 +105,24 @@ Default read order:
 - Prefer updating an existing page over creating near-duplicates.
 - If memory becomes contradictory, fix the wiki page instead of carrying both versions forward.
 
+### `memory/log.md` Append-Only Convention
+
+`memory/log.md` is a maintenance ledger, not a curated summary page.
+
+- append new entries at the end
+- do not rewrite or reorder older entries unless you are adding an explicit correction note
+- keep entries short, factual, and traceable
+- include the action kind, target page, and raw capture or source when available
+
+Preferred entry shape:
+
+```text
+- 2026-04-15T03:12:00+09:00 kind=ingest target=`users/owner/memory/2026-04-15.md` source=`20260415T031100+0900-chat.json`
+- 2026-04-15T03:13:10+09:00 kind=promote target=`users/owner/MEMORY.md` source=`20260415T031100+0900-chat.json` summary="User prefers concise morning updates."
+```
+
+If you discover that an older log entry was wrong, append a correction entry instead of silently editing history.
+
 ## Bridge Commands
 
 - `agent-bridge memory capture`

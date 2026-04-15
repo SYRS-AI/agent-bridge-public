@@ -29,6 +29,41 @@ This will:
 2. ingest it into the active user's daily memory
 3. optionally promote it into long-term memory
 
+## Raw-Source Ingest Workflow
+
+Use the staged flow when the source is long, noisy, or arrives as a file rather than a short chat message.
+
+Examples:
+
+- a pasted meeting transcript
+- a Discord export or support thread
+- a markdown note captured from another system
+- a long email or incident write-up
+
+Recommended flow:
+
+1. capture the raw source into `raw/captures/inbox/`
+2. ingest it into the correct user's daily memory
+3. only then promote durable facts into curated pages
+
+Example with a file source:
+
+```bash
+~/.agent-bridge/agent-bridge memory capture \
+  --agent "$BRIDGE_AGENT_ID" \
+  --user <user-id> \
+  --source notes-import \
+  --title "Weekly ops retro" \
+  --text-file /path/to/source.md
+
+~/.agent-bridge/agent-bridge memory ingest \
+  --agent "$BRIDGE_AGENT_ID" \
+  --latest
+```
+
+If the source contains only a few durable facts, you may still prefer `memory remember`.
+If the source is ambiguous or partly unverified, prefer `capture -> ingest` first and promote later.
+
 ## When To Remember
 
 Use memory when a message contains:
@@ -90,7 +125,7 @@ If the derived index is missing or you want broader markdown-first matching:
 Use these when needed:
 
 - `memory lint`
-  - find missing structure or pending captures
+  - find missing structure, pending captures, and wiki hygiene problems
 - `memory rebuild-index`
   - rebuild the derived SQLite index after significant edits
 

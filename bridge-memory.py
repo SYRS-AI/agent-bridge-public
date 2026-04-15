@@ -336,7 +336,10 @@ def append_ingest_entry(
 
 def append_memory_log(path: Path, capture: dict, daily_rel: str, dry_run: bool) -> None:
     created_at = datetime.now().astimezone().isoformat()
-    line = f"- {created_at} ingested `{capture['capture_id']}` into `{daily_rel}`\n"
+    line = (
+        f"- {created_at} kind=ingest target=`{daily_rel}` "
+        f"source=`{capture['capture_id']}` summary=\"{capture.get('source') or 'capture'} -> daily memory\"\n"
+    )
     append_text(path, line, dry_run)
 
 
@@ -513,9 +516,12 @@ def cmd_promote(args: argparse.Namespace) -> int:
             args.dry_run,
         )
 
-    log_line = f"- {created_at} promoted `{kind}` -> `{target_path.relative_to(home)}`"
+    log_line = (
+        f"- {created_at} kind=promote target=`{target_path.relative_to(home)}` "
+        f"summary=\"{summary.strip()}\""
+    )
     if capture:
-        log_line += f" from `{capture['capture_id']}`"
+        log_line += f" source=`{capture['capture_id']}`"
     append_memory_event(home / "memory" / "log.md", log_line, args.dry_run)
 
     payload = {

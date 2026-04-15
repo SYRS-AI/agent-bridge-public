@@ -7,8 +7,9 @@ import argparse
 import json
 import re
 import shutil
+import subprocess
 import sys
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 
 
@@ -258,6 +259,213 @@ def append_log(shared_root: Path, line: str, dry_run: bool) -> None:
     if not log_path.exists():
         write_text(log_path, "# Knowledge Log\n\n", dry_run)
     append_text(log_path, line.rstrip() + "\n", dry_run)
+
+
+def iter_wiki_markdown_files(shared_root: Path) -> list[Path]:
+    root = wiki_root(shared_root)
+    if not root.exists():
+        return []
+    return sorted(path for path in root.rglob("*.md") if path.is_file())
+
+
+def markdown_title(path: Path) -> str:
+    for raw in read_text(path).splitlines():
+        line = raw.strip()
+        if line.startswith("# "):
+            return line[2:].strip()
+    return page_title(path.stem)
+
+
+def normalize_title(value: str) -> str:
+    return re.sub(r"\s+", " ", value.strip().lower())
+
+
+def markdown_links(text: str) -> list[str]:
+    targets: list[str] = []
+    for match in re.finditer(r"\[[^\]]+\]\(([^)]+)\)", text):
+        target = match.group(1).strip()
+        if not target:
+            continue
+        targets.append(target)
+    return targets
+
+
+def is_external_link(target: str) -> bool:
+    lower = target.lower()
+    return (
+        lower.startswith("http://")
+        or lower.startswith("https://")
+        or lower.startswith("mailto:")
+        or lower.startswith("tel:")
+        or lower.startswith("#")
+    )
+
+
+def resolve_markdown_link(base: Path, target: str) -> Path | None:
+    if is_external_link(target):
+        return None
+    raw_target = target.split("#", 1)[0].strip()
+    if not raw_target:
+        return None
+    candidate = (base.parent / raw_target).resolve()
+    return candidate
+
+
+def first_paragraph(path: Path) -> str:
+    lines = read_text(path).splitlines()
+    paragraphs: list[str] = []
+    current: list[str] = []
+    for raw in lines:
+        line = raw.strip()
+        if not line:
+            if current:
+                paragraphs.append(" ".join(current).strip())
+                current = []
+            continue
+        if line.startswith("#"):
+            continue
+        current.append(line)
+    if current:
+        paragraphs.append(" ".join(current).strip())
+    return paragraphs[0] if paragraphs else ""
+
+
+def lint_wiki(shared_root: Path, stale_days: int) -> dict[str, object]:
+    root = wiki_root(shared_root)
+    wiki_files = iter_wiki_markdown_files(shared_root)
+    file_set = {path.resolve() for path in wiki_files}
+    broken_links: list[dict[str, str]] = []
+    orphan_pages: list[str] = []
+    stale_pages: list[dict[str, object]] = []
+    duplicate_titles: list[dict[str, object]] = []
+    inbound_links: dict[Path, set[Path]] = {}
+    now_ts = now()
+
+    title_map: dict[str, list[Path]] = {}
+    for path in wiki_files:
+        title_map.setdefault(normalize_title(markdown_title(path)), []).append(path)
+
+    for normalized_title, paths in sorted(title_map.items()):
+        if len(paths) <= 1:
+            continue
+        duplicate_titles.append(
+            {
+                "title": markdown_title(paths[0]),
+                "files": [str(path.relative_to(shared_root)) for path in paths],
+            }
+        )
+
+    for path in wiki_files:
+        try:
+            text = read_text(path)
+        except UnicodeDecodeError:
+            continue
+        for target in markdown_links(text):
+            resolved = resolve_markdown_link(path, target)
+            if resolved is None:
+                continue
+            if not resolved.exists():
+                broken_links.append(
+                    {
+                        "source": str(path.relative_to(shared_root)),
+                        "target": target,
+                    }
+                )
+                continue
+            if resolved.suffix == ".md" and resolved in file_set:
+                inbound_links.setdefault(resolved, set()).add(path.resolve())
+
+        age = now_ts - datetime.fromtimestamp(path.stat().st_mtime).astimezone()
+        if age > timedelta(days=stale_days):
+            stale_pages.append(
+                {
+                    "path": str(path.relative_to(shared_root)),
+                    "days_old": int(age.total_seconds() // 86400),
+                }
+            )
+
+    for path in wiki_files:
+        if path.parent == root:
+            continue
+        if path.name == "log.md":
+            continue
+        if not inbound_links.get(path.resolve()):
+            orphan_pages.append(str(path.relative_to(shared_root)))
+
+    return {
+        "broken_links": broken_links,
+        "orphan_pages": orphan_pages,
+        "duplicate_titles": duplicate_titles,
+        "stale_pages": sorted(stale_pages, key=lambda item: item["path"]),
+        "wiki_files": [str(path.relative_to(shared_root)) for path in wiki_files],
+    }
+
+
+def maybe_run_llm_review(shared_root: Path, requested: bool, model: str) -> dict[str, object]:
+    if not requested:
+        return {"requested": False, "status": "disabled", "findings": []}
+
+    claude = shutil.which("claude")
+    if not claude:
+        return {
+            "requested": True,
+            "status": "unavailable",
+            "findings": [],
+            "message": "claude CLI is not installed",
+        }
+
+    sections: list[str] = []
+    budget = 12000
+    for path in iter_wiki_markdown_files(shared_root):
+        title = markdown_title(path)
+        body = first_paragraph(path)
+        snippet = body[:400]
+        block = f"## {path.relative_to(shared_root)}\nTitle: {title}\nSummary: {snippet}\n"
+        if budget - len(block) < 0:
+            break
+        sections.append(block)
+        budget -= len(block)
+
+    prompt = (
+        "Review this team knowledge wiki summary for contradictions or materially conflicting facts.\n"
+        "Return strict JSON with shape {\"findings\": [{\"summary\": str, \"files\": [str]}]}.\n"
+        "If you find no contradictions, return {\"findings\": []}.\n\n"
+        + "\n".join(sections)
+    )
+    command = [claude, "-p", "--dangerously-skip-permissions", "--output-format", "text"]
+    if model:
+        command.extend(["--model", model])
+    command.append(prompt)
+
+    try:
+        completed = subprocess.run(command, check=True, capture_output=True, text=True, timeout=90)
+    except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
+        return {
+            "requested": True,
+            "status": "error",
+            "findings": [],
+            "message": str(exc),
+        }
+
+    stdout = completed.stdout.strip()
+    try:
+        payload = json.loads(stdout)
+        findings = payload.get("findings") if isinstance(payload, dict) else []
+        if not isinstance(findings, list):
+            findings = []
+        return {
+            "requested": True,
+            "status": "ok",
+            "findings": findings,
+            "raw": stdout,
+        }
+    except json.JSONDecodeError:
+        return {
+            "requested": True,
+            "status": "parse-error",
+            "findings": [],
+            "raw": stdout,
+        }
 
 
 def maybe_move_capture(shared_root: Path, capture_path: Path, dry_run: bool) -> Path:
@@ -584,20 +792,46 @@ def cmd_lint(args: argparse.Namespace) -> int:
     required.extend(wiki_root(shared_root) / item for item in WIKI_DIRS)
     required.extend(shared_root / item for item in RAW_DIRS)
     missing = [str(path.relative_to(shared_root)) for path in required if not path.exists()]
-    ok = not missing
+    lint_details = lint_wiki(shared_root, args.stale_days)
+    llm_review = maybe_run_llm_review(shared_root, args.llm_review, args.llm_model)
+    problems = []
+    problems.extend(f"missing: {item}" for item in missing)
+    problems.extend(
+        f"broken_link: {item['source']} -> {item['target']}" for item in lint_details["broken_links"]
+    )
+    problems.extend(f"orphan_page: {item}" for item in lint_details["orphan_pages"])
+    problems.extend(
+        f"duplicate_title: {item['title']} ({', '.join(item['files'])})"
+        for item in lint_details["duplicate_titles"]
+    )
+    warnings = [
+        f"stale_page: {item['path']} ({item['days_old']}d)"
+        for item in lint_details["stale_pages"]
+    ]
+    if llm_review.get("requested") and llm_review.get("status") != "ok":
+        warnings.append(f"llm_review: {llm_review.get('status')}")
+    ok = len(problems) == 0
     payload = {
         "ok": ok,
         "shared_root": str(shared_root),
         "wiki_root": str(wiki_root(shared_root)),
         "missing": missing,
+        "problems": problems,
+        "warnings": warnings,
+        **lint_details,
+        "llm_review": llm_review,
     }
     if args.json:
         print(json.dumps(payload, ensure_ascii=False, indent=2))
     else:
         print(f"ok: {'true' if ok else 'false'}")
-        if missing:
-            print("missing:")
-            for item in missing:
+        if problems:
+            print("problems:")
+            for item in problems:
+                print(f"- {item}")
+        if warnings:
+            print("warnings:")
+            for item in warnings:
                 print(f"- {item}")
     return 0 if ok else 1
 
@@ -663,6 +897,9 @@ def build_parser() -> argparse.ArgumentParser:
 
     lint_parser = subparsers.add_parser("lint")
     lint_parser.add_argument("--shared-root", required=True)
+    lint_parser.add_argument("--stale-days", type=int, default=90)
+    lint_parser.add_argument("--llm-review", action="store_true")
+    lint_parser.add_argument("--llm-model", default="")
     lint_parser.add_argument("--json", action="store_true")
     lint_parser.set_defaults(func=cmd_lint)
 
