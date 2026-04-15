@@ -16,6 +16,11 @@ bridge_tmux_pane_target() {
   printf '=%s:' "$session"
 }
 
+bridge_tmux_session_pane_pid() {
+  local session="$1"
+  tmux display-message -p -t "$(bridge_tmux_pane_target "$session")" '#{pane_pid}' 2>/dev/null || true
+}
+
 bridge_tmux_kill_session() {
   local session="$1"
   tmux kill-session -t "$(bridge_tmux_session_target "$session")"

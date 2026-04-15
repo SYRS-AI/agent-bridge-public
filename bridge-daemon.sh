@@ -9,7 +9,7 @@ source "$SCRIPT_DIR/bridge-lib.sh"
 bridge_load_roster
 
 usage() {
-  echo "Usage: bash $SCRIPT_DIR/bridge-daemon.sh <start|ensure|run|stop|status|sync>"
+  echo "Usage: bash $SCRIPT_DIR/bridge-daemon.sh [--skip-plugin-liveness] <start|ensure|run|stop|status|sync>"
 }
 
 daemon_log_event() {
@@ -2080,6 +2080,133 @@ LAST_REPORT_TS=$(printf '%q' "$now_ts")
 EOF
 }
 
+bridge_plugin_liveness_state_file() {
+  local agent="$1"
+  printf '%s/plugin-liveness/%s.env' "$BRIDGE_STATE_DIR" "$agent"
+}
+
+bridge_clear_plugin_liveness_state() {
+  local agent="$1"
+  rm -f "$(bridge_plugin_liveness_state_file "$agent")"
+}
+
+bridge_note_plugin_liveness_state() {
+  local agent="$1"
+  local last_key="$2"
+  local last_detected_ts="$3"
+  local last_restart_ts="$4"
+  local state_file=""
+
+  state_file="$(bridge_plugin_liveness_state_file "$agent")"
+  mkdir -p "$(dirname "$state_file")"
+  cat >"$state_file" <<EOF
+LAST_KEY=$(printf '%q' "$last_key")
+LAST_DETECTED_TS=$(printf '%q' "$last_detected_ts")
+LAST_RESTART_TS=$(printf '%q' "$last_restart_ts")
+EOF
+}
+
+bridge_report_plugin_liveness_miss() {
+  local agent="$1"
+  local session=""
+  local attached=0
+  local required=""
+  local missing=""
+  local key=""
+  local now_ts=0
+  local cooldown="${BRIDGE_PLUGIN_LIVENESS_RESTART_COOLDOWN_SECONDS:-60}"
+  local state_file=""
+  local last_key=""
+  local last_detected_ts=0
+  local last_restart_ts=0
+
+  [[ "${BRIDGE_SKIP_PLUGIN_LIVENESS:-0}" != "1" ]] || return 1
+  [[ "$(bridge_agent_source "$agent")" == "static" ]] || return 0
+  [[ "$(bridge_agent_engine "$agent")" == "claude" ]] || return 0
+  [[ "$(bridge_agent_channel_status "$agent")" == "ok" ]] || {
+    bridge_clear_plugin_liveness_state "$agent"
+    return 0
+  }
+
+  session="$(bridge_agent_session "$agent")"
+  [[ -n "$session" ]] || {
+    bridge_clear_plugin_liveness_state "$agent"
+    return 0
+  }
+  bridge_tmux_session_exists "$session" || {
+    bridge_clear_plugin_liveness_state "$agent"
+    return 0
+  }
+
+  required="$(bridge_agent_effective_launch_plugin_channels_csv "$agent")"
+  [[ -n "$required" ]] || {
+    bridge_clear_plugin_liveness_state "$agent"
+    return 0
+  }
+
+  missing="$(bridge_agent_missing_plugin_mcp_channels_csv "$agent" || true)"
+  if [[ -z "$missing" ]]; then
+    bridge_clear_plugin_liveness_state "$agent"
+    return 0
+  fi
+
+  key="$(bridge_sha1 "${agent}|${missing}")"
+  now_ts="$(date +%s)"
+  [[ "$cooldown" =~ ^[0-9]+$ ]] || cooldown=60
+  state_file="$(bridge_plugin_liveness_state_file "$agent")"
+  if [[ -f "$state_file" ]]; then
+    # shellcheck source=/dev/null
+    source "$state_file"
+    last_key="${LAST_KEY:-}"
+    last_detected_ts="${LAST_DETECTED_TS:-0}"
+    last_restart_ts="${LAST_RESTART_TS:-0}"
+  fi
+  [[ "$last_detected_ts" =~ ^[0-9]+$ ]] || last_detected_ts=0
+  [[ "$last_restart_ts" =~ ^[0-9]+$ ]] || last_restart_ts=0
+
+  attached="$(bridge_tmux_session_attached_count "$session" 2>/dev/null || printf '0')"
+  [[ "$attached" =~ ^[0-9]+$ ]] || attached=0
+  if (( attached > 0 )); then
+    if [[ "$key" != "$last_key" ]]; then
+      bridge_audit_log daemon plugin_mcp_liveness_attached_skip "$agent" \
+        --detail missing_channels="$missing" \
+        --detail session="$session"
+      daemon_info "plugin MCP liveness miss on attached session ${agent} (${missing})"
+    fi
+    bridge_note_plugin_liveness_state "$agent" "$key" "$now_ts" "$last_restart_ts"
+    return 0
+  fi
+
+  if [[ "$key" == "$last_key" ]] && (( last_restart_ts > 0 )) && (( now_ts - last_restart_ts < cooldown )); then
+    bridge_note_plugin_liveness_state "$agent" "$key" "$now_ts" "$last_restart_ts"
+    return 0
+  fi
+
+  if "$BRIDGE_BASH_BIN" "$SCRIPT_DIR/agent-bridge" agent restart "$agent" --no-attach --no-continue >/dev/null 2>&1; then
+    bridge_audit_log daemon plugin_mcp_liveness_restart "$agent" \
+      --detail missing_channels="$missing" \
+      --detail session="$session"
+    daemon_info "restarted ${agent} after plugin MCP liveness miss (${missing})"
+    last_restart_ts="$now_ts"
+  else
+    bridge_audit_log daemon plugin_mcp_liveness_restart_failed "$agent" \
+      --detail missing_channels="$missing" \
+      --detail session="$session"
+    daemon_info "plugin MCP liveness restart failed for ${agent} (${missing})"
+  fi
+
+  bridge_note_plugin_liveness_state "$agent" "$key" "$now_ts" "$last_restart_ts"
+}
+
+process_plugin_liveness() {
+  local agent
+
+  for agent in "${BRIDGE_AGENT_IDS[@]}"; do
+    [[ -z "$agent" ]] && continue
+    bridge_report_plugin_liveness_miss "$agent" || true
+  done
+}
+
 process_memory_daily_refresh_requests() {
   local agent
   local session
@@ -2786,6 +2913,7 @@ cmd_sync_cycle() {
   bridge_reconcile_idle_markers || true
   recover_claude_bootstrap_blockers || true
   process_channel_health || true
+  process_plugin_liveness || true
 
   snapshot_file="$(mktemp)"
   ready_agents_file="$(mktemp)"
@@ -2987,6 +3115,18 @@ cmd_status() {
     echo "stopped"
   fi
 }
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --skip-plugin-liveness)
+      export BRIDGE_SKIP_PLUGIN_LIVENESS=1
+      shift
+      ;;
+    *)
+      break
+      ;;
+  esac
+done
 
 CMD="${1:-}"
 case "$CMD" in

@@ -4476,6 +4476,97 @@ bash "$REPO_ROOT/bridge-daemon.sh" sync >/dev/null
 CHANNEL_HEALTH_OPEN_ID_AGAIN="$(python3 "$REPO_ROOT/bridge-queue.py" find-open --agent "$SMOKE_AGENT" --title-prefix "[channel-health] $BROKEN_CHANNEL_AGENT " 2>/dev/null || true)"
 [[ "$CHANNEL_HEALTH_OPEN_ID_AGAIN" == "$CHANNEL_HEALTH_OPEN_ID" ]] || die "channel-health alert should be deduped"
 
+log "detecting plugin MCP descendants and watchdog-restarting static Claude roles"
+PLUGIN_TREE_SCRIPT="$TMP_ROOT/fake-plugin-tree.sh"
+PLUGIN_TREE_CHILD_PID_FILE="$TMP_ROOT/fake-plugin-tree-child.pid"
+cat >"$PLUGIN_TREE_SCRIPT" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+child_pid_file="$1"
+bash -c 'exec -a "bun run --cwd /tmp/telegram/0.0.1/package start" sleep 30' &
+child="$!"
+printf '%s\n' "$child" >"$child_pid_file"
+wait "$child"
+EOF
+chmod +x "$PLUGIN_TREE_SCRIPT"
+"$PLUGIN_TREE_SCRIPT" "$PLUGIN_TREE_CHILD_PID_FILE" >/dev/null 2>&1 &
+PLUGIN_TREE_ROOT_PID="$!"
+for _ in {1..20}; do
+  [[ -f "$PLUGIN_TREE_CHILD_PID_FILE" ]] && break
+  sleep 0.1
+done
+[[ -f "$PLUGIN_TREE_CHILD_PID_FILE" ]] || die "expected fake plugin child pid file"
+PLUGIN_TREE_TELEGRAM_READY="$("$BASH4_BIN" -lc '
+  source "'"$REPO_ROOT"'/bridge-lib.sh"
+  if bridge_plugin_mcp_descendant_ready_for_item "'"$PLUGIN_TREE_ROOT_PID"'" "plugin:telegram@claude-plugins-official"; then
+    echo yes
+  else
+    echo no
+  fi
+')"
+[[ "$PLUGIN_TREE_TELEGRAM_READY" == "yes" ]] || die "expected telegram plugin descendant to be detected"
+PLUGIN_TREE_DISCORD_READY="$("$BASH4_BIN" -lc '
+  source "'"$REPO_ROOT"'/bridge-lib.sh"
+  if bridge_plugin_mcp_descendant_ready_for_item "'"$PLUGIN_TREE_ROOT_PID"'" "plugin:discord@claude-plugins-official"; then
+    echo yes
+  else
+    echo no
+  fi
+')"
+[[ "$PLUGIN_TREE_DISCORD_READY" == "no" ]] || die "expected discord plugin descendant check to stay negative"
+kill "$PLUGIN_TREE_ROOT_PID" >/dev/null 2>&1 || true
+wait "$PLUGIN_TREE_ROOT_PID" >/dev/null 2>&1 || true
+
+PLUGIN_WATCH_AGENT="plugin-watchdog"
+PLUGIN_WATCH_SESSION="plugin-watchdog-$SESSION_NAME"
+PLUGIN_WATCH_WORKDIR="$TMP_ROOT/plugin-watchdog"
+PLUGIN_WATCH_FAKE_SCRIPT_DIR="$TMP_ROOT/plugin-watchdog-scriptdir"
+PLUGIN_WATCH_RESTART_LOG="$TMP_ROOT/plugin-watchdog-restarts.log"
+mkdir -p "$PLUGIN_WATCH_WORKDIR" "$PLUGIN_WATCH_FAKE_SCRIPT_DIR"
+cat >>"$BRIDGE_ROSTER_LOCAL_FILE" <<EOF
+
+bridge_add_agent_id_if_missing "$PLUGIN_WATCH_AGENT"
+BRIDGE_AGENT_DESC["$PLUGIN_WATCH_AGENT"]="Plugin watchdog role"
+BRIDGE_AGENT_ENGINE["$PLUGIN_WATCH_AGENT"]="claude"
+BRIDGE_AGENT_SESSION["$PLUGIN_WATCH_AGENT"]="$PLUGIN_WATCH_SESSION"
+BRIDGE_AGENT_WORKDIR["$PLUGIN_WATCH_AGENT"]="$PLUGIN_WATCH_WORKDIR"
+BRIDGE_AGENT_LAUNCH_CMD["$PLUGIN_WATCH_AGENT"]='claude --dangerously-skip-permissions'
+BRIDGE_AGENT_CHANNELS["$PLUGIN_WATCH_AGENT"]="plugin:telegram@claude-plugins-official"
+EOF
+tmux new-session -d -s "$PLUGIN_WATCH_SESSION" "sleep 30"
+cat >"$PLUGIN_WATCH_FAKE_SCRIPT_DIR/agent-bridge" <<EOF
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >>"$PLUGIN_WATCH_RESTART_LOG"
+EOF
+chmod +x "$PLUGIN_WATCH_FAKE_SCRIPT_DIR/agent-bridge"
+PLUGIN_WATCH_OUTPUT="$("$BASH4_BIN" -lc '
+  set -euo pipefail
+  tmp_daemon="'"$TMP_ROOT"'/daemon-plugin-watchdog.sh"
+  {
+    printf "%s\n" "set -euo pipefail"
+    printf "SCRIPT_DIR=%q\n" "'"$PLUGIN_WATCH_FAKE_SCRIPT_DIR"'"
+    printf "%s\n" "source \"'"$REPO_ROOT"'/bridge-lib.sh\""
+    printf "%s\n" "bridge_load_roster"
+    printf "%s\n" "daemon_info() { :; }"
+    printf "%s\n" "bridge_audit_log() { :; }"
+    sed -n '"'"'/^bridge_plugin_liveness_state_file()/,/^process_memory_daily_refresh_requests()/p'"'"' "'"$REPO_ROOT"'/bridge-daemon.sh" | sed '"'"'$d'"'"'
+  } >"$tmp_daemon"
+  source "$tmp_daemon"
+  bridge_agent_channel_status() { printf "ok"; }
+  bridge_agent_missing_plugin_mcp_channels_csv() { printf "plugin:telegram@claude-plugins-official"; }
+  bridge_tmux_session_attached_count() { printf "0\n"; }
+  BRIDGE_PLUGIN_LIVENESS_RESTART_COOLDOWN_SECONDS=60
+  process_plugin_liveness || true
+  process_plugin_liveness || true
+  BRIDGE_SKIP_PLUGIN_LIVENESS=1 process_plugin_liveness || true
+  if [[ -f "'"$PLUGIN_WATCH_RESTART_LOG"'" ]]; then
+    cat "'"$PLUGIN_WATCH_RESTART_LOG"'"
+  fi
+')"
+PLUGIN_WATCH_RESTART_COUNT="$(printf '%s\n' "$PLUGIN_WATCH_OUTPUT" | sed '/^$/d' | wc -l | tr -d ' ')"
+[[ "$PLUGIN_WATCH_RESTART_COUNT" == "1" ]] || die "expected exactly one plugin watchdog restart, got $PLUGIN_WATCH_RESTART_COUNT"
+assert_contains "$PLUGIN_WATCH_OUTPUT" "agent restart $PLUGIN_WATCH_AGENT --no-attach --no-continue"
+
 log "deduping identical watchdog drift reports"
 BRIDGE_WATCHDOG_INTERVAL_SECONDS=1 BRIDGE_WATCHDOG_COOLDOWN_SECONDS=3600 bash "$REPO_ROOT/bridge-daemon.sh" sync >/dev/null
 WATCHDOG_OPEN_ID="$(python3 "$REPO_ROOT/bridge-queue.py" find-open --agent "$SMOKE_AGENT" --title-prefix "[watchdog] " 2>/dev/null || true)"

@@ -1512,6 +1512,135 @@ bridge_agent_effective_launch_plugin_channels_csv() {
   bridge_filter_claude_plugin_channels_csv "$merged"
 }
 
+bridge_plugin_mcp_identity_for_item() {
+  local item="$1"
+
+  item="$(bridge_qualify_channel_item "$item")"
+  case "$item" in
+    plugin:discord|plugin:discord@*)
+      printf '%s' "discord"
+      ;;
+    plugin:telegram|plugin:telegram@*)
+      printf '%s' "telegram"
+      ;;
+    plugin:teams|plugin:teams@*)
+      printf '%s' "teams"
+      ;;
+    *)
+      printf '%s' ""
+      ;;
+  esac
+}
+
+bridge_plugin_mcp_descendant_ready_for_item() {
+  local root_pid="$1"
+  local item="$2"
+  local identity=""
+
+  [[ "$root_pid" =~ ^[0-9]+$ ]] || return 1
+  identity="$(bridge_plugin_mcp_identity_for_item "$item")"
+  [[ -n "$identity" ]] || return 1
+
+  bridge_require_python
+  python3 - "$root_pid" "$identity" <<'PY'
+import subprocess
+import sys
+from collections import defaultdict
+
+root_pid = int(sys.argv[1])
+identity = sys.argv[2].strip().lower()
+
+try:
+    completed = subprocess.run(
+        ["ps", "-axo", "pid=,ppid=,command="],
+        check=True,
+        text=True,
+        capture_output=True,
+    )
+except subprocess.CalledProcessError:
+    raise SystemExit(1)
+
+procs = {}
+children = defaultdict(list)
+for raw in completed.stdout.splitlines():
+    parts = raw.strip().split(None, 2)
+    if len(parts) < 3:
+        continue
+    try:
+        pid = int(parts[0])
+        ppid = int(parts[1])
+    except ValueError:
+        continue
+    command = parts[2]
+    procs[pid] = (ppid, command)
+    children[ppid].append(pid)
+
+descendants = set()
+stack = list(children.get(root_pid, []))
+while stack:
+    pid = stack.pop()
+    if pid in descendants:
+        continue
+    descendants.add(pid)
+    stack.extend(children.get(pid, []))
+
+for pid in descendants:
+    current = pid
+    seen_bun = False
+    seen_identity = False
+    while current in procs and current != root_pid:
+        ppid, command = procs[current]
+        lowered = command.lower()
+        if "bun" in lowered:
+            seen_bun = True
+        if identity in lowered:
+            seen_identity = True
+        current = ppid
+    if seen_bun and seen_identity:
+        raise SystemExit(0)
+
+raise SystemExit(1)
+PY
+}
+
+bridge_agent_plugin_mcp_alive_for_item() {
+  local agent="$1"
+  local item="$2"
+  local session=""
+  local pane_pid=""
+
+  [[ "$(bridge_agent_engine "$agent")" == "claude" ]] || return 1
+  session="$(bridge_agent_session "$agent")"
+  [[ -n "$session" ]] || return 1
+  bridge_tmux_session_exists "$session" || return 1
+  pane_pid="$(bridge_tmux_session_pane_pid "$session")"
+  [[ "$pane_pid" =~ ^[0-9]+$ ]] || return 1
+  bridge_plugin_mcp_descendant_ready_for_item "$pane_pid" "$item"
+}
+
+bridge_agent_missing_plugin_mcp_channels_csv() {
+  local agent="$1"
+  local required=""
+  local item=""
+  local missing=""
+  local -a items=()
+
+  [[ "$(bridge_agent_engine "$agent")" == "claude" ]] || return 0
+  required="$(bridge_agent_effective_launch_plugin_channels_csv "$agent")"
+  [[ -n "$required" ]] || return 0
+
+  IFS=',' read -r -a items <<<"$required"
+  for item in "${items[@]}"; do
+    item="$(bridge_trim_whitespace "$item")"
+    [[ -n "$item" ]] || continue
+    if ! bridge_agent_plugin_mcp_alive_for_item "$agent" "$item"; then
+      missing="$(bridge_merge_channels_csv "$missing" "$item")"
+    fi
+  done
+
+  printf '%s' "$missing"
+}
+
 bridge_agent_required_launch_channels_csv() {
   local agent="$1"
 
