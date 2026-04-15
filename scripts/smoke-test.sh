@@ -3943,9 +3943,11 @@ CHANNEL_SHELL_OUTPUT="$(python3 "$REPO_ROOT/bridge-cron.py" show --jobs-file "$C
 assert_contains "$CHANNEL_SHELL_OUTPUT" "CRON_JOB_JOB_DELIVERY_MODE=direct"
 assert_contains "$CHANNEL_SHELL_OUTPUT" "CRON_JOB_JOB_DELIVERY_CHANNEL=telegram"
 assert_contains "$CHANNEL_SHELL_OUTPUT" "CRON_JOB_ALLOW_CHANNEL_DELIVERY=1"
+assert_contains "$CHANNEL_SHELL_OUTPUT" "CRON_JOB_DISPOSABLE_NEEDS_CHANNELS=0"
 
 python3 - <<'PY'
 import importlib.util
+import subprocess
 from pathlib import Path
 
 path = Path("bridge-cron-runner.py").resolve()
@@ -3962,16 +3964,43 @@ request = {
     "slot": "2026-04-05T09:00+00:00",
     "run_id": "channel-job--2026-04-05T09-00-00-00",
     "payload_file": "/tmp/payload.md",
+    "target_workdir": str(Path(".").resolve()),
     "target_channels": "plugin:telegram",
     "target_telegram_state_dir": "/tmp/telegram-state",
     "allow_channel_delivery": True,
+    "disposable_needs_channels": False,
     "job_delivery_channel": "telegram",
     "job_delivery_target": "telegram:123",
 }
 prompt = module.build_prompt(request, "send a telegram update")
 assert "You may send a user-facing message" in prompt
+assert "Target channels: plugin:telegram" in prompt
+assert "Target agent channels are informational in this disposable run" in prompt
 env = module.apply_channel_runtime_env(request, {"PATH": "/usr/bin"})
 assert env["TELEGRAM_STATE_DIR"] == "/tmp/telegram-state"
+
+
+def fake_run(command, **kwargs):
+    return subprocess.CompletedProcess(
+        command,
+        0,
+        '{"summary":"ok","delivery_status":"not_sent","needs_human_followup":false,"recommended_next_steps":"","details_markdown":""}',
+        "",
+    )
+
+
+module.resolve_binary = lambda name, env_var: f"/fake/{name}"
+module.subprocess.run = fake_run
+
+command, _ = module.run_claude(request, prompt, 30)
+assert "--channels" not in command
+
+opt_in_request = dict(request)
+opt_in_request["disposable_needs_channels"] = True
+opt_in_prompt = module.build_prompt(opt_in_request, "send a telegram update")
+assert "Use only the configured target agent channel tools" in opt_in_prompt
+command, _ = module.run_claude(opt_in_request, opt_in_prompt, 30)
+assert command[2:4] == ["--channels", "plugin:telegram"]
 PY
 
 log "checkpointing cron sync progress only through the successful prefix"

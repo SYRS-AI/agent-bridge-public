@@ -287,6 +287,9 @@ def build_job_record(job):
             or metadata.get("directChannelDelivery")
             or metadata.get("direct_channel_delivery")
         ),
+        "disposable_needs_channels": bool(
+            metadata.get("disposableNeedsChannels") or metadata.get("disposable_needs_channels")
+        ),
         "payload_text": payload_text,
         "payload_preview": preview_text(payload_text),
         "raw": job,
@@ -400,6 +403,7 @@ def serialize_record(record, include_payload=False):
         "job_delivery_channel": record["job_delivery_channel"],
         "job_delivery_target": record["job_delivery_target"],
         "allow_channel_delivery": record["allow_channel_delivery"],
+        "disposable_needs_channels": record["disposable_needs_channels"],
         "payload_preview": record["payload_preview"],
     }
     if include_payload:

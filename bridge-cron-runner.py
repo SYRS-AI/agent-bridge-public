@@ -123,8 +123,21 @@ def channel_enabled(channels: list[str], prefix: str) -> bool:
     return any(item == prefix or item.startswith(f"{prefix}@") for item in channels)
 
 
+def bool_flag(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        return value.strip().lower() in {"1", "true", "yes", "on"}
+    return bool(value)
+
+
+def disposable_needs_channels(request: dict[str, Any]) -> bool:
+    return bool_flag(request.get("disposable_needs_channels"))
+
+
 def build_prompt(request: dict[str, Any], payload_text: str) -> str:
-    allow_channel_delivery = bool(request.get("allow_channel_delivery"))
+    allow_channel_delivery = bool_flag(request.get("allow_channel_delivery"))
+    child_channels_enabled = disposable_needs_channels(request)
     target_channels = csv_items(request.get("target_channels", ""))
     channel_name = str(request.get("job_delivery_channel") or "").strip()
     channel_target = str(request.get("job_delivery_target") or "").strip()
@@ -137,18 +150,28 @@ def build_prompt(request: dict[str, Any], payload_text: str) -> str:
         "Hard rules:",
     ]
     if allow_channel_delivery:
-        lines.extend(
-            [
-                "- You may send a user-facing message when the payload explicitly requires it.",
-                "- If you do send one, use only the configured target agent channel tools that are available in this run.",
-                f"- Preferred delivery channel: {channel_name or 'configured target agent channels'}",
-                f"- Preferred delivery target: {channel_target or '(not specified)'}",
-                "- Do not use agent-bridge urgent/task create/task done/handoff for delivery.",
-                "- If direct delivery succeeds and nothing else requires parent review, set needs_human_followup=false.",
-                "- If delivery cannot be completed, set needs_human_followup=true and explain the blocker in recommended_next_steps.",
-                "- Keep the summary concise and operator-facing.",
-            ]
-        )
+        lines.append("- You may send a user-facing message when the payload explicitly requires it.")
+        if child_channels_enabled:
+            lines.extend(
+                [
+                    "- Use only the configured target agent channel tools that are available in this run.",
+                    f"- Preferred delivery channel: {channel_name or 'configured target agent channels'}",
+                    f"- Preferred delivery target: {channel_target or '(not specified)'}",
+                    "- Do not use agent-bridge urgent/task create/task done/handoff for delivery.",
+                    "- If direct delivery succeeds and nothing else requires parent review, set needs_human_followup=false.",
+                    "- If delivery cannot be completed, set needs_human_followup=true and explain the blocker in recommended_next_steps.",
+                    "- Keep the summary concise and operator-facing.",
+                ]
+            )
+        else:
+            lines.extend(
+                [
+                    "- Target agent channels are informational in this disposable run unless the cron job explicitly opts in to load channel tools.",
+                    "- If delivery would be needed but channel tools are unavailable, set needs_human_followup=true and explain the intended delivery in recommended_next_steps.",
+                    "- Do not use agent-bridge urgent/task create/task done/handoff for delivery.",
+                    "- Keep the summary concise and operator-facing.",
+                ]
+            )
     else:
         lines.extend(
             [
@@ -222,7 +245,7 @@ def apply_channel_runtime_env(request: dict[str, Any], env: dict[str, str]) -> d
 
 
 def validate_channel_delivery_request(request: dict[str, Any]) -> None:
-    if not request.get("allow_channel_delivery"):
+    if not bool_flag(request.get("allow_channel_delivery")):
         return
 
     channels = csv_items(request.get("target_channels", ""))
@@ -297,7 +320,7 @@ def run_claude(request: dict[str, Any], prompt: str, timeout: int) -> tuple[list
         "bypassPermissions",
         prompt,
     ]
-    if channels:
+    if channels and disposable_needs_channels(request):
         command[2:2] = ["--channels", ",".join(channels)]
     env = apply_channel_runtime_env(request, runner_env())
     completed = subprocess.run(
