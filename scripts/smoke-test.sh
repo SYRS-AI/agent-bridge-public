@@ -4597,6 +4597,75 @@ PLUGIN_TREE_DISCORD_READY="$("$BASH4_BIN" -lc '
 kill "$PLUGIN_TREE_ROOT_PID" >/dev/null 2>&1 || true
 wait "$PLUGIN_TREE_ROOT_PID" >/dev/null 2>&1 || true
 
+PLUGIN_MIXED_SERVER_COMMAND="$TMP_ROOT/fake-plugin-mixed-server.command"
+PLUGIN_MIXED_WRAPPER_COMMAND="$TMP_ROOT/fake-plugin-mixed-wrapper.command"
+PLUGIN_MIXED_CLAUDE_COMMAND="$TMP_ROOT/fake-plugin-mixed-claude.command"
+PLUGIN_MIXED_CHILD_PID_FILE="$TMP_ROOT/fake-plugin-mixed-child.pid"
+cat >"$PLUGIN_MIXED_SERVER_COMMAND" <<'EOF'
+exec -a "bun server.ts" sleep 30
+EOF
+cat >"$PLUGIN_MIXED_WRAPPER_COMMAND" <<'EOF'
+server_command_file="$1"
+server_command="$(cat "$server_command_file")"
+exec -a "bun run --cwd /tmp/discord/0.0.4/package start" bash -c '
+  server_command="$1"
+  bash -c "$server_command" &
+  child=$!
+  wait "$child"
+' bash "$server_command"
+EOF
+cat >"$PLUGIN_MIXED_CLAUDE_COMMAND" <<'EOF'
+wrapper_command_file="$1"
+server_command_file="$2"
+wrapper_command="$(cat "$wrapper_command_file")"
+exec -a "claude --dangerously-skip-permissions --name mixed-plugin-watchdog --channels plugin:telegram@claude-plugins-official" bash -c '
+  wrapper_command="$1"
+  server_command_file="$2"
+  bash -c "$wrapper_command" bash "$server_command_file" &
+  child=$!
+  wait "$child"
+' bash "$wrapper_command" "$server_command_file"
+EOF
+PLUGIN_MIXED_ROOT_COMMAND="$(cat <<'EOF'
+claude_command_file="$1"
+wrapper_command_file="$2"
+server_command_file="$3"
+child_pid_file="$4"
+claude_command="$(cat "$claude_command_file")"
+bash -c "$claude_command" bash "$wrapper_command_file" "$server_command_file" &
+child=$!
+printf '%s\n' "$child" >"$child_pid_file"
+wait "$child"
+EOF
+)"
+bash -c "$PLUGIN_MIXED_ROOT_COMMAND" bash "$PLUGIN_MIXED_CLAUDE_COMMAND" "$PLUGIN_MIXED_WRAPPER_COMMAND" "$PLUGIN_MIXED_SERVER_COMMAND" "$PLUGIN_MIXED_CHILD_PID_FILE" >/dev/null 2>&1 &
+PLUGIN_MIXED_ROOT_PID="$!"
+for _ in {1..20}; do
+  [[ -f "$PLUGIN_MIXED_CHILD_PID_FILE" ]] && break
+  sleep 0.1
+done
+[[ -f "$PLUGIN_MIXED_CHILD_PID_FILE" ]] || die "expected fake mixed plugin child pid file"
+PLUGIN_MIXED_TELEGRAM_READY="$("$BASH4_BIN" -lc '
+  source "'"$REPO_ROOT"'/bridge-lib.sh"
+  if bridge_plugin_mcp_descendant_ready_for_item "'"$PLUGIN_MIXED_ROOT_PID"'" "plugin:telegram@claude-plugins-official"; then
+    echo yes
+  else
+    echo no
+  fi
+')"
+[[ "$PLUGIN_MIXED_TELEGRAM_READY" == "no" ]] || die "expected telegram mixed-tree liveness check to stay negative"
+PLUGIN_MIXED_DISCORD_READY="$("$BASH4_BIN" -lc '
+  source "'"$REPO_ROOT"'/bridge-lib.sh"
+  if bridge_plugin_mcp_descendant_ready_for_item "'"$PLUGIN_MIXED_ROOT_PID"'" "plugin:discord@claude-plugins-official"; then
+    echo yes
+  else
+    echo no
+  fi
+')"
+[[ "$PLUGIN_MIXED_DISCORD_READY" == "yes" ]] || die "expected discord mixed-tree liveness check to stay positive"
+kill "$PLUGIN_MIXED_ROOT_PID" >/dev/null 2>&1 || true
+wait "$PLUGIN_MIXED_ROOT_PID" >/dev/null 2>&1 || true
+
 PLUGIN_WATCH_AGENT="plugin-watchdog"
 PLUGIN_WATCH_SESSION="plugin-watchdog-$SESSION_NAME"
 PLUGIN_WATCH_WORKDIR="$TMP_ROOT/plugin-watchdog"

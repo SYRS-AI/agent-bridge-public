@@ -1543,6 +1543,7 @@ bridge_plugin_mcp_descendant_ready_for_item() {
 
   bridge_require_python
   python3 - "$root_pid" "$identity" <<'PY'
+import re
 import subprocess
 import sys
 from collections import defaultdict
@@ -1584,19 +1585,20 @@ while stack:
     descendants.add(pid)
     stack.extend(children.get(pid, []))
 
+def command_has_identity_path_segment(command: str, identity: str) -> bool:
+    for match in re.finditer(r"/[^\s]+", command):
+        token = match.group(0)
+        segments = [segment for segment in token.split("/") if segment]
+        if identity in segments:
+            return True
+    return False
+
 for pid in descendants:
-    current = pid
-    seen_bun = False
-    seen_identity = False
-    while current in procs and current != root_pid:
-        ppid, command = procs[current]
-        lowered = command.lower()
-        if "bun" in lowered:
-            seen_bun = True
-        if identity in lowered:
-            seen_identity = True
-        current = ppid
-    if seen_bun and seen_identity:
+    _ppid, command = procs.get(pid, (None, ""))
+    lowered = command.lower()
+    if "bun" not in lowered:
+        continue
+    if command_has_identity_path_segment(lowered, identity):
         raise SystemExit(0)
 
 raise SystemExit(1)
