@@ -27,6 +27,18 @@ RESULT_SCHEMA = {
         "recommended_next_steps": {"type": "array", "items": {"type": "string"}},
         "artifacts": {"type": "array", "items": {"type": "string"}},
         "confidence": {"type": "string"},
+        "channel_relay": {
+            "type": "object",
+            "properties": {
+                "body": {"type": "string"},
+                "urgency": {"type": "string"},
+                "transport": {"type": "string"},
+                "target": {"type": "string"},
+                "subject": {"type": "string"},
+            },
+            "required": ["body"],
+            "additionalProperties": False,
+        },
     },
     "required": [
         "status",
@@ -97,6 +109,32 @@ def normalize_result(payload: dict[str, Any]) -> dict[str, Any]:
     return result
 
 
+def normalize_channel_relay(value: Any) -> dict[str, str] | None:
+    if value is None:
+        return None
+    if not isinstance(value, dict):
+        raise ValueError("channel_relay must be an object when present")
+
+    allowed = {"body", "urgency", "transport", "target", "subject"}
+    extras = sorted(set(value.keys()) - allowed)
+    if extras:
+        raise ValueError(f"channel_relay contains unsupported fields: {', '.join(extras)}")
+
+    body = str(value.get("body", "")).strip()
+    if not body:
+        raise ValueError("channel_relay.body must be a non-empty string")
+
+    relay = {"body": body}
+    for key in ("urgency", "transport", "target", "subject"):
+        raw = value.get(key)
+        if raw is None:
+            continue
+        text = str(raw).strip()
+        if text:
+            relay[key] = text
+    return relay
+
+
 def validate_result(payload: dict[str, Any]) -> dict[str, Any]:
     result = normalize_result(payload)
     missing = [key for key in RESULT_SCHEMA["required"] if key not in result]
@@ -104,6 +142,12 @@ def validate_result(payload: dict[str, Any]) -> dict[str, Any]:
         raise ValueError(f"result missing required fields: {', '.join(missing)}")
     if not isinstance(result["summary"], str) or not result["summary"].strip():
         raise ValueError("result summary must be a non-empty string")
+    relay = normalize_channel_relay(result.get("channel_relay"))
+    if relay is not None:
+        result["channel_relay"] = relay
+        result["needs_human_followup"] = True
+    else:
+        result.pop("channel_relay", None)
     return result
 
 
@@ -150,24 +194,31 @@ def build_prompt(request: dict[str, Any], payload_text: str) -> str:
         "Hard rules:",
     ]
     if allow_channel_delivery:
-        lines.append("- You may send a user-facing message when the payload explicitly requires it.")
+        lines.extend(
+            [
+                "- Do not send user-facing messages directly from this disposable run.",
+                "- If the cron needs a human-facing message, return it as a structured channel_relay object in the JSON result.",
+                "- channel_relay must include a non-empty body field.",
+                "- channel_relay transport/target are optional hints; request metadata remains the routing authority.",
+                "- When channel_relay is present, treat needs_human_followup as true.",
+            ]
+        )
         if child_channels_enabled:
             lines.extend(
                 [
-                    "- Use only the configured target agent channel tools that are available in this run.",
-                    f"- Preferred delivery channel: {channel_name or 'configured target agent channels'}",
-                    f"- Preferred delivery target: {channel_target or '(not specified)'}",
-                    "- Do not use agent-bridge urgent/task create/task done/handoff for delivery.",
-                    "- If direct delivery succeeds and nothing else requires parent review, set needs_human_followup=false.",
-                    "- If delivery cannot be completed, set needs_human_followup=true and explain the blocker in recommended_next_steps.",
+                    "- Even if channel tools are available in this run, do not use them for human delivery.",
+                    f"- Preferred relay transport: {channel_name or 'configured target agent channels'}",
+                    f"- Preferred relay target: {channel_target or '(not specified)'}",
+                    "- Do not use message/reply/send tools, direct webhook helpers, or agent-bridge urgent/task create/task done/handoff for delivery.",
+                    "- The parent agent will review the relay payload and send it from the parent session.",
                     "- Keep the summary concise and operator-facing.",
                 ]
             )
         else:
             lines.extend(
                 [
-                    "- Target agent channels are informational in this disposable run unless the cron job explicitly opts in to load channel tools.",
-                    "- If delivery would be needed but channel tools are unavailable, set needs_human_followup=true and explain the intended delivery in recommended_next_steps.",
+                    "- Target agent channels are informational routing metadata in this disposable run.",
+                    "- If delivery is needed, return channel_relay instead of describing a direct send in prose only.",
                     "- Do not use agent-bridge urgent/task create/task done/handoff for delivery.",
                     "- Keep the summary concise and operator-facing.",
                 ]

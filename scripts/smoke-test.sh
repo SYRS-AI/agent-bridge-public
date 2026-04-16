@@ -4178,11 +4178,52 @@ request = {
     "job_delivery_target": "telegram:123",
 }
 prompt = module.build_prompt(request, "send a telegram update")
-assert "You may send a user-facing message" in prompt
+assert "Do not send user-facing messages directly from this disposable run." in prompt
+assert "return it as a structured channel_relay object" in prompt
 assert "Target channels: plugin:telegram" in prompt
-assert "Target agent channels are informational in this disposable run" in prompt
+assert "Target agent channels are informational routing metadata in this disposable run." in prompt
 env = module.apply_channel_runtime_env(request, {"PATH": "/usr/bin"})
 assert env["TELEGRAM_STATE_DIR"] == "/tmp/telegram-state"
+
+normalized = module.validate_result(
+    {
+        "status": "completed",
+        "summary": "relay prepared",
+        "findings": [],
+        "actions_taken": [],
+        "needs_human_followup": False,
+        "recommended_next_steps": [],
+        "artifacts": [],
+        "confidence": "high",
+        "channel_relay": {
+            "body": "hello from relay",
+            "transport": "telegram",
+            "target": "default",
+            "urgency": "normal",
+        },
+    }
+)
+assert normalized["needs_human_followup"] is True
+assert normalized["channel_relay"]["body"] == "hello from relay"
+
+try:
+    module.validate_result(
+        {
+            "status": "completed",
+            "summary": "bad relay",
+            "findings": [],
+            "actions_taken": [],
+            "needs_human_followup": True,
+            "recommended_next_steps": [],
+            "artifacts": [],
+            "confidence": "high",
+            "channel_relay": {"body": "   "},
+        }
+    )
+except ValueError as exc:
+    assert "channel_relay.body" in str(exc)
+else:
+    raise AssertionError("expected invalid empty relay body to fail")
 
 
 def fake_run(command, **kwargs):
@@ -4203,10 +4244,65 @@ assert "--channels" not in command
 opt_in_request = dict(request)
 opt_in_request["disposable_needs_channels"] = True
 opt_in_prompt = module.build_prompt(opt_in_request, "send a telegram update")
-assert "Use only the configured target agent channel tools" in opt_in_prompt
+assert "Even if channel tools are available in this run, do not use them for human delivery." in opt_in_prompt
 command, _ = module.run_claude(opt_in_request, opt_in_prompt, 30)
 assert command[2:4] == ["--channels", "plugin:telegram"]
 PY
+
+log "rendering typed channel relay blocks into cron follow-up bodies"
+CRON_RELAY_RUN_ID="relay-smoke--2026-04-16T13-20"
+CRON_RELAY_RUN_DIR="$BRIDGE_CRON_STATE_DIR/runs/$CRON_RELAY_RUN_ID"
+CRON_RELAY_REQUEST_FILE="$CRON_RELAY_RUN_DIR/request.json"
+CRON_RELAY_RESULT_FILE="$CRON_RELAY_RUN_DIR/result.json"
+CRON_RELAY_STATUS_FILE="$CRON_RELAY_RUN_DIR/status.json"
+CRON_RELAY_BODY_FILE="$TMP_ROOT/cron-relay-followup.md"
+mkdir -p "$CRON_RELAY_RUN_DIR"
+python3 - <<'PY' "$CRON_RELAY_REQUEST_FILE" "$CRON_RELAY_RESULT_FILE" "$CRON_RELAY_STATUS_FILE"
+import json
+import sys
+from pathlib import Path
+
+request_path = Path(sys.argv[1])
+result_path = Path(sys.argv[2])
+status_path = Path(sys.argv[3])
+
+request_path.write_text(json.dumps({
+    "run_id": "relay-smoke--2026-04-16T13-20",
+    "job_name": "relay-smoke",
+    "slot": "2026-04-16T13:20+09:00",
+    "family": "relay-smoke",
+    "target_agent": "patch",
+    "target_engine": "claude",
+    "stdout_log": "/tmp/relay-stdout.log",
+    "stderr_log": "/tmp/relay-stderr.log",
+}, ensure_ascii=True, indent=2) + "\n", encoding="utf-8")
+
+result_path.write_text(json.dumps({
+    "status": "completed",
+    "summary": "prepared relay body",
+    "findings": ["one actionable reminder"],
+    "actions_taken": ["compiled relay payload"],
+    "needs_human_followup": True,
+    "recommended_next_steps": ["send to today's telegram thread"],
+    "artifacts": [],
+    "confidence": "high",
+    "channel_relay": {
+        "transport": "telegram",
+        "target": "default",
+        "urgency": "normal",
+        "body": "오늘 일정 리마인드입니다."
+    }
+}, ensure_ascii=True, indent=2) + "\n", encoding="utf-8")
+
+status_path.write_text(json.dumps({
+    "state": "success"
+}, ensure_ascii=True, indent=2) + "\n", encoding="utf-8")
+PY
+"$BASH4_BIN" -lc "source \"$REPO_ROOT/bridge-lib.sh\"; bridge_cron_write_followup_body \"$CRON_RELAY_RUN_ID\" \"$CRON_RELAY_BODY_FILE\""
+grep -q '^## Channel Relay$' "$CRON_RELAY_BODY_FILE" || die "expected channel relay section in cron follow-up body"
+grep -q '^- transport: telegram$' "$CRON_RELAY_BODY_FILE" || die "expected relay transport metadata"
+grep -q '오늘 일정 리마인드입니다.' "$CRON_RELAY_BODY_FILE" || die "expected relay body in follow-up markdown"
+grep -q 'The parent session must own the outbound message.' "$CRON_RELAY_BODY_FILE" || die "expected parent-owned delivery instruction"
 
 log "checkpointing cron sync progress only through the successful prefix"
 SCHEDULER_JOBS_FILE="$TMP_ROOT/scheduler-jobs.json"
