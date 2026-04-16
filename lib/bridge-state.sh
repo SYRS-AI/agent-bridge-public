@@ -1614,6 +1614,9 @@ bridge_task_daemon_step() {
     --idle-threshold "$BRIDGE_TASK_IDLE_NUDGE_SECONDS"
     --nudge-cooldown "$BRIDGE_TASK_NUDGE_COOLDOWN_SECONDS"
     --zombie-threshold "$zombie_threshold"
+    --blocked-reminder-seconds "${BRIDGE_TASK_BLOCKED_REMINDER_SECONDS:-86400}"
+    --blocked-escalate-seconds "${BRIDGE_TASK_BLOCKED_ESCALATE_SECONDS:-604800}"
+    --admin-agent "${BRIDGE_ADMIN_AGENT_ID:-patch}"
   )
 
   if [[ -n "$ready_agents_file" && -f "$ready_agents_file" ]]; then

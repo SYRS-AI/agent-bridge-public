@@ -37,6 +37,9 @@ FAMILY_RULES = (
     "weekly-review",
 )
 
+BLOCKED_REMINDER_TITLE_PREFIX = "[blocked-aging] task #"
+BLOCKED_ESCALATION_TITLE_PREFIX = "[blocked-escalation] task #"
+
 UNEXPANDED_SHELL_VAR_RE = re.compile(r"(?<!\\)(\$\{[A-Za-z_][A-Za-z0-9_]*\}|\$[A-Za-z_][A-Za-z0-9_]*)")
 
 
@@ -1034,6 +1037,330 @@ def dispatch_task_family(row: sqlite3.Row) -> str:
     return classify_family(str(row["title"] or ""))
 
 
+def latest_event_ts(conn: sqlite3.Connection, task_id: int, event_type: str) -> int:
+    row = conn.execute(
+        """
+        SELECT MAX(created_ts) AS created_ts
+        FROM task_events
+        WHERE task_id = ? AND event_type = ?
+        """,
+        (task_id, event_type),
+    ).fetchone()
+    if not row:
+        return 0
+    value = row["created_ts"]
+    return int(value or 0)
+
+
+def find_open_task_by_prefix(conn: sqlite3.Connection, agent: str, title_prefix: str) -> sqlite3.Row | None:
+    placeholders = ",".join(["?"] * len(OPEN_STATUSES))
+    params: list[object] = [agent, *OPEN_STATUSES, f"{title_prefix}%"]
+    return conn.execute(
+        f"""
+        SELECT *
+        FROM tasks
+        WHERE assigned_to = ?
+          AND status IN ({placeholders})
+          AND title LIKE ?
+        ORDER BY
+          CASE priority
+            WHEN 'urgent' THEN 0
+            WHEN 'high'   THEN 1
+            WHEN 'normal' THEN 2
+            WHEN 'low'    THEN 3
+            ELSE 4
+          END,
+          id
+        LIMIT 1
+        """,
+        params,
+    ).fetchone()
+
+
+def create_queue_task(
+    conn: sqlite3.Connection,
+    *,
+    title: str,
+    assigned_to: str,
+    actor: str,
+    priority: str,
+    created_ts: int,
+    body_text: str | None = None,
+    body_path: str | None = None,
+) -> int:
+    cursor = conn.execute(
+        """
+        INSERT INTO tasks (
+          title, assigned_to, created_by, priority, status, created_ts, updated_ts, body_text, body_path
+        ) VALUES (?, ?, ?, ?, 'queued', ?, ?, ?, ?)
+        """,
+        (
+            title,
+            assigned_to,
+            actor,
+            priority,
+            created_ts,
+            created_ts,
+            body_text,
+            body_path,
+        ),
+    )
+    task_id = int(cursor.lastrowid)
+    emit_event(
+        conn,
+        task_id,
+        event_type="created",
+        actor=actor,
+        created_ts=created_ts,
+        note_text=body_text,
+        note_path=body_path,
+        to_agent=assigned_to,
+    )
+    return task_id
+
+
+def refresh_queue_task(
+    conn: sqlite3.Connection,
+    *,
+    task_id: int,
+    title: str,
+    priority: str,
+    actor: str,
+    updated_ts: int,
+    body_text: str | None,
+    note_text: str,
+) -> None:
+    conn.execute(
+        """
+        UPDATE tasks
+        SET title = ?,
+            priority = ?,
+            body_text = ?,
+            body_path = NULL,
+            updated_ts = ?
+        WHERE id = ?
+        """,
+        (title, priority, body_text, updated_ts, task_id),
+    )
+    emit_event(
+        conn,
+        task_id,
+        event_type="updated",
+        actor=actor,
+        created_ts=updated_ts,
+        note_text=note_text,
+    )
+
+
+def upsert_open_task(
+    conn: sqlite3.Connection,
+    *,
+    agent: str,
+    title_prefix: str,
+    title: str,
+    priority: str,
+    actor: str,
+    body_text: str,
+    current_ts: int,
+    refresh_note: str,
+) -> tuple[int, bool]:
+    existing = find_open_task_by_prefix(conn, agent, title_prefix)
+    if existing:
+        refresh_queue_task(
+            conn,
+            task_id=int(existing["id"]),
+            title=title,
+            priority=priority,
+            actor=actor,
+            updated_ts=current_ts,
+            body_text=body_text,
+            note_text=refresh_note,
+        )
+        return int(existing["id"]), False
+
+    task_id = create_queue_task(
+        conn,
+        title=title,
+        assigned_to=agent,
+        actor=actor,
+        priority=priority,
+        created_ts=current_ts,
+        body_text=body_text,
+    )
+    return task_id, True
+
+
+def format_task_age(seconds: int) -> str:
+    seconds = max(0, int(seconds))
+    days, rem = divmod(seconds, 86400)
+    hours, rem = divmod(rem, 3600)
+    minutes = rem // 60
+    if days:
+        return f"{days}d {hours}h"
+    if hours:
+        return f"{hours}h {minutes}m"
+    return f"{minutes}m"
+
+
+def blocked_reminder_title(task_id: int) -> str:
+    return f"{BLOCKED_REMINDER_TITLE_PREFIX}{task_id} needs status refresh"
+
+
+def blocked_escalation_title(task_id: int) -> str:
+    return f"{BLOCKED_ESCALATION_TITLE_PREFIX}{task_id} needs admin review"
+
+
+def blocked_task_reminder_body(task: sqlite3.Row, age_seconds: int, reminder_seconds: int) -> str:
+    task_id = int(task["id"])
+    title = str(task["title"] or "").strip()
+    assigned_to = str(task["assigned_to"] or "").strip()
+    claimed_by = str(task["claimed_by"] or "").strip()
+    body_path = str(task["body_path"] or "").strip()
+    lines = [
+        "# Blocked Task Reminder",
+        "",
+        f"- original_task_id: {task_id}",
+        f"- original_title: {title}",
+        f"- assigned_to: {assigned_to}",
+        f"- claimed_by: {claimed_by or '-'}",
+        f"- blocked_age: {format_task_age(age_seconds)}",
+        f"- last_updated_at: {isoformat_ts(int(task['updated_ts'] or 0))}",
+        f"- reminder_interval: {format_task_age(reminder_seconds)}",
+    ]
+    if body_path:
+        lines.append(f"- original_body_file: {body_path}")
+    lines.extend(
+        [
+            "",
+            "This task has stayed blocked without a status refresh.",
+            "",
+            "Please do one of the following:",
+            f"1. refresh the blocked status: `agb update {task_id} --status blocked --note \"...\"`",
+            f"2. hand it off if ownership changed: `agb handoff {task_id} --to <agent> --note \"...\"`",
+            f"3. resolve it and close it: `agb done {task_id} --agent {assigned_to} --note \"...\"`",
+        ]
+    )
+    return "\n".join(lines).rstrip() + "\n"
+
+
+def blocked_task_escalation_body(
+    task: sqlite3.Row,
+    age_seconds: int,
+    reminder_seconds: int,
+    escalation_seconds: int,
+) -> str:
+    task_id = int(task["id"])
+    title = str(task["title"] or "").strip()
+    assigned_to = str(task["assigned_to"] or "").strip()
+    reminder_count = max(1, age_seconds // max(1, reminder_seconds))
+    lines = [
+        "# Blocked Task Escalation",
+        "",
+        f"- original_task_id: {task_id}",
+        f"- original_title: {title}",
+        f"- assigned_to: {assigned_to}",
+        f"- blocked_age: {format_task_age(age_seconds)}",
+        f"- escalation_threshold: {format_task_age(escalation_seconds)}",
+        f"- last_updated_at: {isoformat_ts(int(task['updated_ts'] or 0))}",
+        f"- reminder_cycles_elapsed: {reminder_count}",
+        "",
+        "This blocked task has gone stale past the escalation threshold.",
+        "Please review whether the assignee needs intervention, handoff, or closure.",
+    ]
+    return "\n".join(lines).rstrip() + "\n"
+
+
+def process_blocked_task_aging(
+    conn: sqlite3.Connection,
+    *,
+    current_ts: int,
+    reminder_seconds: int,
+    escalation_seconds: int,
+    admin_agent: str,
+) -> None:
+    if reminder_seconds <= 0:
+        return
+
+    blocked_rows = conn.execute(
+        """
+        SELECT id, title, assigned_to, created_by, priority, status, created_ts, updated_ts, body_text, body_path,
+               claimed_by, claimed_ts, lease_until_ts, closed_ts
+        FROM tasks
+        WHERE status = 'blocked'
+          AND updated_ts < ?
+          AND title NOT LIKE '[blocked-aging]%'
+          AND title NOT LIKE '[blocked-escalation]%'
+        ORDER BY updated_ts ASC, id ASC
+        """,
+        (current_ts - reminder_seconds,),
+    ).fetchall()
+
+    for task in blocked_rows:
+        task_id = int(task["id"])
+        age_seconds = max(0, current_ts - int(task["updated_ts"] or current_ts))
+
+        last_reminder_ts = latest_event_ts(conn, task_id, "blocked_reminder")
+        if last_reminder_ts == 0 or current_ts - last_reminder_ts >= reminder_seconds:
+            title_prefix = f"{BLOCKED_REMINDER_TITLE_PREFIX}{task_id} "
+            reminder_task_id, created = upsert_open_task(
+                conn,
+                agent=str(task["assigned_to"]),
+                title_prefix=title_prefix,
+                title=blocked_reminder_title(task_id),
+                priority="normal",
+                actor="daemon",
+                body_text=blocked_task_reminder_body(task, age_seconds, reminder_seconds),
+                current_ts=current_ts,
+                refresh_note="daemon refreshed blocked-aging reminder",
+            )
+            emit_event(
+                conn,
+                task_id,
+                event_type="blocked_reminder",
+                actor="daemon",
+                created_ts=current_ts,
+                note_text=(
+                    f"{'created' if created else 'refreshed'} reminder task #{reminder_task_id} "
+                    f"for {task['assigned_to']}"
+                ),
+                to_agent=str(task["assigned_to"]),
+            )
+
+        if escalation_seconds <= 0 or age_seconds < escalation_seconds:
+            continue
+        if not admin_agent:
+            continue
+
+        last_escalated_ts = latest_event_ts(conn, task_id, "blocked_escalated")
+        if last_escalated_ts != 0:
+            continue
+
+        title_prefix = f"{BLOCKED_ESCALATION_TITLE_PREFIX}{task_id} "
+        escalation_task_id, created = upsert_open_task(
+            conn,
+            agent=admin_agent,
+            title_prefix=title_prefix,
+            title=blocked_escalation_title(task_id),
+            priority="high",
+            actor="daemon",
+            body_text=blocked_task_escalation_body(task, age_seconds, reminder_seconds, escalation_seconds),
+            current_ts=current_ts,
+            refresh_note="daemon refreshed blocked-aging escalation",
+        )
+        emit_event(
+            conn,
+            task_id,
+            event_type="blocked_escalated",
+            actor="daemon",
+            created_ts=current_ts,
+            note_text=(
+                f"{'created' if created else 'refreshed'} escalation task #{escalation_task_id} "
+                f"for {admin_agent}"
+            ),
+            to_agent=admin_agent,
+        )
+
+
 def load_ready_agents(path: str | None) -> set[str]:
     if not path:
         return set()
@@ -1054,6 +1381,9 @@ def cmd_daemon_step(args: argparse.Namespace) -> int:
     heartbeat_window = int(args.heartbeat_window)
     idle_threshold = int(args.idle_threshold)
     nudge_cooldown = int(args.nudge_cooldown)
+    blocked_reminder_seconds = max(0, int(args.blocked_reminder_seconds))
+    blocked_escalate_seconds = max(0, int(args.blocked_escalate_seconds))
+    admin_agent = str(args.admin_agent or "").strip()
     queued_ids_by_agent: dict[str, list[int]] = {}
 
     with closing(connect()) as conn, conn:
@@ -1242,6 +1572,14 @@ def cmd_daemon_step(args: argparse.Namespace) -> int:
                 note_text=note_text,
                 from_agent=agent_name,
             )
+
+        process_blocked_task_aging(
+            conn,
+            current_ts=current_ts,
+            reminder_seconds=blocked_reminder_seconds,
+            escalation_seconds=blocked_escalate_seconds,
+            admin_agent=admin_agent,
+        )
 
         rows = conn.execute(
             """
@@ -1551,6 +1889,18 @@ def build_parser() -> argparse.ArgumentParser:
     daemon_parser.add_argument(
         "--max-claim-age",
         default=os.environ.get("BRIDGE_TASK_MAX_CLAIM_AGE_SECONDS", "900"),
+    )
+    daemon_parser.add_argument(
+        "--blocked-reminder-seconds",
+        default=os.environ.get("BRIDGE_TASK_BLOCKED_REMINDER_SECONDS", "86400"),
+    )
+    daemon_parser.add_argument(
+        "--blocked-escalate-seconds",
+        default=os.environ.get("BRIDGE_TASK_BLOCKED_ESCALATE_SECONDS", str(7 * 86400)),
+    )
+    daemon_parser.add_argument(
+        "--admin-agent",
+        default=os.environ.get("BRIDGE_ADMIN_AGENT_ID", "patch"),
     )
     daemon_parser.add_argument("--ready-agents-file")
     daemon_parser.add_argument("--format", choices=("text", "tsv"), default="tsv")

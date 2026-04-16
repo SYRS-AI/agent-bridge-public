@@ -882,6 +882,129 @@ assert_contains "$INFERRED_TASK_SHELL" "TASK_CREATED_BY=$REQUESTER_AGENT"
 INBOX_OUTPUT="$(bash "$REPO_ROOT/bridge-task.sh" inbox "$SMOKE_AGENT")"
 assert_contains "$INBOX_OUTPUT" "smoke queue"
 
+log "aging blocked tasks into reminder and escalation follow-ups"
+BLOCKED_AGING_CREATE_OUTPUT="$(python3 "$REPO_ROOT/bridge-queue.py" create --to "$SMOKE_AGENT" --title "blocked aging smoke" --body "waiting on follow-up" --from "$REQUESTER_AGENT")"
+assert_contains "$BLOCKED_AGING_CREATE_OUTPUT" "created task #"
+BLOCKED_AGING_TASK_ID="$(printf '%s\n' "$BLOCKED_AGING_CREATE_OUTPUT" | sed -n 's/^created task #\([0-9][0-9]*\).*/\1/p' | head -n1)"
+[[ "$BLOCKED_AGING_TASK_ID" =~ ^[0-9]+$ ]] || die "could not parse blocked aging task id"
+python3 "$REPO_ROOT/bridge-queue.py" update "$BLOCKED_AGING_TASK_ID" --status blocked --note "waiting on operator" >/dev/null
+SMOKE_AGENT="$SMOKE_AGENT" BLOCKED_AGING_TASK_ID="$BLOCKED_AGING_TASK_ID" BRIDGE_TASK_DB="$BRIDGE_TASK_DB" python3 - <<'PY'
+import os
+import sqlite3
+import time
+
+db = os.environ["BRIDGE_TASK_DB"]
+task_id = int(os.environ["BLOCKED_AGING_TASK_ID"])
+agent = os.environ["SMOKE_AGENT"]
+stale_ts = int(time.time()) - 9000
+with sqlite3.connect(db) as conn:
+    conn.execute(
+        """
+        UPDATE tasks
+        SET updated_ts = ?, claimed_by = ?, claimed_ts = ?, lease_until_ts = NULL
+        WHERE id = ?
+        """,
+        (stale_ts, agent, stale_ts, task_id),
+    )
+    conn.commit()
+PY
+run_blocked_aging_step() {
+  "$BASH4_BIN" -lc '
+    source "'"$REPO_ROOT"'/bridge-lib.sh"
+    bridge_load_roster
+    snapshot_file="$(mktemp)"
+    trap "rm -f \"$snapshot_file\"" EXIT
+    bridge_write_agent_snapshot "$snapshot_file"
+    python3 "'"$REPO_ROOT"'/bridge-queue.py" daemon-step \
+      --snapshot "$snapshot_file" \
+      --lease-seconds "$BRIDGE_TASK_LEASE_SECONDS" \
+      --heartbeat-window "$BRIDGE_TASK_HEARTBEAT_WINDOW_SECONDS" \
+      --idle-threshold "$BRIDGE_TASK_IDLE_NUDGE_SECONDS" \
+      --nudge-cooldown "$BRIDGE_TASK_NUDGE_COOLDOWN_SECONDS" \
+      --zombie-threshold "${BRIDGE_ZOMBIE_NUDGE_THRESHOLD:-10}" \
+      --blocked-reminder-seconds 3600 \
+      --blocked-escalate-seconds 7200 \
+      --admin-agent "'"$REQUESTER_AGENT"'"
+  '
+}
+BLOCKED_AGING_STEP_OUTPUT="$(run_blocked_aging_step)"
+assert_contains "$BLOCKED_AGING_STEP_OUTPUT" "$SMOKE_AGENT"
+BLOCKED_REMINDER_ID="$(python3 "$REPO_ROOT/bridge-queue.py" find-open --agent "$SMOKE_AGENT" --title-prefix "[blocked-aging] task #$BLOCKED_AGING_TASK_ID ")"
+[[ "$BLOCKED_REMINDER_ID" =~ ^[0-9]+$ ]] || die "expected blocked-aging reminder task"
+BLOCKED_ESCALATION_ID="$(python3 "$REPO_ROOT/bridge-queue.py" find-open --agent "$REQUESTER_AGENT" --title-prefix "[blocked-escalation] task #$BLOCKED_AGING_TASK_ID ")"
+[[ "$BLOCKED_ESCALATION_ID" =~ ^[0-9]+$ ]] || die "expected blocked-aging escalation task"
+BLOCKED_REMINDER_SHOW="$(python3 "$REPO_ROOT/bridge-queue.py" show "$BLOCKED_REMINDER_ID")"
+assert_contains "$BLOCKED_REMINDER_SHOW" "original_task_id: $BLOCKED_AGING_TASK_ID"
+assert_contains "$BLOCKED_REMINDER_SHOW" "needs status refresh"
+BLOCKED_ESCALATION_SHOW="$(python3 "$REPO_ROOT/bridge-queue.py" show "$BLOCKED_ESCALATION_ID")"
+assert_contains "$BLOCKED_ESCALATION_SHOW" "original_task_id: $BLOCKED_AGING_TASK_ID"
+assert_contains "$BLOCKED_ESCALATION_SHOW" "needs admin review"
+BLOCKED_SOURCE_SHOW="$(python3 "$REPO_ROOT/bridge-queue.py" show "$BLOCKED_AGING_TASK_ID")"
+assert_contains "$BLOCKED_SOURCE_SHOW" "blocked_reminder by daemon"
+assert_contains "$BLOCKED_SOURCE_SHOW" "blocked_escalated by daemon"
+BLOCKED_REMINDER_COUNT_BEFORE="$(BRIDGE_TASK_DB="$BRIDGE_TASK_DB" BLOCKED_AGING_TASK_ID="$BLOCKED_AGING_TASK_ID" python3 - <<'PY'
+import os
+import sqlite3
+
+db = os.environ["BRIDGE_TASK_DB"]
+task_id = os.environ["BLOCKED_AGING_TASK_ID"]
+with sqlite3.connect(db) as conn:
+    row = conn.execute(
+        "SELECT COUNT(*) FROM tasks WHERE status IN ('queued','claimed','blocked') AND title LIKE ?",
+        (f"[blocked-aging] task #{task_id} %",),
+    ).fetchone()
+    print(row[0])
+PY
+)"
+BLOCKED_ESCALATION_COUNT_BEFORE="$(BRIDGE_TASK_DB="$BRIDGE_TASK_DB" BLOCKED_AGING_TASK_ID="$BLOCKED_AGING_TASK_ID" python3 - <<'PY'
+import os
+import sqlite3
+
+db = os.environ["BRIDGE_TASK_DB"]
+task_id = os.environ["BLOCKED_AGING_TASK_ID"]
+with sqlite3.connect(db) as conn:
+    row = conn.execute(
+        "SELECT COUNT(*) FROM tasks WHERE status IN ('queued','claimed','blocked') AND title LIKE ?",
+        (f"[blocked-escalation] task #{task_id} %",),
+    ).fetchone()
+    print(row[0])
+PY
+)"
+run_blocked_aging_step >/dev/null
+BLOCKED_REMINDER_COUNT_AFTER="$(BRIDGE_TASK_DB="$BRIDGE_TASK_DB" BLOCKED_AGING_TASK_ID="$BLOCKED_AGING_TASK_ID" python3 - <<'PY'
+import os
+import sqlite3
+
+db = os.environ["BRIDGE_TASK_DB"]
+task_id = os.environ["BLOCKED_AGING_TASK_ID"]
+with sqlite3.connect(db) as conn:
+    row = conn.execute(
+        "SELECT COUNT(*) FROM tasks WHERE status IN ('queued','claimed','blocked') AND title LIKE ?",
+        (f"[blocked-aging] task #{task_id} %",),
+    ).fetchone()
+    print(row[0])
+PY
+)"
+BLOCKED_ESCALATION_COUNT_AFTER="$(BRIDGE_TASK_DB="$BRIDGE_TASK_DB" BLOCKED_AGING_TASK_ID="$BLOCKED_AGING_TASK_ID" python3 - <<'PY'
+import os
+import sqlite3
+
+db = os.environ["BRIDGE_TASK_DB"]
+task_id = os.environ["BLOCKED_AGING_TASK_ID"]
+with sqlite3.connect(db) as conn:
+    row = conn.execute(
+        "SELECT COUNT(*) FROM tasks WHERE status IN ('queued','claimed','blocked') AND title LIKE ?",
+        (f"[blocked-escalation] task #{task_id} %",),
+    ).fetchone()
+    print(row[0])
+PY
+)"
+[[ "$BLOCKED_REMINDER_COUNT_AFTER" == "$BLOCKED_REMINDER_COUNT_BEFORE" ]] || die "blocked reminder should dedupe"
+[[ "$BLOCKED_ESCALATION_COUNT_AFTER" == "$BLOCKED_ESCALATION_COUNT_BEFORE" ]] || die "blocked escalation should dedupe"
+python3 "$REPO_ROOT/bridge-queue.py" cancel "$BLOCKED_REMINDER_ID" --actor smoke-test --note "blocked aging smoke cleanup" >/dev/null
+python3 "$REPO_ROOT/bridge-queue.py" cancel "$BLOCKED_ESCALATION_ID" --actor smoke-test --note "blocked aging smoke cleanup" >/dev/null
+python3 "$REPO_ROOT/bridge-queue.py" cancel "$BLOCKED_AGING_TASK_ID" --actor smoke-test --note "blocked aging smoke cleanup" >/dev/null
+
 log "claiming and completing queue task"
 SMOKE_AGENT="$SMOKE_AGENT" BRIDGE_TASK_DB="$BRIDGE_TASK_DB" python3 - <<'PY'
 import os
