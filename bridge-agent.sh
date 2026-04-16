@@ -166,6 +166,25 @@ bridge_scaffold_agent_home() {
     bridge_render_template_string "$session_template" "$agent" "$display_name" "$role_text" "$engine" "$session_type" >"$home/SESSION-TYPE.md"
   fi
 
+  if [[ "$session_type" == "static-claude" ]]; then
+    python3 - "$home/SESSION-TYPE.md" <<'PY'
+from pathlib import Path
+import re
+import sys
+
+path = Path(sys.argv[1])
+text = path.read_text(encoding="utf-8")
+updated = re.sub(
+    r"(^- Onboarding State:\s*)([A-Za-z0-9._-]+)",
+    r"\1complete",
+    text,
+    count=1,
+    flags=re.MULTILINE,
+)
+path.write_text(updated, encoding="utf-8")
+PY
+  fi
+
   while IFS= read -r rel; do
     mkdir -p "$home/$rel"
   done < <(cd "$template_root" && find . \
