@@ -432,7 +432,7 @@ def maybe_run_llm_review(shared_root: Path, requested: bool, model: str) -> dict
         "If you find no contradictions, return {\"findings\": []}.\n\n"
         + "\n".join(sections)
     )
-    command = [claude, "-p", "--dangerously-skip-permissions", "--output-format", "text"]
+    command = [claude, "-p", "--no-session-persistence", "--dangerously-skip-permissions", "--output-format", "text"]
     if model:
         command.extend(["--model", model])
     command.append(prompt)

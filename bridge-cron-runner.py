@@ -312,6 +312,7 @@ def run_claude(request: dict[str, Any], prompt: str, timeout: int) -> tuple[list
     command = [
         claude_bin,
         "-p",
+        "--no-session-persistence",
         "--output-format",
         "json",
         "--json-schema",

@@ -127,6 +127,7 @@ CLI_OUTPUT_FILE="$(mktemp /tmp/patch-update-output.XXXXXX)"
 TIMEOUT_BIN="$(timeout_bin)"
 if [[ -n "$TIMEOUT_BIN" ]]; then
   "$TIMEOUT_BIN" 900 "$CLAUDE_BIN" -p \
+    --no-session-persistence \
     --append-system-prompt "$CONTEXT" \
     --dangerously-skip-permissions \
     --model opus \
@@ -135,6 +136,7 @@ if [[ -n "$TIMEOUT_BIN" ]]; then
     2>&1 | tee -a "$LOG_FILE" | tee "$CLI_OUTPUT_FILE"
 else
   "$CLAUDE_BIN" -p \
+    --no-session-persistence \
     --append-system-prompt "$CONTEXT" \
     --dangerously-skip-permissions \
     --model opus \

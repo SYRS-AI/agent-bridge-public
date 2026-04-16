@@ -73,7 +73,7 @@ EOF
 set -euo pipefail
 BRIDGE_HOME="\${BRIDGE_HOME:-\$HOME/.agent-bridge}"
 TASK="\${1:?Usage: run-$NAME.sh \"task\"}"
-claude -p --dangerously-skip-permissions --model "$MODEL" --output-format text "\$TASK"
+claude -p --no-session-persistence --dangerously-skip-permissions --model "$MODEL" --output-format text "\$TASK"
 EOF
     chmod +x "$SCRIPT_DIR/run-$NAME.sh"
     echo "Created: $SCRIPT_DIR/run-$NAME.sh"
