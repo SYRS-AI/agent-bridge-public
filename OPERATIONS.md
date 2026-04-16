@@ -92,6 +92,28 @@ cd ~/.agent-bridge-source
 ./scripts/deploy-live-install.sh --target ~/.agent-bridge --restart-daemon
 ```
 
+## Upstream Meta-Issue Cadence
+
+Meta issues are not one-time triage notes. They are recurring backlog review
+targets.
+
+- Every time you review a meta issue, leave a checkpoint comment on the issue.
+- Agent Bridge records those comments with `bridge-upstream.sh meta-record`.
+- The daemon checks configured meta issues on a daily poll and re-queues a
+  reminder for the admin agent when the last recorded review is older than 7
+  days.
+
+Default target:
+
+- `SYRS-AI/agent-bridge-public#9`
+
+Manual commands:
+
+```bash
+bash bridge-upstream.sh meta-status --target SYRS-AI/agent-bridge-public#9 --days 7
+bash bridge-upstream.sh meta-record --target SYRS-AI/agent-bridge-public#9 --days 7 --summary "No new split issues today; backlog still needs another mining pass."
+```
+
 ## Recommended Collaboration Pattern
 
 1. Start agents
@@ -238,6 +260,8 @@ bash ./scripts/oss-preflight.sh
 
 If a change affects queue semantics, roster loading, session resume, worktree
 handling, cron behavior, or upgrade behavior, include manual verification notes.
+If a change adds or retires an upstream meta backlog, review whether the
+checkpoint cadence or target list should change too.
 
 ## Resume Checklist For Another Agent
 

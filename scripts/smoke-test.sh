@@ -5115,6 +5115,83 @@ bash "$REPO_ROOT/bridge-daemon.sh" sync >/dev/null
 RELEASE_OPEN_ID_AGAIN="$(python3 "$REPO_ROOT/bridge-queue.py" find-open --agent "$SMOKE_AGENT" --title-prefix "[release] Agent Bridge " 2>/dev/null || true)"
 [[ -z "$RELEASE_OPEN_ID_AGAIN" ]] || die "release alert should be deduped for the same tag"
 
+log "tracking upstream meta-issue review checkpoints and weekly reminders"
+FAKE_META_ROOT="$(mktemp -d)"
+FAKE_META_JSON="$FAKE_META_ROOT/meta-issue.json"
+FAKE_META_FRESH_JSON="$FAKE_META_ROOT/meta-issue-fresh.json"
+FAKE_META_SUMMARY="$FAKE_META_ROOT/meta-summary.md"
+cat >"$FAKE_META_JSON" <<'EOF'
+{
+  "number": 9,
+  "title": "Meta: live feature mining backlog",
+  "url": "https://github.com/SYRS-AI/agent-bridge-public/issues/9",
+  "state": "OPEN",
+  "updatedAt": "2026-04-16T04:07:16Z",
+  "comments": [
+    {
+      "body": "<!-- bridge:meta-review -->\n\n## Meta Review Checkpoint\n\n- checked_at: 2026-04-01T09:00:00+00:00\n- reviewer: tester\n- target: SYRS-AI/agent-bridge-public#9\n- cadence_days: 7\n\n### Summary\n\nOld review.\n",
+      "createdAt": "2026-04-01T09:00:00Z",
+      "url": "https://github.com/SYRS-AI/agent-bridge-public/issues/9#issuecomment-old",
+      "author": {"login": "tester"}
+    }
+  ]
+}
+EOF
+cat >"$FAKE_META_FRESH_JSON" <<'EOF'
+{
+  "number": 9,
+  "title": "Meta: live feature mining backlog",
+  "url": "https://github.com/SYRS-AI/agent-bridge-public/issues/9",
+  "state": "OPEN",
+  "updatedAt": "2026-04-16T04:07:16Z",
+  "comments": [
+    {
+      "body": "<!-- bridge:meta-review -->\n\n## Meta Review Checkpoint\n\n- checked_at: 2099-04-15T09:00:00+00:00\n- reviewer: tester\n- target: SYRS-AI/agent-bridge-public#9\n- cadence_days: 7\n\n### Summary\n\nFresh review.\n",
+      "createdAt": "2099-04-15T09:00:00Z",
+      "url": "https://github.com/SYRS-AI/agent-bridge-public/issues/9#issuecomment-new",
+      "author": {"login": "tester"}
+    }
+  ]
+}
+EOF
+META_STATUS_JSON="$("$REPO_ROOT/bridge-upstream.sh" meta-status --target SYRS-AI/agent-bridge-public#9 --days 7 --json --mock-json-file "$FAKE_META_JSON")"
+python3 - "$META_STATUS_JSON" <<'PY'
+import json, sys
+payload = json.loads(sys.argv[1])
+assert payload["target"] == "SYRS-AI/agent-bridge-public#9"
+assert payload["review_due"] is True
+assert payload["last_review_author"] == "tester"
+PY
+cat >"$FAKE_META_SUMMARY" <<'EOF'
+No new split issues today; keep the mining backlog open.
+EOF
+META_COMMENT_DRY_RUN="$("$REPO_ROOT/bridge-upstream.sh" meta-record --target SYRS-AI/agent-bridge-public#9 --days 7 --summary-file "$FAKE_META_SUMMARY" --reviewer smoke --dry-run)"
+assert_contains "$META_COMMENT_DRY_RUN" "<!-- bridge:meta-review -->"
+assert_contains "$META_COMMENT_DRY_RUN" "## Meta Review Checkpoint"
+assert_contains "$META_COMMENT_DRY_RUN" "reviewer: smoke"
+assert_contains "$META_COMMENT_DRY_RUN" "No new split issues today"
+BRIDGE_META_REVIEW_ENABLED=1 \
+BRIDGE_META_REVIEW_INTERVAL_SECONDS=0 \
+BRIDGE_META_REVIEW_TARGETS="SYRS-AI/agent-bridge-public#9" \
+BRIDGE_META_REVIEW_DUE_DAYS=7 \
+BRIDGE_META_REVIEW_MOCK_JSON_FILE="$FAKE_META_JSON" \
+bash "$REPO_ROOT/bridge-daemon.sh" sync >/dev/null
+META_OPEN_ID="$(python3 "$REPO_ROOT/bridge-queue.py" find-open --agent "$SMOKE_AGENT" --title-prefix "[upstream-meta] review SYRS-AI/agent-bridge-public#9" 2>/dev/null || true)"
+[[ "$META_OPEN_ID" =~ ^[0-9]+$ ]] || die "expected meta-review reminder task for $SMOKE_AGENT"
+META_BODY_FILE="$BRIDGE_HOME/shared/upstream-meta-review/SYRS-AI-agent-bridge-public-9.md"
+[[ -f "$META_BODY_FILE" ]] || die "expected meta-review reminder body"
+grep -q 'Meta Issue Review Due' "$META_BODY_FILE" || die "expected meta review heading"
+grep -q 'bridge-upstream.sh meta-record' "$META_BODY_FILE" || die "expected meta-record helper command"
+bash "$REPO_ROOT/bridge-task.sh" done "$META_OPEN_ID" --agent "$SMOKE_AGENT" --note "meta review handled" >/dev/null
+BRIDGE_META_REVIEW_ENABLED=1 \
+BRIDGE_META_REVIEW_INTERVAL_SECONDS=0 \
+BRIDGE_META_REVIEW_TARGETS="SYRS-AI/agent-bridge-public#9" \
+BRIDGE_META_REVIEW_DUE_DAYS=7 \
+BRIDGE_META_REVIEW_MOCK_JSON_FILE="$FAKE_META_FRESH_JSON" \
+bash "$REPO_ROOT/bridge-daemon.sh" sync >/dev/null
+META_OPEN_ID_AGAIN="$(python3 "$REPO_ROOT/bridge-queue.py" find-open --agent "$SMOKE_AGENT" --title-prefix "[upstream-meta] review SYRS-AI/agent-bridge-public#9" 2>/dev/null || true)"
+[[ -z "$META_OPEN_ID_AGAIN" ]] || die "fresh meta review should suppress reminder task"
+
 log "escalating crash-loop reports to the admin role"
 CRASH_ERRFILE="$TMP_ROOT/crash-loop.err"
 cat >"$CRASH_ERRFILE" <<'EOF'

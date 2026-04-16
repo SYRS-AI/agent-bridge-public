@@ -262,6 +262,10 @@ bridge_release_poll_state_file() {
   printf '%s/release-check.env' "$BRIDGE_STATE_DIR"
 }
 
+bridge_meta_review_poll_state_file() {
+  printf '%s/meta-review-check.env' "$BRIDGE_STATE_DIR"
+}
+
 bridge_release_due() {
   local interval="${BRIDGE_RELEASE_CHECK_INTERVAL_SECONDS:-86400}"
   local file=""
@@ -295,6 +299,42 @@ bridge_note_release_poll() {
   cat >"$file" <<EOF
 RELEASE_UPDATED_TS=$now
 RELEASE_NEXT_TS=$next_ts
+EOF
+}
+
+bridge_meta_review_due() {
+  local interval="${BRIDGE_META_REVIEW_INTERVAL_SECONDS:-86400}"
+  local file=""
+  local now=0
+  local next_ts=0
+
+  [[ "$interval" =~ ^[0-9]+$ ]] || interval=86400
+  (( interval > 0 )) || return 0
+  file="$(bridge_meta_review_poll_state_file)"
+  [[ -f "$file" ]] || return 0
+  # shellcheck source=/dev/null
+  source "$file"
+  [[ "${META_REVIEW_NEXT_TS:-0}" =~ ^[0-9]+$ ]] || return 0
+  now="$(date +%s)"
+  next_ts="${META_REVIEW_NEXT_TS:-0}"
+  (( now >= next_ts ))
+}
+
+bridge_note_meta_review_poll() {
+  local interval="${BRIDGE_META_REVIEW_INTERVAL_SECONDS:-86400}"
+  local file=""
+  local now=0
+  local next_ts=0
+
+  [[ "$interval" =~ ^[0-9]+$ ]] || interval=86400
+  (( interval > 0 )) || interval=86400
+  file="$(bridge_meta_review_poll_state_file)"
+  mkdir -p "$(dirname "$file")"
+  now="$(date +%s)"
+  next_ts=$(( now + interval ))
+  cat >"$file" <<EOF
+META_REVIEW_UPDATED_TS=$now
+META_REVIEW_NEXT_TS=$next_ts
 EOF
 }
 
@@ -403,6 +443,161 @@ with body_file.open("w", encoding="utf-8") as fh:
     else:
         fh.write("_No release notes were published in the GitHub release body._\n")
 PY
+}
+
+bridge_meta_review_body_file() {
+  local target="$1"
+  local safe_target=""
+
+  safe_target="$(printf '%s' "$target" | sed 's/[^[:alnum:]._-]/-/g')"
+  [[ -n "$safe_target" ]] || safe_target="meta-review"
+  printf '%s/upstream-meta-review/%s.md' "$BRIDGE_SHARED_DIR" "$safe_target"
+}
+
+bridge_write_meta_review_alert_body() {
+  local body_file="$1"
+  local report_json="$2"
+
+  python3 - "$body_file" "$report_json" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+body_file = Path(sys.argv[1])
+report = json.loads(sys.argv[2])
+
+target = str(report.get("target") or "-")
+title = str(report.get("title") or "-")
+url = str(report.get("url") or "-")
+state = str(report.get("state") or "-")
+issue_updated_at = str(report.get("issue_updated_at") or "-")
+last_review_at = str(report.get("last_review_at") or "-")
+last_review_url = str(report.get("last_review_url") or "-")
+last_review_author = str(report.get("last_review_author") or "-")
+days_since_review = report.get("days_since_review")
+due_after_days = report.get("due_after_days")
+changed_since_review = bool(report.get("changed_since_review"))
+
+body_file.parent.mkdir(parents=True, exist_ok=True)
+with body_file.open("w", encoding="utf-8") as fh:
+    fh.write("# Meta Issue Review Due\n\n")
+    fh.write(f"- target: {target}\n")
+    fh.write(f"- title: {title}\n")
+    fh.write(f"- state: {state}\n")
+    fh.write(f"- url: {url}\n")
+    fh.write(f"- issue_updated_at: {issue_updated_at}\n")
+    fh.write(f"- last_review_at: {last_review_at}\n")
+    fh.write(f"- last_review_author: {last_review_author}\n")
+    fh.write(f"- last_review_url: {last_review_url}\n")
+    fh.write(f"- due_after_days: {due_after_days}\n")
+    fh.write(f"- days_since_review: {days_since_review if days_since_review is not None else '-'}\n")
+    fh.write(f"- changed_since_review: {'yes' if changed_since_review else 'no'}\n")
+    fh.write("\n## Action\n\n")
+    fh.write("1. Open the meta issue and read the latest comments.\n")
+    fh.write("2. Compare the remaining backlog against current upstream issues and shipped slices.\n")
+    fh.write("3. If the backlog moved, split concrete follow-up issues first.\n")
+    fh.write("4. Leave a new checkpoint comment on the meta issue after the review.\n")
+    fh.write("\n## Comment Recording Contract\n\n")
+    fh.write("Use the bridge helper so the next daemon pass can detect the recorded review:\n\n")
+    fh.write("```bash\n")
+    fh.write(f"bash bridge-upstream.sh meta-record --target '{target}' --days '{due_after_days}' --summary \"<review summary>\"\n")
+    fh.write("```\n")
+    fh.write("\nEvery meta-issue review must leave a checkpoint comment. The daemon re-queues this reminder after the cadence window passes again.\n")
+PY
+}
+
+bridge_meta_review_targets() {
+  python3 - "${BRIDGE_META_REVIEW_TARGETS:-}" <<'PY'
+import re
+import sys
+
+raw = sys.argv[1]
+for item in re.split(r"[\s,]+", raw.strip()):
+    if item:
+        print(item)
+PY
+}
+
+process_meta_review_monitor() {
+  local admin_agent="${BRIDGE_ADMIN_AGENT_ID:-}"
+  local due_days="${BRIDGE_META_REVIEW_DUE_DAYS:-7}"
+  local target=""
+  local report_json=""
+  local review_due=""
+  local state=""
+  local title=""
+  local task_title=""
+  local body_file=""
+  local existing_id=""
+  local create_output=""
+  local changed=1
+  local args=()
+
+  [[ "${BRIDGE_META_REVIEW_ENABLED:-1}" == "1" ]] || return 1
+  [[ -n "$admin_agent" ]] || return 1
+  bridge_agent_exists "$admin_agent" || return 1
+  bridge_meta_review_due || return 1
+  [[ "$due_days" =~ ^[0-9]+([.][0-9]+)?$ ]] || due_days=7
+
+  if [[ -n "${BRIDGE_META_REVIEW_MOCK_JSON_FILE:-}" ]]; then
+    args+=(--mock-json-file "$BRIDGE_META_REVIEW_MOCK_JSON_FILE")
+  fi
+
+  bridge_note_meta_review_poll
+  while IFS= read -r target; do
+    [[ -n "$target" ]] || continue
+    if ! report_json="$("$BRIDGE_BASH_BIN" "$SCRIPT_DIR/bridge-upstream.sh" meta-status --target "$target" --days "$due_days" --json "${args[@]}" 2>/dev/null)"; then
+      continue
+    fi
+
+    read -r review_due state title < <(python3 - "$report_json" <<'PY'
+import json
+import sys
+
+payload = json.loads(sys.argv[1])
+print(
+    "{}\t{}\t{}".format(
+        "1" if payload.get("review_due") else "0",
+        str(payload.get("state") or ""),
+        str(payload.get("title") or "").replace("\t", " ").replace("\n", " ").strip(),
+    )
+)
+PY
+)
+
+    [[ "$state" == "OPEN" ]] || continue
+    [[ "$review_due" == "1" ]] || continue
+
+    task_title="[upstream-meta] review ${target}"
+    body_file="$(bridge_meta_review_body_file "$target")"
+    if [[ "$(bridge_path_is_within_root "$body_file" "$BRIDGE_SHARED_DIR")" != "1" ]]; then
+      daemon_info "skipping meta review reminder because body_file escaped shared dir: body_file=$body_file shared=$BRIDGE_SHARED_DIR"
+      continue
+    fi
+    bridge_write_meta_review_alert_body "$body_file" "$report_json"
+
+    existing_id="$(bridge_queue_cli find-open --agent "$admin_agent" --title-prefix "$task_title" 2>/dev/null || true)"
+    if [[ "$existing_id" =~ ^[0-9]+$ ]]; then
+      if bridge_queue_cli update "$existing_id" --actor daemon --title "$task_title" --priority normal --body-file "$body_file" >/dev/null 2>&1; then
+        changed=0
+      fi
+    else
+      create_output="$(bridge_queue_cli create --to "$admin_agent" --from daemon --priority normal --title "$task_title" --body-file "$body_file" 2>/dev/null || true)"
+      if [[ "$create_output" == task_id=* ]]; then
+        changed=0
+      fi
+    fi
+
+    if [[ "$changed" == "0" ]]; then
+      bridge_audit_log daemon meta_review_due "$admin_agent" \
+        --detail target="$target" \
+        --detail title="$title" \
+        --detail due_after_days="$due_days"
+      daemon_info "meta review reminder queued for ${admin_agent}: ${target}"
+    fi
+  done < <(bridge_meta_review_targets)
+
+  return "$changed"
 }
 
 process_usage_monitor() {
@@ -2971,6 +3166,9 @@ cmd_sync_cycle() {
     changed=0
   fi
   if process_release_monitor; then
+    changed=0
+  fi
+  if process_meta_review_monitor; then
     changed=0
   fi
   if [[ -n "$summary_output" ]] && process_on_demand_agents "$summary_output"; then
