@@ -298,6 +298,56 @@ RELEASE_NEXT_TS=$next_ts
 EOF
 }
 
+bridge_daily_backup_state_file() {
+  printf '%s' "${BRIDGE_DAILY_BACKUP_STATE_FILE:-$BRIDGE_STATE_DIR/daily-backup/state.env}"
+}
+
+bridge_daily_backup_due() {
+  local enabled="${BRIDGE_DAILY_BACKUP_ENABLED:-1}"
+  local hour="${BRIDGE_DAILY_BACKUP_HOUR:-4}"
+  local file=""
+  local today=""
+  local current_minutes=0
+  local scheduled_minutes=0
+
+  [[ "$enabled" == "1" ]] || return 1
+  [[ "$hour" =~ ^[0-9]+$ ]] || hour=4
+  (( hour >= 0 && hour <= 23 )) || hour=4
+
+  file="$(bridge_daily_backup_state_file)"
+  today="$(date +%F)"
+  if [[ -f "$file" ]]; then
+    # shellcheck source=/dev/null
+    source "$file"
+    if [[ "${DAILY_BACKUP_LAST_SUCCESS_DATE:-}" == "$today" ]]; then
+      return 1
+    fi
+  fi
+
+  current_minutes=$(( 10#$(date +%H) * 60 + 10#$(date +%M) ))
+  scheduled_minutes=$(( 10#$hour * 60 ))
+  (( current_minutes >= scheduled_minutes ))
+}
+
+bridge_note_daily_backup_success() {
+  local archive_path="$1"
+  local pruned_count="$2"
+  local file=""
+  local now=0
+  local today=""
+
+  file="$(bridge_daily_backup_state_file)"
+  mkdir -p "$(dirname "$file")"
+  now="$(date +%s)"
+  today="$(date +%F)"
+  cat >"$file" <<EOF
+DAILY_BACKUP_LAST_SUCCESS_TS=$now
+DAILY_BACKUP_LAST_SUCCESS_DATE=$today
+DAILY_BACKUP_LAST_ARCHIVE=$(printf '%q' "$archive_path")
+DAILY_BACKUP_LAST_PRUNED_COUNT=$pruned_count
+EOF
+}
+
 bridge_release_paths_valid() {
   local shared_ok="0"
   local state_ok="0"
@@ -580,6 +630,44 @@ PY
   fi
 
   return 1
+}
+
+process_daily_backup() {
+  local backup_json=""
+  local created=""
+  local archive_path=""
+  local pruned_count=""
+  local retain_days="${BRIDGE_DAILY_BACKUP_RETAIN_DAYS:-30}"
+
+  bridge_daily_backup_due || return 1
+  [[ "$retain_days" =~ ^[0-9]+$ ]] || retain_days=30
+  (( retain_days > 0 )) || retain_days=30
+
+  if ! backup_json="$(python3 "$SCRIPT_DIR/bridge-upgrade.py" daily-backup-live --target-root "$BRIDGE_HOME" --backup-dir "$BRIDGE_DAILY_BACKUP_DIR" --retain-days "$retain_days" 2>/dev/null)"; then
+    return 1
+  fi
+
+  read -r created archive_path pruned_count < <(python3 - "$backup_json" <<'PY'
+import json
+import sys
+
+payload = json.loads(sys.argv[1])
+created = "1" if payload.get("created") else "0"
+archive_path = str(payload.get("archive_path") or "")
+pruned = payload.get("pruned") or []
+print(created, archive_path, len(pruned))
+PY
+)
+
+  [[ "$created" == "1" ]] || return 1
+  bridge_note_daily_backup_success "$archive_path" "$pruned_count"
+  bridge_audit_log daemon daily_backup_created daemon \
+    --detail archive_path="$archive_path" \
+    --detail backup_dir="$BRIDGE_DAILY_BACKUP_DIR" \
+    --detail retain_days="$retain_days" \
+    --detail pruned_count="$pruned_count"
+  daemon_info "daily live backup created: $archive_path (pruned=$pruned_count)"
+  return 0
 }
 
 bridge_stall_retry_seconds() {
@@ -2971,6 +3059,9 @@ cmd_sync_cycle() {
     changed=0
   fi
   if process_usage_monitor; then
+    changed=0
+  fi
+  if process_daily_backup; then
     changed=0
   fi
   if process_release_monitor; then

@@ -3804,6 +3804,88 @@ UPGRADE_ANALYZE_JSON="$("$REPO_ROOT/agent-bridge" upgrade analyze --target "$BRI
 assert_contains "$UPGRADE_ANALYZE_JSON" "\"mode\": \"upgrade-analyze\""
 assert_contains "$UPGRADE_ANALYZE_JSON" "\"base_ref\""
 
+log "daily live backup archives bridge home and daemon runs it once per day"
+DAILY_BACKUP_HOME="$TMP_ROOT/daily-backup-home"
+mkdir -p \
+  "$DAILY_BACKUP_HOME/logs" \
+  "$DAILY_BACKUP_HOME/backups/daily" \
+  "$DAILY_BACKUP_HOME/backups/upgrade-keep" \
+  "$DAILY_BACKUP_HOME/agents/demo/__pycache__" \
+  "$DAILY_BACKUP_HOME/state" \
+  "$DAILY_BACKUP_HOME/shared"
+printf 'keep roster\n' >"$DAILY_BACKUP_HOME/agent-roster.local.sh"
+printf 'skip log\n' >"$DAILY_BACKUP_HOME/logs/daemon.log"
+printf 'keep state\n' >"$DAILY_BACKUP_HOME/state/runtime.txt"
+printf 'keep shared\n' >"$DAILY_BACKUP_HOME/shared/note.md"
+printf 'keep backup note\n' >"$DAILY_BACKUP_HOME/backups/upgrade-keep/note.txt"
+printf 'skip pycache\n' >"$DAILY_BACKUP_HOME/agents/demo/__pycache__/cache.pyc"
+printf 'keep agent file\n' >"$DAILY_BACKUP_HOME/agents/demo/CLAUDE.md"
+printf 'old backup\n' >"$DAILY_BACKUP_HOME/backups/daily/agent-bridge-2000-01-01.tgz"
+DAILY_BACKUP_JSON="$(python3 "$REPO_ROOT/bridge-upgrade.py" daily-backup-live --target-root "$DAILY_BACKUP_HOME" --backup-dir "$DAILY_BACKUP_HOME/backups/daily" --retain-days 30)"
+assert_contains "$DAILY_BACKUP_JSON" "\"mode\": \"daily-backup-live\""
+assert_contains "$DAILY_BACKUP_JSON" "\"created\": true"
+assert_not_contains "$(ls "$DAILY_BACKUP_HOME/backups/daily")" "agent-bridge-2000-01-01.tgz"
+DAILY_BACKUP_ARCHIVE="$(python3 - <<'PY' "$DAILY_BACKUP_JSON"
+import json, sys
+print(json.loads(sys.argv[1])["archive_path"])
+PY
+)"
+[[ -f "$DAILY_BACKUP_ARCHIVE" ]] || die "daily backup archive was not created"
+DAILY_BACKUP_MEMBERS="$(tar -tzf "$DAILY_BACKUP_ARCHIVE")"
+assert_contains "$DAILY_BACKUP_MEMBERS" "agent-roster.local.sh"
+assert_contains "$DAILY_BACKUP_MEMBERS" "agents/demo/CLAUDE.md"
+assert_contains "$DAILY_BACKUP_MEMBERS" "backups/upgrade-keep/note.txt"
+assert_not_contains "$DAILY_BACKUP_MEMBERS" "logs/daemon.log"
+assert_not_contains "$DAILY_BACKUP_MEMBERS" "backups/daily/"
+assert_not_contains "$DAILY_BACKUP_MEMBERS" "__pycache__"
+
+DAEMON_BACKUP_HOME="$TMP_ROOT/daemon-daily-backup-home"
+mkdir -p \
+  "$DAEMON_BACKUP_HOME/state" \
+  "$DAEMON_BACKUP_HOME/shared" \
+  "$DAEMON_BACKUP_HOME/logs" \
+  "$DAEMON_BACKUP_HOME/agents/demo"
+printf 'daemon keep\n' >"$DAEMON_BACKUP_HOME/agents/demo/CLAUDE.md"
+DAEMON_DAILY_OUTPUT="$(
+  BRIDGE_HOME="$DAEMON_BACKUP_HOME" \
+  BRIDGE_STATE_DIR="$DAEMON_BACKUP_HOME/state" \
+  BRIDGE_LOG_DIR="$DAEMON_BACKUP_HOME/logs" \
+  BRIDGE_SHARED_DIR="$DAEMON_BACKUP_HOME/shared" \
+  BRIDGE_TASK_DB="$DAEMON_BACKUP_HOME/state/tasks.db" \
+  BRIDGE_ACTIVE_AGENT_DIR="$DAEMON_BACKUP_HOME/state/agents" \
+  BRIDGE_HISTORY_DIR="$DAEMON_BACKUP_HOME/state/history" \
+  BRIDGE_FAST_ROSTER_LOAD=1 \
+  BRIDGE_DAILY_BACKUP_ENABLED=1 \
+  BRIDGE_DAILY_BACKUP_HOUR="$(date +%H)" \
+  "$BASH4_BIN" -lc '
+    set -euo pipefail
+    tmp_daemon="'"$TMP_ROOT"'/daemon-daily-backup.sh"
+    {
+      printf "%s\n" "set -euo pipefail"
+      printf "SCRIPT_DIR=%q\n" "'"$REPO_ROOT"'"
+      printf "%s\n" "source \"\$SCRIPT_DIR/bridge-lib.sh\""
+      printf "%s\n" "bridge_load_roster"
+      printf "%s\n" "daemon_info() { :; }"
+      printf "%s\n" "bridge_audit_log() { :; }"
+      sed -n '"'"'/^bridge_daily_backup_state_file()/,/^bridge_stall_retry_seconds()/p'"'"' "'"$REPO_ROOT"'/bridge-daemon.sh" | sed '"'"'$d'"'"'
+    } >"$tmp_daemon"
+    source "$tmp_daemon"
+    process_daily_backup >/dev/null
+    archive="$(find "'"$DAEMON_BACKUP_HOME"'/backups/daily" -maxdepth 1 -name "agent-bridge-*.tgz" | head -n 1)"
+    [[ -n "$archive" && -f "$archive" ]] || exit 1
+    before="$(stat -f "%m" "$archive" 2>/dev/null || stat -c "%Y" "$archive")"
+    sleep 1
+    process_daily_backup >/dev/null || true
+    after="$(stat -f "%m" "$archive" 2>/dev/null || stat -c "%Y" "$archive")"
+    printf "ARCHIVE=%s\nBEFORE=%s\nAFTER=%s\n" "$archive" "$before" "$after"
+  '
+)"
+DAEMON_DAILY_ARCHIVE="$(printf '%s\n' "$DAEMON_DAILY_OUTPUT" | sed -n 's/^ARCHIVE=//p' | tail -n 1)"
+DAEMON_DAILY_MTIME_BEFORE="$(printf '%s\n' "$DAEMON_DAILY_OUTPUT" | sed -n 's/^BEFORE=//p' | tail -n 1)"
+DAEMON_DAILY_MTIME_AFTER="$(printf '%s\n' "$DAEMON_DAILY_OUTPUT" | sed -n 's/^AFTER=//p' | tail -n 1)"
+[[ -n "$DAEMON_DAILY_ARCHIVE" && -f "$DAEMON_DAILY_ARCHIVE" ]] || die "daemon daily backup helper did not create an archive"
+[[ "$DAEMON_DAILY_MTIME_BEFORE" == "$DAEMON_DAILY_MTIME_AFTER" ]] || die "daemon should not overwrite the same day's daily backup twice"
+
 log "upgrade restarts active static loop agents so bridge-run reloads fresh code"
 UPGRADE_RESTART_PANE_BEFORE="$(tmux list-panes -t "$(tmux_session_target "$ALWAYS_ON_SESSION")" -F '#{pane_pid}' 2>/dev/null | head -n 1)"
 [[ -n "$UPGRADE_RESTART_PANE_BEFORE" ]] || die "expected active always-on pane before upgrade restart"

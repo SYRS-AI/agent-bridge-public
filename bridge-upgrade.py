@@ -10,9 +10,11 @@ import os
 import re
 import shutil
 import subprocess
+import tarfile
 from dataclasses import asdict, dataclass
-from datetime import datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
+from stat import S_ISFIFO, S_ISSOCK
 import tempfile
 from typing import Any
 
@@ -446,6 +448,111 @@ def copy_live_backup(target_root: Path, backup_root: Path, entries: list[dict[st
             shutil.copy2(child, dst, follow_symlinks=False)
 
 
+def daily_backup_archive_name(day: date) -> str:
+    return f"agent-bridge-{day.isoformat()}.tgz"
+
+
+def parse_daily_backup_archive_date(name: str) -> date | None:
+    match = re.fullmatch(r"agent-bridge-(\d{4}-\d{2}-\d{2})\.tgz", name)
+    if not match:
+        return None
+    try:
+        return date.fromisoformat(match.group(1))
+    except ValueError:
+        return None
+
+
+def resolve_daily_backup_excluded_roots(target_root: Path, backup_dir: Path) -> list[tuple[str, ...]]:
+    excluded: list[tuple[str, ...]] = [("logs",)]
+    try:
+        relative_backup_dir = backup_dir.resolve().relative_to(target_root.resolve())
+    except ValueError:
+        return excluded
+    if relative_backup_dir.parts:
+        excluded.append(relative_backup_dir.parts)
+    return excluded
+
+
+def should_skip_daily_backup_relpath(relpath: Path, excluded_roots: list[tuple[str, ...]]) -> bool:
+    parts = relpath.parts
+    if not parts:
+        return False
+    if "__pycache__" in parts:
+        return True
+    for root_parts in excluded_roots:
+        if len(parts) >= len(root_parts) and parts[: len(root_parts)] == root_parts:
+            return True
+    return False
+
+
+def iter_daily_backup_members(target_root: Path, backup_dir: Path) -> list[tuple[Path, str]]:
+    excluded_roots = resolve_daily_backup_excluded_roots(target_root, backup_dir)
+    members: list[tuple[Path, str]] = []
+
+    for root, dirnames, filenames in os.walk(target_root, topdown=True, followlinks=False):
+        root_path = Path(root)
+        rel_root = root_path.relative_to(target_root)
+
+        kept_dirs: list[str] = []
+        for dirname in sorted(dirnames):
+            rel_dir = rel_root / dirname if rel_root.parts else Path(dirname)
+            if should_skip_daily_backup_relpath(rel_dir, excluded_roots):
+                continue
+            kept_dirs.append(dirname)
+            members.append((root_path / dirname, rel_dir.as_posix()))
+        dirnames[:] = kept_dirs
+
+        for filename in sorted(filenames):
+            rel_file = rel_root / filename if rel_root.parts else Path(filename)
+            if should_skip_daily_backup_relpath(rel_file, excluded_roots):
+                continue
+            members.append((root_path / filename, rel_file.as_posix()))
+
+    return members
+
+
+def create_daily_backup_archive(target_root: Path, backup_dir: Path, today: date) -> Path:
+    backup_dir.mkdir(parents=True, exist_ok=True)
+    archive_path = backup_dir / daily_backup_archive_name(today)
+    tmp_path = backup_dir / f"{archive_path.name}.tmp.{os.getpid()}"
+    tmp_path.unlink(missing_ok=True)
+
+    with tarfile.open(tmp_path, "w:gz", format=tarfile.PAX_FORMAT, dereference=False) as archive:
+        for src_path, arcname in iter_daily_backup_members(target_root, backup_dir):
+            try:
+                stat_result = os.lstat(src_path)
+            except FileNotFoundError:
+                continue
+            if S_ISSOCK(stat_result.st_mode) or S_ISFIFO(stat_result.st_mode):
+                continue
+            archive.add(src_path, arcname=arcname, recursive=False)
+
+    tmp_path.replace(archive_path)
+    return archive_path
+
+
+def prune_daily_backup_archives(backup_dir: Path, retain_days: int, today: date) -> list[str]:
+    if retain_days < 1:
+        retain_days = 1
+    if not backup_dir.exists():
+        return []
+
+    cutoff = today - timedelta(days=retain_days - 1)
+    pruned: list[str] = []
+    for path in sorted(backup_dir.iterdir()):
+        if not path.is_file():
+            continue
+        parsed = parse_daily_backup_archive_date(path.name)
+        if parsed is not None and parsed < cutoff:
+            path.unlink(missing_ok=True)
+            pruned.append(str(path))
+            continue
+        if path.name.startswith("agent-bridge-") and ".tmp." in path.name:
+            path.unlink(missing_ok=True)
+            pruned.append(str(path))
+    return pruned
+
+
 def remove_existing_target_children(target_root: Path) -> int:
     removed = 0
     for child in sorted(target_root.iterdir()):
@@ -803,6 +910,30 @@ def cmd_backup_live(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_daily_backup_live(args: argparse.Namespace) -> int:
+    target_root = Path(args.target_root).expanduser()
+    backup_dir = Path(args.backup_dir).expanduser()
+    retain_days = max(1, int(args.retain_days))
+    today = date.today()
+    payload = {
+        "mode": "daily-backup-live",
+        "target_root": str(target_root),
+        "backup_dir": str(backup_dir),
+        "archive_path": str(backup_dir / daily_backup_archive_name(today)),
+        "retain_days": retain_days,
+        "exists": target_root.exists(),
+        "created": False,
+        "pruned": [],
+    }
+    if target_root.exists() and not args.dry_run:
+        archive_path = create_daily_backup_archive(target_root, backup_dir, today)
+        payload["archive_path"] = str(archive_path)
+        payload["created"] = True
+        payload["pruned"] = prune_daily_backup_archives(backup_dir, retain_days, today)
+    print(json.dumps(payload, ensure_ascii=False, indent=2))
+    return 0
+
+
 def cmd_apply_live(args: argparse.Namespace) -> int:
     source_root = Path(args.source_root).expanduser()
     target_root = Path(args.target_root).expanduser()
@@ -870,6 +1001,13 @@ def build_parser() -> argparse.ArgumentParser:
     backup.add_argument("--migration-json", default="")
     backup.add_argument("--dry-run", action="store_true")
     backup.set_defaults(handler=cmd_backup_live)
+
+    daily_backup = subparsers.add_parser("daily-backup-live")
+    daily_backup.add_argument("--target-root", required=True)
+    daily_backup.add_argument("--backup-dir", required=True)
+    daily_backup.add_argument("--retain-days", type=int, default=30)
+    daily_backup.add_argument("--dry-run", action="store_true")
+    daily_backup.set_defaults(handler=cmd_daily_backup_live)
 
     apply_live_parser = subparsers.add_parser("apply-live")
     apply_live_parser.add_argument("--source-root", required=True)
