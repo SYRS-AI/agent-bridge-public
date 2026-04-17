@@ -63,3 +63,5 @@ agb setup teams <agent> --app-id ... --app-password ... --tenant-id ... --allow-
 ## Current Scope
 
 This is the Phase 1 channel implementation: webhook receive, access gate, Claude channel notification, reply, and local message fetch. Multi-tenant user-to-agent routing is intentionally left to the Agent Bridge relay layer so one Teams bot can map many users to many timeout agents without mixing conversation state.
+
+If `BRIDGE_PROMPT_GUARD_ENABLED=1` is set in the agent runtime, Teams inbound text is scanned before it reaches Claude and outbound `reply` text is sanitized before send.

@@ -188,12 +188,22 @@ import sys
 print(json.loads(sys.argv[1])["paths"]["triage_markdown"])
 PY
 )"
+    route_blocked="$(python3 - "$triage_json" <<'PY'
+import json
+import sys
+print("1" if json.loads(sys.argv[1]).get("route_blocked") else "0")
+PY
+)"
 
     if [[ $route -eq 1 && $dry_run -eq 0 ]]; then
-      bridge_queue_source_shell create --to "$owner" --title "[intake] $summary" --from bridge --priority "$importance" --body-file "$triage_markdown_path" --format shell
-      run_python attach-task --shared-root "$shared_root" --capture "$capture_id" --task-id "$TASK_ID" --task-title "$TASK_TITLE" --task-priority "$TASK_PRIORITY" >/dev/null
-      bridge_dispatch_notification "$owner" "$TASK_TITLE" "agb inbox ${owner}" "$TASK_ID" "$importance" >/dev/null 2>&1 || true
-      triage_json="$(run_python show --shared-root "$shared_root" --capture "$capture_id")"
+      if [[ "$route_blocked" == "1" ]]; then
+        echo "[intake] prompt guard blocked auto-route for capture $capture_id" >&2
+      else
+        bridge_queue_source_shell create --to "$owner" --title "[intake] $summary" --from bridge --priority "$importance" --body-file "$triage_markdown_path" --format shell
+        run_python attach-task --shared-root "$shared_root" --capture "$capture_id" --task-id "$TASK_ID" --task-title "$TASK_TITLE" --task-priority "$TASK_PRIORITY" >/dev/null
+        bridge_dispatch_notification "$owner" "$TASK_TITLE" "agb inbox ${owner}" "$TASK_ID" "$importance" >/dev/null 2>&1 || true
+        triage_json="$(run_python show --shared-root "$shared_root" --capture "$capture_id")"
+      fi
     fi
 
     if [[ $json_mode -eq 1 ]]; then

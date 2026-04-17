@@ -89,6 +89,24 @@ bridge_claude_prompt_hook_status() {
   fi
 }
 
+bridge_claude_prompt_guard_hook_status() {
+  local workdir="$1"
+  if [[ "$(bridge_claude_settings_mode "$workdir")" == "shared" ]]; then
+    bridge_hooks_python status-prompt-guard-hook --settings-file "$(bridge_hook_shared_settings_base_file)" --bridge-home "$BRIDGE_HOME" --python-bin "$(command -v python3)"
+  else
+    bridge_hooks_python status-prompt-guard-hook --workdir "$workdir" --bridge-home "$BRIDGE_HOME" --python-bin "$(command -v python3)"
+  fi
+}
+
+bridge_claude_tool_policy_hooks_status() {
+  local workdir="$1"
+  if [[ "$(bridge_claude_settings_mode "$workdir")" == "shared" ]]; then
+    bridge_hooks_python status-tool-policy-hooks --settings-file "$(bridge_hook_shared_settings_base_file)" --bridge-home "$BRIDGE_HOME" --python-bin "$(command -v python3)"
+  else
+    bridge_hooks_python status-tool-policy-hooks --workdir "$workdir" --bridge-home "$BRIDGE_HOME" --python-bin "$(command -v python3)"
+  fi
+}
+
 bridge_ensure_claude_stop_hook() {
   local workdir="$1"
   if [[ "$(bridge_claude_settings_mode "$workdir")" == "shared" ]]; then
@@ -116,6 +134,26 @@ bridge_ensure_claude_prompt_hook() {
     bridge_link_claude_settings_to_shared "$workdir"
   else
     bridge_hooks_python ensure-prompt-hook --workdir "$workdir" --bridge-home "$BRIDGE_HOME" --bash-bin "$BRIDGE_BASH_BIN" --python-bin "$(command -v python3)"
+  fi
+}
+
+bridge_ensure_claude_prompt_guard_hook() {
+  local workdir="$1"
+  if [[ "$(bridge_claude_settings_mode "$workdir")" == "shared" ]]; then
+    bridge_hooks_python ensure-prompt-guard-hook --settings-file "$(bridge_hook_shared_settings_base_file)" --bridge-home "$BRIDGE_HOME" --python-bin python3 >/dev/null
+    bridge_link_claude_settings_to_shared "$workdir"
+  else
+    bridge_hooks_python ensure-prompt-guard-hook --workdir "$workdir" --bridge-home "$BRIDGE_HOME" --python-bin "$(command -v python3)"
+  fi
+}
+
+bridge_ensure_claude_tool_policy_hooks() {
+  local workdir="$1"
+  if [[ "$(bridge_claude_settings_mode "$workdir")" == "shared" ]]; then
+    bridge_hooks_python ensure-tool-policy-hooks --settings-file "$(bridge_hook_shared_settings_base_file)" --bridge-home "$BRIDGE_HOME" --python-bin python3 >/dev/null
+    bridge_link_claude_settings_to_shared "$workdir"
+  else
+    bridge_hooks_python ensure-tool-policy-hooks --workdir "$workdir" --bridge-home "$BRIDGE_HOME" --python-bin "$(command -v python3)"
   fi
 }
 

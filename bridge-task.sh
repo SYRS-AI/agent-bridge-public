@@ -138,6 +138,12 @@ cmd_create() {
   local body_was_set=0
   local body_file=""
   local allow_empty_body=0
+  local guard_threshold=""
+  local guard_shell=""
+  local severity=""
+  local threshold=""
+  local blocked=""
+  local reasons=""
   local TASK_ID=""
   local TASK_ASSIGNED_TO=""
   local TASK_PRIORITY=""
@@ -198,6 +204,28 @@ cmd_create() {
   explicit_actor="$actor"
   actor="$(infer_actor_if_possible "$actor")"
   emit_inferred_actor_hint "$explicit_actor" "$actor"
+
+  if bridge_agent_prompt_guard_enabled "$target"; then
+    guard_threshold="$(bridge_agent_prompt_guard_min_block "$target" task_body)"
+    guard_shell=""
+    if [[ "$body_was_set" -eq 1 && -n "$body" ]]; then
+      guard_shell="$(bridge_guard_python scan --agent "$target" --surface task_body --threshold "$guard_threshold" --format shell --text "$body" || true)"
+    elif [[ -n "$body_file" && -f "$body_file" ]]; then
+      guard_shell="$(bridge_guard_python scan --agent "$target" --surface task_body --threshold "$guard_threshold" --format shell --file "$body_file" || true)"
+    fi
+    if [[ -n "$guard_shell" ]]; then
+      # shellcheck disable=SC1091
+      source /dev/stdin <<<"$guard_shell"
+      if [[ "${blocked:-0}" == "1" ]]; then
+        bridge_audit_log guard prompt_guard_blocked "$target" \
+          --detail surface=task_body \
+          --detail severity="${severity:-unknown}" \
+          --detail threshold="${threshold:-$guard_threshold}" \
+          --detail title="$title"
+        bridge_die "Prompt guard blocked task body for '$target' (${severity:-unknown}): ${reasons:-policy match}"
+      fi
+    fi
+  fi
 
   args=(create --to "$target" --title "$title" --from "$actor" --priority "$priority")
   if [[ "$body_was_set" -eq 1 ]]; then

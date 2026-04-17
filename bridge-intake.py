@@ -5,9 +5,12 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 from datetime import datetime
 from pathlib import Path
+
+from bridge_guard_common import analyze_text, prompt_guard_enabled, threshold_for_surface
 
 
 PRIORITIES = ("low", "normal", "high", "urgent")
@@ -101,6 +104,23 @@ def render_triage_markdown(payload: dict[str, object]) -> str:
     lines.extend(
         [
             "",
+            "## Prompt Guard",
+            "",
+        ]
+    )
+    prompt_guard = payload.get("prompt_guard") or {}
+    if prompt_guard:
+        lines.append(f"- Enabled: {'yes' if prompt_guard.get('enabled') else 'no'}")
+        if prompt_guard.get("enabled"):
+            lines.append(f"- Severity: {prompt_guard.get('severity', 'safe')}")
+            lines.append(f"- Blocked: {'yes' if prompt_guard.get('blocked') else 'no'}")
+            if prompt_guard.get("reasons"):
+                lines.append(f"- Reasons: {', '.join(prompt_guard.get('reasons') or [])}")
+    else:
+        lines.append("- Enabled: no")
+    lines.extend(
+        [
+            "",
             "## Human Follow-up Draft",
             "",
             str(payload["followup_draft"]).strip() or "_No human follow-up draft._",
@@ -129,6 +149,21 @@ def cmd_triage(args: argparse.Namespace) -> int:
     capture_path, capture = resolve_capture(shared_root, args.capture)
     extracted_fields = dict(parse_field(item) for item in args.field)
     reply_needed = args.reply_needed == "yes"
+    prompt_guard: dict[str, object] = {"enabled": False}
+    route_blocked = False
+    if prompt_guard_enabled():
+        threshold = threshold_for_surface("intake", "critical")
+        scan = analyze_text(str(capture.get("text") or ""), threshold=threshold, surface="intake", agent=args.owner)
+        prompt_guard = {
+            "enabled": True,
+            "backend": scan.backend,
+            "severity": scan.severity,
+            "threshold": scan.threshold,
+            "blocked": scan.blocked,
+            "reasons": scan.reasons,
+            "categories": scan.categories,
+        }
+        route_blocked = bool(scan.blocked)
     payload = {
         "capture_id": args.capture,
         "triage_created_at": now().isoformat(timespec="seconds"),
@@ -148,6 +183,8 @@ def cmd_triage(args: argparse.Namespace) -> int:
             "title": f"[intake] {args.summary}",
             "priority": args.importance,
         },
+        "prompt_guard": prompt_guard,
+        "route_blocked": route_blocked,
         "paths": {
             "capture": str(capture_path),
             "triage_json": str(triage_json_path(shared_root, args.capture)),

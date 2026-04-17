@@ -17,6 +17,7 @@ import { BotFrameworkAdapter, TurnContext, ActivityTypes } from 'botbuilder'
 import type { ConversationReference, Activity } from 'botbuilder'
 import { createServer } from 'http'
 import { randomUUID } from 'crypto'
+import { spawnSync } from 'child_process'
 import {
   appendFileSync,
   chmodSync,
@@ -54,6 +55,7 @@ type StoredMessage = {
 }
 
 const STATE_DIR = process.env.TEAMS_STATE_DIR ?? join(homedir(), '.claude', 'channels', 'teams')
+const BRIDGE_HOME = process.env.BRIDGE_HOME ?? join(homedir(), '.agent-bridge')
 const ACCESS_FILE = join(STATE_DIR, 'access.json')
 const ENV_FILE = join(STATE_DIR, '.env')
 const REFERENCES_FILE = join(STATE_DIR, 'conversations.json')
@@ -189,6 +191,21 @@ function appendMessage(message: StoredMessage): void {
   appendFileSync(MESSAGES_FILE, JSON.stringify(message) + '\n', { mode: 0o600 })
 }
 
+function runPromptGuard(command: 'scan' | 'sanitize', text: string): Record<string, unknown> | null {
+  const script = join(BRIDGE_HOME, 'bridge-guard.py')
+  const result = spawnSync(
+    'python3',
+    [script, command, '--agent', process.env.BRIDGE_AGENT_ID ?? '', '--surface', command === 'scan' ? 'channel' : 'output', '--format', 'json', text],
+    { encoding: 'utf8' },
+  )
+  if (result.status !== 0 && !result.stdout.trim()) return null
+  try {
+    return JSON.parse(result.stdout)
+  } catch {
+    return null
+  }
+}
+
 function recentMessages(chatId: string, limit: number): StoredMessage[] {
   if (!existsSync(MESSAGES_FILE)) return []
   const lines = readFileSync(MESSAGES_FILE, 'utf8').split('\n').filter(Boolean)
@@ -261,9 +278,15 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
   switch (req.params.name) {
     case 'reply': {
       const chatId = String(args.chat_id ?? '').trim()
-      const text = String(args.text ?? '').trim()
+      let text = String(args.text ?? '').trim()
       if (!chatId) throw new Error('chat_id is required')
       if (!text) throw new Error('text is required')
+      const guarded = runPromptGuard('sanitize', text)
+      if (guarded?.blocked) {
+        text = '[Agent Bridge] outbound reply blocked by prompt guard.'
+      } else if (guarded?.was_modified && typeof guarded.sanitized_text === 'string') {
+        text = guarded.sanitized_text
+      }
       const refs = loadJson<Record<string, ConversationReference>>(REFERENCES_FILE, {})
       const ref = refs[chatId]
       if (!ref) throw new Error(`conversation reference not found for ${chatId}; wait for an inbound Teams message first`)
@@ -304,6 +327,8 @@ async function handleActivity(context: TurnContext): Promise<void> {
   const userIds = idsFor(activity)
   const aad = userIds[0] ?? ''
   const text = compactText(activity.text ?? '')
+  const guarded = runPromptGuard('scan', text)
+  if (guarded?.blocked) return
   const ts = activity.timestamp instanceof Date ? activity.timestamp.toISOString() : new Date().toISOString()
 
   const stored: StoredMessage = {

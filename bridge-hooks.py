@@ -85,6 +85,16 @@ def prompt_timestamp_hook_command(bridge_home: Path, python_bin: str, fmt: str =
     return shell_command(python_bin, shell_path(hook_path))
 
 
+def prompt_guard_hook_command(bridge_home: Path, python_bin: str) -> str:
+    hook_path = bridge_home / "hooks" / "prompt-guard.py"
+    return shell_command(python_bin, shell_path(hook_path))
+
+
+def tool_policy_hook_command(bridge_home: Path, python_bin: str) -> str:
+    hook_path = bridge_home / "hooks" / "tool-policy.py"
+    return shell_command(python_bin, shell_path(hook_path))
+
+
 def codex_session_start_hook_command(bridge_home: Path, python_bin: str) -> str:
     hook_path = bridge_home / "hooks" / "codex-session-start.py"
     return shell_command(python_bin, shell_path(hook_path))
@@ -141,6 +151,14 @@ def is_clear_idle_hook(command: str) -> bool:
 
 def is_prompt_timestamp_hook(command: str) -> bool:
     return "prompt_timestamp.py" in str(command)
+
+
+def is_prompt_guard_hook(command: str) -> bool:
+    return "prompt-guard.py" in str(command)
+
+
+def is_tool_policy_hook(command: str) -> bool:
+    return "tool-policy.py" in str(command)
 
 
 def is_codex_session_start_hook(command: str) -> bool:
@@ -403,6 +421,123 @@ def cmd_ensure_prompt_hook(args: argparse.Namespace) -> int:
     if args.format != "shell":
         print("timestamp_hook: present")
         print(f"timestamp_command: {timestamp_command}")
+    return 0
+
+
+def cmd_status_prompt_guard_hook(args: argparse.Namespace) -> int:
+    settings_path = resolve_settings_path(args)
+    settings = ensure_settings_root(settings_path)
+    prompt_hooks = hooks_list(settings, "UserPromptSubmit")
+    _group, hook = find_command_hook(prompt_hooks, is_prompt_guard_hook)
+    command = str(hook.get("command") or "") if hook else ""
+    payload = {
+        "HOOK_SETTINGS_FILE": str(settings_path),
+        "HOOK_STATUS": "present" if hook else "missing",
+        "HOOK_STOP_HOOK": "",
+        "HOOK_PROMPT_HOOK": "present" if hook else "missing",
+        "HOOK_COMMAND": command,
+        "HOOK_ADDITIONAL_CONTEXT": "",
+    }
+    print_payload(payload, args.format)
+    if args.format != "shell":
+        print(f"prompt_guard_hook: {'present' if hook else 'missing'}")
+    return 0 if hook else 1
+
+
+def cmd_ensure_prompt_guard_hook(args: argparse.Namespace) -> int:
+    bridge_home = Path(args.bridge_home).expanduser()
+    settings_path = resolve_settings_path(args)
+    desired_command = prompt_guard_hook_command(bridge_home, args.python_bin)
+    changed = ensure_command_hook(
+        settings_path,
+        "UserPromptSubmit",
+        desired_command,
+        is_prompt_guard_hook,
+        timeout=3,
+        additional_context=True,
+    )
+    payload = {
+        "HOOK_SETTINGS_FILE": str(settings_path),
+        "HOOK_STATUS": "updated" if changed else "unchanged",
+        "HOOK_STOP_HOOK": "",
+        "HOOK_PROMPT_HOOK": "present",
+        "HOOK_COMMAND": desired_command,
+        "HOOK_ADDITIONAL_CONTEXT": "true",
+    }
+    print_payload(payload, args.format)
+    if args.format != "shell":
+        print("prompt_guard_hook: present")
+    return 0
+
+
+def cmd_status_tool_policy_hooks(args: argparse.Namespace) -> int:
+    settings_path = resolve_settings_path(args)
+    settings = ensure_settings_root(settings_path)
+    pre_hooks = hooks_list(settings, "PreToolUse")
+    post_hooks = hooks_list(settings, "PostToolUse")
+    failure_hooks = hooks_list(settings, "PostToolUseFailure")
+    _pre_group, pre_hook = find_command_hook(pre_hooks, is_tool_policy_hook)
+    _post_group, post_hook = find_command_hook(post_hooks, is_tool_policy_hook)
+    _failure_group, failure_hook = find_command_hook(failure_hooks, is_tool_policy_hook)
+    command = str(pre_hook.get("command") or "") if pre_hook else ""
+    payload = {
+        "HOOK_SETTINGS_FILE": str(settings_path),
+        "HOOK_STATUS": "present" if pre_hook and post_hook and failure_hook else "missing",
+        "HOOK_STOP_HOOK": "",
+        "HOOK_PROMPT_HOOK": "",
+        "HOOK_COMMAND": command,
+        "HOOK_ADDITIONAL_CONTEXT": "",
+    }
+    print_payload(payload, args.format)
+    if args.format != "shell":
+        print(f"pre_tool_use_hook: {'present' if pre_hook else 'missing'}")
+        print(f"post_tool_use_hook: {'present' if post_hook else 'missing'}")
+        print(f"post_tool_failure_hook: {'present' if failure_hook else 'missing'}")
+    return 0 if pre_hook and post_hook and failure_hook else 1
+
+
+def cmd_ensure_tool_policy_hooks(args: argparse.Namespace) -> int:
+    bridge_home = Path(args.bridge_home).expanduser()
+    settings_path = resolve_settings_path(args)
+    desired_command = tool_policy_hook_command(bridge_home, args.python_bin)
+    changed = False
+    changed = ensure_command_hook(
+        settings_path,
+        "PreToolUse",
+        desired_command,
+        is_tool_policy_hook,
+        timeout=3,
+        additional_context=True,
+    ) or changed
+    changed = ensure_command_hook(
+        settings_path,
+        "PostToolUse",
+        desired_command,
+        is_tool_policy_hook,
+        timeout=3,
+        additional_context=True,
+    ) or changed
+    changed = ensure_command_hook(
+        settings_path,
+        "PostToolUseFailure",
+        desired_command,
+        is_tool_policy_hook,
+        timeout=3,
+        additional_context=True,
+    ) or changed
+    payload = {
+        "HOOK_SETTINGS_FILE": str(settings_path),
+        "HOOK_STATUS": "updated" if changed else "unchanged",
+        "HOOK_STOP_HOOK": "",
+        "HOOK_PROMPT_HOOK": "",
+        "HOOK_COMMAND": desired_command,
+        "HOOK_ADDITIONAL_CONTEXT": "true",
+    }
+    print_payload(payload, args.format)
+    if args.format != "shell":
+        print("pre_tool_use_hook: present")
+        print("post_tool_use_hook: present")
+        print("post_tool_failure_hook: present")
     return 0
 
 
@@ -715,6 +850,38 @@ def build_parser() -> argparse.ArgumentParser:
     status_prompt_parser.add_argument("--bash-bin", required=True)
     status_prompt_parser.add_argument("--format", choices=("text", "shell"), default="text")
     status_prompt_parser.set_defaults(handler=cmd_status_prompt_hook)
+
+    ensure_prompt_guard_parser = subparsers.add_parser("ensure-prompt-guard-hook")
+    ensure_prompt_guard_parser.add_argument("--workdir")
+    ensure_prompt_guard_parser.add_argument("--settings-file")
+    ensure_prompt_guard_parser.add_argument("--bridge-home", required=True)
+    ensure_prompt_guard_parser.add_argument("--python-bin", required=True)
+    ensure_prompt_guard_parser.add_argument("--format", choices=("text", "shell"), default="text")
+    ensure_prompt_guard_parser.set_defaults(handler=cmd_ensure_prompt_guard_hook)
+
+    status_prompt_guard_parser = subparsers.add_parser("status-prompt-guard-hook")
+    status_prompt_guard_parser.add_argument("--workdir")
+    status_prompt_guard_parser.add_argument("--settings-file")
+    status_prompt_guard_parser.add_argument("--bridge-home", required=True)
+    status_prompt_guard_parser.add_argument("--python-bin", required=True)
+    status_prompt_guard_parser.add_argument("--format", choices=("text", "shell"), default="text")
+    status_prompt_guard_parser.set_defaults(handler=cmd_status_prompt_guard_hook)
+
+    ensure_tool_policy_parser = subparsers.add_parser("ensure-tool-policy-hooks")
+    ensure_tool_policy_parser.add_argument("--workdir")
+    ensure_tool_policy_parser.add_argument("--settings-file")
+    ensure_tool_policy_parser.add_argument("--bridge-home", required=True)
+    ensure_tool_policy_parser.add_argument("--python-bin", required=True)
+    ensure_tool_policy_parser.add_argument("--format", choices=("text", "shell"), default="text")
+    ensure_tool_policy_parser.set_defaults(handler=cmd_ensure_tool_policy_hooks)
+
+    status_tool_policy_parser = subparsers.add_parser("status-tool-policy-hooks")
+    status_tool_policy_parser.add_argument("--workdir")
+    status_tool_policy_parser.add_argument("--settings-file")
+    status_tool_policy_parser.add_argument("--bridge-home", required=True)
+    status_tool_policy_parser.add_argument("--python-bin", required=True)
+    status_tool_policy_parser.add_argument("--format", choices=("text", "shell"), default="text")
+    status_tool_policy_parser.set_defaults(handler=cmd_status_tool_policy_hooks)
 
     ensure_codex_parser = subparsers.add_parser("ensure-codex-hooks")
     ensure_codex_parser.add_argument("--codex-hooks-file")

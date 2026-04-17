@@ -13,6 +13,14 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
 
+from bridge_guard_common import analyze_text, prompt_guard_enabled, threshold_for_surface
+
+HOOKS_DIR = Path(__file__).resolve().parent / "hooks"
+if str(HOOKS_DIR) not in sys.path:
+    sys.path.insert(0, str(HOOKS_DIR))
+
+from bridge_hook_common import write_audit
+
 
 class JsonRpcWriter:
     def __init__(self) -> None:
@@ -63,6 +71,21 @@ class BridgeChannelServer:
             pass
 
     def deliver(self, content: str) -> None:
+        if prompt_guard_enabled():
+            threshold = threshold_for_surface("channel", "high")
+            result = analyze_text(content, threshold=threshold, surface="channel", agent=self.agent)
+            if result.blocked:
+                write_audit(
+                    "prompt_guard_blocked",
+                    self.agent or "bridge",
+                    {
+                        "surface": "channel",
+                        "severity": result.severity,
+                        "threshold": result.threshold,
+                        "reasons": result.reasons[:5],
+                    },
+                )
+                return
         self.clear_idle_marker()
         self.writer.notification(
             "notifications/claude/channel",

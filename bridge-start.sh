@@ -149,6 +149,12 @@ if [[ "$ENGINE" == "claude" && $SAFE_MODE -eq 0 ]]; then
   if ! bridge_claude_prompt_hook_status "$WORK_DIR" >/dev/null 2>&1; then
     FORCE_FRESH_SESSION=1
   fi
+  if ! bridge_claude_prompt_guard_hook_status "$WORK_DIR" >/dev/null 2>&1; then
+    FORCE_FRESH_SESSION=1
+  fi
+  if ! bridge_claude_tool_policy_hooks_status "$WORK_DIR" >/dev/null 2>&1; then
+    FORCE_FRESH_SESSION=1
+  fi
   if [[ $INSTALL_PROJECT_SKILL -eq 1 ]]; then
     if ! bridge_bootstrap_project_skill "$ENGINE" "$WORK_DIR"; then
       bridge_warn "Claude bridge skill bootstrap skipped or conflicted: $WORK_DIR"
@@ -166,6 +172,12 @@ if [[ "$ENGINE" == "claude" && $SAFE_MODE -eq 0 ]]; then
   fi
   if ! bridge_ensure_claude_prompt_hook "$WORK_DIR" >/dev/null; then
     bridge_die "Claude UserPromptSubmit hook 설정에 실패했습니다: $WORK_DIR"
+  fi
+  if ! bridge_ensure_claude_prompt_guard_hook "$WORK_DIR" >/dev/null; then
+    bridge_die "Claude prompt guard hook 설정에 실패했습니다: $WORK_DIR"
+  fi
+  if ! bridge_ensure_claude_tool_policy_hooks "$WORK_DIR" >/dev/null; then
+    bridge_die "Claude tool policy hook 설정에 실패했습니다: $WORK_DIR"
   fi
   if ! bridge_disable_claude_webhook_channel "$AGENT" "$WORK_DIR" >/dev/null 2>&1; then
     bridge_warn "Claude backlog webhook channel cleanup skipped: $WORK_DIR"

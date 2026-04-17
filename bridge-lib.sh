@@ -153,6 +153,7 @@ bridge_source_module() {
 
 bridge_source_module "bridge-core.sh"
 bridge_source_module "bridge-agents.sh"
+bridge_source_module "bridge-guard.sh"
 bridge_source_module "bridge-tmux.sh"
 bridge_source_module "bridge-skills.sh"
 bridge_source_module "bridge-hooks.sh"

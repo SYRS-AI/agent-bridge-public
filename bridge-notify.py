@@ -5,11 +5,20 @@ from __future__ import annotations
 
 import argparse
 import json
+import sys
 from pathlib import Path
 from typing import Any
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
+
+from bridge_guard_common import prompt_guard_enabled, sanitize_text
+
+HOOKS_DIR = Path(__file__).resolve().parent / "hooks"
+if str(HOOKS_DIR) not in sys.path:
+    sys.path.insert(0, str(HOOKS_DIR))
+
+from bridge_hook_common import write_audit
 
 
 def load_json(path: Path) -> dict[str, Any]:
@@ -140,6 +149,34 @@ def cmd_send(args: argparse.Namespace) -> int:
     target = normalize_target(kind, args.target)
     account = str(args.account or "default").strip()
     text = build_message(args.title or "", args.message or "", args.task_id or "", args.priority or "normal")
+
+    if prompt_guard_enabled():
+        sanitized = sanitize_text(text, surface="output", agent=str(args.agent or "").strip())
+        if sanitized.blocked:
+            write_audit(
+                "prompt_guard_canary_triggered" if sanitized.canary_triggered else "prompt_guard_blocked",
+                str(args.agent or "bridge"),
+                {
+                    "surface": "output",
+                    "kind": kind,
+                    "target": target,
+                    "canary_tokens": sanitized.canary_tokens,
+                },
+            )
+            text = "[Agent Bridge] outbound message blocked by prompt guard."
+        elif sanitized.was_modified:
+            write_audit(
+                "prompt_guard_sanitized",
+                str(args.agent or "bridge"),
+                {
+                    "surface": "output",
+                    "kind": kind,
+                    "target": target,
+                    "redacted_types": sanitized.redacted_types,
+                    "redaction_count": sanitized.redaction_count,
+                },
+            )
+            text = sanitized.sanitized_text
 
     payload = {
         "agent": args.agent,

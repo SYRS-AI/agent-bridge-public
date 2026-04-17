@@ -6,9 +6,11 @@ from __future__ import annotations
 import json
 import os
 import re
+import socket
 import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Any
 
 PRIORITY_ORDER = {"urgent": 0, "high": 1, "normal": 2, "low": 3}
 
@@ -40,6 +42,13 @@ def bridge_home_dir() -> Path:
     return Path.home() / ".agent-bridge"
 
 
+def audit_log_path() -> Path:
+    explicit = os.environ.get("BRIDGE_AUDIT_LOG", "").strip()
+    if explicit:
+        return Path(explicit).expanduser()
+    return bridge_home_dir() / "logs" / "audit.jsonl"
+
+
 def agent_home_root() -> Path:
     explicit = os.environ.get("BRIDGE_AGENT_HOME_ROOT", "").strip()
     if explicit:
@@ -56,6 +65,48 @@ def agent_workdir(agent: str) -> Path:
     if explicit:
         return Path(explicit).expanduser()
     return agent_default_home(agent)
+
+
+def current_agent() -> str:
+    return os.environ.get("BRIDGE_AGENT_ID", "").strip()
+
+
+def current_agent_workdir() -> Path:
+    agent = current_agent()
+    if not agent:
+        return Path.cwd()
+    return agent_workdir(agent)
+
+
+def path_within(path: Path, root: Path) -> bool:
+    try:
+        path.resolve().relative_to(root.resolve())
+        return True
+    except ValueError:
+        return False
+
+
+def truncate_text(text: str, limit: int = 400) -> str:
+    cleaned = " ".join(str(text).split())
+    if len(cleaned) <= limit:
+        return cleaned
+    return cleaned[: limit - 3].rstrip() + "..."
+
+
+def write_audit(action: str, target: str, detail: dict[str, Any]) -> None:
+    path = audit_log_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    record = {
+        "ts": datetime.now(timezone.utc).astimezone().isoformat(timespec="seconds"),
+        "actor": "hook",
+        "action": action,
+        "target": target,
+        "detail": detail,
+        "pid": os.getpid(),
+        "host": socket.gethostname(),
+    }
+    with path.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(record, ensure_ascii=True) + "\n")
 
 
 def first_existing_path(candidates: list[Path]) -> Path | None:
