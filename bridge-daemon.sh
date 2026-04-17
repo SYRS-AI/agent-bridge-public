@@ -2183,7 +2183,10 @@ bridge_report_plugin_liveness_miss() {
     return 0
   fi
 
-  if restart_output="$("$BRIDGE_BASH_BIN" "$SCRIPT_DIR/agent-bridge" agent restart "$agent" --no-continue 2>&1)"; then
+  # Preserve the role's configured continue policy. For static Claude roles,
+  # forcing --no-continue here destroys the session continuity that the roster
+  # or persisted history would otherwise restore.
+  if restart_output="$("$BRIDGE_BASH_BIN" "$SCRIPT_DIR/agent-bridge" agent restart "$agent" 2>&1)"; then
     bridge_audit_log daemon plugin_mcp_liveness_restart "$agent" \
       --detail missing_channels="$missing" \
       --detail session="$session"

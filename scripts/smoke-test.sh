@@ -4935,7 +4935,8 @@ PLUGIN_WATCH_OUTPUT="$("$BASH4_BIN" -lc '
 ')"
 PLUGIN_WATCH_RESTART_COUNT="$(printf '%s\n' "$PLUGIN_WATCH_OUTPUT" | sed '/^$/d' | wc -l | tr -d ' ')"
 [[ "$PLUGIN_WATCH_RESTART_COUNT" == "1" ]] || die "expected exactly one plugin watchdog restart, got $PLUGIN_WATCH_RESTART_COUNT"
-assert_contains "$PLUGIN_WATCH_OUTPUT" "agent restart $PLUGIN_WATCH_AGENT --no-continue"
+assert_contains "$PLUGIN_WATCH_OUTPUT" "agent restart $PLUGIN_WATCH_AGENT"
+assert_not_contains "$PLUGIN_WATCH_OUTPUT" "--no-continue"
 
 PLUGIN_WATCH_FAIL_FAKE_SCRIPT_DIR="$TMP_ROOT/plugin-watchdog-fail-scriptdir"
 mkdir -p "$PLUGIN_WATCH_FAIL_FAKE_SCRIPT_DIR"
