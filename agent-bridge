@@ -41,7 +41,9 @@ Usage:
   $CLI_NAME setup <discord|telegram|teams|agent|admin> ...
   $CLI_NAME cron <inventory|show|import|list|create|update|delete|rebalance-memory-daily|enqueue|sync|run-subagent|errors|cleanup> ...
   $CLI_NAME memory <init|capture|ingest|promote|remember|lint|search|rebuild-index|query> ...
-  $CLI_NAME audit [--agent <name>] [--action <type>] [--since <datetime>] [--limit N] [--json]
+  $CLI_NAME audit [list] [--agent <name>] [--action <type>] [--since <datetime>] [--limit N] [--json]
+  $CLI_NAME audit follow --agent <name> [--action <type>] [--contains <text>] [--follow]
+  $CLI_NAME audit verify
   $CLI_NAME usage <status|monitor|alerts> ...
   $CLI_NAME watchdog scan [agent...] [--json]
   $CLI_NAME discord <status|sync>
@@ -168,6 +170,8 @@ Examples:
   $CLI_NAME memory rebuild-index --agent assistant
   $CLI_NAME memory query --agent assistant --user owner --query "morning updates"
   $CLI_NAME audit --agent patch --limit 20
+  $CLI_NAME audit follow --agent patch --follow
+  $CLI_NAME audit verify
   $CLI_NAME usage status --json
   $CLI_NAME usage alerts --json
   $CLI_NAME setup discord tester

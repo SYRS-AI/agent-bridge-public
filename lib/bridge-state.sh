@@ -739,6 +739,12 @@ bridge_load_static_agent_history() {
   if [[ -n "$AGENT_UPDATED_AT" ]]; then
     BRIDGE_AGENT_UPDATED_AT["$agent"]="$AGENT_UPDATED_AT"
   fi
+  if [[ -n "${AGENT_ISOLATION_MODE:-}" ]]; then
+    BRIDGE_AGENT_ISOLATION_MODE["$agent"]="$AGENT_ISOLATION_MODE"
+  fi
+  if [[ -n "${AGENT_OS_USER:-}" ]]; then
+    BRIDGE_AGENT_OS_USER["$agent"]="$AGENT_OS_USER"
+  fi
 }
 
 bridge_load_static_histories() {
@@ -753,17 +759,24 @@ bridge_load_static_histories() {
 bridge_load_roster() {
   local agent
   local fast_load="${BRIDGE_FAST_ROSTER_LOAD:-0}"
+  local isolated_env_file="${BRIDGE_AGENT_ENV_FILE:-}"
 
   bridge_reset_roster_maps
 
-  if [[ -f "$BRIDGE_ROSTER_FILE" ]]; then
+  if [[ -n "$isolated_env_file" ]]; then
+    [[ -f "$isolated_env_file" ]] || bridge_die "agent env file이 없습니다: $isolated_env_file"
     # shellcheck source=/dev/null
-    source "$BRIDGE_ROSTER_FILE"
-  fi
+    source "$isolated_env_file"
+  else
+    if [[ -f "$BRIDGE_ROSTER_FILE" ]]; then
+      # shellcheck source=/dev/null
+      source "$BRIDGE_ROSTER_FILE"
+    fi
 
-  if [[ -f "$BRIDGE_ROSTER_LOCAL_FILE" ]]; then
-    # shellcheck source=/dev/null
-    source "$BRIDGE_ROSTER_LOCAL_FILE"
+    if [[ -f "$BRIDGE_ROSTER_LOCAL_FILE" ]]; then
+      # shellcheck source=/dev/null
+      source "$BRIDGE_ROSTER_LOCAL_FILE"
+    fi
   fi
 
   : "${BRIDGE_LOG_DIR:=$BRIDGE_HOME/logs}"
@@ -949,6 +962,21 @@ bridge_agent_idle_marker_dir() {
   printf '%s/%s' "$BRIDGE_ACTIVE_AGENT_DIR" "$agent"
 }
 
+bridge_agent_runtime_state_dir() {
+  local agent="$1"
+  bridge_agent_idle_marker_dir "$agent"
+}
+
+bridge_agent_log_dir() {
+  local agent="$1"
+  printf '%s/agents/%s' "$BRIDGE_LOG_DIR" "$agent"
+}
+
+bridge_agent_audit_log_file() {
+  local agent="$1"
+  printf '%s/audit.jsonl' "$(bridge_agent_log_dir "$agent")"
+}
+
 bridge_agent_idle_since_file() {
   local agent="$1"
   printf '%s/idle-since' "$(bridge_agent_idle_marker_dir "$agent")"
@@ -961,12 +989,12 @@ bridge_agent_manual_stop_file() {
 
 bridge_agent_memory_daily_refresh_file() {
   local agent="$1"
-  printf '%s/session-refresh/%s.env' "$BRIDGE_STATE_DIR" "$agent"
+  printf '%s/session-refresh.env' "$(bridge_agent_runtime_state_dir "$agent")"
 }
 
 bridge_agent_crash_report_file() {
   local agent="$1"
-  printf '%s/crash-report/%s.env' "$BRIDGE_STATE_DIR" "$agent"
+  printf '%s/crash/report.env' "$(bridge_agent_runtime_state_dir "$agent")"
 }
 
 bridge_agent_crash_report_body_file() {
@@ -976,17 +1004,17 @@ bridge_agent_crash_report_body_file() {
 
 bridge_agent_crash_tail_file() {
   local agent="$1"
-  printf '%s/crash-report/%s.tail.log' "$BRIDGE_STATE_DIR" "$agent"
+  printf '%s/crash/tail.log' "$(bridge_agent_runtime_state_dir "$agent")"
 }
 
 bridge_agent_crash_state_file() {
   local agent="$1"
-  printf '%s/crash-report/%s.state.env' "$BRIDGE_STATE_DIR" "$agent"
+  printf '%s/crash/state.env' "$(bridge_agent_runtime_state_dir "$agent")"
 }
 
 bridge_agent_stall_state_file() {
   local agent="$1"
-  printf '%s/stall/%s.env' "$BRIDGE_STATE_DIR" "$agent"
+  printf '%s/stall.env' "$(bridge_agent_runtime_state_dir "$agent")"
 }
 
 bridge_agent_stall_report_file() {
@@ -997,7 +1025,17 @@ bridge_agent_stall_report_file() {
 
 bridge_agent_context_pressure_state_file() {
   local agent="$1"
-  printf '%s/context-pressure/%s.env' "$BRIDGE_STATE_DIR" "$agent"
+  printf '%s/context-pressure.env' "$(bridge_agent_runtime_state_dir "$agent")"
+}
+
+bridge_agent_next_session_marker_file() {
+  local agent="$1"
+  printf '%s/next-session.sha' "$(bridge_agent_runtime_state_dir "$agent")"
+}
+
+bridge_agent_initial_inbox_marker_file() {
+  local agent="$1"
+  printf '%s/initial-inbox.started' "$(bridge_agent_runtime_state_dir "$agent")"
 }
 
 bridge_agent_context_pressure_report_file() {
@@ -1047,7 +1085,7 @@ bridge_agent_clear_crash_report() {
     "$(bridge_agent_crash_report_file "$agent")" \
     "$(bridge_agent_crash_report_body_file "$agent")" \
     "$(bridge_agent_crash_tail_file "$agent")" \
-    "$(bridge_agent_crash_state_file "$agent")"
+    "$(bridge_agent_crash_state_file "$agent")" >/dev/null 2>&1 || true
 }
 
 bridge_agent_ack_crash_report() {

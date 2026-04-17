@@ -83,6 +83,42 @@ print(secrets.token_hex(8))
 PY
 }
 
+bridge_queue_gateway_root() {
+  printf '%s/queue-gateway' "$BRIDGE_STATE_DIR"
+}
+
+bridge_queue_gateway_agent_dir() {
+  local agent="$1"
+  printf '%s/%s' "$(bridge_queue_gateway_root)" "$agent"
+}
+
+bridge_queue_gateway_requests_dir() {
+  local agent="$1"
+  printf '%s/requests' "$(bridge_queue_gateway_agent_dir "$agent")"
+}
+
+bridge_queue_gateway_responses_dir() {
+  local agent="$1"
+  printf '%s/responses' "$(bridge_queue_gateway_agent_dir "$agent")"
+}
+
+bridge_queue_gateway_proxy_agent() {
+  local agent=""
+  local count=0
+
+  [[ -n "${BRIDGE_AGENT_ENV_FILE:-}" ]] || return 1
+  count="${#BRIDGE_AGENT_IDS[@]}"
+  [[ "$count" -eq 1 ]] || return 1
+  agent="${BRIDGE_AGENT_IDS[0]}"
+  bridge_agent_linux_user_isolation_effective "$agent" || return 1
+  printf '%s' "$agent"
+}
+
+bridge_queue_cli_direct() {
+  bridge_require_python
+  python3 "$BRIDGE_SCRIPT_DIR/bridge-queue.py" "$@"
+}
+
 bridge_sha1() {
   local text="$1"
 
@@ -96,8 +132,20 @@ PY
 }
 
 bridge_queue_cli() {
-  bridge_require_python
-  python3 "$BRIDGE_SCRIPT_DIR/bridge-queue.py" "$@"
+  local agent=""
+
+  if agent="$(bridge_queue_gateway_proxy_agent 2>/dev/null)"; then
+    bridge_require_python
+    python3 "$BRIDGE_SCRIPT_DIR/bridge-queue-gateway.py" client \
+      --root "$(bridge_queue_gateway_root)" \
+      --agent "$agent" \
+      --timeout "${BRIDGE_QUEUE_GATEWAY_TIMEOUT_SECONDS:-45}" \
+      --poll "${BRIDGE_QUEUE_GATEWAY_POLL_SECONDS:-0.2}" \
+      "$@"
+    return $?
+  fi
+
+  bridge_queue_cli_direct "$@"
 }
 
 bridge_queue_source_shell() {

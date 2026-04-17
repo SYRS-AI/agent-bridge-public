@@ -104,6 +104,7 @@ EFFECTIVE_CONTINUE_MODE="$(bridge_agent_continue "$AGENT")"
 FORCE_FRESH_SESSION=0
 SUPPRESS_MISSING_CHANNELS=0
 CHANNEL_REASON=""
+AGENT_ENV_FILE=""
 
 if [[ ! -d "$WORK_DIR" ]]; then
   if [[ "$WORK_DIR" == "$DEFAULT_WORK_DIR" ]]; then
@@ -217,6 +218,11 @@ if [[ "$ENGINE" == "claude" && $SAFE_MODE -eq 0 ]]; then
   fi
 fi
 
+if bridge_agent_linux_user_isolation_effective "$AGENT"; then
+  AGENT_ENV_FILE="$(bridge_agent_linux_env_file "$AGENT")"
+  bridge_write_linux_agent_env_file "$AGENT" "$AGENT_ENV_FILE"
+fi
+
 SESSION_CMD="$(bridge_join_quoted "$BRIDGE_BASH_BIN" "$RUNNER" "$AGENT")"
 if [[ "$EFFECTIVE_CONTINUE_MODE" == "1" ]]; then
   SESSION_CMD+=" --continue"
@@ -231,6 +237,9 @@ if [[ "$(bridge_agent_loop "$AGENT")" != "1" ]]; then
 fi
 if [[ -n "$ENV_PREFIX" ]]; then
   SESSION_CMD="${ENV_PREFIX} ${SESSION_CMD}"
+fi
+if [[ -n "$AGENT_ENV_FILE" ]]; then
+  SESSION_CMD="BRIDGE_AGENT_ENV_FILE=$(printf '%q' "$AGENT_ENV_FILE") ${SESSION_CMD}"
 fi
 if [[ $SUPPRESS_MISSING_CHANNELS -eq 1 ]]; then
   SESSION_CMD="BRIDGE_AGENT_SUPPRESS_MISSING_CHANNELS=1 ${SESSION_CMD}"
@@ -249,6 +258,9 @@ if [[ $DRY_RUN -eq 1 ]]; then
   echo "safe_mode=$SAFE_MODE"
   echo "channels=$(bridge_agent_channels_csv "$AGENT")"
   echo "launch_channels=$launch_channels"
+  if [[ -n "$AGENT_ENV_FILE" ]]; then
+    echo "agent_env_file=$AGENT_ENV_FILE"
+  fi
   echo "channel_status=$(bridge_agent_channel_status "$AGENT")"
   if [[ -n "$CHANNEL_REASON" ]]; then
     echo "channel_reason=$CHANNEL_REASON"

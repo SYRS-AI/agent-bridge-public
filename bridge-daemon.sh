@@ -1719,9 +1719,9 @@ process_crash_reports() {
   bridge_agent_exists "$admin_agent" || return 1
   [[ "$cooldown" =~ ^[0-9]+$ ]] || cooldown=1800
 
-  shopt -s nullglob
-  for report_file in "$BRIDGE_STATE_DIR"/crash-report/*.env; do
-    agent=""
+  for agent in "${BRIDGE_AGENT_IDS[@]}"; do
+    report_file="$(bridge_agent_crash_report_file "$agent")"
+    [[ -f "$report_file" ]] || continue
     fail_count=0
     exit_code=0
     engine=""
@@ -1732,7 +1732,7 @@ process_crash_reports() {
     reported_at=""
     # shellcheck source=/dev/null
     source "$report_file"
-    agent="${CRASH_AGENT:-}"
+    agent="${CRASH_AGENT:-$agent}"
     [[ -n "$agent" ]] || continue
     if ! bridge_agent_exists "$agent"; then
       bridge_agent_clear_crash_report "$agent"
@@ -1824,7 +1824,6 @@ EOF
       changed=0
     fi
   done
-  shopt -u nullglob
 
   return "$changed"
 }
@@ -2984,6 +2983,21 @@ PY
   (( killed_count > 0 ))
 }
 
+process_queue_gateway_requests() {
+  local processed=0
+
+  processed="$(python3 "$SCRIPT_DIR/bridge-queue-gateway.py" serve-once \
+    --root "$(bridge_queue_gateway_root)" \
+    --queue-script "$SCRIPT_DIR/bridge-queue.py" \
+    --max-requests "${BRIDGE_QUEUE_GATEWAY_MAX_REQUESTS_PER_CYCLE:-100}" 2>/dev/null || printf '0')"
+  [[ "$processed" =~ ^[0-9]+$ ]] || processed=0
+  if (( processed > 0 )); then
+    bridge_audit_log daemon queue_gateway_processed daemon --detail count="$processed"
+    return 0
+  fi
+  return 1
+}
+
 cmd_sync_cycle() {
   local snapshot_file
   local ready_agents_file
@@ -3008,6 +3022,9 @@ cmd_sync_cycle() {
 
   "$BRIDGE_BASH_BIN" "$SCRIPT_DIR/bridge-sync.sh" >/dev/null 2>&1 || true
   bridge_load_roster
+  if process_queue_gateway_requests; then
+    changed=0
+  fi
   bridge_reconcile_idle_markers || true
   recover_claude_bootstrap_blockers || true
   process_channel_health || true

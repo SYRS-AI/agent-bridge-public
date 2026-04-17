@@ -116,15 +116,17 @@ fi
 export PATH="$HOME/.local/bin:$HOME/.nix-profile/bin:/usr/local/bin:$PATH"
 export BRIDGE_AGENT_ID="$AGENT"
 export BRIDGE_AGENT_WORKDIR="$WORK_DIR"
+export BRIDGE_AGENT_ISOLATION_MODE="$(bridge_agent_isolation_mode "$AGENT")"
+export BRIDGE_AGENT_OS_USER="$(bridge_agent_os_user "$AGENT")"
 export BRIDGE_AGENT_INJECT_TIMESTAMP="$(bridge_agent_inject_timestamp "$AGENT")"
 export BRIDGE_AGENT_PROMPT_GUARD_POLICY="$(bridge_guard_policy_raw "$AGENT")"
 export BRIDGE_PROMPT_GUARD_CANARY_TOKENS="$(bridge_agent_prompt_guard_canary "$AGENT")"
 
-mkdir -p "$BRIDGE_LOG_DIR" "$BRIDGE_SHARED_DIR"
+mkdir -p "$(bridge_agent_log_dir "$AGENT")" "$BRIDGE_SHARED_DIR"
 cd "$WORK_DIR" || bridge_die "$WORK_DIR 디렉토리가 없습니다."
 
-LOGFILE="$BRIDGE_LOG_DIR/${AGENT}-$(date '+%Y%m%d').log"
-ERRFILE="$BRIDGE_LOG_DIR/${AGENT}-$(date '+%Y%m%d').err.log"
+LOGFILE="$(bridge_agent_log_dir "$AGENT")/$(date '+%Y%m%d').log"
+ERRFILE="$(bridge_agent_log_dir "$AGENT")/$(date '+%Y%m%d').err.log"
 BRIDGE_RUN_ROSTER_SIGNATURE=""
 
 log_line() {
@@ -276,11 +278,11 @@ bridge_run_schedule_next_session_prompt() {
 
 bridge_run_schedule_idle_marker_and_inbox_bootstrap() {
   local next_file="$WORK_DIR/NEXT-SESSION.md"
-  local marker_dir="$BRIDGE_STATE_DIR/initial-inbox-prompts"
-  local marker_file="$marker_dir/${AGENT}.started"
+  local marker_file=""
 
   [[ "$ENGINE" == "claude" ]] || return 0
   [[ $SAFE_MODE -eq 0 ]] || return 0
+  marker_file="$(bridge_agent_initial_inbox_marker_file "$AGENT")"
 
   (
     "$BRIDGE_BASH_BIN" -lc '

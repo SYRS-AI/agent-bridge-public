@@ -411,6 +411,29 @@ def agent_summary_rows(conn: sqlite3.Connection, agents: Iterable[str] | None) -
 
 
 def print_summary(rows: list[sqlite3.Row], fmt: str) -> None:
+    if fmt == "json":
+        payload = []
+        for row in rows:
+            activity_ts = row["session_activity_ts"] or row["last_seen_ts"] or 0
+            idle_seconds = max(0, now_ts() - int(activity_ts)) if activity_ts else -1
+            payload.append(
+                {
+                    "agent": str(row["agent"] or ""),
+                    "queued_count": int(row["queued_count"] or 0),
+                    "claimed_count": int(row["claimed_count"] or 0),
+                    "blocked_count": int(row["blocked_count"] or 0),
+                    "active": int(row["active"] or 0),
+                    "idle_seconds": int(idle_seconds),
+                    "last_seen_ts": int(row["last_seen_ts"] or 0),
+                    "last_nudge_ts": int(row["last_nudge_ts"] or 0),
+                    "session": str(row["session"] or ""),
+                    "engine": str(row["engine"] or ""),
+                    "workdir": str(row["workdir"] or ""),
+                }
+            )
+        print(json.dumps(payload, ensure_ascii=False))
+        return
+
     if fmt == "tsv":
         for row in rows:
             activity_ts = row["session_activity_ts"] or row["last_seen_ts"] or 0
@@ -680,6 +703,24 @@ def cmd_find_open(args: argparse.Namespace) -> int:
 
     if row is None:
         return 1
+
+    if args.format == "json":
+        print(
+            json.dumps(
+                {
+                    "id": int(row["id"]),
+                    "title": str(row["title"] or ""),
+                    "status": str(row["status"] or ""),
+                    "assigned_to": str(row["assigned_to"] or ""),
+                    "created_by": str(row["created_by"] or ""),
+                    "priority": str(row["priority"] or ""),
+                    "claimed_by": str(row["claimed_by"] or ""),
+                    "body_path": str(row["body_path"] or ""),
+                },
+                ensure_ascii=False,
+            )
+        )
+        return 0
 
     if args.format == "shell":
         fields = {
@@ -1808,7 +1849,7 @@ def build_parser() -> argparse.ArgumentParser:
     find_open_parser = subparsers.add_parser("find-open")
     find_open_parser.add_argument("--agent", required=True)
     find_open_parser.add_argument("--title-prefix")
-    find_open_parser.add_argument("--format", choices=("id", "text", "shell"), default="id")
+    find_open_parser.add_argument("--format", choices=("id", "text", "shell", "json"), default="id")
     find_open_parser.set_defaults(handler=cmd_find_open)
 
     claim_parser = subparsers.add_parser("claim")
@@ -1856,7 +1897,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     summary_parser = subparsers.add_parser("summary")
     summary_parser.add_argument("--agent", action="append")
-    summary_parser.add_argument("--format", choices=("text", "tsv"), default="text")
+    summary_parser.add_argument("--format", choices=("text", "tsv", "json"), default="text")
     summary_parser.set_defaults(handler=cmd_summary)
 
     cron_ready_parser = subparsers.add_parser("cron-ready")

@@ -36,6 +36,9 @@ Options:
   --notify-kind <kind>         out-of-band notify transport metadata
   --notify-target <target>     notify target metadata
   --notify-account <account>   notify account metadata
+  --isolation <mode>           shared|linux-user (default: shared)
+  --isolate                    shorthand for --isolation linux-user
+  --os-user <user>             explicit Linux service user for linux-user isolation
   --loop                       mark the role as loop-enabled
   --always-on                  configure IDLE_TIMEOUT=0 for this role
   --continue|--no-continue     explicit continue mode (default: continue)
@@ -401,7 +404,9 @@ bridge_write_role_block() {
     "$notify_account" \
     "$loop_mode" \
     "$continue_mode" \
-    "$always_on" <<'PY'
+    "$always_on" \
+    "$isolation_mode" \
+    "$os_user" <<'PY'
 from pathlib import Path
 import shlex
 import sys
@@ -495,12 +500,14 @@ emit_create_json() {
   local dry_run="$9"
   local users_json="${10}"
   local session_type="${11}"
+  local isolation_mode="${12}"
+  local os_user="${13}"
 
-  bridge_agent_manage_python "$agent" "$engine" "$session" "$workdir" "$profile_home" "$launch_cmd" "$channels" "$roster_file" "$dry_run" "$users_json" "$session_type" <<'PY'
+  bridge_agent_manage_python "$agent" "$engine" "$session" "$workdir" "$profile_home" "$launch_cmd" "$channels" "$roster_file" "$dry_run" "$users_json" "$session_type" "$isolation_mode" "$os_user" <<'PY'
 import json
 import sys
 
-agent, engine, session, workdir, profile_home, launch_cmd, channels, roster_file, dry_run, users_json, session_type = sys.argv[1:]
+agent, engine, session, workdir, profile_home, launch_cmd, channels, roster_file, dry_run, users_json, session_type, isolation_mode, os_user = sys.argv[1:]
 payload = {
     "agent": agent,
     "engine": engine,
@@ -510,6 +517,10 @@ payload = {
     "profile_home": profile_home,
     "launch_cmd": launch_cmd,
     "channels": channels,
+    "isolation": {
+        "mode": isolation_mode,
+        "os_user": os_user,
+    },
     "roster_file": roster_file,
     "dry_run": dry_run == "1",
     "users": json.loads(users_json),
@@ -584,7 +595,7 @@ bridge_agent_records_tsv() {
   local -A blocked_counts=()
 
   bridge_agent_queue_maps queued_counts claimed_counts blocked_counts
-  echo -e "agent\tdescription\tengine\tsource\tsession\tsession_id\tworkdir\tprofile_home\tprofile_source\tactive\tactivity_state\tloop\tcontinue\talways_on\tidle_timeout\twake_status\tnotify_status\tchannel_status\tchannels\tnotify_kind\tnotify_target\tnotify_account\tdiscord_channel_id\tqueue_queued\tqueue_claimed\tqueue_blocked\tactions\tadmin"
+  echo -e "agent\tdescription\tengine\tsource\tsession\tsession_id\tworkdir\tprofile_home\tprofile_source\tactive\tactivity_state\tloop\tcontinue\talways_on\tidle_timeout\twake_status\tnotify_status\tchannel_status\tchannels\tnotify_kind\tnotify_target\tnotify_account\tdiscord_channel_id\tisolation_mode\tos_user\tqueue_queued\tqueue_claimed\tqueue_blocked\tactions\tadmin"
 
   for agent in "${BRIDGE_AGENT_IDS[@]}"; do
     if [[ -n "$selected_agent" && "$agent" != "$selected_agent" ]]; then
@@ -616,7 +627,7 @@ bridge_agent_records_tsv() {
       admin="yes"
     fi
 
-    echo -e "${agent}\t$(bridge_agent_desc "$agent")\t$(bridge_agent_engine "$agent")\t$(bridge_agent_source "$agent")\t$(bridge_agent_session "$agent")\t$(bridge_agent_session_id "$agent")\t$(bridge_agent_workdir "$agent")\t${profile_home}\t${profile_source}\t${active}\t$(bridge_agent_activity_state "$agent")\t$(bridge_agent_loop "$agent")\t$(bridge_agent_continue "$agent")\t${always_on}\t$(bridge_agent_idle_timeout "$agent")\t$(bridge_agent_wake_status "$agent")\t$(bridge_agent_notify_status "$agent")\t$(bridge_agent_channel_status "$agent")\t$(bridge_agent_channels_csv "$agent")\t$(bridge_agent_notify_kind "$agent")\t$(bridge_agent_notify_target "$agent")\t$(bridge_agent_notify_account "$agent")\t$(bridge_agent_discord_channel_id "$agent")\t${queued_counts[$agent]-0}\t${claimed_counts[$agent]-0}\t${blocked_counts[$agent]-0}\t$(bridge_agent_actions_csv "$agent")\t${admin}"
+    echo -e "${agent}\t$(bridge_agent_desc "$agent")\t$(bridge_agent_engine "$agent")\t$(bridge_agent_source "$agent")\t$(bridge_agent_session "$agent")\t$(bridge_agent_session_id "$agent")\t$(bridge_agent_workdir "$agent")\t${profile_home}\t${profile_source}\t${active}\t$(bridge_agent_activity_state "$agent")\t$(bridge_agent_loop "$agent")\t$(bridge_agent_continue "$agent")\t${always_on}\t$(bridge_agent_idle_timeout "$agent")\t$(bridge_agent_wake_status "$agent")\t$(bridge_agent_notify_status "$agent")\t$(bridge_agent_channel_status "$agent")\t$(bridge_agent_channels_csv "$agent")\t$(bridge_agent_notify_kind "$agent")\t$(bridge_agent_notify_target "$agent")\t$(bridge_agent_notify_account "$agent")\t$(bridge_agent_discord_channel_id "$agent")\t$(bridge_agent_isolation_mode "$agent")\t$(bridge_agent_os_user "$agent")\t${queued_counts[$agent]-0}\t${claimed_counts[$agent]-0}\t${blocked_counts[$agent]-0}\t$(bridge_agent_actions_csv "$agent")\t${admin}"
   done
 }
 
@@ -677,6 +688,10 @@ def convert_row(row: dict) -> dict:
             "required": converted["channels"],
             "discord_channel_id": converted["discord_channel_id"],
         },
+        "isolation": {
+            "mode": converted["isolation_mode"],
+            "os_user": converted["os_user"],
+        },
         "queue": {
             "queued": converted["queue_queued"],
             "claimed": converted["queue_claimed"],
@@ -717,26 +732,36 @@ run_list() {
     emit_agent_records_json list "$output"
     return 0
   fi
+  bridge_agent_manage_python "$(emit_agent_records_json list "$output")" <<'PY'
+import json
+import sys
 
-  printf 'agent | eng | src | active | state | q/c/b | wake | notify | chan | session | workdir\n'
-  while IFS=$'\t' read -r agent _description engine source session _session_id workdir _profile_home _profile_source active activity_state _loop _continue always_on _idle_timeout wake_status notify_status channel_status _channels _notify_kind _notify_target _notify_account _discord_channel_id queue_queued queue_claimed queue_blocked _actions admin; do
-    [[ "$agent" == "agent" ]] && continue
-    printf '%s%s | %s | %s | %s | %s | %s/%s/%s | %s | %s | %s | %s | %s\n' \
-      "$agent" \
-      "$([[ "$admin" == "yes" ]] && printf ' [admin]' || true)" \
-      "$engine" \
-      "$source" \
-      "$active" \
-      "$activity_state" \
-      "$queue_queued" \
-      "$queue_claimed" \
-      "$queue_blocked" \
-      "$wake_status" \
-      "$notify_status" \
-      "$channel_status" \
-      "$session" \
-      "$workdir"
-  done <<<"$output"
+items = json.loads(sys.argv[1])
+print("agent | eng | src | active | state | iso | q/c/b | wake | notify | chan | session | workdir")
+for item in items:
+    suffix = " [admin]" if item.get("admin") else ""
+    isolation = item.get("isolation", {}) or {}
+    mode = isolation.get("mode") or "shared"
+    os_user = isolation.get("os_user") or ""
+    iso_text = f"{mode}:{os_user}" if os_user else mode
+    queue = item.get("queue", {}) or {}
+    notify = item.get("notify", {}) or {}
+    channels = item.get("channels", {}) or {}
+    print(
+        f"{item.get('agent','')}{suffix} | "
+        f"{item.get('engine','')} | "
+        f"{item.get('source','')} | "
+        f"{'yes' if item.get('active') else 'no'} | "
+        f"{item.get('activity_state','')} | "
+        f"{iso_text} | "
+        f"{queue.get('queued',0)}/{queue.get('claimed',0)}/{queue.get('blocked',0)} | "
+        f"{item.get('wake_status','')} | "
+        f"{notify.get('status','')} | "
+        f"{channels.get('status','')} | "
+        f"{item.get('session','')} | "
+        f"{item.get('workdir','')}"
+    )
+PY
 }
 
 run_show() {
@@ -777,7 +802,7 @@ PY
     return 0
   fi
 
-  while IFS=$'\t' read -r row_agent description engine source session session_id workdir profile_home profile_source active activity_state loop_mode continue_mode always_on idle_timeout wake_status notify_status channel_status channels notify_kind notify_target notify_account discord_channel_id queue_queued queue_claimed queue_blocked actions admin; do
+  while IFS=$'\t' read -r row_agent description engine source session session_id workdir profile_home profile_source active activity_state loop_mode continue_mode always_on idle_timeout wake_status notify_status channel_status channels notify_kind notify_target notify_account discord_channel_id isolation_mode os_user queue_queued queue_claimed queue_blocked actions admin; do
     [[ "$row_agent" == "agent" ]] && continue
     printf 'agent: %s\n' "$row_agent"
     printf 'description: %s\n' "$description"
@@ -803,6 +828,8 @@ PY
     printf 'channel_status: %s\n' "$channel_status"
     printf 'channels: %s\n' "${channels:--}"
     printf 'discord_channel_id: %s\n' "${discord_channel_id:--}"
+    printf 'isolation_mode: %s\n' "${isolation_mode:--}"
+    printf 'os_user: %s\n' "${os_user:--}"
     printf 'queue: queued=%s claimed=%s blocked=%s\n' "$queue_queued" "$queue_claimed" "$queue_blocked"
     printf 'actions: %s\n' "$actions"
     printf 'channel_diagnostics:\n'
@@ -828,6 +855,8 @@ run_create() {
   local notify_kind=""
   local notify_target=""
   local notify_account=""
+  local isolation_mode="shared"
+  local os_user=""
   local loop_mode=0
   local continue_mode=1
   local always_on=0
@@ -922,6 +951,20 @@ run_create() {
         notify_account="$2"
         shift 2
         ;;
+      --isolation)
+        [[ $# -ge 2 ]] || bridge_die "옵션 값이 필요합니다: $1"
+        isolation_mode="$2"
+        shift 2
+        ;;
+      --isolate)
+        isolation_mode="linux-user"
+        shift
+        ;;
+      --os-user)
+        [[ $# -ge 2 ]] || bridge_die "옵션 값이 필요합니다: $1"
+        os_user="$2"
+        shift 2
+        ;;
       --loop)
         loop_mode=1
         shift
@@ -967,6 +1010,14 @@ run_create() {
     admin|static-claude|static-codex|dynamic|cron) ;;
     *) bridge_die "지원하지 않는 session type 입니다: $session_type" ;;
   esac
+  case "$isolation_mode" in
+    shared|linux-user) ;;
+    *) bridge_die "지원하지 않는 isolation mode 입니다: $isolation_mode" ;;
+  esac
+
+  if [[ "$isolation_mode" == "shared" && -n "$os_user" ]]; then
+    bridge_die "--os-user 는 --isolation linux-user 와 함께만 사용할 수 있습니다."
+  fi
 
   session="${session:-$agent}"
   default_home="$(bridge_agent_default_home "$agent")"
@@ -978,10 +1029,32 @@ run_create() {
   launch_cmd="${launch_cmd:-$(bridge_agent_default_launch_cmd "$engine")}"
   channels="$(bridge_normalize_channels_csv "$channels")"
   users_json="$(bridge_normalize_user_specs_json "${user_specs[@]}")"
+  if [[ "$isolation_mode" == "linux-user" ]]; then
+    if [[ "$(bridge_host_platform)" != "Linux" ]]; then
+      bridge_warn "linux-user isolation은 Linux 전용입니다. 현재 호스트에서는 shared mode로 생성합니다."
+      isolation_mode="shared"
+      os_user=""
+    else
+      os_user="${os_user:-$(bridge_agent_default_os_user "$agent")}"
+    fi
+  fi
 
   default_home="$(bridge_expand_user_path "$default_home")"
   if [[ -z "$profile_home" && "$workdir" != "$default_home" ]]; then
     profile_home="$workdir"
+  fi
+
+  if [[ "$isolation_mode" == "linux-user" ]]; then
+    local existing_agent=""
+    local existing_workdir=""
+    for existing_agent in "${BRIDGE_AGENT_IDS[@]}"; do
+      [[ "$existing_agent" == "$agent" ]] && continue
+      existing_workdir="$(bridge_agent_workdir "$existing_agent")"
+      [[ -n "$existing_workdir" ]] || continue
+      if [[ "$(bridge_expand_user_path "$existing_workdir")" == "$workdir" ]]; then
+        bridge_die "linux-user isolation에서는 workdir를 다른 에이전트와 공유할 수 없습니다: ${existing_agent} -> ${workdir}"
+      fi
+    done
   fi
 
   if [[ $dry_run -eq 0 ]]; then
@@ -1018,14 +1091,19 @@ run_create() {
       "$notify_account" \
       "$loop_mode" \
       "$continue_mode" \
-      "$always_on" >/dev/null
+      "$always_on" \
+      "$isolation_mode" \
+      "$os_user" >/dev/null
     bridge_load_roster
     bridge_sync_skill_docs "$agent" >/dev/null 2>&1 || true
+    if [[ "$isolation_mode" == "linux-user" ]]; then
+      bridge_linux_prepare_agent_isolation "$agent" "$os_user" "$workdir"
+    fi
     start_dry_run="$("$BRIDGE_BASH_BIN" "$SCRIPT_DIR/bridge-start.sh" "$agent" --dry-run 2>&1)"
   fi
 
   if [[ $json_mode -eq 1 ]]; then
-    emit_create_json "$agent" "$engine" "$session" "$workdir" "$profile_home" "$launch_cmd" "$channels" "$BRIDGE_ROSTER_LOCAL_FILE" "$dry_run" "$users_json" "$session_type"
+    emit_create_json "$agent" "$engine" "$session" "$workdir" "$profile_home" "$launch_cmd" "$channels" "$BRIDGE_ROSTER_LOCAL_FILE" "$dry_run" "$users_json" "$session_type" "$isolation_mode" "$os_user"
     exit 0
   fi
 
@@ -1041,6 +1119,10 @@ run_create() {
   printf 'users: %s\n' "$users_json"
   if [[ -n "$channels" ]]; then
     printf 'channels: %s\n' "$channels"
+  fi
+  printf 'isolation_mode: %s\n' "$isolation_mode"
+  if [[ -n "$os_user" ]]; then
+    printf 'os_user: %s\n' "$os_user"
   fi
   printf 'roster_file: %s\n' "$BRIDGE_ROSTER_LOCAL_FILE"
   if [[ $always_on -eq 1 ]]; then

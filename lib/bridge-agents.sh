@@ -391,6 +391,421 @@ bridge_agent_session() {
   printf '%s' "${BRIDGE_AGENT_SESSION[$agent]-}"
 }
 
+bridge_agent_isolation_mode() {
+  local agent="$1"
+  printf '%s' "${BRIDGE_AGENT_ISOLATION_MODE[$agent]-shared}"
+}
+
+bridge_agent_os_user() {
+  local agent="$1"
+  printf '%s' "${BRIDGE_AGENT_OS_USER[$agent]-}"
+}
+
+bridge_agent_default_os_user() {
+  local agent="$1"
+
+  bridge_require_python
+  python3 - "$agent" <<'PY'
+import re
+import sys
+
+agent = sys.argv[1].strip().lower()
+slug = re.sub(r"[^a-z0-9_-]+", "-", agent).strip("-")
+slug = slug or "agent"
+prefix = "agent-bridge-"
+max_len = 32
+keep = max_len - len(prefix)
+if keep < 1:
+    keep = 1
+print(prefix + slug[:keep])
+PY
+}
+
+bridge_agent_linux_user_isolation_requested() {
+  local agent="$1"
+  [[ "$(bridge_agent_isolation_mode "$agent")" == "linux-user" ]]
+}
+
+bridge_agent_linux_user_isolation_effective() {
+  local agent="$1"
+
+  bridge_agent_linux_user_isolation_requested "$agent" || return 1
+  [[ "$(bridge_host_platform)" == "Linux" ]] || return 1
+  [[ -n "$(bridge_agent_os_user "$agent")" ]] || return 1
+  return 0
+}
+
+bridge_current_user() {
+  id -un
+}
+
+bridge_agent_linux_user_home() {
+  local os_user="$1"
+  printf '%s/%s' "$BRIDGE_LINUX_ISOLATED_USER_HOME_ROOT" "$os_user"
+}
+
+bridge_agent_linux_env_file() {
+  local agent="$1"
+  printf '%s/.bridge/agent-env.sh' "$(bridge_agent_workdir "$agent")"
+}
+
+bridge_linux_sudo_root() {
+  if [[ "$(id -u)" == "0" ]]; then
+    "$@"
+    return $?
+  fi
+
+  command -v sudo >/dev/null 2>&1 || bridge_die "linux-user isolation requires sudo"
+  sudo -n "$@"
+}
+
+bridge_linux_require_setfacl() {
+  if command -v setfacl >/dev/null 2>&1; then
+    return 0
+  fi
+  bridge_linux_sudo_root bash -lc 'command -v setfacl >/dev/null 2>&1' || bridge_die "linux-user isolation requires setfacl"
+}
+
+bridge_linux_user_exists() {
+  local os_user="$1"
+  id -u "$os_user" >/dev/null 2>&1
+}
+
+bridge_linux_ensure_os_user() {
+  local os_user="$1"
+  local user_home="$2"
+
+  bridge_linux_user_exists "$os_user" && return 0
+  bridge_linux_sudo_root useradd -r -d "$user_home" -s /bin/bash "$os_user"
+}
+
+bridge_linux_ensure_user_home() {
+  local os_user="$1"
+  local user_home="$2"
+
+  bridge_linux_sudo_root mkdir -p "$user_home"
+  bridge_linux_sudo_root chown "$os_user" "$user_home"
+  bridge_linux_sudo_root chmod 700 "$user_home"
+}
+
+bridge_linux_install_agent_bridge_symlink() {
+  local os_user="$1"
+  local user_home="$2"
+  local bridge_home="$3"
+  local target="$user_home/.agent-bridge"
+  local current=""
+
+  current="$(bridge_linux_sudo_root python3 - "$target" <<'PY'
+from pathlib import Path
+import os
+import sys
+
+path = Path(sys.argv[1])
+if not path.exists() and not path.is_symlink():
+    print("")
+elif path.is_symlink():
+    print(os.readlink(path))
+else:
+    print("__nonlink__")
+PY
+)"
+
+  if [[ "$current" == "$bridge_home" ]]; then
+    return 0
+  fi
+
+  bridge_linux_sudo_root rm -rf "$target"
+  bridge_linux_sudo_root ln -s "$bridge_home" "$target"
+  bridge_linux_sudo_root chown -h "$os_user" "$target" >/dev/null 2>&1 || true
+}
+
+bridge_linux_acl_add() {
+  local spec="$1"
+  shift || true
+  (($# > 0)) || return 0
+  bridge_linux_sudo_root setfacl -m "$spec" "$@"
+}
+
+bridge_linux_acl_add_recursive() {
+  local spec="$1"
+  shift || true
+  (($# > 0)) || return 0
+  bridge_linux_sudo_root setfacl -R -m "$spec" "$@"
+}
+
+bridge_linux_acl_remove_recursive() {
+  local spec="$1"
+  shift || true
+  (($# > 0)) || return 0
+  bridge_linux_sudo_root setfacl -R -x "$spec" "$@" >/dev/null 2>&1 || true
+}
+
+bridge_linux_acl_add_default_dirs_recursive() {
+  local spec="$1"
+  shift || true
+  local path=""
+
+  for path in "$@"; do
+    [[ -d "$path" ]] || continue
+    bridge_linux_sudo_root find "$path" -type d -exec setfacl -d -m "$spec" {} +
+  done
+}
+
+bridge_linux_grant_traverse_chain() {
+  local os_user="$1"
+  local target="$2"
+  local path=""
+
+  while IFS= read -r path; do
+    [[ -d "$path" ]] || continue
+    bridge_linux_acl_add "u:${os_user}:--x" "$path"
+  done < <(python3 - "$target" <<'PY'
+from pathlib import Path
+import os
+import sys
+
+path = Path(sys.argv[1]).expanduser().resolve()
+items = []
+current = path
+while True:
+    items.append(str(current))
+    if current.parent == current:
+        break
+    current = current.parent
+for item in reversed(items):
+    print(item)
+PY
+)
+}
+
+bridge_write_linux_agent_env_file() {
+  local agent="$1"
+  local file="${2:-$(bridge_agent_linux_env_file "$agent")}"
+  local description=""
+  local engine=""
+  local session=""
+  local workdir=""
+  local profile_home=""
+  local launch_cmd=""
+  local channels=""
+  local discord_channel=""
+  local notify_kind=""
+  local notify_target=""
+  local notify_account=""
+  local loop_mode=""
+  local continue_mode=""
+  local idle_timeout=""
+  local session_id=""
+  local history_key=""
+  local created_at=""
+  local updated_at=""
+  local isolation_mode=""
+  local os_user=""
+  local admin_agent=""
+  local agent_log_dir=""
+  local agent_audit_log=""
+
+  description="$(bridge_agent_desc "$agent")"
+  engine="$(bridge_agent_engine "$agent")"
+  session="$(bridge_agent_session "$agent")"
+  workdir="$(bridge_agent_workdir "$agent")"
+  profile_home="$(bridge_agent_profile_home "$agent")"
+  launch_cmd="$(bridge_agent_launch_cmd_raw "$agent")"
+  channels="$(bridge_agent_channels_csv "$agent")"
+  discord_channel="$(bridge_agent_discord_channel_id "$agent")"
+  notify_kind="$(bridge_agent_notify_kind "$agent")"
+  notify_target="$(bridge_agent_notify_target "$agent")"
+  notify_account="$(bridge_agent_notify_account "$agent")"
+  loop_mode="$(bridge_agent_loop "$agent")"
+  continue_mode="$(bridge_agent_continue "$agent")"
+  idle_timeout="$(bridge_agent_idle_timeout "$agent")"
+  session_id="$(bridge_agent_session_id "$agent")"
+  history_key="${BRIDGE_AGENT_HISTORY_KEY[$agent]-}"
+  created_at="${BRIDGE_AGENT_CREATED_AT[$agent]-}"
+  updated_at="${BRIDGE_AGENT_UPDATED_AT[$agent]-}"
+  isolation_mode="$(bridge_agent_isolation_mode "$agent")"
+  os_user="$(bridge_agent_os_user "$agent")"
+  admin_agent="$(bridge_admin_agent_id)"
+  agent_log_dir="$(bridge_agent_log_dir "$agent")"
+  agent_audit_log="$(bridge_agent_audit_log_file "$agent")"
+
+  mkdir -p "$(dirname "$file")"
+  cat >"$file" <<EOF
+#!/usr/bin/env bash
+# shellcheck shell=bash disable=SC2034
+BRIDGE_HOME=$(printf '%q' "$BRIDGE_HOME")
+BRIDGE_STATE_DIR=$(printf '%q' "$BRIDGE_STATE_DIR")
+BRIDGE_ACTIVE_AGENT_DIR=$(printf '%q' "$BRIDGE_ACTIVE_AGENT_DIR")
+BRIDGE_HISTORY_DIR=$(printf '%q' "$BRIDGE_HISTORY_DIR")
+BRIDGE_WORKTREE_META_DIR=$(printf '%q' "$BRIDGE_WORKTREE_META_DIR")
+BRIDGE_ACTIVE_ROSTER_TSV=$(printf '%q' "$BRIDGE_ACTIVE_ROSTER_TSV")
+BRIDGE_ACTIVE_ROSTER_MD=$(printf '%q' "$BRIDGE_ACTIVE_ROSTER_MD")
+BRIDGE_DAEMON_PID_FILE=$(printf '%q' "$BRIDGE_DAEMON_PID_FILE")
+BRIDGE_DAEMON_LOG=$(printf '%q' "$BRIDGE_DAEMON_LOG")
+BRIDGE_DAEMON_CRASH_LOG=$(printf '%q' "$BRIDGE_DAEMON_CRASH_LOG")
+BRIDGE_TASK_DB=$(printf '%q' "$BRIDGE_TASK_DB")
+BRIDGE_PROFILE_STATE_DIR=$(printf '%q' "$BRIDGE_PROFILE_STATE_DIR")
+BRIDGE_CRON_STATE_DIR=$(printf '%q' "$BRIDGE_CRON_STATE_DIR")
+BRIDGE_CRON_HOME_DIR=$(printf '%q' "$BRIDGE_CRON_HOME_DIR")
+BRIDGE_WORKTREE_ROOT=$(printf '%q' "$BRIDGE_WORKTREE_ROOT")
+BRIDGE_AGENT_HOME_ROOT=$(printf '%q' "$BRIDGE_AGENT_HOME_ROOT")
+BRIDGE_RUNTIME_ROOT=$(printf '%q' "$BRIDGE_RUNTIME_ROOT")
+BRIDGE_RUNTIME_SCRIPTS_DIR=$(printf '%q' "$BRIDGE_RUNTIME_SCRIPTS_DIR")
+BRIDGE_RUNTIME_SKILLS_DIR=$(printf '%q' "$BRIDGE_RUNTIME_SKILLS_DIR")
+BRIDGE_RUNTIME_SHARED_DIR=$(printf '%q' "$BRIDGE_RUNTIME_SHARED_DIR")
+BRIDGE_RUNTIME_SHARED_TOOLS_DIR=$(printf '%q' "$BRIDGE_RUNTIME_SHARED_TOOLS_DIR")
+BRIDGE_RUNTIME_SHARED_REFERENCES_DIR=$(printf '%q' "$BRIDGE_RUNTIME_SHARED_REFERENCES_DIR")
+BRIDGE_RUNTIME_MEMORY_DIR=$(printf '%q' "$BRIDGE_RUNTIME_MEMORY_DIR")
+BRIDGE_RUNTIME_CREDENTIALS_DIR=$(printf '%q' "$BRIDGE_RUNTIME_CREDENTIALS_DIR")
+BRIDGE_RUNTIME_SECRETS_DIR=$(printf '%q' "$BRIDGE_RUNTIME_SECRETS_DIR")
+BRIDGE_RUNTIME_CONFIG_FILE=$(printf '%q' "$BRIDGE_RUNTIME_CONFIG_FILE")
+BRIDGE_HOOKS_DIR=$(printf '%q' "$BRIDGE_HOOKS_DIR")
+BRIDGE_SHARED_DIR=$(printf '%q' "$BRIDGE_SHARED_DIR")
+BRIDGE_LOG_DIR=$(printf '%q' "$agent_log_dir")
+BRIDGE_AUDIT_LOG=$(printf '%q' "$agent_audit_log")
+BRIDGE_ROSTER_FILE=""
+BRIDGE_ROSTER_LOCAL_FILE=""
+BRIDGE_ADMIN_AGENT_ID=$(printf '%q' "$admin_agent")
+BRIDGE_AGENT_IDS=()
+declare -g -A BRIDGE_AGENT_DESC=()
+declare -g -A BRIDGE_AGENT_ENGINE=()
+declare -g -A BRIDGE_AGENT_SESSION=()
+declare -g -A BRIDGE_AGENT_WORKDIR=()
+declare -g -A BRIDGE_AGENT_PROFILE_HOME=()
+declare -g -A BRIDGE_AGENT_LAUNCH_CMD=()
+declare -g -A BRIDGE_AGENT_SOURCE=()
+declare -g -A BRIDGE_AGENT_LOOP=()
+declare -g -A BRIDGE_AGENT_CONTINUE=()
+declare -g -A BRIDGE_AGENT_SESSION_ID=()
+declare -g -A BRIDGE_AGENT_HISTORY_KEY=()
+declare -g -A BRIDGE_AGENT_CREATED_AT=()
+declare -g -A BRIDGE_AGENT_UPDATED_AT=()
+declare -g -A BRIDGE_AGENT_IDLE_TIMEOUT=()
+declare -g -A BRIDGE_AGENT_NOTIFY_KIND=()
+declare -g -A BRIDGE_AGENT_NOTIFY_TARGET=()
+declare -g -A BRIDGE_AGENT_NOTIFY_ACCOUNT=()
+declare -g -A BRIDGE_AGENT_DISCORD_CHANNEL_ID=()
+declare -g -A BRIDGE_AGENT_CHANNELS=()
+declare -g -A BRIDGE_AGENT_ISOLATION_MODE=()
+declare -g -A BRIDGE_AGENT_OS_USER=()
+bridge_add_agent_id_if_missing $(printf '%q' "$agent")
+BRIDGE_AGENT_DESC["$agent"]=$(printf '%q' "$description")
+BRIDGE_AGENT_ENGINE["$agent"]=$(printf '%q' "$engine")
+BRIDGE_AGENT_SESSION["$agent"]=$(printf '%q' "$session")
+BRIDGE_AGENT_WORKDIR["$agent"]=$(printf '%q' "$workdir")
+BRIDGE_AGENT_PROFILE_HOME["$agent"]=$(printf '%q' "$profile_home")
+BRIDGE_AGENT_LAUNCH_CMD["$agent"]=$(printf '%q' "$launch_cmd")
+BRIDGE_AGENT_SOURCE["$agent"]="static"
+BRIDGE_AGENT_LOOP["$agent"]=$(printf '%q' "$loop_mode")
+BRIDGE_AGENT_CONTINUE["$agent"]=$(printf '%q' "$continue_mode")
+BRIDGE_AGENT_SESSION_ID["$agent"]=$(printf '%q' "$session_id")
+BRIDGE_AGENT_HISTORY_KEY["$agent"]=$(printf '%q' "$history_key")
+BRIDGE_AGENT_CREATED_AT["$agent"]=$(printf '%q' "$created_at")
+BRIDGE_AGENT_UPDATED_AT["$agent"]=$(printf '%q' "$updated_at")
+BRIDGE_AGENT_IDLE_TIMEOUT["$agent"]=$(printf '%q' "$idle_timeout")
+BRIDGE_AGENT_NOTIFY_KIND["$agent"]=$(printf '%q' "$notify_kind")
+BRIDGE_AGENT_NOTIFY_TARGET["$agent"]=$(printf '%q' "$notify_target")
+BRIDGE_AGENT_NOTIFY_ACCOUNT["$agent"]=$(printf '%q' "$notify_account")
+BRIDGE_AGENT_DISCORD_CHANNEL_ID["$agent"]=$(printf '%q' "$discord_channel")
+BRIDGE_AGENT_CHANNELS["$agent"]=$(printf '%q' "$channels")
+BRIDGE_AGENT_ISOLATION_MODE["$agent"]=$(printf '%q' "$isolation_mode")
+BRIDGE_AGENT_OS_USER["$agent"]=$(printf '%q' "$os_user")
+EOF
+  chmod 600 "$file"
+}
+
+bridge_linux_prepare_agent_isolation() {
+  local agent="$1"
+  local os_user="$2"
+  local workdir="$3"
+  local controller_user="${4:-$(bridge_current_user)}"
+  local user_home=""
+  local env_file=""
+  local runtime_state_dir=""
+  local log_dir=""
+  local audit_file=""
+  local history_file=""
+  local request_dir=""
+  local response_dir=""
+  local other=""
+  local other_workdir=""
+  local other_queue_dir=""
+  local -a recursive_read_paths=()
+  local -a recursive_write_paths=()
+  local -a hidden_paths=()
+
+  [[ "$(bridge_host_platform)" == "Linux" ]] || return 0
+  [[ -n "$os_user" ]] || bridge_die "linux-user isolation requires os_user"
+
+  bridge_linux_require_setfacl
+  user_home="$(bridge_agent_linux_user_home "$os_user")"
+  env_file="$(bridge_agent_linux_env_file "$agent")"
+  runtime_state_dir="$(bridge_agent_runtime_state_dir "$agent")"
+  log_dir="$(bridge_agent_log_dir "$agent")"
+  audit_file="$(bridge_agent_audit_log_file "$agent")"
+  history_file="$(bridge_history_file_for_agent "$agent")"
+  request_dir="$(bridge_queue_gateway_requests_dir "$agent")"
+  response_dir="$(bridge_queue_gateway_responses_dir "$agent")"
+
+  bridge_linux_ensure_os_user "$os_user" "$user_home"
+  bridge_linux_ensure_user_home "$os_user" "$user_home"
+  bridge_linux_install_agent_bridge_symlink "$os_user" "$user_home" "$BRIDGE_HOME"
+
+  recursive_read_paths+=("$BRIDGE_HOOKS_DIR" "$BRIDGE_SHARED_DIR")
+  [[ -d "$BRIDGE_RUNTIME_ROOT" ]] && recursive_read_paths+=("$BRIDGE_RUNTIME_ROOT")
+  [[ -d "$BRIDGE_HOME/.claude" ]] && recursive_read_paths+=("$BRIDGE_HOME/.claude")
+  [[ -d "$BRIDGE_HOME/lib" ]] && recursive_read_paths+=("$BRIDGE_HOME/lib")
+  [[ -d "$BRIDGE_HOME/plugins" ]] && recursive_read_paths+=("$BRIDGE_HOME/plugins")
+  [[ -d "$BRIDGE_HOME/scripts" ]] && recursive_read_paths+=("$BRIDGE_HOME/scripts")
+  [[ -d "$BRIDGE_AGENT_HOME_ROOT/.claude" ]] && recursive_read_paths+=("$BRIDGE_AGENT_HOME_ROOT/.claude")
+  bridge_linux_acl_remove_recursive "u:${os_user}" "$BRIDGE_STATE_DIR" "$BRIDGE_LOG_DIR"
+  bridge_linux_sudo_root mkdir -p "$runtime_state_dir" "$log_dir" "$request_dir" "$response_dir" "$(dirname "$history_file")"
+  bridge_linux_sudo_root touch "$audit_file" "$history_file"
+  recursive_write_paths+=("$workdir" "$runtime_state_dir" "$log_dir" "$request_dir" "$response_dir")
+  hidden_paths+=("$BRIDGE_ROSTER_FILE" "$BRIDGE_ROSTER_LOCAL_FILE" "$BRIDGE_RUNTIME_CREDENTIALS_DIR" "$BRIDGE_RUNTIME_SECRETS_DIR" "$BRIDGE_RUNTIME_CONFIG_FILE" "$BRIDGE_TASK_DB" "${BRIDGE_LOG_DIR}/audit.jsonl")
+
+  bridge_linux_grant_traverse_chain "$os_user" "$BRIDGE_HOME"
+  bridge_linux_grant_traverse_chain "$os_user" "$workdir"
+  bridge_linux_grant_traverse_chain "$os_user" "$user_home"
+  bridge_linux_grant_traverse_chain "$os_user" "$runtime_state_dir"
+  bridge_linux_grant_traverse_chain "$os_user" "$log_dir"
+  bridge_linux_grant_traverse_chain "$os_user" "$history_file"
+  bridge_linux_grant_traverse_chain "$os_user" "$request_dir"
+  bridge_linux_grant_traverse_chain "$os_user" "$response_dir"
+
+  bridge_linux_acl_add "u:${os_user}:r-x" "$BRIDGE_HOME" "$BRIDGE_AGENT_HOME_ROOT"
+  bridge_linux_acl_add "u:${os_user}:r-x" "$BRIDGE_HOME/agent-bridge" "$BRIDGE_HOME/agb" "$BRIDGE_HOME/VERSION" >/dev/null 2>&1 || true
+  bridge_linux_acl_add_recursive "u:${os_user}:r-X" "${recursive_read_paths[@]}"
+  bridge_linux_acl_add_recursive "u:${os_user}:rwX" "${recursive_write_paths[@]}"
+  bridge_linux_acl_add_default_dirs_recursive "u:${os_user}:rwX" "$runtime_state_dir" "$log_dir" "$request_dir" "$response_dir"
+  bridge_linux_acl_add "u:${os_user}:rw-" "$history_file"
+
+  for other in "${BRIDGE_AGENT_IDS[@]}"; do
+    [[ "$other" == "$agent" ]] && continue
+    other_workdir="$(bridge_agent_workdir "$other")"
+    other_queue_dir="$(bridge_queue_gateway_agent_dir "$other")"
+    [[ "$other_workdir" == "$workdir" ]] && continue
+    [[ -d "$other_workdir" ]] || continue
+    bridge_linux_acl_remove_recursive "u:${os_user}" "$other_workdir"
+    [[ -d "$other_queue_dir" ]] && bridge_linux_acl_remove_recursive "u:${os_user}" "$other_queue_dir"
+  done
+
+  for other in "${hidden_paths[@]}"; do
+    [[ -e "$other" ]] || continue
+    bridge_linux_acl_remove_recursive "u:${os_user}" "$other"
+  done
+
+  bridge_linux_sudo_root chown -R "$os_user" "$workdir"
+  bridge_linux_sudo_root chown -R "$os_user" "$runtime_state_dir" "$log_dir"
+  bridge_linux_sudo_root chown "$os_user" "$audit_file" "$history_file"
+  bridge_linux_acl_add_recursive "u:${controller_user}:rwX" "$workdir"
+  bridge_linux_acl_add_default_dirs_recursive "u:${controller_user}:rwX" "$workdir"
+  bridge_linux_acl_add_recursive "u:${controller_user}:rwX" "$runtime_state_dir" "$log_dir" "$request_dir" "$response_dir"
+  bridge_linux_acl_add "u:${controller_user}:rw-" "$history_file" "$audit_file"
+  bridge_write_linux_agent_env_file "$agent" "$env_file"
+  bridge_linux_sudo_root chown "$os_user" "$env_file"
+  bridge_linux_acl_add "u:${controller_user}:rw-" "$env_file"
+}
 bridge_agent_default_home() {
   local agent="$1"
   printf '%s/%s' "$BRIDGE_AGENT_HOME_ROOT" "$agent"

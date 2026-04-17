@@ -7,7 +7,8 @@ import json
 import os
 import re
 import socket
-import sqlite3
+import subprocess
+import sys
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -42,10 +43,17 @@ def bridge_home_dir() -> Path:
     return Path.home() / ".agent-bridge"
 
 
+def bridge_script_dir() -> Path:
+    return Path(__file__).resolve().parent.parent
+
+
 def audit_log_path() -> Path:
     explicit = os.environ.get("BRIDGE_AUDIT_LOG", "").strip()
     if explicit:
         return Path(explicit).expanduser()
+    agent = current_agent()
+    if agent:
+        return bridge_home_dir() / "logs" / "agents" / agent / "audit.jsonl"
     return bridge_home_dir() / "logs" / "audit.jsonl"
 
 
@@ -69,6 +77,15 @@ def agent_workdir(agent: str) -> Path:
 
 def current_agent() -> str:
     return os.environ.get("BRIDGE_AGENT_ID", "").strip()
+
+
+def current_isolated_agent() -> str | None:
+    agent = current_agent()
+    if not agent:
+        return None
+    if os.environ.get("BRIDGE_AGENT_ISOLATION_MODE", "").strip() != "linux-user":
+        return None
+    return agent
 
 
 def current_agent_workdir() -> Path:
@@ -107,6 +124,38 @@ def write_audit(action: str, target: str, detail: dict[str, Any]) -> None:
     }
     with path.open("a", encoding="utf-8") as handle:
         handle.write(json.dumps(record, ensure_ascii=True) + "\n")
+
+
+def queue_gateway_root() -> Path:
+    return bridge_state_dir() / "queue-gateway"
+
+
+def queue_cli(args: list[str]) -> subprocess.CompletedProcess[str]:
+    isolated_agent = current_isolated_agent()
+    if isolated_agent:
+        cmd = [
+            sys.executable,
+            str(bridge_script_dir() / "bridge-queue-gateway.py"),
+            "client",
+            "--root",
+            str(queue_gateway_root()),
+            "--agent",
+            isolated_agent,
+            "--timeout",
+            os.environ.get("BRIDGE_QUEUE_GATEWAY_TIMEOUT_SECONDS", "45"),
+            "--poll",
+            os.environ.get("BRIDGE_QUEUE_GATEWAY_POLL_SECONDS", "0.2"),
+            *args,
+        ]
+    else:
+        cmd = [sys.executable, str(bridge_script_dir() / "bridge-queue.py"), *args]
+    return subprocess.run(
+        cmd,
+        cwd=str(current_agent_workdir()),
+        capture_output=True,
+        text=True,
+        check=False,
+    )
 
 
 def first_existing_path(candidates: list[Path]) -> Path | None:
@@ -182,7 +231,7 @@ def bootstrap_artifact_context(agent: str) -> str:
 
 
 def timestamp_state_path(agent: str) -> Path:
-    return bridge_state_dir() / "timestamps" / f"{agent}.json"
+    return bridge_state_dir() / "agents" / agent / "timestamp.json"
 
 
 def load_timestamp_state(agent: str) -> dict[str, int]:
@@ -288,45 +337,40 @@ def session_start_context(agent: str) -> str:
     return queue_context
 
 
-def queue_summary(agent: str) -> tuple[int, sqlite3.Row | None]:
-    task_db = bridge_task_db()
-    if not task_db.exists():
+def queue_summary(agent: str) -> tuple[int, dict[str, Any] | None]:
+    summary_proc = queue_cli(["summary", "--agent", agent, "--format", "json"])
+    if summary_proc.returncode != 0 or not summary_proc.stdout.strip():
+        return 0, None
+    try:
+        rows = json.loads(summary_proc.stdout)
+    except json.JSONDecodeError:
+        return 0, None
+    if not isinstance(rows, list) or not rows:
+        return 0, None
+    row = rows[0] if isinstance(rows[0], dict) else None
+    if not row:
+        return 0, None
+    pending = int(row.get("queued_count", 0)) + int(row.get("blocked_count", 0)) + int(row.get("claimed_count", 0))
+    if pending <= 0:
         return 0, None
 
-    with sqlite3.connect(task_db) as conn:
-        conn.row_factory = sqlite3.Row
-        rows = conn.execute(
-            """
-            SELECT id, title, priority, status, assigned_to, claimed_by
-            FROM tasks
-            WHERE (
-                assigned_to = ?
-                AND status IN ('queued', 'blocked')
-            ) OR (
-                claimed_by = ?
-                AND status = 'claimed'
-            )
-            """,
-            (agent, agent),
-        ).fetchall()
-    if not rows:
-        return 0, None
-
-    ordered = sorted(
-        rows,
-        key=lambda row: (
-            PRIORITY_ORDER.get(str(row["priority"] or "normal"), 99),
-            int(row["id"]),
-        ),
-    )
-    return len(rows), ordered[0]
+    top_proc = queue_cli(["find-open", "--agent", agent, "--format", "json"])
+    if top_proc.returncode != 0 or not top_proc.stdout.strip():
+        return pending, None
+    try:
+        top_row = json.loads(top_proc.stdout)
+    except json.JSONDecodeError:
+        return pending, None
+    if not isinstance(top_row, dict):
+        return pending, None
+    return pending, top_row
 
 
-def queue_attention_message(agent: str, pending: int, row: sqlite3.Row | None) -> str:
+def queue_attention_message(agent: str, pending: int, row: dict[str, Any] | None) -> str:
     lines = [f"[Agent Bridge] {pending} pending task(s) for {agent}."]
     if row is not None:
         lines.append(
-            f"Highest priority: Task #{int(row['id'])} [{str(row['priority'] or 'normal')}] {str(row['title'] or '')}"
+            f"Highest priority: Task #{int(row.get('id', 0))} [{str(row.get('priority') or 'normal')}] {str(row.get('title') or '')}"
         )
     lines.append("ACTION REQUIRED: Use your Bash tool now. Do not acknowledge or reply conversationally first.")
     lines.append(f"Run exactly: ~/.agent-bridge/agb inbox {agent}")
@@ -335,9 +379,9 @@ def queue_attention_message(agent: str, pending: int, row: sqlite3.Row | None) -
     return "\n".join(lines)
 
 
-def codex_stop_reason(agent: str, row: sqlite3.Row) -> str:
-    task_id = int(row["id"])
-    title = str(row["title"] or "")
+def codex_stop_reason(agent: str, row: dict[str, Any]) -> str:
+    task_id = int(row.get("id", 0))
+    title = str(row.get("title") or "")
     priority = str(row["priority"] or "normal")
     status = str(row["status"] or "")
     if status == "claimed":
