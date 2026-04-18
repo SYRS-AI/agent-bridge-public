@@ -28,3 +28,10 @@ agents/*/.claude/
 !agents/_template/session-type-files/**
 agents/.claude/settings.local.json
 agents/.claude/settings.effective.json
+
+# Local developer harness (worker agents + orchestrator skills for repo
+# workflow). Tracked plugin skills under .claude/skills/<name>/ stay
+# committed via explicit git add; everything else under these paths is
+# machine-local.
+.claude/agents/
+.claude/skills/upstream-issue-fix/
