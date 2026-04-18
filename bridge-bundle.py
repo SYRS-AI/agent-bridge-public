@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import json
 import re
+import shutil
 from datetime import datetime
 from pathlib import Path
 
@@ -137,9 +138,34 @@ def write_bundle(payload: dict[str, object], dry_run: bool) -> None:
     if not dry_run:
         bundle_dir_path.mkdir(parents=True, exist_ok=True)
         artifact_dir_path.mkdir(parents=True, exist_ok=True)
+        bundle_dir_path.chmod(0o755)
+        artifact_dir_path.chmod(0o755)
         (artifact_dir_path / ".gitkeep").write_text("", encoding="utf-8")
     write_text(Path(payload["paths"]["bundle_json"]), json.dumps(payload, ensure_ascii=False, indent=2) + "\n", dry_run)
     write_text(Path(payload["paths"]["task_body"]), render_bundle_markdown(payload), dry_run)
+
+
+def stage_artifacts(artifacts: list[dict[str, str]], artifact_dir: Path, shared_root: Path, dry_run: bool) -> None:
+    used_names: set[str] = set()
+    for artifact in artifacts:
+        src = Path(artifact["path"])
+        base = src.name
+        name = base
+        index = 1
+        while name in used_names:
+            name = f"{src.stem}-{index}{src.suffix}"
+            index += 1
+        used_names.add(name)
+        dst = artifact_dir / name
+        artifact["staged_path"] = str(dst)
+        try:
+            artifact["staged_relative_path"] = str(dst.relative_to(shared_root))
+        except ValueError:
+            artifact["staged_relative_path"] = ""
+        if dry_run or not src.exists():
+            continue
+        shutil.copy2(src, dst)
+        dst.chmod(0o644)
 
 
 def cmd_create(args: argparse.Namespace) -> int:
@@ -178,6 +204,9 @@ def cmd_create(args: argparse.Namespace) -> int:
         },
     }
     write_bundle(payload, args.dry_run)
+    stage_artifacts(artifacts, Path(payload["paths"]["artifact_dir"]), shared_root, args.dry_run)
+    if not args.dry_run:
+        write_text(Path(payload["paths"]["bundle_json"]), json.dumps(payload, ensure_ascii=False, indent=2) + "\n", args.dry_run)
     print(json.dumps(payload, ensure_ascii=False, indent=2))
     return 0
 
