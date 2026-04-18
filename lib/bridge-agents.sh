@@ -762,6 +762,25 @@ BRIDGE_AGENT_ISOLATION_MODE["$agent"]=$(printf '%q' "$isolation_mode")
 BRIDGE_AGENT_OS_USER["$agent"]=$(printf '%q' "$os_user")
 EOF
   chmod 600 "$file"
+  # `chmod 600` maps to mask::--- on a file that already carries named-user
+  # ACLs (POSIX ACL: chmod's group bits drive the mask when named entries
+  # exist). isolate originally grants the isolated UID `u:<os_user>:r--` so
+  # it can read agent-env.sh under sudo-wrap, but the mask wipe makes that
+  # entry effective `---`, so subsequent `agent start` cycles fail silently
+  # — bridge-run.sh sources nothing, sees an empty roster, and exits before
+  # tmux is created. Re-apply the named-user ACL so setfacl recomputes the
+  # mask back to rw- (or whatever covers the named entries).
+  if [[ "$isolation_mode" == "linux-user" \
+        && -n "$os_user" \
+        && "$(bridge_host_platform 2>/dev/null || printf '')" == "Linux" ]] \
+      && command -v bridge_linux_acl_add >/dev/null 2>&1; then
+    local _controller_user
+    _controller_user="$(bridge_current_user 2>/dev/null || printf '')"
+    bridge_linux_acl_add "u:${os_user}:r--" "$file" >/dev/null 2>&1 || true
+    if [[ -n "$_controller_user" ]]; then
+      bridge_linux_acl_add "u:${_controller_user}:rw-" "$file" >/dev/null 2>&1 || true
+    fi
+  fi
 }
 
 bridge_linux_prepare_agent_isolation() {
