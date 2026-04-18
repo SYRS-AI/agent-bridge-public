@@ -2928,6 +2928,129 @@ bridge_refresh_runtime_state() {
   fi
 }
 
+bridge_agent_plugin_port_from_env_file() {
+  # Read a single <KEY>=<value> line from a plugin .env file and echo the
+  # value if it parses as a port. Empty output on miss.
+  local env_file="$1"
+  local key="$2"
+  local line=""
+  local value=""
+
+  [[ -n "$env_file" && -f "$env_file" ]] || return 0
+  [[ -n "$key" ]] || return 0
+  # Grab the last occurrence — plugin .env files are append-style in places.
+  line="$(grep -E "^${key}=" "$env_file" 2>/dev/null | tail -n 1 || true)"
+  [[ -n "$line" ]] || return 0
+  value="${line#${key}=}"
+  # Strip optional surrounding quotes and whitespace.
+  value="${value%\"}"
+  value="${value#\"}"
+  value="${value%\'}"
+  value="${value#\'}"
+  value="${value//[[:space:]]/}"
+  [[ "$value" =~ ^[0-9]+$ ]] || return 0
+  printf '%s' "$value"
+}
+
+bridge_agent_plugin_ports() {
+  # Enumerate known plugin ports for an agent. Currently only teams binds
+  # a long-lived port inside the tmux pane tree, but the helper is built
+  # to grow: each entry is "<port>\t<binary-name>\t<plugin-label>".
+  local agent="$1"
+  local teams_env=""
+  local port=""
+
+  teams_env="$(bridge_agent_teams_state_dir "$agent")/.env"
+  port="$(bridge_agent_plugin_port_from_env_file "$teams_env" "TEAMS_WEBHOOK_PORT" 2>/dev/null || true)"
+  if [[ -n "$port" ]]; then
+    printf '%s\t%s\t%s\n' "$port" "bun" "teams"
+  fi
+}
+
+bridge_kill_port_holder_if_orphan() {
+  # Port-aware fallback to the generic orphan cleanup: if $port is still
+  # bound after session stop, find the pid holding it, confirm it is
+  # rooted at pid 1 (reparented to init) and that its command matches the
+  # plugin binary name, then SIGTERM → wait → SIGKILL it specifically.
+  # See issue #69 Defect A.
+  local port="$1"
+  local binary_name="$2"
+  local plugin_label="$3"
+  local -a holders=()
+  local pid=""
+  local ppid_value=""
+  local cmd=""
+  local attempt=0
+
+  [[ "$port" =~ ^[0-9]+$ ]] || return 0
+  [[ -n "$binary_name" ]] || return 0
+
+  # Enumerate PIDs holding the port. Prefer ss -tlnp, fall back to lsof.
+  if command -v ss >/dev/null 2>&1; then
+    while IFS= read -r pid; do
+      [[ -n "$pid" ]] && holders+=("$pid")
+    done < <(
+      ss -H -tlnp "sport = :${port}" 2>/dev/null \
+        | grep -oE 'pid=[0-9]+' \
+        | awk -F= '{print $2}' \
+        | sort -u
+    )
+  fi
+  if [[ ${#holders[@]} -eq 0 ]] && command -v lsof >/dev/null 2>&1; then
+    while IFS= read -r pid; do
+      [[ -n "$pid" ]] && holders+=("$pid")
+    done < <(lsof -ti ":${port}" 2>/dev/null | sort -u)
+  fi
+
+  [[ ${#holders[@]} -gt 0 ]] || return 0
+
+  for pid in "${holders[@]}"; do
+    [[ "$pid" =~ ^[0-9]+$ ]] || continue
+    # Only touch processes that have been reparented to init/launchd (ppid=1
+    # or 0). A live session's bun child still parented to a tmux pane
+    # process must not be killed from under it.
+    ppid_value="$(ps -o ppid= -p "$pid" 2>/dev/null | tr -d '[:space:]' || true)"
+    [[ "$ppid_value" =~ ^[0-9]+$ ]] || continue
+    (( ppid_value == 0 || ppid_value == 1 )) || continue
+    cmd="$(ps -o command= -p "$pid" 2>/dev/null || true)"
+    # Require the recognized binary name in the command line to avoid
+    # killing an unrelated process that happened to bind the same port.
+    [[ "$cmd" == *"${binary_name}"* ]] || continue
+
+    bridge_info "[info] killing reparented ${plugin_label} port holder pid=${pid} port=${port} cmd='${cmd}' (issue #69)"
+    kill -TERM "$pid" >/dev/null 2>&1 || true
+    for attempt in {1..20}; do
+      if ! kill -0 "$pid" >/dev/null 2>&1; then
+        break
+      fi
+      sleep 0.1
+    done
+    if kill -0 "$pid" >/dev/null 2>&1; then
+      kill -KILL "$pid" >/dev/null 2>&1 || true
+    fi
+  done
+}
+
+bridge_agent_port_aware_orphan_cleanup_after_session_stop() {
+  # Complement to bridge_mcp_orphan_cleanup_after_session_stop: walk the
+  # plugin ports this agent reserves and make sure nothing is still
+  # holding them after the tmux tree comes down. Belt-and-suspenders for
+  # issue #69 Defect A, where reparented bun processes have been observed
+  # to survive the pattern-based cleanup.
+  local agent="$1"
+  local port=""
+  local binary=""
+  local label=""
+
+  [[ "${BRIDGE_PLUGIN_PORT_ORPHAN_CLEANUP_ENABLED:-1}" == "1" ]] || return 0
+
+  while IFS=$'\t' read -r port binary label; do
+    [[ -n "$port" ]] || continue
+    bridge_kill_port_holder_if_orphan "$port" "$binary" "$label" \
+      >/dev/null 2>&1 || true
+  done < <(bridge_agent_plugin_ports "$agent" 2>/dev/null || true)
+}
+
 bridge_kill_agent_session() {
   local agent="$1"
   local session
@@ -2957,6 +3080,8 @@ bridge_kill_agent_session() {
   fi
   sleep 0.2
   bridge_mcp_orphan_cleanup_after_session_stop "$agent" >/dev/null 2>&1 || true
+  bridge_agent_port_aware_orphan_cleanup_after_session_stop "$agent" \
+    >/dev/null 2>&1 || true
   bridge_agent_clear_idle_marker "$agent"
   bridge_info "[info] killed ${agent}/${session}"
 }

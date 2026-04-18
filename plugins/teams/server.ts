@@ -93,6 +93,46 @@ process.on('uncaughtException', err => {
   process.stderr.write(`teams channel: uncaught exception: ${err}\n`)
 })
 
+/**
+ * Graceful shutdown: close the HTTP listener (releasing the bound port) and
+ * exit. This is referenced by the signal handlers and the parent-death
+ * watchdog below. See issue #69.
+ */
+let shuttingDown = false
+function gracefulShutdown(reason: string): void {
+  if (shuttingDown) return
+  shuttingDown = true
+  process.stderr.write(`teams channel: shutting down (${reason})\n`)
+  try {
+    httpServer.close(() => process.exit(0))
+  } catch {
+    process.exit(0)
+  }
+  // Safety: if close() hangs (open keep-alive sockets), force exit quickly.
+  setTimeout(() => process.exit(0), 1500).unref?.()
+}
+
+// Signal handlers: without these, bun does not release the port when tmux
+// SIGKILLs the pane process tree — the bun child is reparented to init and
+// keeps holding the port. See issue #69 Defect A.
+process.on('SIGTERM', () => gracefulShutdown('SIGTERM'))
+process.on('SIGHUP', () => gracefulShutdown('SIGHUP'))
+process.on('SIGINT', () => gracefulShutdown('SIGINT'))
+
+// Parent-death watchdog: poll process.ppid every 2s. If the parent has been
+// reaped and we got reparented to init (ppid=1), shut down. This catches the
+// abrupt `tmux kill-session` path, where no signal is delivered to the
+// grandchild bun process.
+const parentDeathWatch = setInterval(() => {
+  try {
+    if (process.ppid === 1) {
+      clearInterval(parentDeathWatch)
+      gracefulShutdown('parent-died')
+    }
+  } catch {}
+}, 2000)
+parentDeathWatch.unref?.()
+
 function ensureStateDir(): void {
   mkdirSync(STATE_DIR, { recursive: true, mode: 0o700 })
 }
