@@ -454,7 +454,14 @@ bridge_agent_linux_user_home() {
 
 bridge_agent_linux_env_file() {
   local agent="$1"
-  printf '%s/.bridge/agent-env.sh' "$(bridge_agent_workdir "$agent")"
+  # Scoped per-agent roster snapshot at a stable controller-owned path.
+  # Must NOT live under the workdir — workdir is chowned to $os_user, which
+  # would make the file writable by the isolated UID. Placing it under
+  # $runtime_state_dir keeps controller ownership while still letting the
+  # isolated UID read it (via u:$os_user:r-- ACL). The path is derivable
+  # from BRIDGE_AGENT_ID alone, so bridge_load_roster can find it without
+  # a roster lookup — closes issue #116.
+  printf '%s/agent-env.sh' "$(bridge_agent_runtime_state_dir "$agent")"
 }
 
 bridge_linux_sudo_root() {

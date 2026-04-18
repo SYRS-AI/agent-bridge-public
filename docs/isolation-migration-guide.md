@@ -36,6 +36,12 @@ After this guide has been run on an agent, expect:
   (mode `0700`, owned by the new OS user).
 - Per-agent ACLs on workdir / state / log / queue-gateway request+response
   directories are installed (via `bridge_linux_prepare_agent_isolation`).
+- A per-agent scoped roster snapshot at
+  `~/.agent-bridge/state/agents/<agent>/agent-env.sh` (controller-owned,
+  `u:<os_user>:r--` ACL) so the isolated UID can resolve its own roster
+  entry without read access to the shared `agent-roster.local.sh`. This
+  is how `bridge-run.sh` and the hook runtime load roster state on an
+  isolated host; see issue `#116`.
 - Runtime UID switch on tmux launch — **only if** the sudoers drop-in
   exists. Install it with `agent-bridge isolate <agent> --install-sudoers`
   (validated via `visudo -cf`) or manually per the hint printed by
