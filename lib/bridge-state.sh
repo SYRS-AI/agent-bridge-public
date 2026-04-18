@@ -1342,6 +1342,7 @@ bridge_detect_claude_session_id() {
 import glob
 import json
 import os
+import re
 import sys
 
 workdir = os.path.realpath(sys.argv[1])
@@ -1351,35 +1352,48 @@ if 0 < since_ms < 10**11:
 exclude = {x for x in sys.argv[3].split(",") if x}
 best = None
 
-def transcript_exists(session_id: str) -> bool:
-    pattern = os.path.expanduser(f"~/.claude/projects/**/{session_id}.jsonl")
-    for transcript in glob.glob(pattern, recursive=True):
-        try:
-            if os.path.getsize(transcript) <= 0:
-                continue
-            with open(transcript, "r", encoding="utf-8") as fh:
-                seen = 0
-                for raw in fh:
-                    line = raw.strip()
-                    if not line:
-                        continue
-                    seen += 1
-                    try:
-                        obj = json.loads(line)
-                    except Exception:
-                        if seen >= 10:
-                            break
-                        continue
-                    if isinstance(obj, dict):
-                        found = obj.get("sessionId")
-                        if not found or found == session_id:
-                            return True
+
+def read_transcript_session_id(path):
+    try:
+        if os.path.getsize(path) <= 0:
+            return None
+        with open(path, "r", encoding="utf-8") as fh:
+            seen = 0
+            for raw in fh:
+                line = raw.strip()
+                if not line:
+                    continue
+                seen += 1
+                try:
+                    obj = json.loads(line)
+                except Exception:
                     if seen >= 10:
                         break
-        except Exception:
-            continue
-    return False
+                    continue
+                if isinstance(obj, dict):
+                    found = obj.get("sessionId")
+                    if found:
+                        return found
+                if seen >= 10:
+                    break
+    except Exception:
+        return None
+    return None
 
+
+def workdir_slug_candidates(path):
+    # Claude encodes the project dir by replacing "/" (always) and "." (most
+    # versions) with "-". Accept both variants so older transcripts still
+    # match.
+    slash_only = path.replace("/", "-")
+    slash_and_dot = re.sub(r"[/.]", "-", path)
+    candidates = [slash_only]
+    if slash_and_dot != slash_only:
+        candidates.append(slash_and_dot)
+    return candidates
+
+
+# Primary: live sessions/<pid>.json records.
 for path in glob.glob(os.path.expanduser("~/.claude/sessions/*.json")):
     try:
         with open(path, "r", encoding="utf-8") as fh:
@@ -1393,10 +1407,51 @@ for path in glob.glob(os.path.expanduser("~/.claude/sessions/*.json")):
         continue
     if since_ms and started < max(0, since_ms - 300000):
         continue
-    if not transcript_exists(sid):
+    transcript = None
+    for slug in workdir_slug_candidates(workdir):
+        candidate = os.path.expanduser(
+            f"~/.claude/projects/{slug}/{sid}.jsonl"
+        )
+        if os.path.isfile(candidate):
+            transcript = candidate
+            break
+    if transcript is None:
+        for candidate in glob.glob(
+            os.path.expanduser(f"~/.claude/projects/**/{sid}.jsonl"),
+            recursive=True,
+        ):
+            if os.path.isfile(candidate):
+                transcript = candidate
+                break
+    if transcript is None:
         continue
     if best is None or started > best[0]:
         best = (started, sid)
+
+# Fallback: dead processes left behind a transcript but sessions/<pid>.json
+# has already been cleaned up. Pick the most recent transcript in the
+# agent's project dir so `continue=1` agents can resume after a restart.
+if best is None:
+    transcripts = []
+    for slug in workdir_slug_candidates(workdir):
+        transcripts.extend(
+            glob.glob(os.path.expanduser(f"~/.claude/projects/{slug}/*.jsonl"))
+        )
+    for transcript in transcripts:
+        stem = os.path.splitext(os.path.basename(transcript))[0]
+        if not stem or stem in exclude:
+            continue
+        try:
+            mtime_ms = int(os.path.getmtime(transcript) * 1000)
+        except Exception:
+            continue
+        if since_ms and mtime_ms < max(0, since_ms - 300000):
+            continue
+        # Filename is what `claude --resume` takes; trust it even if the
+        # first-line sessionId disagrees (legacy transcripts may lack it).
+        read_transcript_session_id(transcript)
+        if best is None or mtime_ms > best[0]:
+            best = (mtime_ms, stem)
 
 print(best[1] if best else "")
 PY
@@ -1412,40 +1467,65 @@ bridge_claude_session_id_exists() {
 import glob
 import json
 import os
+import re
 import sys
 
 session_id = sys.argv[1]
 workdir = os.path.realpath(sys.argv[2])
 
-def transcript_exists(session_id: str) -> bool:
-    pattern = os.path.expanduser(f"~/.claude/projects/**/{session_id}.jsonl")
-    for transcript in glob.glob(pattern, recursive=True):
-        try:
-            if os.path.getsize(transcript) <= 0:
-                continue
-            with open(transcript, "r", encoding="utf-8") as fh:
-                seen = 0
-                for raw in fh:
-                    line = raw.strip()
-                    if not line:
-                        continue
-                    seen += 1
-                    try:
-                        obj = json.loads(line)
-                    except Exception:
-                        if seen >= 10:
-                            break
-                        continue
-                    if isinstance(obj, dict):
-                        found = obj.get("sessionId")
-                        if not found or found == session_id:
-                            return True
+
+def transcript_has_session(transcript_path, session_id):
+    try:
+        if os.path.getsize(transcript_path) <= 0:
+            return False
+        with open(transcript_path, "r", encoding="utf-8") as fh:
+            seen = 0
+            for raw in fh:
+                line = raw.strip()
+                if not line:
+                    continue
+                seen += 1
+                try:
+                    obj = json.loads(line)
+                except Exception:
                     if seen >= 10:
                         break
-        except Exception:
-            continue
+                    continue
+                if isinstance(obj, dict):
+                    found = obj.get("sessionId")
+                    if not found or found == session_id:
+                        return True
+                if seen >= 10:
+                    break
+    except Exception:
+        return False
     return False
 
+
+def workdir_slug_candidates(path):
+    slash_only = path.replace("/", "-")
+    slash_and_dot = re.sub(r"[/.]", "-", path)
+    candidates = [slash_only]
+    if slash_and_dot != slash_only:
+        candidates.append(slash_and_dot)
+    return candidates
+
+
+def transcript_for_workdir(session_id, workdir):
+    for slug in workdir_slug_candidates(workdir):
+        path = os.path.expanduser(
+            f"~/.claude/projects/{slug}/{session_id}.jsonl"
+        )
+        if os.path.isfile(path) and transcript_has_session(path, session_id):
+            return path
+    pattern = os.path.expanduser(f"~/.claude/projects/**/{session_id}.jsonl")
+    for transcript in glob.glob(pattern, recursive=True):
+        if transcript_has_session(transcript, session_id):
+            return transcript
+    return None
+
+
+# Fast path: live sessions/<pid>.json record still around.
 for path in glob.glob(os.path.expanduser("~/.claude/sessions/*.json")):
     try:
         with open(path, "r", encoding="utf-8") as fh:
@@ -1456,8 +1536,16 @@ for path in glob.glob(os.path.expanduser("~/.claude/sessions/*.json")):
         continue
     if os.path.realpath(str(data.get("cwd") or "")) != workdir:
         continue
-    if not transcript_exists(session_id):
+    if not transcript_for_workdir(session_id, workdir):
         continue
+    raise SystemExit(0)
+
+# Fallback: the process has exited so sessions/<pid>.json is gone, but the
+# transcript still lives under ~/.claude/projects/. Accept the session as
+# resumable when the transcript sits in a project dir whose slug matches
+# the agent workdir, so `continue=1` static agents can pick up where they
+# left off across stop/start cycles.
+if transcript_for_workdir(session_id, workdir):
     raise SystemExit(0)
 
 raise SystemExit(1)
