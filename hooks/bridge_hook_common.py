@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import json
 import os
+import pwd
 import re
 import socket
 import subprocess
@@ -110,6 +111,22 @@ def truncate_text(text: str, limit: int = 400) -> str:
     return cleaned[: limit - 3].rstrip() + "..."
 
 
+def _acting_os_user() -> str:
+    try:
+        return pwd.getpwuid(os.geteuid()).pw_name
+    except (KeyError, OSError):
+        pass
+    try:
+        return os.getlogin()
+    except OSError:
+        return ""
+
+
+def _current_isolation_mode() -> str:
+    mode = os.environ.get("BRIDGE_AGENT_ISOLATION_MODE", "").strip()
+    return mode or "shared"
+
+
 def write_audit(action: str, target: str, detail: dict[str, Any]) -> None:
     path = audit_log_path()
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -121,6 +138,9 @@ def write_audit(action: str, target: str, detail: dict[str, Any]) -> None:
         "detail": detail,
         "pid": os.getpid(),
         "host": socket.gethostname(),
+        "acting_os_uid": os.geteuid(),
+        "acting_os_user": _acting_os_user(),
+        "isolation_mode": _current_isolation_mode(),
     }
     with path.open("a", encoding="utf-8") as handle:
         handle.write(json.dumps(record, ensure_ascii=True) + "\n")
