@@ -122,6 +122,7 @@ fi
 
 export PATH="$HOME/.local/bin:$HOME/.nix-profile/bin:/usr/local/bin:$PATH"
 export BRIDGE_AGENT_ID="$AGENT"
+export BRIDGE_ADMIN_AGENT_ID="$(bridge_admin_agent_id)"
 export BRIDGE_AGENT_WORKDIR="$WORK_DIR"
 export BRIDGE_AGENT_ISOLATION_MODE="$(bridge_agent_isolation_mode "$AGENT")"
 export BRIDGE_AGENT_OS_USER="$(bridge_agent_os_user "$AGENT")"
