@@ -560,6 +560,41 @@ bridge_linux_acl_add() {
   bridge_linux_sudo_root setfacl -m "$spec" "$@"
 }
 
+# Resolve the absolute path of an engine CLI (claude/codex) on the
+# controller's PATH. Returns empty string if not found.
+bridge_resolve_engine_cli() {
+  local engine="$1"
+  case "$engine" in
+    claude|codex) command -v "$engine" 2>/dev/null || true ;;
+    *) printf '' ;;
+  esac
+}
+
+# Engine binaries are typically installed under the operator's home
+# (e.g. ~/.local/bin/claude -> ~/.local/share/claude/versions/X). The
+# isolated UID has no PATH entry pointing there and no traverse/read
+# perms on the chain, so `claude --continue` fails with "command not
+# found" inside the sudo wrap. Grant the isolated UID exec on both the
+# symlink path and its realpath, plus traverse on every parent dir of
+# both. PATH injection happens in bridge_write_linux_agent_env_file.
+bridge_linux_grant_engine_cli_access() {
+  local os_user="$1"
+  local engine="$2"
+  local cli_path=""
+  local cli_real=""
+
+  cli_path="$(bridge_resolve_engine_cli "$engine")"
+  [[ -n "$cli_path" ]] || return 0
+  cli_real="$(readlink -f "$cli_path" 2>/dev/null || printf '%s' "$cli_path")"
+
+  bridge_linux_grant_traverse_chain "$os_user" "$cli_path"
+  bridge_linux_acl_add "u:${os_user}:r-x" "$cli_path" >/dev/null 2>&1 || true
+  if [[ -n "$cli_real" && "$cli_real" != "$cli_path" ]]; then
+    bridge_linux_grant_traverse_chain "$os_user" "$cli_real"
+    bridge_linux_acl_add "u:${os_user}:r-x" "$cli_real" >/dev/null 2>&1 || true
+  fi
+}
+
 bridge_linux_acl_add_recursive() {
   local spec="$1"
   shift || true
@@ -761,6 +796,22 @@ BRIDGE_AGENT_CHANNELS["$agent"]=$(printf '%q' "$channels")
 BRIDGE_AGENT_ISOLATION_MODE["$agent"]=$(printf '%q' "$isolation_mode")
 BRIDGE_AGENT_OS_USER["$agent"]=$(printf '%q' "$os_user")
 EOF
+  # Inject engine CLI directory into PATH for sudo-wrapped launchers when
+  # isolation is active. Under sudo, PATH falls back to secure_path which
+  # almost never contains the operator's per-user bin (e.g.
+  # ~/.local/bin/claude), so the launcher's bare `claude` / `codex` call
+  # would die with "command not found". Resolving on every start picks up
+  # CLI upgrades automatically; the matching ACL grant lives in
+  # bridge_linux_grant_engine_cli_access (one-shot at isolate time).
+  if [[ "$isolation_mode" == "linux-user" && -n "$engine" ]]; then
+    local _engine_cli _engine_dir
+    _engine_cli="$(bridge_resolve_engine_cli "$engine" 2>/dev/null || printf '')"
+    if [[ -n "$_engine_cli" ]]; then
+      _engine_dir="$(dirname "$_engine_cli")"
+      printf '\nexport PATH=%s:"${PATH:-/usr/local/bin:/usr/bin:/bin}"\n' \
+        "$(printf '%q' "$_engine_dir")" >>"$file"
+    fi
+  fi
   chmod 600 "$file"
   # `chmod 600` maps to mask::--- on a file that already carries named-user
   # ACLs (POSIX ACL: chmod's group bits drive the mask when named entries
@@ -844,6 +895,18 @@ bridge_linux_prepare_agent_isolation() {
 
   bridge_linux_acl_add "u:${os_user}:r-x" "$BRIDGE_HOME" "$BRIDGE_AGENT_HOME_ROOT"
   bridge_linux_acl_add "u:${os_user}:r-x" "$BRIDGE_HOME/agent-bridge" "$BRIDGE_HOME/agb" "$BRIDGE_HOME/VERSION" >/dev/null 2>&1 || true
+  # Root-level Bash and Python helpers (bridge-*.sh, bridge-*.py) live next
+  # to agent-bridge/agb. lib/scripts/ are already covered by recursive_read_paths,
+  # but root helpers like bridge-dev-plugin-cache.py default to mode 600 and
+  # have no ACL grant, so things like dev-plugin-cache sync fail with EACCES
+  # under the sudo wrap during agent start.
+  local _bridge_root_helper
+  shopt -s nullglob
+  for _bridge_root_helper in "$BRIDGE_HOME"/bridge-*.sh "$BRIDGE_HOME"/bridge-*.py; do
+    bridge_linux_acl_add "u:${os_user}:r-x" "$_bridge_root_helper" >/dev/null 2>&1 || true
+  done
+  shopt -u nullglob
+  bridge_linux_grant_engine_cli_access "$os_user" "$(bridge_agent_engine "$agent")"
   bridge_linux_acl_add_recursive "u:${os_user}:r-X" "${recursive_read_paths[@]}"
   bridge_linux_acl_add_recursive "u:${os_user}:rwX" "${recursive_write_paths[@]}"
   bridge_linux_acl_add_default_dirs_recursive "u:${os_user}:rwX" "$runtime_state_dir" "$log_dir" "$request_dir" "$response_dir"
