@@ -1192,6 +1192,97 @@ process_stall_reports() {
   return "$changed"
 }
 
+bridge_permission_escalation_state_dir() {
+  printf '%s/permission-escalations' "$BRIDGE_STATE_DIR"
+}
+
+bridge_permission_escalation_marker_file() {
+  local task_id="$1"
+  printf '%s/%s.ts' "$(bridge_permission_escalation_state_dir)" "$task_id"
+}
+
+# Fans out unclaimed [PERMISSION] tasks to the admin's human notify channel
+# once they exceed BRIDGE_DAEMON_PERMISSION_TIMEOUT_SECONDS. Dedupes via a
+# marker file so repeat sweeps do not re-notify.
+process_permission_task_timeout_fanout() {
+  local admin_agent
+  admin_agent="$(bridge_admin_agent_id)"
+  [[ -n "$admin_agent" ]] || return 1
+  bridge_agent_exists "$admin_agent" || return 1
+
+  local timeout_seconds="${BRIDGE_DAEMON_PERMISSION_TIMEOUT_SECONDS:-${BRIDGE_PERMISSION_ESCALATION_TIMEOUT_SECONDS:-1800}}"
+  [[ "$timeout_seconds" =~ ^[0-9]+$ ]] || timeout_seconds=1800
+  (( timeout_seconds > 0 )) || return 1
+
+  bridge_agent_has_notify_transport "$admin_agent" || return 1
+
+  local tasks_json
+  tasks_json="$(bridge_queue_cli find-open --agent "$admin_agent" --title-prefix '[PERMISSION] ' --all --format json 2>/dev/null || true)"
+  [[ -n "$tasks_json" && "$tasks_json" != "[]" ]] || return 1
+
+  local state_dir
+  state_dir="$(bridge_permission_escalation_state_dir)"
+  mkdir -p "$state_dir"
+
+  local now_ts
+  now_ts="$(date +%s)"
+  local changed=1
+
+  local expired_rows
+  expired_rows="$(python3 - "$tasks_json" "$now_ts" "$timeout_seconds" <<'PY' 2>/dev/null || true
+import json, sys
+payload = sys.argv[1]
+now_ts = int(sys.argv[2])
+timeout = int(sys.argv[3])
+try:
+    tasks = json.loads(payload)
+except Exception:
+    sys.exit(0)
+for t in tasks:
+    created_ts = int(t.get("created_ts", 0) or 0)
+    if created_ts <= 0:
+        continue
+    age = now_ts - created_ts
+    if age < timeout:
+        continue
+    tid = int(t.get("id", 0) or 0)
+    title = str(t.get("title", "")).replace("\t", " ")
+    status = str(t.get("status", ""))
+    created_by = str(t.get("created_by", ""))
+    print(f"{tid}\t{age}\t{created_by}\t{status}\t{title}")
+PY
+  )"
+  [[ -n "$expired_rows" ]] || return 1
+
+  local task_id age_seconds created_by status title marker age_minutes body_text
+  while IFS=$'\t' read -r task_id age_seconds created_by status title; do
+    [[ "$task_id" =~ ^[0-9]+$ ]] || continue
+    marker="$(bridge_permission_escalation_marker_file "$task_id")"
+    if [[ -f "$marker" ]]; then
+      continue
+    fi
+
+    age_minutes=$(( age_seconds / 60 ))
+    body_text="[PERMISSION] task #${task_id} unclaimed for ${age_minutes}m — admin ${admin_agent} has not responded. Requested by ${created_by:-unknown}. Status: ${status}. Title: ${title}"
+
+    bridge_notify_send "$admin_agent" "Permission request timed out" "$body_text" "$task_id" urgent "${BRIDGE_DAEMON_NOTIFY_DRY_RUN:-0}" >/dev/null 2>&1 || true
+
+    bridge_queue_cli update "$task_id" --actor daemon \
+      --note "daemon-timeout-escalated (awaiting human) after ${age_minutes}m" >/dev/null 2>&1 || true
+
+    bridge_audit_log daemon permission_task_timeout_escalated "$admin_agent" \
+      --detail task_id="$task_id" \
+      --detail age_seconds="$age_seconds" \
+      --detail requested_by="${created_by:-unknown}" \
+      --detail timeout_seconds="$timeout_seconds"
+
+    printf '%s\n' "$now_ts" >"$marker"
+    changed=0
+  done <<<"$expired_rows"
+
+  return "$changed"
+}
+
 bridge_context_pressure_decode_excerpt() {
   local encoded="${1:-}"
   python3 - "$encoded" <<'PY'
@@ -3061,6 +3152,9 @@ cmd_sync_cycle() {
     changed=0
   fi
   if [[ -n "$summary_output" ]] && process_stall_reports "$summary_output"; then
+    changed=0
+  fi
+  if process_permission_task_timeout_fanout; then
     changed=0
   fi
   if [[ -n "$summary_output" ]] && process_context_pressure_reports "$summary_output"; then
