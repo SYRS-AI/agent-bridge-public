@@ -225,6 +225,29 @@ mkdir -p ~/.agent-bridge/state ~/.agent-bridge/logs ~/.agent-bridge/shared
 Do not delete `agent-roster.local.sh` unless you intentionally want to remove
 local static roles.
 
+## Platform Scope
+
+Agent Bridge runs on both macOS and Linux, but the two hosts have
+different support targets for multi-tenant isolation:
+
+- **macOS** is a developer and single-operator target. Static agents
+  run in `shared` mode (the default); per-UID isolation is not
+  implemented. Hardening is limited to the hook layer (tool policy,
+  prompt guard) and operator vigilance.
+- **Linux** is the production target for multi-principal deployments.
+  `BRIDGE_AGENT_ISOLATION_MODE=linux-user` enforces per-agent UID
+  separation and is required when agents hold delegated credentials or
+  handle untrusted external input. See issues
+  [#68](https://github.com/SYRS-AI/agent-bridge-public/issues/68) and
+  [#85](https://github.com/SYRS-AI/agent-bridge-public/issues/85).
+
+On macOS the `linux-user` mode falls back to shared silently (see
+`bridge_agent_linux_user_isolation_effective` in
+[`lib/bridge-agents.sh`](./lib/bridge-agents.sh)), and the migration
+helper `agent-bridge isolate <agent>` (#85) exits with an explanatory
+error. Full matrix and rationale in
+[docs/platform-support.md](./docs/platform-support.md).
+
 ## Release Checklist
 
 Before pushing bridge changes:
