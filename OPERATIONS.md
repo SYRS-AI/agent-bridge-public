@@ -268,6 +268,10 @@ helper `agent-bridge isolate <agent>` (#85) exits with an explanatory
 error. Full matrix and rationale in
 [docs/platform-support.md](./docs/platform-support.md).
 
+For the step-by-step operator walkthrough for transitioning an existing
+Linux fleet from shared mode to per-UID isolation one agent at a time,
+see [docs/isolation-migration-guide.md](./docs/isolation-migration-guide.md).
+
 ## Release Checklist
 
 Before pushing bridge changes:
