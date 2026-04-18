@@ -57,6 +57,8 @@ Usage:
   $CLI_NAME migrate workspace plan <agent>
   $CLI_NAME migrate workspace copy <agent> [--dry-run]
   $CLI_NAME migrate workspace cutover <agent> --dry-run
+  $CLI_NAME isolate <agent> [--dry-run]
+  $CLI_NAME unisolate <agent> [--dry-run]
   $CLI_NAME inbox [agent] [--all]
   $CLI_NAME show <task-id>
   $CLI_NAME claim <task-id> [--agent <agent>] [--lease <seconds>]
@@ -601,6 +603,16 @@ PY
     migrate)
       shift
       exec "$BRIDGE_BASH_BIN" "$SCRIPT_DIR/bridge-migrate.sh" "$@"
+      ;;
+    isolate)
+      shift
+      bridge_migration_isolate_cli "$@"
+      exit 0
+      ;;
+    unisolate)
+      shift
+      bridge_migration_unisolate_cli "$@"
+      exit 0
       ;;
     worktree)
       shift
