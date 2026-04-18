@@ -133,6 +133,10 @@ bridge_migration_isolate() {
   printf '[plan] isolate %s -> linux-user mode\n' "$agent"
   printf '       os_user=%s user_home=%s workdir=%s\n' "$os_user" "$user_home" "$workdir"
 
+  # Write the roster metadata FIRST so a mid-run failure leaves unisolate with
+  # enough state to roll back; the upsert is idempotent.
+  bridge_migration_roster_upsert "$dry_run" "$agent" "linux-user" "$os_user"
+
   if ! id -u "$os_user" >/dev/null 2>&1; then
     bridge_migration_print_step "$dry_run" "useradd --system --home-dir $user_home --shell /usr/sbin/nologin $os_user"
     if [[ "$dry_run" != "1" ]]; then
@@ -168,15 +172,27 @@ bridge_migration_isolate() {
     if [[ "$dry_run" != "1" ]]; then
       bridge_linux_sudo_root chown -R "$os_user" "$runtime_state_dir"
     fi
+  else
+    printf '  [warn]    runtime state dir missing: %s (skipping chown; will be created on first start)\n' "${runtime_state_dir:-<unset>}"
   fi
   if [[ -n "$log_dir" && -d "$log_dir" ]]; then
     bridge_migration_print_step "$dry_run" "chown -R $os_user $log_dir"
     if [[ "$dry_run" != "1" ]]; then
       bridge_linux_sudo_root chown -R "$os_user" "$log_dir"
     fi
+  else
+    printf '  [warn]    log dir missing: %s (skipping chown; will be created on first start)\n' "${log_dir:-<unset>}"
   fi
 
-  bridge_migration_roster_upsert "$dry_run" "$agent" "linux-user" "$os_user"
+  # Install the ACL / queue-gateway / hidden-path-strip plumbing that the
+  # create-time path (bridge_linux_prepare_agent_isolation) would have set up.
+  # Without this the acceptance runbook's §2.1/§2.4 cannot pass on migrated
+  # agents.
+  bridge_migration_print_step "$dry_run" "install per-agent ACLs + queue-gateway dirs + hidden-path strips (bridge_linux_prepare_agent_isolation)"
+  if [[ "$dry_run" != "1" ]]; then
+    bridge_linux_prepare_agent_isolation "$agent" "$os_user" "$workdir" "$BRIDGE_HOME" "$user_home" || \
+      bridge_warn "bridge_linux_prepare_agent_isolation returned non-zero for $agent; re-run isolate or check acceptance runbook §2"
+  fi
 
   if [[ "$install_sudoers" == "1" ]]; then
     bridge_migration_install_sudoers "$dry_run" "$os_user" || true

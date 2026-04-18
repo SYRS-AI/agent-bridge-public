@@ -22,32 +22,30 @@ Each step below follows the same shape as the acceptance runbook:
 
 ## Important caveat — read before running anything
 
-Until issue [#103](https://github.com/SYRS-AI/agent-bridge-public/issues/103)
-lands, `agent-bridge isolate` only converts **metadata**: it creates the
-dedicated OS user, chowns the agent's managed home, installs the
-`.agent-bridge` symlink, and writes `BRIDGE_AGENT_ISOLATION_MODE` /
-`BRIDGE_AGENT_OS_USER` into the local roster. It does **not** change the
-UID the Claude / Codex process actually runs under — the tmux session
-keeps running as the operator UID, and audit records continue to emit
-`acting_os_uid` / `acting_os_user` for the operator, not the dedicated
-agent user.
+`agent-bridge isolate` sets up metadata, the dedicated OS user, ACL
+plumbing, and (when `--install-sudoers` is passed or the entry is
+installed manually) the sudoers drop-in that `bridge-start.sh` needs
+for the runtime UID switch. **The runtime UID switch itself is
+conditional**: if the sudoers entry is missing, `bridge-start.sh`
+falls back to shared-mode launch with a loud warning rather than
+refusing to start.
 
-In other words, after this guide has been run on an agent:
+After this guide has been run on an agent, expect:
 
-- Filesystem containment on `/home/agent-bridge-<slug>` is already in
-  effect (mode `0700`, owned by the new OS user).
-- Queue-gateway-level separation is already in effect for any isolated
-  tools that honor the declared mode.
-- Runtime process UID attribution, and therefore the
-  "`acting_os_uid` matches the agent" half of the acceptance runbook
-  ([§3 in the acceptance runbook](./isolation-acceptance-runbook.md#3-audit-attribution-carries-the-acting-uid)),
-  will only become effective once [#103](https://github.com/SYRS-AI/agent-bridge-public/issues/103)
-  ships.
-
-Go ahead and migrate now if you need the metadata state to be correct
-for a scheduled rollout, but do **not** claim that an agent is
-"isolated at runtime" until #103 is live. The acceptance runbook's
-audit section will partially fail on purpose in the interim.
+- Filesystem containment on `/home/agent-bridge-<slug>` is in effect
+  (mode `0700`, owned by the new OS user).
+- Per-agent ACLs on workdir / state / log / queue-gateway request+response
+  directories are installed (via `bridge_linux_prepare_agent_isolation`).
+- Runtime UID switch on tmux launch — **only if** the sudoers drop-in
+  exists. Install it with `agent-bridge isolate <agent> --install-sudoers`
+  (validated via `visudo -cf`) or manually per the hint printed by
+  `isolate` when `--install-sudoers` is omitted. Without it, the agent
+  still runs under the operator UID and audit `acting_os_uid` records
+  the operator.
+- Audit attribution per the acceptance runbook
+  ([§3](./isolation-acceptance-runbook.md#3-audit-attribution-carries-the-acting-uid))
+  becomes accurate once both migration and sudoers are in place; until
+  sudoers lands, it continues to report the operator.
 
 ---
 
@@ -83,7 +81,25 @@ sudo -n true && echo ok
 - **FAIL** if sudo is not installed or the operator account cannot
   elevate. `useradd` and `chown` require root.
 
-### 1.3 Agent currently in shared mode
+### 1.3 `setfacl` available (acl package)
+
+`bridge_linux_prepare_agent_isolation` uses `setfacl` to install the
+traverse-chain ACLs that the acceptance runbook's §2 containment checks
+depend on. `bridge_linux_require_setfacl` (`lib/bridge-agents.sh`)
+hard-fails when the binary is absent.
+
+```bash
+command -v setfacl
+```
+
+- **PASS** if the path prints (`/usr/bin/setfacl` on most distros).
+- **FAIL** if nothing prints. Install the `acl` package
+  (`apt-get install -y acl` on Debian/Ubuntu, `dnf install -y acl` on
+  RHEL/Fedora) before continuing. Migrating without `setfacl` will
+  leave per-agent ACLs uninstalled and acceptance-runbook §2.1/§2.4
+  will fail.
+
+### 1.4 Agent currently in shared mode
 
 The migration helper refuses to re-isolate an already-isolated agent,
 but confirm anyway so you know what you are changing:
@@ -97,7 +113,7 @@ grep -E 'BRIDGE_AGENT_ISOLATION_MODE\["<agent>"\]' \
 - **FAIL** if the value is already `"linux-user"`. That agent has
   already been migrated; skip to §7 (verify) or §8 (rollback) as needed.
 
-### 1.4 No live tmux session for the agent
+### 1.5 No live tmux session for the agent
 
 ```bash
 agent-bridge agent show <agent>
@@ -140,11 +156,15 @@ Note whether the agent is active. If it is, plan for the stop step in §4.
 
 If this agent runs a channel plugin (Discord / Telegram / Teams /
 mailbot), find the port it currently holds so you can confirm it
-releases cleanly after stop:
+releases cleanly after stop. Plugin ports live in per-channel env
+files under the agent's workdir, **not** in the roster:
 
 ```bash
-grep -E 'BRIDGE_AGENT_CHANNEL_PLUGIN_PORT\["<agent>"\]' \
-  ~/.agent-bridge/agent-roster.local.sh || echo "(no plugin port assigned)"
+grep -h -E '^(DISCORD|TELEGRAM|TEAMS)_WEBHOOK_PORT=' \
+  ~/.agent-bridge/agents/<agent>/.discord/.env \
+  ~/.agent-bridge/agents/<agent>/.telegram/.env \
+  ~/.agent-bridge/agents/<agent>/.teams/.env 2>/dev/null \
+  || echo "(no plugin port assigned)"
 ```
 
 If a port is assigned, spot-check that it is held:
@@ -186,12 +206,14 @@ plan the order up front.
 agent-bridge agent stop <agent>
 ```
 
-Expected output: a confirmation that the tmux session was terminated
-(or a note that there was no live session).
+Expected output: either `stopped: <agent>` (session was terminated) or
+`[info] 에이전트 "<agent>" 세션이 이미 중지된 상태입니다.` (no live
+session — already stopped).
 
-- **PASS** if the command exits `0`.
-- **FAIL** on any error — investigate before continuing; the migration
-  helper will refuse to run while a live tmux session exists.
+- **PASS** if the command exits `0`. Both outputs above are acceptable.
+- **FAIL** on any other non-zero exit — investigate before continuing;
+  the migration helper will refuse to run while a live tmux session
+  exists.
 
 ### 4.2 tmux session gone
 
@@ -206,7 +228,8 @@ tmux ls 2>/dev/null | grep -F '<session-name>' || echo "(no session)"
 
 ### 4.3 Channel plugin port released
 
-If the agent was running a channel plugin (recorded in §2.3):
+If §2.3 recorded a port, verify it is no longer held. Skip this step
+if §2.3 returned `(no plugin port assigned)`.
 
 ```bash
 ss -ltnp | grep ":<port>" || echo "(port released)"
@@ -241,16 +264,27 @@ each prefixed with `[dry-run]`. A typical plan looks like:
 ```
 [plan] isolate <agent> -> linux-user mode
        os_user=agent-bridge-<slug> user_home=/home/agent-bridge-<slug> workdir=/path/to/agent/workdir
+  [dry-run] upsert roster metadata in /home/<operator>/.agent-bridge/agent-roster.local.sh: isolation_mode=linux-user os_user=agent-bridge-<slug>
   [dry-run] useradd --system --home-dir /home/agent-bridge-<slug> --shell /usr/sbin/nologin agent-bridge-<slug>
   [dry-run] mkdir -p /home/agent-bridge-<slug> && chown agent-bridge-<slug>:agent-bridge-<slug> /home/agent-bridge-<slug> && chmod 0700 /home/agent-bridge-<slug>
   [dry-run] install symlink /home/agent-bridge-<slug>/.agent-bridge -> /home/<operator>/.agent-bridge
   [dry-run] chown -R agent-bridge-<slug> /path/to/agent/workdir
   [dry-run] chown -R agent-bridge-<slug> /home/<operator>/.agent-bridge/state/agents/<agent>
   [dry-run] chown -R agent-bridge-<slug> /home/<operator>/.agent-bridge/logs/agents/<agent>
-  [dry-run] upsert roster metadata in /home/<operator>/.agent-bridge/agent-roster.local.sh: isolation_mode=linux-user os_user=agent-bridge-<slug>
+  [dry-run] install per-agent ACLs + queue-gateway dirs + hidden-path strips (bridge_linux_prepare_agent_isolation)
 [done] isolation plan printed (dry-run) for <agent>
 [note] re-run without --dry-run to apply...
 ```
+
+Notes on plan shape:
+
+- The roster upsert runs **first** so a mid-run failure leaves `unisolate`
+  with enough state to roll back; the upsert is idempotent.
+- Missing state or log directories print `[warn] ... skipping chown`
+  lines (they will be created on first start) instead of being silently
+  omitted.
+- If `--install-sudoers` was passed, an additional `[sudoers] planned
+  entry for /etc/sudoers.d/agent-bridge-<os_user>:` block is printed.
 
 ### 5.3 Review checklist
 
@@ -322,9 +356,13 @@ agent-bridge-<slug>:x:998:998::/home/agent-bridge-<slug>:/usr/sbin/nologin
 
 ### 6.3 Verify: managed home owned by the new user and mode 0700
 
+The managed home is mode `0700` owned by the new UID, so the operator
+cannot `ls` into it directly. Use `stat` (which needs only `+x` on the
+parent `/home`) or prefix with `sudo`.
+
 ```bash
-ls -la /home/agent-bridge-<slug>
 stat -c '%U:%G %a %n' /home/agent-bridge-<slug>
+sudo -u agent-bridge-<slug> ls -la /home/agent-bridge-<slug>
 ```
 
 Expected `stat` output:
@@ -333,21 +371,26 @@ Expected `stat` output:
 agent-bridge-<slug>:agent-bridge-<slug> 700 /home/agent-bridge-<slug>
 ```
 
-- **PASS** if owner and group are both the new OS user and the mode is
-  `700`.
+- **PASS** if `stat` reports the new OS user as both owner and group
+  with mode `700`.
 - **FAIL** on any other owner or mode — the chown / chmod step was
   skipped or overridden. Inspect and re-apply.
 
 ### 6.4 Verify: `.agent-bridge` symlink points at the live runtime
 
+Same access story as §6.3 — the managed home is `0700`. Use
+`sudo readlink` or `sudo stat`:
+
 ```bash
-ls -la /home/agent-bridge-<slug>/.agent-bridge
+sudo readlink /home/agent-bridge-<slug>/.agent-bridge
+# or equivalently:
+sudo stat -c '%N' /home/agent-bridge-<slug>/.agent-bridge
 ```
 
-Expected: a symlink pointing at the operator's `~/.agent-bridge`
+Expected: the symlink resolves to the operator's `~/.agent-bridge`
 (i.e. `$BRIDGE_HOME` at apply time).
 
-- **PASS** if the symlink exists and resolves to the live runtime.
+- **PASS** if the target path matches the live runtime.
 - **FAIL** if the symlink is missing or points somewhere else.
 
 ### 6.5 Verify: roster has the new isolation metadata
@@ -375,10 +418,11 @@ stat -c '%U %n' /path/to/agent/workdir \
   ~/.agent-bridge/logs/agents/<agent> 2>/dev/null
 ```
 
-- **PASS** if every listed path is owned by `agent-bridge-<slug>`
-  (missing paths are acceptable if they did not exist pre-migration
-  and the plan in §5.2 marked them as `[warn] ... skipping chown`).
-- **FAIL** if any path is still owned by the operator UID.
+- **PASS** if every listed path is owned by `agent-bridge-<slug>`, or
+  if the path is missing AND the §5.2 plan printed a
+  `[warn] ... skipping chown` line for it (state/log dirs are created
+  lazily on first start).
+- **FAIL** if any existing path is still owned by the operator UID.
 
 ---
 
@@ -408,16 +452,19 @@ scoped to this one agent:
 - §2.1 Own inbox works.
 - §2.3 Direct DB write from isolated UID is denied.
 - §2.4 Claim / done round-trip.
-- §3 Audit attribution. **Expect partial PASS until #103 lands.** The
-  `isolation_mode` field should already read `linux-user`, but
-  `acting_os_uid` and `acting_os_user` will still be the operator's
-  until the runtime UID-switch ships. Note this in your migration log
-  but do not treat it as a migration-blocking failure.
+- §3 Audit attribution. **Full PASS if the sudoers drop-in is
+  installed** (via `isolate --install-sudoers` or manual install) so
+  `bridge-start.sh`'s `sudo -u` wrap actually runs the tmux session
+  under the per-agent UID. If the sudoers drop-in is missing,
+  `bridge-start.sh` falls back to shared-mode launch with a
+  `bridge_warn` and `acting_os_uid` will still be the operator's.
+  Confirm via `agent-bridge audit follow --agent <agent>` after a
+  tool call.
 - §4 Operator-facing audit tools — hash-chain verification should
   still pass.
 
-- **PASS** if every applicable check passes, and the audit attribution
-  check is at most partial in the way described above.
+- **PASS** if every applicable check passes. §3 passes only when the
+  sudoers drop-in is installed.
 - **FAIL** if any containment check (§1, §2.3) fails — that indicates
   filesystem or gateway isolation is broken and must be resolved
   before moving to the next agent.
@@ -491,15 +538,22 @@ grep -E 'BRIDGE_AGENT_(ISOLATION_MODE|OS_USER)\["<agent>"\]' \
   ~/.agent-bridge/agent-roster.local.sh || echo "(unset)"
 ```
 
-Expected output: either `(unset)` or both lines showing
-`ISOLATION_MODE="shared"` and an empty `OS_USER`. Restart the agent
-with `agent-bridge agent start <agent>` and confirm it comes up.
+Expected output: both lines present with `ISOLATION_MODE="shared"` and
+empty `OS_USER=""` — the unisolate upsert writes both keys, it never
+deletes. Restart the agent with `agent-bridge agent start <agent>` and
+confirm it comes up.
 
-- **PASS** if the roster no longer declares `linux-user` for this
-  agent and the agent starts cleanly.
-- **FAIL** if either the roster still has `linux-user`, or the agent
-  fails to start. Check the apply output, re-run `unisolate`, and
-  escalate if the state does not converge.
+- **PASS** if both lines are present with `ISOLATION_MODE="shared"` +
+  `OS_USER=""` and the agent starts cleanly.
+- **FAIL — investigate** if grep returns `(unset)`. That means
+  `unisolate` short-circuited (it printed `[info] <agent> is already
+  in shared mode; nothing to do.` in §8.3). Filesystem ownership was
+  not reverted, and the agent was likely not in `linux-user` mode
+  before you ran rollback. Check the §8.3 output, confirm the agent's
+  prior state, and re-plan before acting.
+- **FAIL** if the roster still has `linux-user`, or the agent fails
+  to start. Check the apply output, re-run `unisolate`, and escalate
+  if the state does not converge.
 
 ---
 
@@ -546,11 +600,26 @@ keep a notebook, and treat each agent as an independent unit of work.
   watchdog that restarted the process between `agent stop` and your
   port check — run `agent-bridge agent stop <agent>` again to confirm
   the agent is really stopped before investigating the stray process.
-- **Mid-run failures.** If apply (§6.1) fails partway through, rollback
-  via `agent-bridge unisolate <agent>` (§8) is safe to run even on a
-  partially-migrated agent. Unisolate only rewrites ownership back to
-  the operator and clears the roster; it will not touch a non-existent
-  path.
+- **Mid-run failures.** The migration helper writes the roster metadata
+  **before** any destructive step, so `agent-bridge unisolate <agent>`
+  (§8) can always roll back a partially-applied migration: it will see
+  `isolation_mode="linux-user"` and `os_user=...` and reverse whatever
+  chowns did land. If apply dies before the roster upsert runs,
+  `unisolate` will short-circuit with `[info] ... already in shared
+  mode; nothing to do.` — in that case no destructive step ran either,
+  so the host is still in its pre-migration state.
+  - **Exception — acceptance-runbook §2 failures after apply completes.**
+    If §7.2's containment checks fail but the apply itself succeeded,
+    the most likely cause is that `setfacl` was not installed (§1.3
+    should have caught this) or `bridge_linux_prepare_agent_isolation`
+    returned non-zero (look for the `bridge_warn` line in the apply
+    output). Install `acl`, then re-run
+    `agent-bridge isolate <agent>` — it is idempotent and will
+    re-install the missing ACLs.
+  - **Exception — §7.2 §3 audit still reports operator UID.** The
+    sudoers drop-in was not installed. Run `agent-bridge isolate
+    <agent> --install-sudoers`, or install the drop-in manually using
+    the entry printed at the end of apply, then restart the agent.
 - **After all agents are migrated.** Re-run the full
   [Linux Per-UID Isolation Acceptance Runbook](./isolation-acceptance-runbook.md)
   across two agents (the cross-agent checks in §1 and §2.2 require
