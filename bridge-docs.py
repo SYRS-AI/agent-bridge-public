@@ -15,17 +15,17 @@ from pathlib import Path
 
 MANAGED_START = "<!-- BEGIN AGENT BRIDGE DOC MIGRATION -->"
 MANAGED_END = "<!-- END AGENT BRIDGE DOC MIGRATION -->"
-TODAY = datetime.now().strftime("%Y-%m-%d")
 HOME_DIR = str(Path.home())
 HOME_DIR_RE = re.escape(HOME_DIR)
 REPO_ROOT = Path(__file__).resolve().parent
 
 REMOVABLE_DOCS = ("AGENTS.md", "IDENTITY.md", "BOOTSTRAP.md")
-SHARED_SOURCE_FILES = ("ROSTER.md", "SYRS-CONTEXT.md", "SYRS-RULES.md", "SYRS-USER.md")
 AGENT_SHARED_LINKS = (
     "COMMON-INSTRUCTIONS.md",
     "CHANGE-POLICY.md",
     "TOOLS.md",
+)
+DEPRECATED_SHARED_FILES = (
     "ROSTER.md",
     "SYRS-CONTEXT.md",
     "SYRS-RULES.md",
@@ -344,7 +344,7 @@ def backup_file(src: Path, backup_root: Path, dry_run: bool) -> None:
     if dry_run:
         return
     backup_root.mkdir(parents=True, exist_ok=True)
-    shutil.copy2(src, backup_root / src.name)
+    shutil.copy2(src, backup_root / src.name, follow_symlinks=False)
 
 
 def list_agent_dirs(target_root: Path, selected: list[str], all_agents: bool) -> list[Path]:
@@ -408,46 +408,6 @@ def audit_agent(agent_dir: Path) -> AgentAudit:
     )
 
 
-def render_shared_override(name: str) -> str:
-    bullets_by_file = {
-        "ROSTER.md": [
-            "이 파일은 현재 `~/.agent-bridge/shared/ROSTER.md`에서 관리된다.",
-            "에이전트 간 durable 통신의 기본값은 `~/.agent-bridge/agent-bridge task create|urgent|handoff`다.",
-            "본문에 남아 있는 옛 queue/send/gateway 설명은 역사적 참고 정보다.",
-            "현재 live roster/queue 상태는 `~/.agent-bridge/agent-bridge status`와 `~/.agent-bridge/state/active-roster.md`가 기준이다.",
-        ],
-        "SYRS-RULES.md": [
-            "이 파일은 현재 Agent Bridge 런타임 기준으로 읽는다.",
-            "본문에 남아 있는 옛 message/cron 예시는 역사적 참고 정보다.",
-            "사람에게 보이는 Discord/Telegram 출력은 연결된 Claude 세션 또는 bridge notify path를 사용한다.",
-            "시스템 전역 변경 승인 규칙은 Agent Bridge, 남은 OpenClaw compatibility layer, Claude/Codex runtime 전부에 적용된다.",
-        ],
-        "SYRS-CONTEXT.md": [
-            "이 파일의 비즈니스 팩트는 그대로 SSOT다.",
-            "문서 위치만 `~/.agent-bridge/shared/SYRS-CONTEXT.md`로 옮겼다.",
-            "툴/전송 메커니즘은 `TOOLS.md`와 각 에이전트 `CLAUDE.md`의 Agent Bridge block을 따른다.",
-        ],
-    }
-    bullets = bullets_by_file.get(name)
-    if not bullets:
-        return ""
-    lines = [
-        f"## Agent Bridge Migration Override ({TODAY})",
-        *(f"- {bullet}" for bullet in bullets),
-        "- 아래 본문과 충돌하면 이 override가 우선이다.",
-    ]
-    return "\n".join(lines) + "\n"
-
-
-def inject_after_heading(text: str, block: str) -> str:
-    if not block:
-        return text
-    if text.startswith("# "):
-        first, rest = text.split("\n", 1) if "\n" in text else (text, "")
-        return f"{first}\n\n{block}\n{rest.lstrip()}"
-    return f"{block}\n{text}"
-
-
 def render_shared_tools_md(bridge_home: Path) -> str:
     home = pretty_path(bridge_home)
     return f"""# TOOLS.md — Agent Bridge Shared Runtime
@@ -484,10 +444,11 @@ def render_shared_tools_md(bridge_home: Path) -> str:
 ## Shared References
 - 공통 규칙: `{home}/shared/COMMON-INSTRUCTIONS.md`
 - upstream/downstream 분류: `{home}/shared/CHANGE-POLICY.md`
-- 비즈니스 SSOT: `{home}/shared/SYRS-CONTEXT.md`
-- 팀 규칙: `{home}/shared/SYRS-RULES.md`
-- 사용자 정보: `{home}/shared/SYRS-USER.md`
-- roster: `{home}/shared/ROSTER.md`
+- 팀 지식 인덱스: `{home}/shared/wiki/index.md`
+- 사용자/운영자 프로필: `{home}/shared/wiki/people.md`
+- 에이전트 역할/구성: `{home}/shared/wiki/agents.md`
+- 팀 운영 규칙: `{home}/shared/wiki/operating-rules.md`
+- 데이터 소스/도구: `{home}/shared/wiki/data-sources.md`, `{home}/shared/wiki/tools.md`
 - 스킬 가이드: `{home}/shared/SKILLS.md`
 """
 
@@ -642,61 +603,6 @@ def render_shared_skills_md(bridge_home: Path, registry: dict[str, SkillEntry]) 
     return "\n".join(lines).rstrip() + "\n"
 
 
-def rewrite_shared_legacy_text(name: str, bridge_home: Path, text: str) -> str:
-    runtime_root = pretty_path(bridge_home / "runtime")
-    replacements = {
-        "~/.openclaw/credentials/": f"{runtime_root}/credentials/",
-        "$HOME/.openclaw/credentials/": f"{runtime_root}/credentials/",
-        f"{HOME_DIR}/.openclaw/credentials/": f"{runtime_root}/credentials/",
-        "~/.openclaw/secrets/": f"{runtime_root}/secrets/",
-        "$HOME/.openclaw/secrets/": f"{runtime_root}/secrets/",
-        f"{HOME_DIR}/.openclaw/secrets/": f"{runtime_root}/secrets/",
-        "~/.openclaw/openclaw.json": f"{runtime_root}/bridge-config.json",
-        "$HOME/.openclaw/openclaw.json": f"{runtime_root}/bridge-config.json",
-        f"{HOME_DIR}/.openclaw/openclaw.json": f"{runtime_root}/bridge-config.json",
-        "~/.openclaw/scripts/": f"{runtime_root}/scripts/",
-        "$HOME/.openclaw/scripts/": f"{runtime_root}/scripts/",
-        f"{HOME_DIR}/.openclaw/scripts/": f"{runtime_root}/scripts/",
-        "~/.openclaw/skills/": f"{runtime_root}/skills/",
-        "$HOME/.openclaw/skills/": f"{runtime_root}/skills/",
-        f"{HOME_DIR}/.openclaw/skills/": f"{runtime_root}/skills/",
-        "~/.openclaw/data/": f"{runtime_root}/data/",
-        "$HOME/.openclaw/data/": f"{runtime_root}/data/",
-        f"{HOME_DIR}/.openclaw/data/": f"{runtime_root}/data/",
-        "~/.openclaw/assets/": f"{runtime_root}/assets/",
-        "$HOME/.openclaw/assets/": f"{runtime_root}/assets/",
-        f"{HOME_DIR}/.openclaw/assets/": f"{runtime_root}/assets/",
-        "~/.openclaw/extensions/": f"{runtime_root}/extensions/",
-        "$HOME/.openclaw/extensions/": f"{runtime_root}/extensions/",
-        f"{HOME_DIR}/.openclaw/extensions/": f"{runtime_root}/extensions/",
-        "~/.openclaw/shared/a2a-files/": "~/.agent-bridge/shared/a2a-files/",
-        "$HOME/.openclaw/shared/a2a-files/": "~/.agent-bridge/shared/a2a-files/",
-        f"{HOME_DIR}/.openclaw/shared/a2a-files/": "~/.agent-bridge/shared/a2a-files/",
-        "bash ~/.openclaw/scripts/codex-review.sh review main": "agent-bridge task create --to <review-agent> --title \"[REVIEW] 변경 검토\" --body \"변경 내용과 검토 포인트를 함께 전달\"",
-        "bash ~/.openclaw/scripts/codex-review.sh plan /path/to/plan.md": "agent-bridge task create --to <review-agent> --title \"[PLAN-REVIEW] 계획 검토\" --body-file /path/to/plan.md",
-        "bash ~/.openclaw/scripts/codex-review.sh review [base] [instructions]": "agent-bridge task create --to <review-agent> --title \"[REVIEW] 변경 검토\" --body \"base와 검토 포인트를 함께 전달\"",
-        "bash ~/.openclaw/scripts/codex-review.sh plan <file>": "agent-bridge task create --to <review-agent> --title \"[PLAN-REVIEW] 계획 검토\" --body-file <file>",
-        "bash ~/.openclaw/scripts/codex-review.sh challenge [focus]": "agent-bridge task create --to <review-agent> --title \"[CHALLENGE] 적대적 분석\" --body \"focus를 함께 전달\"",
-        "bash ~/.openclaw/scripts/codex-review.sh consult \"<prompt>\"": "agent-bridge task create --to <review-agent> --title \"[CONSULT]\" --body \"<prompt>\"",
-        "python3 ~/.openclaw/skills/task-log/scripts/task-log.py": f"python3 {runtime_root}/skills/task-log/scripts/task-log.py",
-        "Discord #patch 채널 웹훅": "`agent-bridge task create --to <admin-agent>` 또는 `agent-bridge urgent <admin-agent>`",
-        "localhost:8787/hooks/patch-trigger": "`agent-bridge urgent <admin-agent>`",
-    }
-    for old, new in replacements.items():
-        text = text.replace(old, new)
-
-    if name in {"SYRS-RULES.md", "ROSTER.md", "SYRS-CONTEXT.md"}:
-        text = text.replace("A2A(sessions_send)", "A2A(agent-bridge task create)")
-        text = text.replace("sessions_send/sessions_spawn", "agent-bridge task create/urgent")
-        text = text.replace("sessions_spawn", "bridge disposable child")
-        text = text.replace("sessions_history", "bridge task/MEMORY context")
-        text = text.replace("sessions_send", "agent-bridge task create")
-        text = text.replace("openclaw message send", "연결된 Claude 세션 응답")
-        text = text.replace("패치는 OpenClaw 에이전트가 아님", "관리자 에이전트는 Agent Bridge 역할")
-
-    return text
-
-
 def rewrite_agent_runtime_text(agent_dir: Path, text: str) -> str:
     text = normalize_legacy_paths(text)
     runtime_root = "~/.agent-bridge/runtime"
@@ -753,7 +659,7 @@ def normalize_agent_runtime_file(path: Path, agent_dir: Path, dry_run: bool, bac
     return True
 
 
-def sync_shared_docs(bridge_home: Path, source_shared: Path, dry_run: bool, registry: dict[str, SkillEntry]) -> list[str]:
+def sync_shared_docs(bridge_home: Path, source_shared: Path, dry_run: bool, stamp: str, registry: dict[str, SkillEntry]) -> list[str]:
     changed: list[str] = []
     target_shared = bridge_home / "shared"
     target_refs = target_shared / "references"
@@ -761,18 +667,15 @@ def sync_shared_docs(bridge_home: Path, source_shared: Path, dry_run: bool, regi
         target_shared.mkdir(parents=True, exist_ok=True)
     ensure_symlink(bridge_home / "agents" / "shared", "../shared", dry_run)
 
-    for name in SHARED_SOURCE_FILES:
-        src = source_shared / name
-        if not src.exists():
+    deprecated_backup_root = bridge_home / "state" / "doc-migration" / "backups" / stamp / "_shared"
+    for name in DEPRECATED_SHARED_FILES:
+        path = target_shared / name
+        if not path.exists() and not path.is_symlink():
             continue
-        text = inject_after_heading(read_text(src), render_shared_override(name))
-        text = normalize_legacy_paths(text)
-        text = rewrite_shared_legacy_text(name, bridge_home, text)
-        dst = target_shared / name
-        old = read_text(dst) if dst.exists() else None
-        if old != text:
-            write_text(dst, text, dry_run)
-            changed.append(str(dst))
+        backup_file(path, deprecated_backup_root, dry_run)
+        if not dry_run:
+            path.unlink()
+        changed.append(f"removed:{path}")
 
     source_refs = source_shared / "references"
     if source_refs.exists():
@@ -928,7 +831,8 @@ def render_agent_bridge_block(agent_dir: Path) -> str:
 
 COMMON_CLAUDE_REPLACEMENTS = {
     '5. Run the DB preflight steps described in `AGENTS.md` before sending anything; if compaction recovery is pending, wait for verification rather than guessing.': '5. Run the DB preflight steps described in `TOOLS.md` before sending anything; if compaction recovery is pending, wait for verification rather than guessing.',
-    '6. Confirm that the workspace files you need (`AGENTS.md`, `SOUL.md`, `TOOLS.md`, `ROSTER.md`, the user files, and the memory tree) are accessible. If something is missing, document it in your notes before you proceed.': '6. Confirm that the workspace files you need (`SOUL.md`, `TOOLS.md`, `ROSTER.md`, the user files, and the memory tree) are accessible. If something is missing, document it in your notes before you proceed.',
+    '6. Confirm that the workspace files you need (`AGENTS.md`, `SOUL.md`, `TOOLS.md`, `ROSTER.md`, the user files, and the memory tree) are accessible. If something is missing, document it in your notes before you proceed.': '6. Confirm that the workspace files you need (`SOUL.md`, `TOOLS.md`, the shared wiki pages, the user files, and the memory tree) are accessible. If something is missing, document it in your notes before you proceed.',
+    '6. Confirm that the workspace files you need (`SOUL.md`, `TOOLS.md`, `ROSTER.md`, the user files, and the memory tree) are accessible. If something is missing, document it in your notes before you proceed.': '6. Confirm that the workspace files you need (`SOUL.md`, `TOOLS.md`, the shared wiki pages, the user files, and the memory tree) are accessible. If something is missing, document it in your notes before you proceed.',
     '- Replace `sessions_send(sessionKey="agent:<id>:main", …)` calls with `agent-bridge task create --to <agent>` for the intended recipient, and `agent-bridge urgent` for interrupts. Add context so the receiving agent knows why the request exists.': '- Durable delegation uses `agent-bridge task create --to <agent>`. True interrupts use `agent-bridge urgent <agent> "..."`. Always include enough context for the receiver to work from the queue alone.',
     '- **Telegram** – respond through Claude Code `--channels plugin:telegram@claude-plugins-official`. The plugin mimics the old `openclaw message send` behavior; you do not run that CLI anymore. If a job needs a Telegram nudge, craft the message inside Claude Code and let the plugin deliver it.': '- **Telegram** – respond through Claude Code `--channels plugin:telegram@claude-plugins-official`. If a job needs a Telegram nudge, craft it in the live session and let the plugin deliver it.',
     '- **Bridge queue** – when another agent asks you to do something, create a durable task rather than replying via `sessions_send`. Always include the full context so the queue consumer does not have to open the old gateway stacks.': '- **Bridge queue** – when another agent asks you to do something, create a durable task with enough context for the receiver to work from the queue alone.',
@@ -1063,10 +967,28 @@ def ensure_agent_shared_links(agent_dir: Path, dry_run: bool, backup_root: Path)
     return changed
 
 
+def cleanup_broken_shared_doc_links(agent_dir: Path, dry_run: bool, backup_root: Path) -> list[str]:
+    changed: list[str] = []
+    for path in sorted(agent_dir.iterdir()):
+        if not path.is_symlink() or path.name in AGENT_SHARED_LINKS:
+            continue
+        target = os.readlink(path)
+        if not target.startswith("../shared/") or not target.endswith(".md"):
+            continue
+        if path.exists():
+            continue
+        backup_file(path, backup_root, dry_run)
+        if not dry_run:
+            path.unlink()
+        changed.append(f"removed:{path}")
+    return changed
+
+
 def sync_agent_docs(agent_dir: Path, bridge_home: Path, dry_run: bool, stamp: str, registry: dict[str, SkillEntry]) -> list[str]:
     changed: list[str] = []
     backup_root = bridge_home / "state" / "doc-migration" / "backups" / stamp / agent_dir.name
 
+    changed.extend(cleanup_broken_shared_doc_links(agent_dir, dry_run, backup_root))
     changed.extend(ensure_agent_shared_links(agent_dir, dry_run, backup_root))
 
     if normalize_claude(agent_dir, dry_run, backup_root):
@@ -1184,7 +1106,7 @@ def main() -> int:
     stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
     registry_path, registry_changed = write_skill_registry(bridge_home, registry, args.dry_run)
     changed = [str(registry_path)] if registry_changed else []
-    changed.extend(sync_shared_docs(bridge_home, source_shared, args.dry_run, registry))
+    changed.extend(sync_shared_docs(bridge_home, source_shared, args.dry_run, stamp, registry))
     for agent_dir in agent_dirs:
         changed.extend(sync_agent_docs(agent_dir, bridge_home, args.dry_run, stamp, registry))
 

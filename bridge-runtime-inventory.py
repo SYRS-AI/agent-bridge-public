@@ -49,12 +49,8 @@ AGENT_RUNTIME_FILES = {
     "CLAUDE.md",
     "HEARTBEAT.md",
     "MEMORY.md",
-    "ROSTER.md",
     "SOUL.md",
     "SKILLS.md",
-    "SYRS-CONTEXT.md",
-    "SYRS-RULES.md",
-    "SYRS-USER.md",
     "TOOLS.md",
 }
 AGENT_RUNTIME_DIRS = {"references", "skills"}
@@ -112,7 +108,7 @@ def category_patterns(legacy_home: Path) -> dict[str, list[re.Pattern[str]]]:
             re.compile(rf"(?:{legacy_root})/data/"),
             re.compile(r"\bagent-db\b"),
             re.compile(r"\b(?:postgres|psql|supabase)\b", re.IGNORECASE),
-            re.compile(r"\b(?:pinchtab|railway-db|vendor-db|production-db|cost-db|syrs-commerce-db)\b"),
+            re.compile(r"\b(?:pinchtab|railway-db|vendor-db|production-db|cost-db|commerce-db)\b"),
             re.compile(r"\.sqlite\b"),
             re.compile(r"\.db\b"),
         ],
@@ -528,10 +524,6 @@ def legacy_rewrite_rules(bridge_home: Path, legacy_home: Path) -> list[tuple[str
     rules.extend(dir_rules("agents", "agents", runtime["agents"]))
     rules.extend(dir_rules("watchdog", "watchdog", runtime["watchdog"]))
     rules.extend(dir_rules("patch_home", "patch", runtime["patch_home"]))
-    rules.extend(file_rules("shared", "shared/ROSTER.md", f"{runtime['shared']}/ROSTER.md"))
-    rules.extend(file_rules("shared", "shared/SYRS-CONTEXT.md", f"{runtime['shared']}/SYRS-CONTEXT.md"))
-    rules.extend(file_rules("shared", "shared/SYRS-RULES.md", f"{runtime['shared']}/SYRS-RULES.md"))
-    rules.extend(file_rules("shared", "shared/SYRS-USER.md", f"{runtime['shared']}/SYRS-USER.md"))
     rules.extend(file_rules("shared", "shared/TOOLS.md", f"{runtime['shared']}/TOOLS.md"))
     rules.extend(file_rules("shared", "shared/TOOLS-REGISTRY.md", f"{runtime['shared']}/TOOLS-REGISTRY.md"))
     rules.extend(file_rules("config", "openclaw.json", runtime["config"]))

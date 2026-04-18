@@ -31,7 +31,7 @@ It also adopts the "LLM-maintained wiki" model:
 - Do not restore the entire OpenClaw document set as-is.
 - Do not make SQLite or embeddings the source of truth.
 - Do not mix multiple humans into one flat `MEMORY.md`.
-- Do not put team-specific SYRS behavior into the public template.
+- Do not put team-specific private behavior into the public template.
 
 ## Target Model
 

@@ -21,8 +21,9 @@ Install and verify the local toolchain before changing code.
 
 1. Read [`README.md`](./README.md)
 2. Read [`ARCHITECTURE.md`](./ARCHITECTURE.md)
-3. Read [`OPERATIONS.md`](./OPERATIONS.md)
-4. Read [`KNOWN_ISSUES.md`](./KNOWN_ISSUES.md)
+3. Read [`docs/developer-handover.md`](./docs/developer-handover.md)
+4. Read [`OPERATIONS.md`](./OPERATIONS.md)
+5. Read [`KNOWN_ISSUES.md`](./KNOWN_ISSUES.md)
 
 ## Local Workflow
 
