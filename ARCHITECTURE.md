@@ -161,3 +161,6 @@ Use them for isolated testing and for machine-specific installs.
 - Private machine paths belong in `agent-roster.local.sh`
 - Runtime directories are not source files
 - Cross-platform behavior assumes Bash 4+, tmux, Python 3, and git
+- Multi-tenant per-UID isolation is Linux-only; macOS runs shared mode
+  plus hook-layer hardening only (see
+  [`docs/platform-support.md`](./docs/platform-support.md))
