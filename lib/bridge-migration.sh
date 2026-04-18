@@ -190,7 +190,7 @@ bridge_migration_isolate() {
   # agents.
   bridge_migration_print_step "$dry_run" "install per-agent ACLs + queue-gateway dirs + hidden-path strips (bridge_linux_prepare_agent_isolation)"
   if [[ "$dry_run" != "1" ]]; then
-    bridge_linux_prepare_agent_isolation "$agent" "$os_user" "$workdir" "$BRIDGE_HOME" "$user_home" || \
+    bridge_linux_prepare_agent_isolation "$agent" "$os_user" "$workdir" "$(bridge_current_user)" || \
       bridge_warn "bridge_linux_prepare_agent_isolation returned non-zero for $agent; re-run isolate or check acceptance runbook §2"
   fi
 
@@ -256,6 +256,42 @@ bridge_migration_unisolate() {
     bridge_migration_print_step "$dry_run" "chown -R $controller_user $log_dir"
     if [[ "$dry_run" != "1" ]]; then
       bridge_linux_sudo_root chown -R "$controller_user" "$log_dir"
+    fi
+  fi
+
+  # Restore ownership of per-agent sibling files that prepare_agent_isolation
+  # chowns to the os_user: history file, audit log, queue-gateway
+  # request/response dirs. These live outside $runtime_state_dir and
+  # $log_dir, so the chown -R above misses them, leaving the operator
+  # unable to start the agent post-rollback (issue #112).
+  local audit_file history_file request_dir response_dir
+  audit_file="$(bridge_agent_audit_log_file "$agent" 2>/dev/null || true)"
+  history_file="$(bridge_history_file_for_agent "$agent" 2>/dev/null || true)"
+  request_dir="$(bridge_queue_gateway_requests_dir "$agent" 2>/dev/null || true)"
+  response_dir="$(bridge_queue_gateway_responses_dir "$agent" 2>/dev/null || true)"
+
+  if [[ -n "$audit_file" && -e "$audit_file" ]]; then
+    bridge_migration_print_step "$dry_run" "chown $controller_user $audit_file"
+    if [[ "$dry_run" != "1" ]]; then
+      bridge_linux_sudo_root chown "$controller_user" "$audit_file" || true
+    fi
+  fi
+  if [[ -n "$history_file" && -e "$history_file" ]]; then
+    bridge_migration_print_step "$dry_run" "chown $controller_user $history_file"
+    if [[ "$dry_run" != "1" ]]; then
+      bridge_linux_sudo_root chown "$controller_user" "$history_file" || true
+    fi
+  fi
+  if [[ -n "$request_dir" && -d "$request_dir" ]]; then
+    bridge_migration_print_step "$dry_run" "chown -R $controller_user $request_dir"
+    if [[ "$dry_run" != "1" ]]; then
+      bridge_linux_sudo_root chown -R "$controller_user" "$request_dir" || true
+    fi
+  fi
+  if [[ -n "$response_dir" && -d "$response_dir" ]]; then
+    bridge_migration_print_step "$dry_run" "chown -R $controller_user $response_dir"
+    if [[ "$dry_run" != "1" ]]; then
+      bridge_linux_sudo_root chown -R "$controller_user" "$response_dir" || true
     fi
   fi
 
