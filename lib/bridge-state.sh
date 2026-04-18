@@ -21,6 +21,45 @@ bridge_agent_claude_effective_engine_continue() {
   return 0
 }
 
+# Joins the argv for a `claude` launch from the dynamic builders, honoring the
+# per-agent model / effort / permission_mode roster fields. When all three are
+# unset (or permission_mode is explicitly "legacy") the output is byte-for-byte
+# the historical shape so pre-issue-#72 rosters keep launching unchanged.
+#
+# Args:
+#   $1 — agent id
+#   $2 — effective_continue (0/1)
+#   $3 — continue_fallback  (0/1)
+#   $4 — session_id (may be empty)
+bridge_claude_dynamic_launch_cmd() {
+  local agent="$1"
+  local effective_continue="$2"
+  local continue_fallback="$3"
+  local session_id="$4"
+  local model effort pm
+  local -a argv=(claude)
+
+  if [[ "$effective_continue" == "1" && -n "$session_id" ]]; then
+    argv+=(--resume "$session_id")
+  elif [[ "$continue_fallback" == "1" ]]; then
+    argv+=(--continue)
+  fi
+
+  if bridge_agent_uses_legacy_launch_flags "$agent"; then
+    argv+=(--dangerously-skip-permissions --name "$agent")
+  else
+    model="$(bridge_agent_model "$agent")"
+    effort="$(bridge_agent_effort "$agent")"
+    pm="$(bridge_agent_permission_mode "$agent")"
+    [[ -n "$model" ]] || model="claude-opus-4-7"
+    [[ -n "$effort" ]] || effort="xhigh"
+    [[ -n "$pm" ]] || pm="auto"
+    argv+=(--model "$model" --effort "$effort" --permission-mode "$pm" --name "$agent")
+  fi
+
+  bridge_join_quoted "${argv[@]}"
+}
+
 bridge_build_dynamic_launch_cmd() {
   local agent="$1"
   local engine continue_mode session_id continue_fallback effective_continue
@@ -56,21 +95,16 @@ bridge_build_dynamic_launch_cmd() {
       fi
       ;;
     claude)
-      if [[ "$effective_continue" == "1" && -n "$session_id" ]]; then
-        bridge_join_quoted claude --resume "$session_id" --dangerously-skip-permissions --name "$agent"
-      elif [[ "$continue_fallback" == "1" ]]; then
-        bridge_join_quoted claude --continue --dangerously-skip-permissions --name "$agent"
-      else
-        if [[ "$continue_mode" == "1" && "$effective_continue" == "1" ]]; then
-          bridge_warn "Claude agent '$agent' has continue=1 but no resumable session was found; launching fresh (restart_count=${BRIDGE_AGENT_LOOP_RESTART_COUNT:-0})."
-          bridge_audit_log state claude_session_resume_drift "$agent" \
-            --field "continue_mode=$continue_mode" \
-            --field "effective_continue=$effective_continue" \
-            --field "restart_count=${BRIDGE_AGENT_LOOP_RESTART_COUNT:-0}" \
-            2>/dev/null || true
-        fi
-        bridge_join_quoted claude --dangerously-skip-permissions --name "$agent"
+      if [[ "$continue_mode" == "1" && "$effective_continue" == "1" \
+          && -z "$session_id" && "$continue_fallback" != "1" ]]; then
+        bridge_warn "Claude agent '$agent' has continue=1 but no resumable session was found; launching fresh (restart_count=${BRIDGE_AGENT_LOOP_RESTART_COUNT:-0})."
+        bridge_audit_log state claude_session_resume_drift "$agent" \
+          --field "continue_mode=$continue_mode" \
+          --field "effective_continue=$effective_continue" \
+          --field "restart_count=${BRIDGE_AGENT_LOOP_RESTART_COUNT:-0}" \
+          2>/dev/null || true
       fi
+      bridge_claude_dynamic_launch_cmd "$agent" "$effective_continue" "$continue_fallback" "$session_id"
       ;;
     *)
       printf '%s' "${BRIDGE_AGENT_LAUNCH_CMD[$agent]-}"
@@ -110,7 +144,7 @@ bridge_build_resume_launch_cmd() {
       if [[ "$original_cmd" == *"--channels "* ]]; then
         channels_flag="$(printf '%s' "$original_cmd" | grep -oE -- '--channels [^ ]+' || true)"
       fi
-      resume_cmd="$(bridge_join_quoted claude --resume "$session_id" --dangerously-skip-permissions --name "$agent")"
+      resume_cmd="$(bridge_claude_dynamic_launch_cmd "$agent" 1 0 "$session_id")"
       if [[ -n "$channels_flag" ]]; then
         resume_cmd="${resume_cmd} ${channels_flag//$'\n'/ }"
       fi
