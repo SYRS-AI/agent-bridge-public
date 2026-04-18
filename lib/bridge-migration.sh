@@ -104,6 +104,7 @@ PY
 bridge_migration_isolate() {
   local agent="$1"
   local dry_run="$2"
+  local install_sudoers="${3:-0}"
   local os_user current_mode workdir user_home runtime_state_dir log_dir
 
   bridge_migration_require_linux
@@ -176,6 +177,12 @@ bridge_migration_isolate() {
   fi
 
   bridge_migration_roster_upsert "$dry_run" "$agent" "linux-user" "$os_user"
+
+  if [[ "$install_sudoers" == "1" ]]; then
+    bridge_migration_install_sudoers "$dry_run" "$os_user" || true
+  else
+    bridge_migration_print_sudoers_hint "$os_user"
+  fi
 
   if [[ "$dry_run" == "1" ]]; then
     printf '[done] isolation plan printed (dry-run) for %s\n' "$agent"
@@ -251,11 +258,16 @@ bridge_migration_parse_args() {
   BRIDGE_MIGRATION_AGENT=""
   BRIDGE_MIGRATION_DRY_RUN=0
   BRIDGE_MIGRATION_SHOW_HELP=0
+  BRIDGE_MIGRATION_INSTALL_SUDOERS=0
 
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --dry-run)
         BRIDGE_MIGRATION_DRY_RUN=1
+        shift
+        ;;
+      --install-sudoers)
+        BRIDGE_MIGRATION_INSTALL_SUDOERS=1
         shift
         ;;
       -h|--help)
@@ -281,11 +293,66 @@ bridge_migration_parse_args() {
   done
 }
 
+bridge_migration_sudoers_entry() {
+  local operator="$1"
+  local os_user="$2"
+  local tmux_bin bash_bin
+  tmux_bin="$(command -v tmux 2>/dev/null || printf '/usr/bin/tmux')"
+  bash_bin="$(command -v bash 2>/dev/null || printf '/bin/bash')"
+  printf '%s ALL=(%s) NOPASSWD: %s, %s\n' "$operator" "$os_user" "$tmux_bin" "$bash_bin"
+}
+
+bridge_migration_install_sudoers() {
+  local dry_run="$1"
+  local os_user="$2"
+  local operator="${3:-$(bridge_current_user)}"
+  local entry target tmpfile
+
+  [[ -n "$os_user" ]] || return 0
+  target="/etc/sudoers.d/agent-bridge-${os_user}"
+  entry="$(bridge_migration_sudoers_entry "$operator" "$os_user")"
+
+  printf '[sudoers] planned entry for %s:\n' "$target"
+  printf '          %s' "$entry"
+  if [[ "$dry_run" == "1" ]]; then
+    printf '[dry-run] skipping sudoers install; re-run without --dry-run to apply.\n'
+    return 0
+  fi
+
+  if ! command -v visudo >/dev/null 2>&1; then
+    bridge_warn "visudo not found; skipping sudoers install. Add this entry manually to $target:"
+    printf '  %s' "$entry" >&2
+    return 1
+  fi
+
+  tmpfile="$(mktemp)" || bridge_die "failed to create temp file for sudoers validation"
+  printf '%s' "$entry" >"$tmpfile"
+  if ! visudo -cf "$tmpfile" >/dev/null 2>&1; then
+    rm -f "$tmpfile"
+    bridge_die "generated sudoers entry failed visudo -cf validation (operator=$operator os_user=$os_user)"
+  fi
+
+  bridge_linux_sudo_root install -m 0440 -o root -g root "$tmpfile" "$target"
+  rm -f "$tmpfile"
+  printf '[sudoers] installed %s (mode 0440)\n' "$target"
+}
+
+bridge_migration_print_sudoers_hint() {
+  local os_user="$1"
+  local operator="${2:-$(bridge_current_user)}"
+  local entry
+  entry="$(bridge_migration_sudoers_entry "$operator" "$os_user")"
+  printf '[hint] To enable UID switch on agent launch, install a sudoers drop-in at /etc/sudoers.d/agent-bridge-%s containing:\n' "$os_user"
+  printf '         %s' "$entry"
+  printf '       Re-run this command with --install-sudoers to apply it automatically (after visudo validation).\n'
+  printf '       See docs/linux-host-acceptance.md for the full migration runbook.\n'
+}
+
 bridge_migration_isolate_cli() {
   bridge_migration_parse_args "$@"
   if [[ "${BRIDGE_MIGRATION_SHOW_HELP:-0}" == "1" ]]; then
     cat <<'EOF'
-Usage: agent-bridge isolate <agent> [--dry-run]
+Usage: agent-bridge isolate <agent> [--dry-run] [--install-sudoers]
 
 Migrate a static agent from shared isolation to linux-user isolation.
 On macOS this command refuses with a pointer to #89 for scope.
@@ -298,12 +365,21 @@ Steps (planned; --dry-run prints without executing):
   5. Install $user_home/.agent-bridge symlink into $BRIDGE_HOME.
   6. Write isolation_mode=linux-user + os_user=<slug> to the local roster.
 
+Options:
+  --install-sudoers  Also install /etc/sudoers.d/agent-bridge-<os_user> so
+                     'agent-bridge agent start <agent>' can sudo -u the
+                     dedicated OS user without a password prompt. The entry
+                     is validated with visudo -cf before install. When
+                     omitted, the exact required entry is printed so the
+                     operator can install it manually (see
+                     docs/linux-host-acceptance.md).
+
 Re-running on an already-isolated agent is a no-op.
 EOF
     return 0
   fi
-  [[ -n "$BRIDGE_MIGRATION_AGENT" ]] || bridge_die "Usage: agent-bridge isolate <agent> [--dry-run]"
-  bridge_migration_isolate "$BRIDGE_MIGRATION_AGENT" "$BRIDGE_MIGRATION_DRY_RUN"
+  [[ -n "$BRIDGE_MIGRATION_AGENT" ]] || bridge_die "Usage: agent-bridge isolate <agent> [--dry-run] [--install-sudoers]"
+  bridge_migration_isolate "$BRIDGE_MIGRATION_AGENT" "$BRIDGE_MIGRATION_DRY_RUN" "$BRIDGE_MIGRATION_INSTALL_SUDOERS"
 }
 
 bridge_migration_unisolate_cli() {

@@ -245,6 +245,37 @@ if [[ $SUPPRESS_MISSING_CHANNELS -eq 1 ]]; then
   SESSION_CMD="BRIDGE_AGENT_SUPPRESS_MISSING_CHANNELS=1 ${SESSION_CMD}"
 fi
 
+SUDO_WRAP_ACTIVE=0
+SUDO_WRAP_OS_USER=""
+SUDO_WRAP_FALLBACK_REASON=""
+if bridge_agent_linux_user_isolation_effective "$AGENT"; then
+  SUDO_WRAP_OS_USER="$(bridge_agent_os_user "$AGENT")"
+  if [[ "$(id -u)" == "0" ]]; then
+    SUDO_WRAP_FALLBACK_REASON="controller is root; sudo wrap skipped"
+  elif ! id -u "$SUDO_WRAP_OS_USER" >/dev/null 2>&1; then
+    SUDO_WRAP_FALLBACK_REASON="os_user $SUDO_WRAP_OS_USER does not exist"
+  elif ! bridge_linux_can_sudo_to "$SUDO_WRAP_OS_USER"; then
+    SUDO_WRAP_FALLBACK_REASON="passwordless sudo -u $SUDO_WRAP_OS_USER not available"
+  else
+    SUDO_WRAP_ACTIVE=1
+  fi
+fi
+
+if [[ $SUDO_WRAP_ACTIVE -eq 1 ]]; then
+  SUDO_PRESERVE_ENV="$(bridge_agent_preserved_env_vars)"
+  SUDO_WRAPPED_CMD="sudo -n -u $(printf '%q' "$SUDO_WRAP_OS_USER") -H"
+  if [[ -n "$SUDO_PRESERVE_ENV" ]]; then
+    SUDO_WRAPPED_CMD+=" --preserve-env=$(printf '%q' "$SUDO_PRESERVE_ENV")"
+  fi
+  SUDO_WRAPPED_CMD+=" -- $(printf '%q' "$BRIDGE_BASH_BIN") -lc $(printf '%q' "$SESSION_CMD")"
+  SESSION_CMD="$SUDO_WRAPPED_CMD"
+elif [[ -n "$SUDO_WRAP_OS_USER" && -n "$SUDO_WRAP_FALLBACK_REASON" && $DRY_RUN -eq 0 ]]; then
+  bridge_warn "linux-user isolation requested for '$AGENT' but UID switch unavailable: $SUDO_WRAP_FALLBACK_REASON. Falling back to shared-mode launch. Run 'agent-bridge isolate $AGENT --install-sudoers' or configure sudoers manually (see docs/linux-host-acceptance.md)."
+  bridge_audit_log state linux_user_sudo_unavailable "$AGENT" \
+    --field os_user="$SUDO_WRAP_OS_USER" \
+    --field reason="$SUDO_WRAP_FALLBACK_REASON" >/dev/null 2>&1 || true
+fi
+
 if [[ $DRY_RUN -eq 1 ]]; then
   if [[ $SUPPRESS_MISSING_CHANNELS -eq 1 ]]; then
     launch_channels="$(BRIDGE_AGENT_SUPPRESS_MISSING_CHANNELS=1 bridge_agent_launch_channels_csv "$AGENT")"
@@ -264,6 +295,13 @@ if [[ $DRY_RUN -eq 1 ]]; then
   echo "channel_status=$(bridge_agent_channel_status "$AGENT")"
   if [[ -n "$CHANNEL_REASON" ]]; then
     echo "channel_reason=$CHANNEL_REASON"
+  fi
+  if [[ -n "$SUDO_WRAP_OS_USER" ]]; then
+    echo "sudo_wrap_active=$SUDO_WRAP_ACTIVE"
+    echo "sudo_wrap_os_user=$SUDO_WRAP_OS_USER"
+    if [[ -n "$SUDO_WRAP_FALLBACK_REASON" ]]; then
+      echo "sudo_wrap_fallback_reason=$SUDO_WRAP_FALLBACK_REASON"
+    fi
   fi
   echo "tmux_command=$SESSION_CMD"
   exit 0

@@ -426,6 +426,14 @@ bridge_agent_linux_user_isolation_requested() {
   [[ "$(bridge_agent_isolation_mode "$agent")" == "linux-user" ]]
 }
 
+bridge_host_platform() {
+  if [[ -n "${BRIDGE_HOST_PLATFORM_OVERRIDE:-}" ]]; then
+    printf '%s' "$BRIDGE_HOST_PLATFORM_OVERRIDE"
+    return 0
+  fi
+  uname -s 2>/dev/null || printf 'unknown'
+}
+
 bridge_agent_linux_user_isolation_effective() {
   local agent="$1"
 
@@ -457,6 +465,25 @@ bridge_linux_sudo_root() {
 
   command -v sudo >/dev/null 2>&1 || bridge_die "linux-user isolation requires sudo"
   sudo -n "$@"
+}
+
+bridge_linux_can_sudo_to() {
+  local os_user="$1"
+
+  [[ -n "$os_user" ]] || return 1
+  if [[ "$(id -u)" == "0" ]]; then
+    return 0
+  fi
+  command -v sudo >/dev/null 2>&1 || return 1
+  sudo -n -u "$os_user" true 2>/dev/null
+}
+
+bridge_agent_preserved_env_vars() {
+  # Intentionally conservative: the ENV_PREFIX inlined in the SESSION_CMD
+  # re-exports all BRIDGE_* runtime paths inside the bash -c child, so sudo
+  # only needs to pass through the terminal/locale bits and the two
+  # launch-time markers that are not in ENV_PREFIX.
+  printf '%s' "TERM,LANG,LC_ALL,BRIDGE_AGENT_ENV_FILE,BRIDGE_AGENT_SUPPRESS_MISSING_CHANNELS"
 }
 
 bridge_linux_require_setfacl() {
