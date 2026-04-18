@@ -63,6 +63,51 @@ def other_agent_homes(agent: str) -> list[Path]:
     return homes
 
 
+def target_agent_for_path(path: Path, agent: str) -> str | None:
+    for other_home in other_agent_homes(agent):
+        if path_within(path, other_home):
+            return other_home.name
+    return None
+
+
+def target_agent_for_text(text: str, agent: str) -> str | None:
+    home_root = agent_home_root()
+    for other in other_agent_homes(agent):
+        name = other.name
+        needles = [
+            f"{home_root}/{name}/",
+            f"{home_root}/{name}",
+            f"~/.agent-bridge/agents/{name}/",
+            f"~/.agent-bridge/agents/{name}",
+            f"$HOME/.agent-bridge/agents/{name}/",
+            f"$HOME/.agent-bridge/agents/{name}",
+        ]
+        for needle in needles:
+            if needle in text:
+                return name
+    return None
+
+
+def detect_target_agent(tool_name: str, tool_input: dict[str, Any], agent: str) -> str | None:
+    if tool_name == "Bash":
+        command = str(tool_input.get("command") or "")
+        if command:
+            return target_agent_for_text(command, agent)
+        return None
+    for key in ("file_path", "path"):
+        raw = str(tool_input.get(key) or "").strip()
+        if not raw:
+            continue
+        try:
+            candidate = Path(raw).expanduser()
+        except Exception:
+            continue
+        target = target_agent_for_path(candidate, agent)
+        if target:
+            return target
+    return None
+
+
 def protected_path_reason(path: Path, agent: str) -> str | None:
     if path == roster_local_path():
         return "shared roster secrets are not available inside Claude tool calls"
@@ -70,9 +115,9 @@ def protected_path_reason(path: Path, agent: str) -> str | None:
         return "direct queue DB access is blocked; use `agb` queue commands instead"
     if is_admin_agent(agent):
         return None
-    for other_home in other_agent_homes(agent):
-        if path_within(path, other_home):
-            return f"cross-agent access is blocked: {other_home.name}"
+    target = target_agent_for_path(path, agent)
+    if target:
+        return f"cross-agent access is blocked: {target}"
     return None
 
 
@@ -167,6 +212,9 @@ def handle_pretool(payload: dict[str, Any], agent: str) -> int:
         "session_id": str(payload.get("session_id") or ""),
         "summary": tool_input_summary(tool_name, tool_input),
     }
+    target_agent = detect_target_agent(tool_name, tool_input, agent)
+    if target_agent:
+        detail["target_agent"] = target_agent
 
     if tool_name == "Bash":
         reason = protected_alias_reason(str(tool_input.get("command") or ""), agent)
@@ -204,6 +252,9 @@ def handle_posttool_common(payload: dict[str, Any], agent: str, action: str) -> 
         "cwd": str(payload.get("cwd") or current_agent_workdir()),
         "summary": tool_input_summary(tool_name, tool_input),
     }
+    target_agent = detect_target_agent(tool_name, tool_input, agent)
+    if target_agent:
+        detail["target_agent"] = target_agent
     if action == "agent_tool_failure":
         detail["error"] = truncate_text(str(payload.get("error") or ""), 240)
         detail["is_interrupt"] = bool(payload.get("is_interrupt"))
