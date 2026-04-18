@@ -40,6 +40,15 @@ def task_db_path() -> Path:
     return bridge_home_dir() / "state" / "tasks.db"
 
 
+def admin_agent_id() -> str:
+    return os.environ.get("BRIDGE_ADMIN_AGENT_ID", "").strip()
+
+
+def is_admin_agent(agent: str) -> bool:
+    admin = admin_agent_id()
+    return bool(admin) and agent == admin
+
+
 def other_agent_homes(agent: str) -> list[Path]:
     homes: list[Path] = []
     root = agent_home_root()
@@ -59,6 +68,8 @@ def protected_path_reason(path: Path, agent: str) -> str | None:
         return "shared roster secrets are not available inside Claude tool calls"
     if path == task_db_path():
         return "direct queue DB access is blocked; use `agb` queue commands instead"
+    if is_admin_agent(agent):
+        return None
     for other_home in other_agent_homes(agent):
         if path_within(path, other_home):
             return f"cross-agent access is blocked: {other_home.name}"
@@ -71,6 +82,8 @@ def protected_alias_reason(text: str, agent: str) -> str | None:
         return "shared roster secrets are not available inside Claude tool calls"
     if "state/tasks.db" in text:
         return "direct queue DB access is blocked; use `agb` queue commands instead"
+    if is_admin_agent(agent):
+        return None
     aliases = [
         f"{home_root}/{other.name}/"
         for other in other_agent_homes(agent)
