@@ -5276,9 +5276,6 @@ BRIDGE_AGENT_WORKDIR["$STALL_UNKNOWN_AGENT"]="$STALL_UNKNOWN_WORKDIR"
 BRIDGE_AGENT_LAUNCH_CMD["$STALL_UNKNOWN_AGENT"]='claude --dangerously-skip-permissions'
 EOF
 
-STALL_RATE_INPUT_LOG="$TMP_ROOT/stall-rate-input.log"
-STALL_AUTH_INPUT_LOG="$TMP_ROOT/stall-auth-input.log"
-STALL_UNKNOWN_INPUT_LOG="$TMP_ROOT/stall-unknown-input.log"
 STALL_RATE_SCRIPT="$TMP_ROOT/stall-rate.py"
 STALL_AUTH_SCRIPT="$TMP_ROOT/stall-auth.py"
 STALL_UNKNOWN_SCRIPT="$TMP_ROOT/stall-unknown.py"
