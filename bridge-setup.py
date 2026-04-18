@@ -5,9 +5,11 @@ from __future__ import annotations
 
 import argparse
 import getpass
+import hashlib
 import json
 import os
 import re
+import socket
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -19,6 +21,49 @@ from urllib.request import Request, urlopen
 
 class SetupError(Exception):
     """Raised when setup validation fails with a user-facing message."""
+
+
+def plugin_port_range() -> tuple[int, int]:
+    start_raw = os.environ.get("BRIDGE_PLUGIN_PORT_RANGE_START", "").strip() or "39800"
+    end_raw = os.environ.get("BRIDGE_PLUGIN_PORT_RANGE_END", "").strip() or "39999"
+    try:
+        start = int(start_raw)
+        end = int(end_raw)
+    except ValueError as exc:
+        raise SetupError(f"BRIDGE_PLUGIN_PORT_RANGE_* must be integers: {start_raw}-{end_raw}") from exc
+    if start <= 0 or end <= 0 or end < start:
+        raise SetupError(f"BRIDGE_PLUGIN_PORT_RANGE_* 범위가 유효하지 않습니다: {start}-{end}")
+    return start, end
+
+
+def port_is_free(port: int) -> bool:
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    try:
+        sock.bind(("127.0.0.1", port))
+    except OSError:
+        return False
+    finally:
+        sock.close()
+    return True
+
+
+def allocate_channel_port(agent: str, plugin_label: str, existing: str = "") -> int:
+    start, end = plugin_port_range()
+    span = end - start + 1
+    existing_stripped = existing.strip()
+    if existing_stripped.isdigit():
+        current = int(existing_stripped)
+        if start <= current <= end and port_is_free(current):
+            return current
+    digest = hashlib.sha1(f"{agent}|{plugin_label}".encode("utf-8")).hexdigest()
+    offset = int(digest[:8], 16) % span
+    for step in range(span):
+        candidate = start + (offset + step) % span
+        if port_is_free(candidate):
+            return candidate
+    raise SetupError(
+        f"사용 가능한 plugin 포트를 찾지 못했습니다 (agent={agent}, plugin={plugin_label}, range={start}-{end})"
+    )
 
 
 def load_json(path: Path, default: Any) -> Any:
@@ -981,7 +1026,12 @@ def cmd_teams(args: argparse.Namespace) -> int:
         tenant_id = str(args.tenant_id or account_cfg.get("tenantId") or account_cfg.get("tenant_id") or inspected["tenant_id"]).strip()
         service_url = str(args.service_url or account_cfg.get("serviceUrl") or account_cfg.get("service_url") or inspected["service_url"]).strip()
         webhook_host = str(args.webhook_host or inspected["webhook_host"] or "127.0.0.1").strip()
-        webhook_port = str(args.webhook_port or inspected["webhook_port"] or "3978").strip()
+        if args.webhook_port:
+            webhook_port = str(args.webhook_port).strip()
+        elif inspected["webhook_port"]:
+            webhook_port = str(inspected["webhook_port"]).strip()
+        else:
+            webhook_port = str(allocate_channel_port(args.agent, "teams"))
         ingress_port = str(args.ingress_port or "").strip()
         messaging_endpoint = str(args.messaging_endpoint or "").strip()
 
