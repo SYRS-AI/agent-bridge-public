@@ -695,12 +695,33 @@ def cmd_find_open(args: argparse.Namespace) -> int:
             ELSE 4
           END,
           id
-        LIMIT 1
     """
+    if not getattr(args, "all", False):
+        sql += " LIMIT 1"
 
     with closing(connect()) as conn:
-        row = conn.execute(sql, params).fetchone()
+        rows = conn.execute(sql, params).fetchall()
 
+    if getattr(args, "all", False):
+        payload = [
+            {
+                "id": int(r["id"]),
+                "title": str(r["title"] or ""),
+                "status": str(r["status"] or ""),
+                "assigned_to": str(r["assigned_to"] or ""),
+                "created_by": str(r["created_by"] or ""),
+                "priority": str(r["priority"] or ""),
+                "claimed_by": str(r["claimed_by"] or ""),
+                "body_path": str(r["body_path"] or ""),
+                "created_ts": int(r["created_ts"] or 0),
+                "updated_ts": int(r["updated_ts"] or 0),
+            }
+            for r in rows
+        ]
+        print(json.dumps(payload, ensure_ascii=False))
+        return 0 if payload else 1
+
+    row = rows[0] if rows else None
     if row is None:
         return 1
 
@@ -1850,6 +1871,11 @@ def build_parser() -> argparse.ArgumentParser:
     find_open_parser.add_argument("--agent", required=True)
     find_open_parser.add_argument("--title-prefix")
     find_open_parser.add_argument("--format", choices=("id", "text", "shell", "json"), default="id")
+    find_open_parser.add_argument(
+        "--all",
+        action="store_true",
+        help="return all matching open tasks as a JSON array (forces JSON output with created_ts/updated_ts)",
+    )
     find_open_parser.set_defaults(handler=cmd_find_open)
 
     claim_parser = subparsers.add_parser("claim")
