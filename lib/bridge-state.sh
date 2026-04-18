@@ -1141,17 +1141,26 @@ bridge_agent_ack_crash_report() {
   local now_ts=0
 
   report_file="$(bridge_agent_crash_report_file "$agent")"
-  [[ -f "$report_file" ]] || return 1
-  # shellcheck source=/dev/null
-  source "$report_file"
-  [[ "${CRASH_AGENT:-}" == "$agent" ]] || return 1
-  [[ -n "${CRASH_ERROR_HASH:-}" ]] || return 1
+  if [[ -f "$report_file" ]]; then
+    # shellcheck source=/dev/null
+    source "$report_file"
+    if [[ -n "${CRASH_AGENT:-}" && "$CRASH_AGENT" != "$agent" ]]; then
+      return 1
+    fi
+  fi
 
   state_file="$(bridge_agent_crash_state_file "$agent")"
   if [[ -f "$state_file" ]]; then
     # shellcheck source=/dev/null
     source "$state_file"
   fi
+
+  # Fall back to whatever hash state.env last recorded when report.env
+  # has already been cleaned up (e.g. after a successful auto-restart).
+  # Without this fallback the ack silently no-ops and the daemon
+  # re-queues the same [crash-loop] task on every sweep. See #109.
+  CRASH_ERROR_HASH="${CRASH_ERROR_HASH:-${CRASH_LAST_HASH:-}}"
+  [[ -n "$CRASH_ERROR_HASH" ]] || return 1
 
   now_ts="$(date +%s)"
   mkdir -p "$(dirname "$state_file")"
