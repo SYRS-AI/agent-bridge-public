@@ -688,6 +688,9 @@ declare -g -A BRIDGE_AGENT_DISCORD_CHANNEL_ID=()
 declare -g -A BRIDGE_AGENT_CHANNELS=()
 declare -g -A BRIDGE_AGENT_ISOLATION_MODE=()
 declare -g -A BRIDGE_AGENT_OS_USER=()
+declare -g -A BRIDGE_AGENT_MODEL=()
+declare -g -A BRIDGE_AGENT_EFFORT=()
+declare -g -A BRIDGE_AGENT_PERMISSION_MODE=()
 bridge_add_agent_id_if_missing $(printf '%q' "$agent")
 BRIDGE_AGENT_DESC["$agent"]=$(printf '%q' "$description")
 BRIDGE_AGENT_ENGINE["$agent"]=$(printf '%q' "$engine")
@@ -2702,6 +2705,38 @@ bridge_agent_loop() {
 bridge_agent_continue() {
   local agent="$1"
   printf '%s' "${BRIDGE_AGENT_CONTINUE[$agent]-1}"
+}
+
+bridge_agent_model() {
+  local agent="$1"
+  printf '%s' "${BRIDGE_AGENT_MODEL[$agent]-}"
+}
+
+bridge_agent_effort() {
+  local agent="$1"
+  printf '%s' "${BRIDGE_AGENT_EFFORT[$agent]-}"
+}
+
+bridge_agent_permission_mode() {
+  local agent="$1"
+  printf '%s' "${BRIDGE_AGENT_PERMISSION_MODE[$agent]-}"
+}
+
+# Returns 0 (true) when none of model/effort/permission_mode have been set
+# for $agent and permission_mode is not explicitly "legacy". In that case the
+# launch builders MUST emit the historical command shape (no --model /
+# --effort / --permission-mode flags, --dangerously-skip-permissions kept) so
+# rosters that predate these fields keep launching byte-for-byte the same.
+bridge_agent_uses_legacy_launch_flags() {
+  local agent="$1"
+  local pm model effort
+  pm="$(bridge_agent_permission_mode "$agent")"
+  model="$(bridge_agent_model "$agent")"
+  effort="$(bridge_agent_effort "$agent")"
+  if [[ "$pm" == "legacy" ]]; then
+    return 0
+  fi
+  [[ -z "$pm" && -z "$model" && -z "$effort" ]]
 }
 
 bridge_agent_session_id() {

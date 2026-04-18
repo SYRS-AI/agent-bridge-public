@@ -95,6 +95,24 @@ BRIDGE_AGENT_LAUNCH_CMD["developer"]='claude --dangerously-skip-permissions'
 BRIDGE_AGENT_LAUNCH_CMD["codex-tester"]='codex --dangerously-bypass-approvals-and-sandbox --no-alt-screen'
 BRIDGE_AGENT_LAUNCH_CMD["codex-developer"]='codex --dangerously-bypass-approvals-and-sandbox --no-alt-screen'
 
+# Optional: per-agent Claude launch-flag overrides (issue #72).
+#
+# Leave all three fields unset (the default for legacy rosters) and the
+# bridge keeps emitting `claude --dangerously-skip-permissions --name <agent>`
+# byte-for-byte as before. Set ANY one field to opt the agent into the new
+# launch shape `claude --model <model> --effort <effort> --permission-mode
+# <mode> --name <agent>`; any field still unset on that agent falls back to
+# the fleet defaults shown below.
+#
+# BRIDGE_AGENT_MODEL["developer"]="claude-opus-4-7"            # default: claude-opus-4-7
+# BRIDGE_AGENT_EFFORT["developer"]="xhigh"                      # default: xhigh
+# BRIDGE_AGENT_PERMISSION_MODE["developer"]="auto"              # default: auto
+#
+# To pin an agent to the historical blanket-bypass shape (e.g. a sandboxed
+# offline role) without removing the model/effort hints, set permission_mode
+# explicitly to "legacy":
+# BRIDGE_AGENT_PERMISSION_MODE["sandboxed"]="legacy"
+
 # Optional: auto-stop timeout in seconds. Set this only for roles you
 # explicitly want the daemon to stop after inactivity. An explicit `0` marks a
 # static role as always-on: the daemon will keep it running and restart it if

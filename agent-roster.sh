@@ -48,6 +48,22 @@ declare -Ag BRIDGE_AGENT_NOTIFY_TARGET=()
 # shellcheck disable=SC2034
 declare -Ag BRIDGE_AGENT_NOTIFY_ACCOUNT=()
 
+# Optional Claude launch-flag overrides (issue #72).
+# Leave all three unset to preserve the historical
+# `claude --dangerously-skip-permissions` launch shape. Setting any one opts
+# the agent into the new --model / --effort / --permission-mode launch shape,
+# with claude-opus-4-7 / xhigh / auto applied as defaults for any field still
+# unset. Use BRIDGE_AGENT_PERMISSION_MODE["agent"]="legacy" to explicitly pin
+# the historical shape (e.g. for sandboxed roles that need the blanket bypass).
+# shellcheck disable=SC2034
+declare -Ag BRIDGE_AGENT_MODEL=()
+
+# shellcheck disable=SC2034
+declare -Ag BRIDGE_AGENT_EFFORT=()
+
+# shellcheck disable=SC2034
+declare -Ag BRIDGE_AGENT_PERMISSION_MODE=()
+
 # shellcheck disable=SC2034
 declare -Ag BRIDGE_AGENT_WEBHOOK_PORT=()
 

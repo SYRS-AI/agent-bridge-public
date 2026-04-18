@@ -136,6 +136,26 @@ agb profile diff <agent>
 agb profile deploy <agent>
 ```
 
+### Claude launch-flag overrides
+
+For dynamic Claude agents (and static Claude agents that rely on the
+bridge-built launch command), three optional roster fields control the
+generated `claude` invocation:
+
+| field | default when opted in | flag |
+|---|---|---|
+| `BRIDGE_AGENT_MODEL` | `claude-opus-4-7` | `--model` |
+| `BRIDGE_AGENT_EFFORT` | `xhigh` | `--effort` |
+| `BRIDGE_AGENT_PERMISSION_MODE` | `auto` | `--permission-mode` |
+
+Leaving all three unset preserves the historical
+`claude --dangerously-skip-permissions --name <agent>` shape byte-for-byte,
+so rosters that predate these fields keep launching unchanged. Setting any
+one field opts the agent into the new shape; remaining fields fall back to
+the defaults above. Set `BRIDGE_AGENT_PERMISSION_MODE["agent"]="legacy"`
+to explicitly pin the historical blanket-bypass shape (e.g. for sandboxed
+offline roles).
+
 ## Worktree Workers
 
 When multiple agents may edit the same git repository, prefer isolated managed
