@@ -134,6 +134,39 @@ echo "exit=$?"
 - **PASS** if `Permission denied` and non-zero exit.
 - **FAIL** if the directory listing succeeds.
 
+### 1.3 Scoped roster snapshot is readable; global roster is not
+
+Under isolation each agent loads roster state from a per-agent scoped
+snapshot at
+`~/.agent-bridge/state/agents/<agent>/agent-env.sh` instead of the shared
+`agent-roster.local.sh` (which is `0600`, controller-only, and contains
+every agent's tokens). `bridge_load_roster` picks the snapshot up
+automatically when `BRIDGE_AGENT_ID` is exported, which bridge-run.sh and
+the hook runtime always set. See issue `#116`.
+
+```bash
+sudo -u agent-bridge-agenta bash -lc \
+  'cat ~/.agent-bridge/state/agents/agentA/agent-env.sh >/dev/null; echo own_exit=$?'
+sudo -u agent-bridge-agenta bash -lc \
+  'cat ~/.agent-bridge/state/agents/agentB/agent-env.sh >/dev/null 2>&1; echo other_exit=$?'
+sudo -u agent-bridge-agenta bash -lc \
+  'cat ~/.agent-bridge/agent-roster.local.sh >/dev/null 2>&1; echo roster_exit=$?'
+```
+
+Expected output:
+
+```
+own_exit=0
+other_exit=1
+roster_exit=1
+```
+
+- **PASS** if `own_exit=0` (the isolated UID can read its own snapshot),
+  `other_exit=1` (cannot read any other agent's snapshot), and
+  `roster_exit=1` (cannot read the shared roster with everyone's tokens).
+- **FAIL** on any other combination — especially `other_exit=0` (cross-agent
+  snapshot leak) or `roster_exit=0` (token leak via the shared roster).
+
 ---
 
 ## 2. Queue gateway round-trip

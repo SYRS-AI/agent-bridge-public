@@ -801,8 +801,24 @@ bridge_load_roster() {
   local agent
   local fast_load="${BRIDGE_FAST_ROSTER_LOAD:-0}"
   local isolated_env_file="${BRIDGE_AGENT_ENV_FILE:-}"
+  local scoped_agent_id="${BRIDGE_AGENT_ID:-}"
+  local scoped_env_file=""
 
   bridge_reset_roster_maps
+
+  # When BRIDGE_AGENT_ENV_FILE is not explicitly set but BRIDGE_AGENT_ID is
+  # exported (e.g., the isolated Claude/Codex session spawned by bridge-run.sh,
+  # or agb commands the agent executes as its isolated UID), fall back to the
+  # per-agent scoped roster snapshot written by bridge_linux_prepare_agent_isolation.
+  # This is what keeps the isolated UID from needing read access to the global
+  # agent-roster.local.sh (which is 0600 and contains every agent's tokens).
+  # See issue #116.
+  if [[ -z "$isolated_env_file" && -n "$scoped_agent_id" && -n "${BRIDGE_ACTIVE_AGENT_DIR:-}" ]]; then
+    scoped_env_file="$BRIDGE_ACTIVE_AGENT_DIR/$scoped_agent_id/agent-env.sh"
+    if [[ -r "$scoped_env_file" ]]; then
+      isolated_env_file="$scoped_env_file"
+    fi
+  fi
 
   if [[ -n "$isolated_env_file" ]]; then
     [[ -f "$isolated_env_file" ]] || bridge_die "agent env file이 없습니다: $isolated_env_file"

@@ -295,6 +295,19 @@ bridge_migration_unisolate() {
     fi
   fi
 
+  # Remove the scoped roster snapshot (agent-env.sh). In shared mode the
+  # snapshot is stale — it still carries linux-user isolation metadata and
+  # would be picked up by bridge_load_roster's BRIDGE_AGENT_ID fallback,
+  # making shared-mode launches believe isolation is still active (#116).
+  local scoped_env_file=""
+  scoped_env_file="$(bridge_agent_linux_env_file "$agent" 2>/dev/null || true)"
+  if [[ -n "$scoped_env_file" && -e "$scoped_env_file" ]]; then
+    bridge_migration_print_step "$dry_run" "rm $scoped_env_file"
+    if [[ "$dry_run" != "1" ]]; then
+      bridge_linux_sudo_root rm -f "$scoped_env_file" 2>/dev/null || rm -f "$scoped_env_file" || true
+    fi
+  fi
+
   bridge_migration_roster_upsert "$dry_run" "$agent" "shared" ""
 
   if [[ "$dry_run" == "1" ]]; then

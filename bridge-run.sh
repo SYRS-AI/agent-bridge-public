@@ -6,7 +6,6 @@ set -uo pipefail
 SCRIPT_DIR="$(cd -P "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 # shellcheck source=/dev/null
 source "$SCRIPT_DIR/bridge-lib.sh"
-bridge_load_roster
 
 usage() {
   echo "Usage: bash $SCRIPT_DIR/bridge-run.sh <agent> [--once] [--continue|--no-continue] [--safe-mode] [--dry-run]"
@@ -65,6 +64,14 @@ while [[ $# -gt 0 ]]; do
       ;;
   esac
 done
+
+# Export BRIDGE_AGENT_ID before roster load so bridge_load_roster can pick up
+# the per-agent scoped snapshot when this script runs under an isolated UID
+# that cannot read the 0600 agent-roster.local.sh. See issue #116.
+if [[ -n "$AGENT" ]]; then
+  export BRIDGE_AGENT_ID="$AGENT"
+fi
+bridge_load_roster
 
 if [[ $LIST_ONLY -eq 1 ]]; then
   bridge_list_agents
