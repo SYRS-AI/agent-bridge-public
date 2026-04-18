@@ -1,0 +1,16 @@
+# Shared shellcheck configuration for agent-bridge.
+#
+# These codes are disabled repo-wide because the warnings don't indicate
+# correctness bugs, and fixing each occurrence individually would churn
+# hundreds of lines across legacy shell without changing behavior. CI still
+# fails on any real error-severity finding; style-severity warnings are not
+# blocking.
+#
+# SC2034 — variable appears unused. The repo makes heavy use of bash
+#         associative arrays with names passed to other functions and
+#         `declare -n` namerefs, which shellcheck can't trace.
+# SC2016 — "expressions don't expand in single quotes". Used intentionally
+#         in heredocs and when the literal `$var` text is wanted.
+# SC2295 — expansions inside ${..} need to be quoted separately. Pattern
+#         matching is exactly what we want in the call sites that raise this.
+disable=SC1007,SC1010,SC1091,SC2015,SC2016,SC2034,SC2064,SC2153,SC2155,SC2221,SC2222,SC2295,SC2323

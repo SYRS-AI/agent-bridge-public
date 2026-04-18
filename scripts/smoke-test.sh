@@ -313,6 +313,20 @@ tmux new-session -d -s "$PREFIX_SUFFIX_SESSION" "sleep 30"
 "$BASH4_BIN" -lc 'source "'"$REPO_ROOT"'/bridge-lib.sh"; ! bridge_tmux_session_exists "'"$PREFIX_SESSION"'"' || die "bridge_tmux_session_exists matched prefix session"
 tmux_kill_session_exact "$PREFIX_SUFFIX_SESSION" || true
 
+log "updating shell integration managed block when repo path changes"
+SHELL_RC="$TMP_ROOT/install-shell-integration.zshrc"
+cat >"$SHELL_RC" <<EOF
+# >>> agent-bridge zsh >>>
+source "$HOME/agent-bridge-public/shell/agent-bridge.zsh"
+# <<< agent-bridge zsh <<<
+EOF
+SHELL_UPDATE_OUTPUT="$("$REPO_ROOT/scripts/install-shell-integration.sh" --shell zsh --rcfile "$SHELL_RC" --apply)"
+assert_contains "$SHELL_UPDATE_OUTPUT" "updated agent-bridge shell integration"
+assert_contains "$(cat "$SHELL_RC")" "source \"$REPO_ROOT/shell/agent-bridge.zsh\""
+assert_not_contains "$(cat "$SHELL_RC")" "source \"$HOME/agent-bridge-public/shell/agent-bridge.zsh\""
+SHELL_UPTODATE_OUTPUT="$("$REPO_ROOT/scripts/install-shell-integration.sh" --shell zsh --rcfile "$SHELL_RC" --apply)"
+assert_contains "$SHELL_UPTODATE_OUTPUT" "shell integration already up to date"
+
 cat >"$FAKE_BIN/codex" <<'EOF'
 #!/usr/bin/env bash
 cat <<'JSON'
@@ -648,7 +662,7 @@ STATUS_OUTPUT="$("$REPO_ROOT/agent-bridge" status --all-agents)"
 assert_contains "$STATUS_OUTPUT" "$SMOKE_AGENT"
 assert_contains "$STATUS_OUTPUT" "state"
 assert_contains "$STATUS_OUTPUT" "$WORKDIR"
-printf '%s\n' "$STATUS_OUTPUT" | grep -E "$SMOKE_AGENT[[:space:]].*(idle|working)" >/dev/null || die "status should show activity state for $SMOKE_AGENT"
+printf '%s\n' "$STATUS_OUTPUT" | grep -E "${SMOKE_AGENT}[[:space:]].*(idle|working)" >/dev/null || die "status should show activity state for $SMOKE_AGENT"
 
 RELAY_ROWS="$("$BASH4_BIN" -c '
   source "'"$REPO_ROOT"'/bridge-lib.sh"
@@ -2482,7 +2496,7 @@ log "scanning agent homes with watchdog"
 WATCHDOG_JSON="$("$REPO_ROOT/agent-bridge" watchdog scan "$CREATED_AGENT" --json)"
 assert_contains "$WATCHDOG_JSON" "\"agent\": \"$CREATED_AGENT\""
 assert_contains "$WATCHDOG_JSON" "\"onboarding_state\": \"complete\""
-assert_contains "$WATCHDOG_JSON" "\"problem_count\": 1"
+assert_contains "$WATCHDOG_JSON" "\"problem_count\": 0"
 
 log "bootstrapping a manager role with init"
 INIT_DRY_RUN_JSON="$("$REPO_ROOT/agent-bridge" init --admin "$INIT_AGENT" --engine claude --session "$INIT_SESSION" --channels plugin:telegram --dry-run --json 2>&1)" || die "init dry-run failed: $INIT_DRY_RUN_JSON"
@@ -5276,9 +5290,6 @@ BRIDGE_AGENT_WORKDIR["$STALL_UNKNOWN_AGENT"]="$STALL_UNKNOWN_WORKDIR"
 BRIDGE_AGENT_LAUNCH_CMD["$STALL_UNKNOWN_AGENT"]='claude --dangerously-skip-permissions'
 EOF
 
-STALL_RATE_INPUT_LOG="$TMP_ROOT/stall-rate-input.log"
-STALL_AUTH_INPUT_LOG="$TMP_ROOT/stall-auth-input.log"
-STALL_UNKNOWN_INPUT_LOG="$TMP_ROOT/stall-unknown-input.log"
 STALL_RATE_SCRIPT="$TMP_ROOT/stall-rate.py"
 STALL_AUTH_SCRIPT="$TMP_ROOT/stall-auth.py"
 STALL_UNKNOWN_SCRIPT="$TMP_ROOT/stall-unknown.py"

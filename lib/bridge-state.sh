@@ -95,6 +95,15 @@ bridge_build_dynamic_launch_cmd() {
       fi
       ;;
     claude)
+      if [[ "$continue_mode" == "1" && "$effective_continue" == "1" \
+          && -z "$session_id" && "$continue_fallback" != "1" ]]; then
+        bridge_warn "Claude agent '$agent' has continue=1 but no resumable session was found; launching fresh (restart_count=${BRIDGE_AGENT_LOOP_RESTART_COUNT:-0})."
+        bridge_audit_log state claude_session_resume_drift "$agent" \
+          --field "continue_mode=$continue_mode" \
+          --field "effective_continue=$effective_continue" \
+          --field "restart_count=${BRIDGE_AGENT_LOOP_RESTART_COUNT:-0}" \
+          2>/dev/null || true
+      fi
       bridge_claude_dynamic_launch_cmd "$agent" "$effective_continue" "$continue_fallback" "$session_id"
       ;;
     *)

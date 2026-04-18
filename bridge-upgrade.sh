@@ -512,10 +512,13 @@ PY
     fi
   else
     for CANDIDATE_SOURCE_ROOT in \
+      "${AGENT_BRIDGE_SOURCE_DIR:-}" \
       "$HOME/.agent-bridge-source" \
+      "$HOME/Projects/agent-bridge-public" \
       "$HOME/agent-bridge-public" \
       "$HOME/agent-bridge"
     do
+      [[ -n "$CANDIDATE_SOURCE_ROOT" ]] || continue
       if [[ -d "$CANDIDATE_SOURCE_ROOT/.git" ]]; then
         SOURCE_ROOT="$(cd -P "$CANDIDATE_SOURCE_ROOT" && pwd -P)"
         if [[ "$SUBCOMMAND" == "apply" && $PULL_EXPLICIT -eq 0 ]]; then
@@ -549,7 +552,8 @@ if ! git -C "$SOURCE_ROOT" rev-parse --show-toplevel >/dev/null 2>&1; then
   if [[ $SOURCE_EXPLICIT -eq 0 && "$SOURCE_ROOT" == "$TARGET_ROOT" ]]; then
     bridge_die "live install은 git repo가 아니고 source checkout 기록도 없습니다: $TARGET_ROOT
 복구: git clone https://github.com/SYRS-AI/agent-bridge-public \"\$HOME/.agent-bridge-source\" 후 다시 실행하거나,
-명시적으로 실행하세요: $TARGET_ROOT/agent-bridge upgrade --source \"\$HOME/.agent-bridge-source\""
+AGENT_BRIDGE_SOURCE_DIR를 설정하거나,
+명시적으로 실행하세요: $TARGET_ROOT/agent-bridge upgrade --source /path/to/agent-bridge-public"
   fi
   bridge_die "git repo가 아닙니다: $SOURCE_ROOT"
 fi

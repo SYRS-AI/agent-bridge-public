@@ -1183,7 +1183,16 @@ run_restart() {
   local engine=""
   local launch_channels=""
   local preflight_reason=""
-  local verify_timeout="${BRIDGE_AGENT_RESTART_CHANNEL_VERIFY_SECONDS:-12}"
+  # Default raised from 12s to 30s: measured teams-plugin cold-start on a
+  # healthy host is ~14s, 12s lost the race deterministically (issue #69
+  # Defect B). Operators can still override via the env var.
+  local verify_timeout="${BRIDGE_AGENT_RESTART_CHANNEL_VERIFY_SECONDS:-30}"
+  # Kill-on-repeated-fail threshold: how many consecutive banner-verify
+  # timeouts before we stop the session and let the daemon's cooldown retry
+  # later. Previously hardcoded at 2, which combined with a too-short
+  # timeout created a death loop (issue #69 Defect C). Default 5.
+  local verify_max_attempts="${BRIDGE_AGENT_RESTART_CHANNEL_VERIFY_MAX_ATTEMPTS:-5}"
+  local verify_attempts=0
 
   shift || true
   [[ -n "$agent" ]] || bridge_die "Usage: $(basename "$0") restart <agent> [...]"
@@ -1251,8 +1260,25 @@ run_restart() {
   fi
 
   launch_channels="$(bridge_agent_effective_launch_plugin_channels_csv "$agent")"
-  if ! bridge_tmux_wait_for_claude_channel_banner "$session" "$launch_channels" "$verify_timeout"; then
-    bridge_warn "Claude channel runtime banner missing after restart for '$agent'. Retrying once with a fresh session."
+
+  [[ "$verify_max_attempts" =~ ^[0-9]+$ ]] || verify_max_attempts=5
+  (( verify_max_attempts >= 1 )) || verify_max_attempts=1
+
+  verify_attempts=1
+  if bridge_tmux_wait_for_claude_channel_banner "$session" "$launch_channels" "$verify_timeout"; then
+    return 0
+  fi
+
+  # Retry with fresh sessions up to verify_max_attempts total. Keep going
+  # only while the session restarts cleanly. If we exhaust attempts without
+  # seeing the banner, leave the session running and return non-zero so
+  # the daemon's next cooldown cycle can take another look. Previously we
+  # killed the session after 2 attempts, which — combined with the too-short
+  # 12s default timeout and reparented bun holding the port — produced the
+  # observed permanent death loop (issue #69 Defect C).
+  while (( verify_attempts < verify_max_attempts )); do
+    verify_attempts=$(( verify_attempts + 1 ))
+    bridge_warn "Claude channel runtime banner missing after restart for '$agent' (attempt ${verify_attempts}/${verify_max_attempts}). Retrying with a fresh session."
     if bridge_tmux_session_exists "$session"; then
       bridge_kill_agent_session "$agent" >/dev/null 2>&1 || true
       bridge_refresh_runtime_state
@@ -1260,17 +1286,13 @@ run_restart() {
     if ! restart_once; then
       return 1
     fi
-    if ! bridge_tmux_wait_for_claude_channel_banner "$session" "$launch_channels" "$verify_timeout"; then
-      bridge_warn "Claude channel runtime banner still missing after retry for '$agent'. Stopping the session to avoid a half-ready channel agent."
-      if bridge_tmux_session_exists "$session"; then
-        bridge_kill_agent_session "$agent" >/dev/null 2>&1 || true
-        bridge_refresh_runtime_state
-      fi
-      return 1
+    if bridge_tmux_wait_for_claude_channel_banner "$session" "$launch_channels" "$verify_timeout"; then
+      return 0
     fi
-  fi
+  done
 
-  return 0
+  bridge_warn "Claude channel runtime banner still missing after ${verify_max_attempts} attempts for '$agent'. Leaving the session alive so the daemon's next cycle can re-check (avoids the plugin-port death loop from issue #69)."
+  return 1
 }
 
 run_attach() {
