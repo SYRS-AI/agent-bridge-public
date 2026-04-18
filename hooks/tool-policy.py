@@ -44,9 +44,29 @@ def admin_agent_id() -> str:
     return os.environ.get("BRIDGE_ADMIN_AGENT_ID", "").strip()
 
 
+def _admin_agent_from_session_type(agent: str) -> bool:
+    try:
+        session_type_path = agent_home_root() / agent / "SESSION-TYPE.md"
+        if not session_type_path.is_file():
+            return False
+        for raw_line in session_type_path.read_text(errors="replace").splitlines():
+            line = raw_line.strip().lstrip("-").strip()
+            if not line.lower().startswith("session type:"):
+                continue
+            value = line.split(":", 1)[1].strip().lower()
+            return value == "admin"
+    except Exception:
+        return False
+    return False
+
+
 def is_admin_agent(agent: str) -> bool:
     admin = admin_agent_id()
-    return bool(admin) and agent == admin
+    if admin and agent == admin:
+        return True
+    if agent and _admin_agent_from_session_type(agent):
+        return True
+    return False
 
 
 def other_agent_homes(agent: str) -> list[Path]:
@@ -109,11 +129,14 @@ def detect_target_agent(tool_name: str, tool_input: dict[str, Any], agent: str) 
 
 
 def protected_path_reason(path: Path, agent: str) -> str | None:
+    admin = is_admin_agent(agent)
     if path == roster_local_path():
+        if admin:
+            return None
         return "shared roster secrets are not available inside Claude tool calls"
     if path == task_db_path():
         return "direct queue DB access is blocked; use `agb` queue commands instead"
-    if is_admin_agent(agent):
+    if admin:
         return None
     target = target_agent_for_path(path, agent)
     if target:
@@ -123,11 +146,14 @@ def protected_path_reason(path: Path, agent: str) -> str | None:
 
 def protected_alias_reason(text: str, agent: str) -> str | None:
     home_root = agent_home_root()
+    admin = is_admin_agent(agent)
     if "agent-roster.local.sh" in text:
+        if admin:
+            return None
         return "shared roster secrets are not available inside Claude tool calls"
     if "state/tasks.db" in text:
         return "direct queue DB access is blocked; use `agb` queue commands instead"
-    if is_admin_agent(agent):
+    if admin:
         return None
     aliases = [
         f"{home_root}/{other.name}/"
