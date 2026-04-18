@@ -3010,3 +3010,211 @@ bridge_kill_all_active_agents() {
 
   bridge_refresh_runtime_state
 }
+
+bridge_plugin_port_range_start() {
+  printf '%s' "${BRIDGE_PLUGIN_PORT_RANGE_START:-39800}"
+}
+
+bridge_plugin_port_range_end() {
+  printf '%s' "${BRIDGE_PLUGIN_PORT_RANGE_END:-39999}"
+}
+
+bridge_plugin_channel_state_dir() {
+  local agent="$1"
+  local label="$2"
+
+  case "$label" in
+    teams)
+      bridge_agent_teams_state_dir "$agent"
+      ;;
+    discord)
+      bridge_agent_discord_state_dir "$agent"
+      ;;
+    telegram)
+      bridge_agent_telegram_state_dir "$agent"
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
+bridge_plugin_port_env_key() {
+  local label="$1"
+
+  case "$label" in
+    teams)
+      printf 'TEAMS_WEBHOOK_PORT'
+      ;;
+    discord)
+      printf 'DISCORD_WEBHOOK_PORT'
+      ;;
+    telegram)
+      printf 'TELEGRAM_WEBHOOK_PORT'
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
+bridge_read_port_from_env_file() {
+  local env_file="$1"
+  local key="$2"
+  local line=""
+  local value=""
+
+  [[ -f "$env_file" ]] || return 0
+  [[ -n "$key" ]] || return 0
+  line="$(grep -E "^${key}=" "$env_file" 2>/dev/null | tail -n 1 || true)"
+  [[ -n "$line" ]] || return 0
+  value="${line#"${key}="}"
+  value="${value%\"}"
+  value="${value#\"}"
+  value="${value%\'}"
+  value="${value#\'}"
+  value="${value//[[:space:]]/}"
+  [[ "$value" =~ ^[0-9]+$ ]] || return 0
+  printf '%s' "$value"
+}
+
+bridge_port_is_free() {
+  local port="$1"
+
+  [[ "$port" =~ ^[0-9]+$ ]] || return 1
+  python3 - "$port" <<'PY' 2>/dev/null
+import socket
+import sys
+
+port = int(sys.argv[1])
+sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+try:
+    sock.bind(("127.0.0.1", port))
+except OSError:
+    sys.exit(1)
+finally:
+    sock.close()
+sys.exit(0)
+PY
+}
+
+bridge_allocate_channel_port() {
+  local agent="$1"
+  local label="$2"
+  local state_dir=""
+  local env_file=""
+  local env_key=""
+  local range_start range_end span
+  local current=""
+  local candidate=""
+  local hash_hex
+  local -i offset=0
+  local -i attempts=0
+  local -i max_attempts=0
+  local -i allocated=0
+
+  if [[ -z "$agent" || -z "$label" ]]; then
+    bridge_warn "bridge_allocate_channel_port: agent와 plugin label이 필요합니다"
+    return 1
+  fi
+
+  if ! state_dir="$(bridge_plugin_channel_state_dir "$agent" "$label")"; then
+    bridge_warn "bridge_allocate_channel_port: 지원하지 않는 plugin label: $label"
+    return 1
+  fi
+  if ! env_key="$(bridge_plugin_port_env_key "$label")"; then
+    bridge_warn "bridge_allocate_channel_port: plugin label에 대한 port env key를 결정하지 못했습니다: $label"
+    return 1
+  fi
+
+  env_file="$state_dir/.env"
+  range_start="$(bridge_plugin_port_range_start)"
+  range_end="$(bridge_plugin_port_range_end)"
+
+  if ! [[ "$range_start" =~ ^[0-9]+$ && "$range_end" =~ ^[0-9]+$ ]] || (( range_start <= 0 || range_end <= 0 || range_end < range_start )); then
+    bridge_warn "BRIDGE_PLUGIN_PORT_RANGE_* 가 유효하지 않습니다: ${range_start}-${range_end}"
+    return 1
+  fi
+  span=$(( range_end - range_start + 1 ))
+
+  if [[ -f "$env_file" ]]; then
+    current="$(bridge_read_port_from_env_file "$env_file" "$env_key" 2>/dev/null || true)"
+  fi
+  if [[ "$current" =~ ^[0-9]+$ ]] && (( current >= range_start && current <= range_end )); then
+    if bridge_port_is_free "$current"; then
+      printf '%s' "$current"
+      return 0
+    fi
+  fi
+
+  hash_hex="$(bridge_sha1 "${agent}|${label}")"
+  hash_hex="${hash_hex:0:8}"
+  if [[ -z "$hash_hex" ]]; then
+    offset=0
+  else
+    offset=$(( 16#${hash_hex} % span ))
+  fi
+
+  max_attempts="$span"
+  attempts=0
+  while (( attempts < max_attempts )); do
+    candidate=$(( range_start + ( offset + attempts ) % span ))
+    if bridge_port_is_free "$candidate"; then
+      allocated="$candidate"
+      break
+    fi
+    attempts=$(( attempts + 1 ))
+  done
+
+  if (( allocated == 0 )); then
+    bridge_warn "bridge_allocate_channel_port: ${range_start}-${range_end} 범위에서 사용 가능한 포트를 찾지 못했습니다 (agent=${agent}, label=${label})"
+    return 1
+  fi
+
+  mkdir -p "$state_dir"
+  bridge_upsert_env_value "$env_file" "$env_key" "$allocated"
+  printf '%s' "$allocated"
+}
+
+bridge_upsert_env_value() {
+  local env_file="$1"
+  local key="$2"
+  local value="$3"
+  local tmp_file=""
+
+  if [[ -z "$env_file" || -z "$key" ]]; then
+    return 1
+  fi
+
+  mkdir -p "$(dirname "$env_file")"
+  if [[ ! -f "$env_file" ]]; then
+    printf '%s=%s\n' "$key" "$value" >"$env_file"
+    return 0
+  fi
+
+  tmp_file="$(mktemp "${env_file}.XXXXXX")" || return 1
+  if grep -Eq "^${key}=" "$env_file" 2>/dev/null; then
+    awk -v key="$key" -v value="$value" '
+      BEGIN { replaced = 0 }
+      {
+        if ($0 ~ "^" key "=") {
+          if (!replaced) {
+            print key "=" value
+            replaced = 1
+          }
+        } else {
+          print $0
+        }
+      }
+      END {
+        if (!replaced) {
+          print key "=" value
+        }
+      }
+    ' "$env_file" >"$tmp_file"
+  else
+    cat "$env_file" >"$tmp_file"
+    printf '%s=%s\n' "$key" "$value" >>"$tmp_file"
+  fi
+  mv "$tmp_file" "$env_file"
+}
