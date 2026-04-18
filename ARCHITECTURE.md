@@ -8,9 +8,10 @@ If you are resuming development, read in this order:
 
 1. [`README.md`](./README.md)
 2. [`ARCHITECTURE.md`](./ARCHITECTURE.md)
-3. [`OPERATIONS.md`](./OPERATIONS.md)
-4. [`KNOWN_ISSUES.md`](./KNOWN_ISSUES.md)
-5. [`AGENTS.md`](./AGENTS.md)
+3. [`docs/developer-handover.md`](./docs/developer-handover.md)
+4. [`OPERATIONS.md`](./OPERATIONS.md)
+5. [`KNOWN_ISSUES.md`](./KNOWN_ISSUES.md)
+6. [`AGENTS.md`](./AGENTS.md)
 
 ## Core Model
 

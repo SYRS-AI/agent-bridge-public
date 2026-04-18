@@ -147,7 +147,7 @@ If you think this README has no concrete install steps, stop and reread this `CL
    - On macOS, if `/opt/homebrew/bin/bash` exists, prefer it. If not, warn the user that macOS system Bash 3.2 may be unsupported and ask them to install Homebrew Bash if the scripts fail.
 
 2. Clone or update the public source checkout, then pin it to the latest stable release tag.
-   Keep the source checkout hidden at `~/.agent-bridge-source`. If an older visible checkout exists at `~/agent-bridge-public`, move it automatically only when it is clean and points to this public repository.
+   Keep the source checkout hidden at `~/.agent-bridge-source`. If an older visible checkout exists at `~/agent-bridge-public`, move it automatically only when it is clean and points to this public repository. If you intentionally keep the source checkout elsewhere, such as `~/Projects/agent-bridge-public`, set `AGENT_BRIDGE_SOURCE_DIR` or pass `agent-bridge upgrade --source /path/to/agent-bridge-public` when upgrading from the live install.
 
    ```bash
    REPO_URL="https://github.com/SYRS-AI/agent-bridge-public"
@@ -190,6 +190,8 @@ print(tags[-1] if tags else "")'
    fi
    git -C "$SOURCE_DIR" checkout --detach "$LATEST_TAG"
    ```
+
+   If your shell rc sources the source checkout directly rather than `~/.agent-bridge`, rerun `bash scripts/install-shell-integration.sh --shell zsh --apply` or the matching bash variant after moving the checkout so the managed block points at the new path.
 
 3. Deploy tracked source files into the live install at `~/.agent-bridge`.
    Runtime files, agent homes, queue state, logs, backups, and local roster files must be preserved.

@@ -230,8 +230,8 @@ Canonical home:
 - queue body / operator-readable summary: `shared/raw/intake/<capture-id>.md`
 - built with `agent-bridge knowledge capture` plus `agent-bridge intake triage|show`
 
-This generalizes the live mail triage pattern without copying a SYRS-specific
-mail workflow into core.
+This generalizes the live mail triage pattern without copying a private
+team-specific mail workflow into core.
 
 ## Migration Map From Private/Live Runtime
 
@@ -239,9 +239,9 @@ These mappings are the intended refactor direction, not a direct file copy.
 
 | Live/Private Pattern | Public Destination |
 | --- | --- |
-| `shared/SYRS-USER.md` | `shared/wiki/people.md` plus operator profile rules |
-| `shared/SYRS-CONTEXT.md` | `shared/wiki/projects/`, `decisions/`, `data-sources.md`, `tools.md`, and team rules |
-| `shared/ROSTER.md` | `shared/wiki/agents.md` |
+| legacy shared operator profile docs | `shared/wiki/people.md` plus operator profile rules |
+| legacy shared context/rules docs | `shared/wiki/projects/`, `decisions/`, `data-sources.md`, `tools.md`, and team rules |
+| legacy shared agent roster docs | `shared/wiki/agents.md` |
 | `shared/a2a-files/...` | structured handoff bundle artifact storage (`#23`) |
 | `shared/mailbot-triage/*.md` | external intake triage contract (`#24`) |
 | ad hoc human/addressing facts embedded in many agent homes | shared operator profile (`#25`) |

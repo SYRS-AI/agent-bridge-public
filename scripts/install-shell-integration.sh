@@ -13,7 +13,7 @@ usage() {
 Usage: $0 [--shell zsh|bash] [--rcfile <path>] [--apply]
 
 Without --apply, prints the snippet to add to your shell rc file.
-With --apply, appends a managed block to the rc file if it is not already present.
+With --apply, writes or updates a managed block in the rc file.
 EOF
 }
 
@@ -76,7 +76,51 @@ mkdir -p "$(dirname "$RCFILE")"
 touch "$RCFILE"
 
 if grep -Fq "$START_MARKER" "$RCFILE"; then
-  echo "[info] shell integration already present in $RCFILE"
+  UPDATE_RESULT="$(
+    python3 - "$RCFILE" "$START_MARKER" "$END_MARKER" "$SNIPPET" <<'PY'
+from pathlib import Path
+import re
+import sys
+
+path = Path(sys.argv[1])
+start_marker, end_marker, snippet = sys.argv[2:]
+text = path.read_text(encoding="utf-8")
+managed_block = f"{start_marker}\n{snippet}\n{end_marker}"
+pattern = re.compile(
+    re.escape(start_marker) + r"\n.*?\n" + re.escape(end_marker),
+    re.DOTALL,
+)
+
+if not pattern.search(text):
+    print("malformed")
+    raise SystemExit(0)
+
+updated = pattern.sub(managed_block, text, count=1)
+if updated == text:
+    print("unchanged")
+    raise SystemExit(0)
+
+path.write_text(updated, encoding="utf-8")
+print("updated")
+PY
+  )"
+  case "$UPDATE_RESULT" in
+    updated)
+      echo "[info] updated agent-bridge shell integration in $RCFILE"
+      echo "[info] restart your shell or run: exec ${TARGET_SHELL}"
+      ;;
+    unchanged)
+      echo "[info] shell integration already up to date in $RCFILE"
+      ;;
+    malformed)
+      echo "[error] existing managed block in $RCFILE is malformed; fix it manually or remove it and rerun." >&2
+      exit 1
+      ;;
+    *)
+      echo "[error] unexpected shell integration update result: $UPDATE_RESULT" >&2
+      exit 1
+      ;;
+  esac
   exit 0
 fi
 
