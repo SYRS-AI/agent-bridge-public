@@ -13,4 +13,5 @@
 #         in heredocs and when the literal `$var` text is wanted.
 # SC2295 — expansions inside ${..} need to be quoted separately. Pattern
 #         matching is exactly what we want in the call sites that raise this.
+severity=error
 disable=SC2034,SC2016,SC2295
