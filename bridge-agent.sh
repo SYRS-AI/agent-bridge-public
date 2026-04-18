@@ -1296,6 +1296,20 @@ run_restart() {
   return 1
 }
 
+run_ack_crash() {
+  local agent="${1:-}"
+
+  shift || true
+  [[ -n "$agent" ]] || bridge_die "Usage: $(basename "$0") ack-crash <agent>"
+  [[ $# -eq 0 ]] || bridge_die "지원하지 않는 agent ack-crash 옵션입니다: $1"
+  bridge_require_agent "$agent"
+  if bridge_agent_ack_crash_report "$agent"; then
+    printf 'ack-crash: %s\n' "$agent"
+  else
+    bridge_die "ack-crash failed: no crash report or state available for '$agent'"
+  fi
+}
+
 run_attach() {
   local agent="${1:-}"
 
@@ -1330,6 +1344,9 @@ case "$subcommand" in
     ;;
   restart)
     run_restart "$@"
+    ;;
+  ack-crash)
+    run_ack_crash "$@"
     ;;
   attach)
     run_attach "$@"
