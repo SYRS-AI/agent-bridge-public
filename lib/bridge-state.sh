@@ -75,10 +75,7 @@ bridge_build_dynamic_launch_cmd() {
     else
       session_id=""
     fi
-    if [[ "$effective_continue" == "1" \
-      && -z "$session_id" \
-      && "${BRIDGE_AGENT_LOOP_RESTART_COUNT:-0}" =~ ^[0-9]+$ \
-      && "${BRIDGE_AGENT_LOOP_RESTART_COUNT:-0}" -gt 0 ]]; then
+    if [[ "$effective_continue" == "1" && -z "$session_id" ]]; then
       continue_fallback=1
     fi
   else
@@ -95,13 +92,18 @@ bridge_build_dynamic_launch_cmd() {
       fi
       ;;
     claude)
-      if [[ "$continue_mode" == "1" && "$effective_continue" == "1" \
-          && -z "$session_id" && "$continue_fallback" != "1" ]]; then
-        bridge_warn "Claude agent '$agent' has continue=1 but no resumable session was found; launching fresh (restart_count=${BRIDGE_AGENT_LOOP_RESTART_COUNT:-0})."
-        bridge_audit_log state claude_session_resume_drift "$agent" \
+      # The fresh-session branch is now only reachable when continue_mode=0
+      # in the roster, or when effective_continue was gated by onboarding /
+      # channel setup / NEXT-SESSION.md. continue_fallback above makes every
+      # "continue intended but no session_id" case go through --continue, so
+      # the silent-drift warning from issue #71 cannot fire in practice.
+      # Kept as a defensive emit for the onboarding-gate case so operators
+      # still see why a static agent restarted fresh.
+      if [[ "$continue_mode" == "1" && "$effective_continue" != "1" ]]; then
+        bridge_warn "Claude agent '$agent' has continue=1 but effective_continue is 0 (onboarding/channel/NEXT-SESSION gate); launching fresh."
+        bridge_audit_log state claude_session_resume_blocked_by_gate "$agent" \
           --field "continue_mode=$continue_mode" \
           --field "effective_continue=$effective_continue" \
-          --field "restart_count=${BRIDGE_AGENT_LOOP_RESTART_COUNT:-0}" \
           2>/dev/null || true
       fi
       bridge_claude_dynamic_launch_cmd "$agent" "$effective_continue" "$continue_fallback" "$session_id"
@@ -496,10 +498,7 @@ bridge_build_static_claude_launch_cmd() {
   if bridge_agent_claude_effective_engine_continue "$agent"; then
     effective_continue=1
     session_id="$(bridge_claude_resume_session_id_for_agent "$agent" || true)"
-    if [[ "$effective_continue" == "1" \
-      && -z "$session_id" \
-      && "${BRIDGE_AGENT_LOOP_RESTART_COUNT:-0}" =~ ^[0-9]+$ \
-      && "${BRIDGE_AGENT_LOOP_RESTART_COUNT:-0}" -gt 0 ]]; then
+    if [[ "$effective_continue" == "1" && -z "$session_id" ]]; then
       continue_fallback=1
     fi
   fi

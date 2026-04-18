@@ -657,6 +657,19 @@ bridge_write_linux_agent_env_file() {
   agent_audit_log="$(bridge_agent_audit_log_file "$agent")"
 
   mkdir -p "$(dirname "$file")"
+  # Self-heal ownership: when an earlier isolate cycle chowned the file to the
+  # isolated os_user, `cat >` preserves ownership and the trailing `chmod 600`
+  # fails with EPERM for the operator. Drop the stale inode (via sudo when
+  # linux-user isolation is active) so the redirect creates a fresh one owned
+  # by the current UID. See issue #112 retest.
+  if [[ -e "$file" && ! -O "$file" ]]; then
+    if [[ "$(bridge_host_platform 2>/dev/null || printf '')" == "Linux" ]] \
+        && command -v bridge_linux_sudo_root >/dev/null 2>&1; then
+      bridge_linux_sudo_root rm -f "$file" 2>/dev/null || rm -f "$file"
+    else
+      rm -f "$file"
+    fi
+  fi
   cat >"$file" <<EOF
 #!/usr/bin/env bash
 # shellcheck shell=bash disable=SC2034
@@ -833,7 +846,12 @@ bridge_linux_prepare_agent_isolation() {
   bridge_linux_acl_add_recursive "u:${controller_user}:rwX" "$runtime_state_dir" "$log_dir" "$request_dir" "$response_dir"
   bridge_linux_acl_add "u:${controller_user}:rw-" "$history_file" "$audit_file"
   bridge_write_linux_agent_env_file "$agent" "$env_file"
-  bridge_linux_sudo_root chown "$os_user" "$env_file"
+  # Leave env_file owned by the controller so subsequent starts can chmod it.
+  # Previously we chowned it to $os_user, which made the operator-run start
+  # path hit EPERM on the trailing `chmod 600` (file ownership is an
+  # owner-only op; rwX ACL doesn't cover it). Grant the isolated user read
+  # access via ACL instead — the agent only needs to read this file.
+  bridge_linux_acl_add "u:${os_user}:r--" "$env_file"
   bridge_linux_acl_add "u:${controller_user}:rw-" "$env_file"
 }
 bridge_agent_default_home() {
