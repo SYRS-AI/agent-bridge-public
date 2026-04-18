@@ -249,6 +249,66 @@ for reason in sorted(payload.get("skipped_reasons", {})):
 PY
 }
 
+bridge_upgrade_detect_stuck_crash_loops() {
+  # Scan every agent's crash/state.env for the stuck-ack pattern from issue
+  # #109: a non-empty CRASH_LAST_HASH that has never been acked. The daemon
+  # re-queues [crash-loop] tasks indefinitely when this pattern persists.
+  local target_root="$1"
+  local agents_dir="$target_root/state/agents"
+  [[ -d "$agents_dir" ]] || return 0
+
+  local agent_dir name state_file
+  local CRASH_LAST_HASH=""
+  local CRASH_ACK_HASH=""
+  for agent_dir in "$agents_dir"/*/; do
+    [[ -d "$agent_dir" ]] || continue
+    name="$(basename "$agent_dir")"
+    state_file="$agent_dir/crash/state.env"
+    [[ -f "$state_file" ]] || continue
+    CRASH_LAST_HASH=""
+    CRASH_ACK_HASH=""
+    # shellcheck source=/dev/null
+    source "$state_file" 2>/dev/null || continue
+    if [[ -n "$CRASH_LAST_HASH" && "$CRASH_LAST_HASH" != "$CRASH_ACK_HASH" ]]; then
+      printf '%s\n' "$name"
+    fi
+  done
+}
+
+bridge_upgrade_print_post_upgrade_notices() {
+  local target_root="$1"
+  local target_version="$2"
+
+  printf '\n== Post-upgrade notices ==\n'
+  printf 'release_notes: https://github.com/SYRS-AI/agent-bridge-public/releases/tag/v%s\n' "$target_version"
+
+  local stuck
+  stuck="$(bridge_upgrade_detect_stuck_crash_loops "$target_root" 2>/dev/null || true)"
+  if [[ -z "$stuck" ]]; then
+    return 0
+  fi
+
+  printf '\n[action required] stale crash-loop ack state detected for these agents:\n'
+  while IFS= read -r agent; do
+    [[ -n "$agent" ]] || continue
+    printf '  - %s\n' "$agent"
+  done <<<"$stuck"
+
+  printf '\nOn v0.3.0 the ack path silently no-oped whenever crash/report.env had been\n'
+  printf 'cleaned up, so the daemon re-queued [crash-loop] urgent tasks on every sweep\n'
+  printf 'even after the operator ran agb done. v0.3.1 fixes the ack path AND ships a\n'
+  printf 'first-class recovery CLI. Run once per agent above to break the loop:\n\n'
+  while IFS= read -r agent; do
+    [[ -n "$agent" ]] || continue
+    printf '  agent-bridge agent ack-crash %s\n' "$agent"
+  done <<<"$stuck"
+
+  printf '\nReference:\n'
+  printf '  - Release notes (with runbook): https://github.com/SYRS-AI/agent-bridge-public/releases/tag/v%s\n' "$target_version"
+  printf '  - Fix PR: https://github.com/SYRS-AI/agent-bridge-public/pull/110\n'
+  printf '  - Issue #109: https://github.com/SYRS-AI/agent-bridge-public/issues/109\n'
+}
+
 bridge_upgrade_channel_guard_report() {
   local source_root="$1"
   local target_root="$2"
@@ -974,3 +1034,4 @@ print(f"migrated_files: {payload.get('added_files', 0)}")
 PY
 fi
 bridge_upgrade_print_agent_restart_summary "$AGENT_RESTART_JSON"
+bridge_upgrade_print_post_upgrade_notices "$TARGET_ROOT" "$SOURCE_VERSION"
