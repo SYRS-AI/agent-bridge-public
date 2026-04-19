@@ -961,11 +961,28 @@ drift if the state is already converged.
 When you finish the three steps above, close this task with:
 \`agb done <task_id> --note "bootstrap OK; first-scan <N> files / <M> entities; distribution report at <path>"\`
 POST_EOF
-    "$TARGET_ROOT/agent-bridge" task create \
-      --to "$_post_admin" --priority normal --from "$_post_admin" \
-      --title "[upgrade-complete] Agent Bridge $SOURCE_VERSION — run bootstrap" \
-      --body-file "$_post_body" >/dev/null 2>&1 || true
-    rm -f "$_post_body"
+    _post_task_log="$(mktemp -t bridge-upgrade-post-task.XXXXXX.log)"
+    if "$TARGET_ROOT/agent-bridge" task create \
+        --to "$_post_admin" --priority normal --from "$_post_admin" \
+        --title "[upgrade-complete] Agent Bridge $SOURCE_VERSION — run bootstrap" \
+        --body-file "$_post_body" >"$_post_task_log" 2>&1; then
+      :
+    else
+      # Surface failure on stderr so the operator sees it on upgrade.
+      # A silent `|| true` here was the R9 reliability gap — the
+      # entire post-upgrade signal chain is anchored on this task
+      # actually being delivered. The rest of the upgrade succeeded;
+      # the notification specifically did not. Re-running agb upgrade
+      # retries the task emission.
+      {
+        echo "[bridge-upgrade] WARN: could not file [upgrade-complete] task for admin=$_post_admin"
+        echo "[bridge-upgrade] WARN: admin inbox will not be auto-notified. Re-run 'agb upgrade' to retry, or"
+        echo "[bridge-upgrade] WARN: queue manually: agent-bridge task create --to $_post_admin --title '[upgrade-complete] ...' --body-file $_post_body"
+        echo "[bridge-upgrade] WARN: task create stderr follows:"
+        sed 's/^/[bridge-upgrade] WARN:   /' "$_post_task_log"
+      } >&2
+    fi
+    rm -f "$_post_body" "$_post_task_log"
   fi
 fi
 
