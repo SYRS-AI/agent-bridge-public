@@ -147,6 +147,153 @@ expect_idle "no prompt glyph anywhere" \
   $'just text, nothing composable'
 BASH_UT
 
+log "tmux pending-attention spool: escape/drain/prepend/deferral-cap (issue #132a)"
+"$BASH4_BIN" -s "$REPO_ROOT" <<'SPOOL_UT'
+set -u
+repo="$1"
+# shellcheck disable=SC1090
+source "$repo/bridge-lib.sh"
+
+fail() { printf '[smoke][error] spool: %s\n' "$*" >&2; exit 1; }
+
+scratch="$(mktemp -d)"
+export BRIDGE_HOME="$scratch"
+export BRIDGE_STATE_DIR="$BRIDGE_HOME/state"
+export BRIDGE_ACTIVE_AGENT_DIR="$BRIDGE_STATE_DIR/agents"
+export BRIDGE_LOG_DIR="$BRIDGE_HOME/logs"
+export BRIDGE_SHARED_DIR="$BRIDGE_HOME/shared"
+agent="spool-test"
+
+# Round-trip escape/unescape over the four escape classes.
+for text in "plain" $'two\nlines' $'tab\there' "back\\slash" $'mixed\n\ta\\b'; do
+  esc="$(bridge_tmux_pending_attention_escape "$text")"
+  dec="$(bridge_tmux_pending_attention_unescape "$esc")"
+  if [[ "$dec" == "$text" ]]; then
+    printf '[smoke]   [ok] round-trip: %q\n' "$text"
+  else
+    fail "round-trip mismatch for: $(printf '%q' "$text") -> $(printf '%q' "$esc") -> $(printf '%q' "$dec")"
+  fi
+done
+
+# FIFO append/drain
+bridge_tmux_pending_attention_append "$agent" "first"
+bridge_tmux_pending_attention_append "$agent" "second"
+bridge_tmux_pending_attention_append "$agent" $'third\nwith-newline'
+count="$(bridge_tmux_pending_attention_count "$agent")"
+[[ "$count" == "3" ]] || fail "count after 3 appends: expected 3, got $count"
+printf '[smoke]   [ok] append: count=3\n'
+
+drained="$(bridge_tmux_pending_attention_drain "$agent")"
+[[ -n "$drained" ]] || fail "drain returned empty"
+# Expect 3 lines in FIFO order
+line1="$(printf '%s\n' "$drained" | sed -n '1p' | cut -f2)"
+line2="$(printf '%s\n' "$drained" | sed -n '2p' | cut -f2)"
+line3="$(printf '%s\n' "$drained" | sed -n '3p' | cut -f2)"
+[[ "$line1" == "first" ]] || fail "drain line1: expected 'first', got '$line1'"
+[[ "$line2" == "second" ]] || fail "drain line2: expected 'second', got '$line2'"
+[[ "$line3" == $'third\\nwith-newline' ]] || fail "drain line3: expected 'third\\\\nwith-newline', got '$line3'"
+printf '[smoke]   [ok] drain: FIFO order preserved, newline escaped\n'
+
+# Drain empties the spool
+count_after="$(bridge_tmux_pending_attention_count "$agent")"
+[[ "$count_after" == "0" ]] || fail "count after drain: expected 0, got $count_after"
+printf '[smoke]   [ok] drain: spool emptied\n'
+
+# Prepend preserves head insertion
+bridge_tmux_pending_attention_append "$agent" "new-A"
+bridge_tmux_pending_attention_append "$agent" "new-B"
+bridge_tmux_pending_attention_prepend "$agent" $'99\told-X\n99\told-Y\n'
+file="$(bridge_agent_pending_attention_file "$agent")"
+actual="$(cat "$file")"
+expected=$'99\told-X\n99\told-Y\n'"$(date +%s | head -c 10)"  # ts prefix will differ; check structurally
+head1="$(sed -n '1p' "$file" | cut -f2)"
+head2="$(sed -n '2p' "$file" | cut -f2)"
+tail1="$(sed -n '3p' "$file" | cut -f2)"
+tail2="$(sed -n '4p' "$file" | cut -f2)"
+[[ "$head1" == "old-X" && "$head2" == "old-Y" ]] \
+  || fail "prepend head: expected old-X,old-Y, got '$head1','$head2'"
+[[ "$tail1" == "new-A" && "$tail2" == "new-B" ]] \
+  || fail "prepend tail: expected new-A,new-B, got '$tail1','$tail2'"
+printf '[smoke]   [ok] prepend: head preserved, original tail intact\n'
+
+# Deferral-cap + flush requeue. Mock bridge_tmux_send_and_submit to avoid
+# needing a real tmux and drive the gate's bounce/accept from a state var.
+cap_agent="cap-test"
+
+# One fresh entry + one aged entry (ts = 0 = far in the past)
+now="$(date +%s)"
+bridge_tmux_pending_attention_append "$cap_agent" "fresh-event"
+fresh_file="$(bridge_agent_pending_attention_file "$cap_agent")"
+# Append a second record with an ancient timestamp by rewriting the file.
+cat >>"$fresh_file" <<'EOF'
+0	very-old-event
+EOF
+
+# Override the real tmux send path with a stub that succeeds and records
+# every injection that flush attempts.
+captured_log="$(mktemp)"
+bridge_tmux_send_and_submit() {
+  printf '%s\n' "$3" >>"$captured_log"
+  return 0
+}
+# Override wait-for-prompt and the gate so flush's internal send_and_submit
+# call (which uses them) is a no-op — but our function stub above shadows
+# send_and_submit anyway.
+bridge_tmux_pending_attention_flush "mock-session" claude "$cap_agent" \
+  || fail "flush returned non-zero with all-success stub"
+
+# Expect two lines in the capture log: "fresh-event" (no marker) and
+# "[deferred] very-old-event" (marker applied).
+line_fresh="$(sed -n '1p' "$captured_log")"
+line_aged="$(sed -n '2p' "$captured_log")"
+[[ "$line_fresh" == "fresh-event" ]] \
+  || fail "flush line 1: expected 'fresh-event', got '$line_fresh'"
+[[ "$line_aged" == "[deferred] very-old-event" ]] \
+  || fail "flush line 2: expected '[deferred] very-old-event', got '$line_aged'"
+printf '[smoke]   [ok] flush: deferral-cap marker applied to aged entry\n'
+
+# Spool empty after successful flush
+remaining="$(bridge_tmux_pending_attention_count "$cap_agent")"
+[[ "$remaining" == "0" ]] || fail "spool should be empty after flush, got $remaining"
+printf '[smoke]   [ok] flush: spool emptied after all entries delivered\n'
+
+# Requeue-on-busy: stub returns 1 on first call, success after that
+rm -f "$captured_log" "$fresh_file"
+bridge_tmux_pending_attention_append "$cap_agent" "entry-1"
+bridge_tmux_pending_attention_append "$cap_agent" "entry-2"
+bridge_tmux_pending_attention_append "$cap_agent" "entry-3"
+busy_count=0
+bridge_tmux_send_and_submit() {
+  busy_count=$((busy_count + 1))
+  printf '%s\n' "$3" >>"$captured_log"
+  # First call bounces (simulating busy gate), rest succeed. But flush
+  # treats a return 1 as "prepend remainder and stop", so we only expect
+  # one line in the log from this run.
+  if (( busy_count == 1 )); then
+    return 1
+  fi
+  return 0
+}
+bridge_tmux_pending_attention_flush "mock-session" claude "$cap_agent" \
+  && fail "flush should report 1 when gate bounces mid-drain"
+
+logged_lines="$(wc -l <"$captured_log" | awk '{print $1}')"
+[[ "$logged_lines" == "1" ]] \
+  || fail "flush should stop after first busy bounce, logged=$logged_lines"
+spooled_after="$(bridge_tmux_pending_attention_count "$cap_agent")"
+[[ "$spooled_after" == "3" ]] \
+  || fail "flush should re-prepend all 3 entries after bounce, got $spooled_after"
+head_after="$(sed -n '1p' "$fresh_file" | cut -f2)"
+[[ "$head_after" == "entry-1" ]] \
+  || fail "flush requeue: head should be entry-1, got '$head_after'"
+printf '[smoke]   [ok] flush: busy bounce re-prepends FIFO remainder\n'
+
+# Restore real send function for cleanliness if later code re-sources.
+unset -f bridge_tmux_send_and_submit
+rm -f "$captured_log"
+rm -rf "$scratch"
+SPOOL_UT
+
 TMP_ROOT="$(mktemp -d)"
 export BRIDGE_HOME="$TMP_ROOT/bridge-home"
 export BRIDGE_STATE_DIR="$BRIDGE_HOME/state"
