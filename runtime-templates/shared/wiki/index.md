@@ -3,6 +3,8 @@
 This wiki is the team-level source of truth for durable knowledge that should be
 shared across agents.
 
+> 정보 검색: `agent-bridge knowledge search --hybrid` 가 기본. `--legacy-text` 은 명시 opt-out.
+
 ## Core Pages
 
 - [People](people.md)

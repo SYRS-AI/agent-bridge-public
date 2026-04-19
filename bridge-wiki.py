@@ -171,7 +171,33 @@ def cmd_bootstrap(args: argparse.Namespace) -> int:
 
 _FRONTMATTER_RE = re.compile(r"\A---\n(.*?)\n---\n", re.S)
 _WIKILINK_RE = re.compile(r"\[\[([^\]|#]+)(?:[|#][^\]]*)?\]\]")
+# Match a markdown codespan (one or more backticks, content, matching backtick run).
+# We skip wikilinks whose match.start() falls inside any codespan range.
+# Intentionally NOT multiline: markdown codespans don't span paragraphs, and
+# using re.S would consume text across unrelated paragraphs when a stray
+# backtick appears (which would accidentally mask real broken wikilinks).
+_CODESPAN_RE = re.compile(r"(`+)(?!`)(.+?)\1(?!`)")
 _ENTITY_DIRS = ("entities", "concepts", "decisions", "systems")
+
+
+def _codespan_ranges(text: str) -> list[tuple[int, int]]:
+    """Return list of (start, end) character ranges that fall inside a
+    markdown codespan (i.e. between matching backtick runs).
+
+    A wikilink match at position `p` should be skipped when any range
+    (s, e) in the returned list satisfies `s <= p < e` — i.e. the
+    `[[…]]` is inside `` `…` ``.
+    """
+    return [(m.start(), m.end()) for m in _CODESPAN_RE.finditer(text)]
+
+
+def _inside_codespan(pos: int, ranges: list[tuple[int, int]]) -> bool:
+    for start, end in ranges:
+        if start <= pos < end:
+            return True
+        if start > pos:
+            break
+    return False
 
 
 def _is_entity_like(rel_parts: tuple) -> bool:
@@ -229,7 +255,12 @@ def _validate_broken_links(wiki: Path) -> tuple[int, dict]:
             text = path.read_text(encoding="utf-8")
         except (OSError, UnicodeDecodeError):
             continue
+        cs_ranges = _codespan_ranges(text)
         for match in _WIKILINK_RE.finditer(text):
+            # Skip `[[…]]` that lives inside a `` `…` `` codespan — those
+            # are prose illustrations of the wikilink syntax, not live links.
+            if _inside_codespan(match.start(), cs_ranges):
+                continue
             target = match.group(1).strip()
             if not target:
                 continue
@@ -259,9 +290,12 @@ def _validate_tree_edges(wiki: Path) -> list[str]:
             text = path.read_text(encoding="utf-8")
         except (OSError, UnicodeDecodeError):
             continue
+        cs_ranges = _codespan_ranges(text)
         # Tree-edge heuristic: file linking to its own direct parent dir
         # (e.g. `daily-2026-04-19.md` → `[[daily]]`).
         for match in _WIKILINK_RE.finditer(text):
+            if _inside_codespan(match.start(), cs_ranges):
+                continue
             target = match.group(1).strip()
             if target in rel.parts[:-1]:
                 hits.append(str(rel))
@@ -651,6 +685,7 @@ def cmd_repair_links(args: argparse.Namespace) -> int:
         except (OSError, UnicodeDecodeError):
             continue
         file_changed = False
+        cs_ranges = _codespan_ranges(text)
 
         def _rewrite(match: re.Match) -> str:
             """Span-scoped rewrite: only touch the matched `[[…]]` wikilink.
@@ -662,6 +697,11 @@ def cmd_repair_links(args: argparse.Namespace) -> int:
             """
             nonlocal file_changed
             full = match.group(0)
+            # Skip codespan-embedded wikilinks (prose illustrations of
+            # `[[…]]` syntax inside backticks) so we neither flag them as
+            # broken nor rewrite them.
+            if _inside_codespan(match.start(), cs_ranges):
+                return full
             raw_target = match.group(1)
             target = raw_target.strip()
             if not target:

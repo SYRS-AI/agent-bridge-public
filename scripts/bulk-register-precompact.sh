@@ -5,6 +5,9 @@
 #   bulk-register.sh --canary     # phase 1, register on `patch` only
 #   bulk-register.sh --phase2     # phase 2, three non-customer-facing agents
 #   bulk-register.sh --all        # phase 3, every claude-engine agent (post-gate)
+#   bulk-register.sh --include-stopped   # alias for --all; explicit intent to
+#                                        # cover stopped (not just active) claude
+#                                        # agents. Kept for clarity at call site.
 #   bulk-register.sh --dry-run ... # show the plan, take no action
 #
 # All phases append one ndjson record per agent to
@@ -18,6 +21,7 @@ set -euo pipefail
 
 BRIDGE_HOME="${BRIDGE_HOME:-$HOME/.agent-bridge}"
 AGENT_BRIDGE_BIN="${AGENT_BRIDGE_BIN:-$BRIDGE_HOME/agent-bridge}"
+PYTHON_BIN="${BRIDGE_PYTHON_BIN:-$(command -v python3 || echo /usr/bin/python3)}"
 STATE_DIR="$BRIDGE_HOME/state/precompact-registration"
 BACKUP_DIR="$STATE_DIR/backups"
 
@@ -34,10 +38,11 @@ usage() {
 
 while [ $# -gt 0 ]; do
     case "$1" in
-        --canary)  PHASE="canary"; shift ;;
-        --phase2)  PHASE="phase2"; shift ;;
-        --all)     PHASE="all";    shift ;;
-        --dry-run) DRY_RUN=1;      shift ;;
+        --canary)          PHASE="canary"; shift ;;
+        --phase2)          PHASE="phase2"; shift ;;
+        --all)             PHASE="all";    shift ;;
+        --include-stopped) PHASE="all";    shift ;;
+        --dry-run)         DRY_RUN=1;      shift ;;
         -h|--help) usage ;;
         *) echo "bulk-register: unknown flag: $1" >&2; usage ;;
     esac
@@ -131,16 +136,24 @@ register_one() {
     local backup
     backup="$(backup_settings "$agent")"
 
+    # Canonical invocation: call bridge-hooks.py directly. The top-level
+    # `agent-bridge hooks` subcommand does not exist (bootstrap-memory-system.sh
+    # and bridge-agent.sh's safety net both use this same direct path).
+    local cmd_for_log
+    cmd_for_log="$PYTHON_BIN $BRIDGE_HOME/bridge-hooks.py ensure-pre-compact-hook --workdir $BRIDGE_HOME/agents/$agent --bridge-home $BRIDGE_HOME --python-bin $PYTHON_BIN --settings-file $settings"
+
     if [ $DRY_RUN -eq 1 ]; then
-        record "$agent" "register" "dry_run" \
-            "agent-bridge hooks ensure-pre-compact-hook --agent $agent" \
-            "$backup" ""
+        record "$agent" "register" "dry_run" "$cmd_for_log" "$backup" ""
         printf 'dry    %-20s pre=%s backup=%s\n' "$agent" "$pre_status" "$backup"
         return 0
     fi
 
     local out status
-    if out="$("$AGENT_BRIDGE_BIN" hooks ensure-pre-compact-hook --agent "$agent" 2>&1)"; then
+    if out="$("$PYTHON_BIN" "$BRIDGE_HOME/bridge-hooks.py" ensure-pre-compact-hook \
+            --workdir "$BRIDGE_HOME/agents/$agent" \
+            --bridge-home "$BRIDGE_HOME" \
+            --python-bin "$PYTHON_BIN" \
+            --settings-file "$settings" 2>&1)"; then
         status="ok"
     else
         status="error"
@@ -148,14 +161,10 @@ register_one() {
 
     if [ "$status" = "ok" ]; then
         printf 'ok     %-20s pre=%s backup=%s\n' "$agent" "$pre_status" "$backup"
-        record "$agent" "register" "ok" \
-            "agent-bridge hooks ensure-pre-compact-hook --agent $agent" \
-            "$backup" ""
+        record "$agent" "register" "ok" "$cmd_for_log" "$backup" ""
     else
         printf 'ERR    %-20s: %s\n' "$agent" "$out" >&2
-        record "$agent" "register" "error" \
-            "agent-bridge hooks ensure-pre-compact-hook --agent $agent" \
-            "$backup" "$out"
+        record "$agent" "register" "error" "$cmd_for_log" "$backup" "$out"
     fi
 }
 
