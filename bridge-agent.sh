@@ -387,6 +387,8 @@ bridge_write_role_block() {
   local loop_mode="${13}"
   local continue_mode="${14}"
   local always_on="${15}"
+  local isolation_mode="${16:-}"
+  local os_user="${17:-}"
 
   bridge_agent_manage_python \
     "$BRIDGE_ROSTER_LOCAL_FILE" \
@@ -428,6 +430,8 @@ import sys
     loop_mode,
     continue_mode,
     always_on,
+    isolation_mode,
+    os_user,
 ) = sys.argv[1:]
 
 path = Path(path_str)
@@ -473,6 +477,13 @@ else:
     lines.append(f'BRIDGE_AGENT_CONTINUE["{agent}"]="0"')
 if always_on == "1":
     lines.append(f'BRIDGE_AGENT_IDLE_TIMEOUT["{agent}"]="0"')
+if isolation_mode:
+    # Emit the isolation mode verbatim (including "shared") so roster
+    # round-trips preserve explicit configuration. Downstream tooling that
+    # distinguishes "unset" from "shared" relies on this being present.
+    lines.append(f'BRIDGE_AGENT_ISOLATION_MODE["{agent}"]={sq(isolation_mode)}')
+if os_user:
+    lines.append(f'BRIDGE_AGENT_OS_USER["{agent}"]={sq(os_user)}')
 lines.append(end)
 
 block = "\n".join(lines) + "\n"

@@ -771,10 +771,56 @@ def extract_identity_snapshot(identity_path: Path) -> list[str]:
     return lines[:5]
 
 
-def render_agent_bridge_block(agent_dir: Path) -> str:
+SESSION_TYPE_RE = re.compile(r"^\s*-\s*Session Type:\s*(?P<value>[A-Za-z0-9_-]+)", re.MULTILINE)
+
+
+def read_session_type(agent_dir: Path) -> str:
+    """Return the agent's session type (e.g. 'admin', 'static-claude').
+
+    Falls back to 'general' when SESSION-TYPE.md is missing, unreadable, or
+    does not contain a `- Session Type: <value>` line. The role filter in
+    `render_agent_bridge_block` treats 'admin' as the only special case;
+    all other values render the general block. Returned value is
+    lowercased so `Admin` / `ADMIN` / `admin` all match the filter.
+    """
+    session_type_path = agent_dir / "SESSION-TYPE.md"
+    try:
+        text = session_type_path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        return "general"
+    match = SESSION_TYPE_RE.search(text)
+    if not match:
+        return "general"
+    value = match.group("value").strip().lower()
+    return value or "general"
+
+
+def _admin_block_lines() -> list[str]:
+    """Admin-only runtime content for the managed block.
+
+    Included only when `render_agent_bridge_block` is called with
+    session_type == 'admin'. Kept deliberately short — detailed admin
+    protocols live in `docs/agent-runtime/admin-protocol.md` and the agent's
+    own CLAUDE.md (outside the managed markers).
+    """
+    return [
+        "",
+        "## Admin Onboarding Pointer",
+        "- First-run onboarding, channel setup, and bootstrap protocols live in `docs/agent-runtime/admin-protocol.md`.",
+        "- Managed admin defaults ride with this block; role-specific customizations live outside the managed markers in this file.",
+        "- Never auto-run `upstream propose --yes`. Require explicit human approval in every install.",
+    ]
+
+
+def render_agent_bridge_block(agent_dir: Path, session_type: str | None = None) -> str:
     identity_lines = extract_identity_snapshot(agent_dir / "IDENTITY.md")
     local_skill_files = collect_relative_files(agent_dir, "skills")
     reference_files = collect_relative_files(agent_dir, "references")
+    if session_type is None:
+        session_type = read_session_type(agent_dir)
+    # Normalize explicitly-passed session_type so caller case variants
+    # ("Admin", "ADMIN") match the role filter.
+    session_type = (session_type or "").strip().lower() or "general"
     lines = [
         MANAGED_START,
         "## Agent Bridge Runtime Canon",
@@ -815,6 +861,8 @@ def render_agent_bridge_block(agent_dir: Path) -> str:
         "- cron 생성/수정은 `~/.agent-bridge/agent-bridge cron ...`를 사용한다.",
         "- 예전 `AGENTS.md`, `IDENTITY.md`, `BOOTSTRAP.md`의 규칙은 여기로 흡수되었다. 삭제된 파일을 기준으로 삼지 않는다.",
     ]
+    if session_type == "admin":
+        lines.extend(_admin_block_lines())
     if identity_lines:
         lines.extend(["", "## Identity Snapshot", *identity_lines])
     if local_skill_files or reference_files:
