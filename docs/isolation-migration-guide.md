@@ -42,6 +42,16 @@ After this guide has been run on an agent, expect:
   entry without read access to the shared `agent-roster.local.sh`. This
   is how `bridge-run.sh` and the hook runtime load roster state on an
   isolated host; see issue `#116`.
+- For Claude-engine agents, a symlink
+  `/home/agent-bridge-<slug>/.claude/.credentials.json` pointing at the
+  operator's `~/.claude/.credentials.json`, plus `u:<os_user>:r--` ACL
+  on the target file and a default ACL on the operator's `.claude/` so
+  Claude's atomic-rename re-auth still inherits the grant. This is the
+  only part of the operator's `.claude/` that is exposed — projects,
+  sessions, plugins, and settings remain per-agent. Run `claude login`
+  as the operator first if `~/.claude/.credentials.json` does not yet
+  exist; `isolate` warns and skips that step otherwise. See issue
+  `#125`.
 - Runtime UID switch on tmux launch — **only if** the sudoers drop-in
   exists. Install it with `agent-bridge isolate <agent> --install-sudoers`
   (validated via `visudo -cf`) or manually per the hint printed by
