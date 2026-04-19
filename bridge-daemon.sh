@@ -910,7 +910,7 @@ bridge_send_stall_nudge() {
   local text=""
 
   text="$(bridge_notification_text "stall detected" "$(bridge_stall_nudge_message "$classification")" "" normal)"
-  bridge_tmux_send_and_submit "$session" "$engine" "$text"
+  bridge_tmux_send_and_submit "$session" "$engine" "$text" "$agent"
 }
 
 process_stall_reports() {
@@ -2102,6 +2102,30 @@ PY
   daemon_info "nudged ${agent} (queued=${live_queued}, claimed=${live_claimed}, idle=${idle}s)"
 }
 
+flush_pending_attention_spools() {
+  # Issue #132a: per-sync-pass flush of the per-agent pending-attention spool.
+  # Covers every engine that the tmux inject gate applies to (claude + codex)
+  # so a busy Codex session does not permanently accumulate entries either.
+  # The flush itself is bounded by the spool size and skips over agents with
+  # empty spools in O(1).
+  local agent=""
+  local session=""
+  local engine=""
+  local count=0
+
+  for agent in "${BRIDGE_AGENT_IDS[@]}"; do
+    engine="$(bridge_agent_engine "$agent")"
+    [[ -n "$engine" ]] || continue
+    session="$(bridge_agent_session "$agent")"
+    [[ -n "$session" ]] || continue
+    bridge_tmux_session_exists "$session" || continue
+    count="$(bridge_tmux_pending_attention_count "$agent" 2>/dev/null || printf '0')"
+    [[ "$count" =~ ^[0-9]+$ ]] || count=0
+    (( count > 0 )) || continue
+    bridge_tmux_pending_attention_flush "$session" "$engine" "$agent" >/dev/null 2>&1 || true
+  done
+}
+
 recover_claude_bootstrap_blockers() {
   local agent
   local session
@@ -3118,6 +3142,7 @@ cmd_sync_cycle() {
   fi
   bridge_reconcile_idle_markers || true
   recover_claude_bootstrap_blockers || true
+  flush_pending_attention_spools || true
   process_channel_health || true
   process_plugin_liveness || true
 
