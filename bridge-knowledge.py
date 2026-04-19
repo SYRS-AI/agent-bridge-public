@@ -845,8 +845,11 @@ def line_matches(line: str, query: str, tokens: list[str]) -> bool:
 
 # ---------------------------------------------------------------------------
 # Hybrid search wrap: bridge-knowledge search optionally delegates to
-# tools/memory-manager.py's vector+BM25 engine. `--legacy-text` keeps the
-# existing regex behavior available for callers (and tests).
+# tools/memory-manager.py's vector+BM25 engine. When a bridge-wiki-hybrid-v2
+# index exists for the resolved agent, hybrid is selected automatically
+# (reported as engine="hybrid-auto"). `--hybrid` forces hybrid explicitly.
+# `--legacy-text` forces legacy regex and beats auto-detection — operators
+# who hardcoded legacy in scripts keep that escape hatch.
 # ---------------------------------------------------------------------------
 
 # Mapping from bridge-knowledge `--scope` to memory-manager `--source` filters.
@@ -928,6 +931,64 @@ def _resolve_hybrid_agent(args: argparse.Namespace) -> str:
     return "default"
 
 
+def _v2_index_available(agent: str) -> bool:
+    """Return True iff a bridge-wiki-hybrid-v2 index exists for `agent`.
+
+    Lookup order for the index DB:
+      1. `$BRIDGE_HOME/runtime/memory/<agent>.sqlite`
+      2. `~/.agent-bridge/runtime/memory/<agent>.sqlite`
+
+    Criteria (all must hold):
+      - File exists and is non-empty.
+      - `meta` table has `index_kind = 'bridge-wiki-hybrid-v2'`.
+      - `chunks` table has at least one row.
+
+    Any exception (missing sqlite3, corrupt DB, permission denied,
+    unexpected schema) falls back to False — auto-hybrid never hijacks a
+    call that the legacy engine could handle.
+    """
+    try:
+        import sqlite3  # local import so bridge-knowledge stays lazy
+    except ImportError:
+        return False
+    candidates: list[Path] = []
+    env_home = os.environ.get("BRIDGE_HOME")
+    if env_home:
+        candidates.append(Path(env_home) / "runtime" / "memory" / f"{agent}.sqlite")
+    candidates.append(Path.home() / ".agent-bridge" / "runtime" / "memory" / f"{agent}.sqlite")
+    seen: set[str] = set()
+    for db_path in candidates:
+        key = str(db_path)
+        if key in seen:
+            continue
+        seen.add(key)
+        try:
+            if not db_path.exists() or db_path.stat().st_size == 0:
+                continue
+            uri = f"file:{db_path}?mode=ro"
+            conn = sqlite3.connect(uri, uri=True, timeout=2)
+        except Exception:
+            continue
+        try:
+            row = conn.execute(
+                "SELECT value FROM meta WHERE key = 'index_kind'"
+            ).fetchone()
+            if not row or row[0] != "bridge-wiki-hybrid-v2":
+                continue
+            chunks = conn.execute("SELECT 1 FROM chunks LIMIT 1").fetchone()
+            if chunks is None:
+                continue
+            return True
+        except Exception:
+            continue
+        finally:
+            try:
+                conn.close()
+            except Exception:
+                pass
+    return False
+
+
 def search_via_memory_manager(args: argparse.Namespace) -> list[dict] | None:
     """Delegate search to the hybrid engine. Returns None on any failure.
 
@@ -988,17 +1049,43 @@ def search_via_memory_manager(args: argparse.Namespace) -> list[dict] | None:
 
 
 def cmd_search(args: argparse.Namespace) -> int:
-    # Default engine is legacy regex scan (backward compatible with historical
-    # behavior). Hybrid vector+BM25 is opt-in via `--hybrid`. The legacy
-    # opt-in flag `--legacy-text` is kept as a redundant no-op for BC.
-    want_hybrid = getattr(args, "hybrid", False) and not getattr(args, "legacy_text", False)
-    if want_hybrid:
+    # Engine selection precedence:
+    #   1. `--legacy-text` → always legacy (explicit opt-out, beats auto).
+    #   2. `--hybrid`      → explicit opt-in (tagged "hybrid").
+    #   3. Auto-detect: if a v2 index exists for the resolved agent,
+    #      use hybrid (tagged "hybrid-auto"). Else legacy.
+    #
+    # Rationale: operators who hardcoded legacy in scripts keep
+    # `--legacy-text` as an escape hatch. Fresh callers on v2-indexed
+    # agents get hybrid automatically without having to flip `--hybrid`
+    # on every invocation.
+    engine_choice = "legacy-text"
+    engine_reported = "legacy-text"
+    if getattr(args, "legacy_text", False):
+        engine_choice = "legacy-text"
+        engine_reported = "legacy-text"
+    elif getattr(args, "hybrid", False):
+        engine_choice = "hybrid"
+        engine_reported = "hybrid"
+    else:
+        try:
+            agent_id = _resolve_hybrid_agent(args)
+        except Exception:
+            agent_id = ""
+        if agent_id and _v2_index_available(agent_id):
+            engine_choice = "hybrid"
+            engine_reported = "hybrid-auto"
+        else:
+            engine_choice = "legacy-text"
+            engine_reported = "legacy-text"
+
+    if engine_choice == "hybrid":
         hybrid = search_via_memory_manager(args)
         if hybrid is not None:
             payload = {
                 "query": args.query,
                 "scope": args.scope,
-                "engine": "hybrid",
+                "engine": engine_reported,
                 "count": len(hybrid),
                 "results": hybrid,
             }
@@ -1006,11 +1093,13 @@ def cmd_search(args: argparse.Namespace) -> int:
                 print(json.dumps(payload, ensure_ascii=False, indent=2))
             else:
                 print(f"query: {args.query}")
-                print(f"engine: hybrid")
+                print(f"engine: {engine_reported}")
                 print(f"matches: {len(hybrid)}")
                 for item in hybrid:
                     print(f"- {item['relative_path']}:{item['line']} (score={item['score']:.3f}) {item['snippet']}")
             return 0
+        # Hybrid fell through (memory-manager unreachable or errored).
+        # Fall back to legacy so callers always get *some* answer.
 
     shared_root = Path(args.shared_root)
     tokens = [token for token in re.split(r"\s+", args.query.lower().strip()) if token]
@@ -1165,11 +1254,15 @@ def build_parser() -> argparse.ArgumentParser:
     search_parser.add_argument("--limit", type=int, default=10)
     search_parser.add_argument("--json", action="store_true")
     search_parser.add_argument("--hybrid", action="store_true",
-        help="opt in to hybrid vector+BM25 search via tools/memory-manager.py (default: legacy regex)")
+        help="force hybrid vector+BM25 search via tools/memory-manager.py "
+             "(default: auto-hybrid when a bridge-wiki-hybrid-v2 index exists, "
+             "else legacy regex)")
     search_parser.add_argument("--agent", default="",
-        help="agent id for --hybrid dispatch (defaults to BRIDGE_AGENT_ID env or shared-root tail)")
+        help="agent id for hybrid dispatch and v2-index auto-detect "
+             "(defaults to BRIDGE_AGENT_ID env or shared-root tail)")
     search_parser.add_argument("--legacy-text", action="store_true",
-        help="kept for backward compatibility; legacy regex is already the default")
+        help="force legacy regex engine (opt-out of auto-hybrid when v2 index "
+             "is present); highest precedence flag")
     search_parser.set_defaults(func=cmd_search)
 
     lint_parser = subparsers.add_parser("lint")

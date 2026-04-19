@@ -280,11 +280,45 @@ def slugify(text: str) -> str:
     return slug or "capture"
 
 
+ENVELOPE_SCHEMA_VERSIONS = {"1"}
+
+
+def _sniff_envelope(text: str) -> dict | None:
+    """Return parsed envelope dict if `text` carries a structured capture.
+
+    Two accepted shapes (both produced by hooks/pre-compact.py):
+        1) Pure JSON body whose top-level `schema_version` is known.
+        2) A short head line (e.g. `schema_version=1 | excerpt=...`)
+           followed by a blank line, then a JSON object body.
+    Anything else returns None and the caller falls back to text-only.
+    """
+    if not text:
+        return None
+    stripped = text.lstrip()
+    if stripped.startswith("{"):
+        try:
+            data = json.loads(stripped)
+        except (json.JSONDecodeError, ValueError):
+            data = None
+        if isinstance(data, dict) and str(data.get("schema_version") or "") in ENVELOPE_SCHEMA_VERSIONS:
+            return data
+    brace_idx = text.find("\n{")
+    if brace_idx != -1:
+        candidate = text[brace_idx + 1:].strip()
+        try:
+            data = json.loads(candidate)
+        except (json.JSONDecodeError, ValueError):
+            return None
+        if isinstance(data, dict) and str(data.get("schema_version") or "") in ENVELOPE_SCHEMA_VERSIONS:
+            return data
+    return None
+
+
 def capture_payload(args: argparse.Namespace) -> dict:
     now = datetime.now().astimezone()
     capture_id = now.strftime("%Y%m%dT%H%M%S%z")
     capture_id = f"{capture_id[:15]}-{slugify(args.title or args.source or args.agent)}"
-    return {
+    payload: dict = {
         "capture_id": capture_id,
         "agent": args.agent,
         "user": args.user,
@@ -295,6 +329,15 @@ def capture_payload(args: argparse.Namespace) -> dict:
         "text": args.text,
         "created_at": now.isoformat(),
     }
+    envelope = _sniff_envelope(args.text or "")
+    if envelope is not None:
+        payload["envelope"] = envelope
+        payload["schema_version"] = envelope.get("schema_version")
+        for key in ("suggested_slug", "suggested_title", "session_type", "trigger"):
+            value = envelope.get(key)
+            if value and key not in payload:
+                payload[key] = value
+    return payload
 
 
 def write_capture_payload(home: Path, payload: dict, dry_run: bool) -> Path:
@@ -995,8 +1038,14 @@ def collect_index_documents(home: Path, shared_root: Path | None = None, include
 
     if include_cascade:
         # v2 cascade sources — weekly + monthly summaries produced by the
-        # `summarize` subcommands, plus re-ingested captures. Each gets a
-        # distinct `kind` so search callers can filter via `--source`.
+        # `summarize` subcommands.
+        #
+        # Note: ingested captures are ALREADY collected by the base flow
+        # above as kind="raw-ingested". We do NOT re-add them here because
+        # `documents.path` is a PRIMARY KEY and the same file would cause a
+        # UNIQUE constraint violation on rebuild. The v2 search path maps
+        # both "raw-ingested" and "capture-ingested" via the consumer's
+        # `--source` filter, so no content is lost by skipping the re-add.
         for cascade_dir, kind in (
             (home / "memory" / "weekly", "memory-weekly"),
             (home / "memory" / "monthly", "memory-monthly"),
@@ -1004,11 +1053,6 @@ def collect_index_documents(home: Path, shared_root: Path | None = None, include
             if cascade_dir.exists():
                 for path in sorted(cascade_dir.glob("*.md")):
                     add_markdown(path, kind)
-        # Ingested captures re-add under the canonical v2 source label.
-        ingested_root = home / "raw" / "captures" / "ingested"
-        if ingested_root.exists():
-            for path in sorted(ingested_root.glob("*.json")):
-                add_json(path, "capture-ingested")
 
     if shared_root is not None:
         wiki_root = shared_root / "wiki"
