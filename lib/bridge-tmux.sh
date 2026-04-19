@@ -141,13 +141,28 @@ bridge_tmux_codex_prompt_line_ready() {
 bridge_tmux_prompt_line_has_pending_input() {
   local engine="$1"
   local trimmed="$2"
+  local remainder=""
 
   case "$engine" in
     claude)
-      if [[ "$trimmed" == ❯* || "$trimmed" == '>'* ]]; then
-        ! bridge_tmux_claude_prompt_line_ready "$trimmed"
-        return
+      # Issue #132: the previous implementation inverted bridge_tmux_claude_prompt_line_ready
+      # which only flagged blocker menus (`1. Yes 2. No`), so "> typed text"
+      # — an operator mid-compose — was NOT classified as pending. That is
+      # precisely why a post-3s-pause daemon injection could interleave with
+      # the operator's keystrokes. Here we detect any non-empty remainder
+      # after the prompt glyph as pending, except for the numbered-menu
+      # blocker pattern (which is handled separately via blocker_state).
+      if [[ "$trimmed" == ❯* ]]; then
+        remainder="${trimmed#❯}"
+      elif [[ "$trimmed" == '>'* ]]; then
+        remainder="${trimmed#>}"
+      else
+        return 1
       fi
+      remainder="${remainder#"${remainder%%[![:space:]]*}"}"
+      [[ -n "$remainder" ]] || return 1
+      [[ "$remainder" =~ ^[0-9]+\.[[:space:]] ]] && return 1
+      return 0
       ;;
     codex)
       return 1
@@ -215,6 +230,7 @@ bridge_tmux_session_has_pending_input_from_text() {
   local recent="$2"
   local line=""
   local trimmed=""
+  local last_prompt_line=""
 
   bridge_tmux_engine_requires_prompt "$engine" || return 1
   [[ -n "$recent" ]] || return 1
@@ -225,15 +241,34 @@ bridge_tmux_session_has_pending_input_from_text() {
     fi
   fi
 
+  # Issue #132: the Claude input box is always the last prompt-glyph line in
+  # the TUI. Earlier lines that happen to start with "> " are scrollback
+  # (quoted text in an agent response, markdown blockquotes). Remember the
+  # LAST line that looks like a prompt and evaluate pending-input on that
+  # one only, so quoted content above cannot trigger a permanent defer.
   while IFS= read -r line; do
     line="${line//$'\r'/}"
     line="${line//$'\u00A0'/ }"
     trimmed="${line#"${line%%[![:space:]]*}"}"
     trimmed="${trimmed%"${trimmed##*[![:space:]]}"}"
-    if bridge_tmux_prompt_line_has_pending_input "$engine" "$trimmed"; then
-      return 0
-    fi
+    case "$engine" in
+      claude)
+        if [[ "$trimmed" == ❯* || "$trimmed" == '>'* ]]; then
+          last_prompt_line="$trimmed"
+        fi
+        ;;
+      *)
+        if bridge_tmux_prompt_line_has_pending_input "$engine" "$trimmed"; then
+          return 0
+        fi
+        ;;
+    esac
   done <<<"$recent"
+
+  if [[ "$engine" == "claude" && -n "$last_prompt_line" ]]; then
+    bridge_tmux_prompt_line_has_pending_input "$engine" "$last_prompt_line"
+    return
+  fi
 
   return 1
 }
@@ -244,7 +279,12 @@ bridge_tmux_session_has_pending_input() {
   local recent=""
 
   bridge_tmux_engine_requires_prompt "$engine" || return 1
-  recent="$(bridge_capture_recent "$session" 20 2>/dev/null || true)"
+  # Issue #132: use tmux -J so a wrapped prompt line (long mid-compose input
+  # that wraps the "> " glyph off to the next visual line on narrow panes) is
+  # still detectable as a single logical line. And widen the capture window
+  # from 20 to 40 lines so agent output churn cannot push the input box out
+  # of view between daemon passes.
+  recent="$(bridge_capture_recent "$session" 40 join 2>/dev/null || true)"
   [[ -n "$recent" ]] || return 1
   bridge_tmux_session_has_pending_input_from_text "$engine" "$recent"
 }
@@ -411,7 +451,14 @@ bridge_tmux_send_and_submit() {
   local session="$1"
   local engine="$2"
   local text="$3"
-  local inject_grace="${BRIDGE_TMUX_INJECT_IDLE_GRACE_SECONDS:-3}"
+  # Issue #132: previous default was 3s. Operators frequently pause >3s while
+  # composing (reading, thinking, switching windows), which left a window for
+  # daemon injections to land mid-compose. The input-buffer-content check
+  # (bridge_tmux_session_has_pending_input) is the primary gate; this
+  # timestamp gate is the fallback for cases where the input line itself
+  # couldn't be matched. A 10s default is still well under the operator's
+  # tolerance for a deferred notification but materially reduces the leak.
+  local inject_grace="${BRIDGE_TMUX_INJECT_IDLE_GRACE_SECONDS:-10}"
 
   if ! bridge_tmux_wait_for_prompt "$session" "$engine"; then
     bridge_warn "session prompt unavailable; skipping send to '$session'"
@@ -435,7 +482,17 @@ bridge_tmux_send_and_submit() {
 bridge_capture_recent() {
   local session="$1"
   local lines="${2:-30}"
-  tmux capture-pane -t "$(bridge_tmux_pane_target "$session")" -p -S "-$lines"
+  # Pass "join" as $3 to join visually wrapped lines (-J). Needed when the
+  # caller regexes single-line artifacts (e.g., the Claude "> <typed text>"
+  # input box at the bottom of the TUI) that can wrap across physical pane
+  # lines on narrow terminals. Default behavior (unjoined) preserves every
+  # historical caller's output verbatim.
+  local mode="${3:-}"
+  if [[ "$mode" == "join" ]]; then
+    tmux capture-pane -t "$(bridge_tmux_pane_target "$session")" -p -J -S "-$lines"
+  else
+    tmux capture-pane -t "$(bridge_tmux_pane_target "$session")" -p -S "-$lines"
+  fi
 }
 
 bridge_sanitize_text() {
