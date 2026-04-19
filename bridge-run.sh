@@ -251,39 +251,6 @@ bridge_run_reconcile_next_session_state() {
   fi
 }
 
-bridge_run_schedule_next_session_prompt() {
-  local next_file="$WORK_DIR/NEXT-SESSION.md"
-  local marker_file=""
-  local digest=""
-
-  [[ "$ENGINE" == "claude" ]] || return 0
-  [[ $SAFE_MODE -eq 0 ]] || return 0
-  [[ -f "$next_file" ]] || return 0
-
-  marker_file="$(bridge_agent_next_session_marker_file "$AGENT")"
-  digest="$(bridge_sha1 "$(cat "$next_file")")"
-  if [[ -f "$marker_file" && "$(cat "$marker_file" 2>/dev/null || true)" == "$digest" ]]; then
-    return 0
-  fi
-
-  (
-    "$BRIDGE_BASH_BIN" -lc '
-      set -euo pipefail
-      script_dir="$1"
-      session="$2"
-      agent="$3"
-      marker_file="$4"
-      digest="$5"
-      source "$script_dir/bridge-lib.sh"
-      if bridge_tmux_wait_for_prompt "$session" claude 20; then
-        bridge_tmux_send_and_submit "$session" claude "You have just restarted under Agent Bridge. Read NEXT-SESSION.md now, run the verification commands listed there, open with a short user-facing resume summary, and then delete NEXT-SESSION.md before doing unrelated work."
-        mkdir -p "$(dirname "$marker_file")"
-        printf "%s" "$digest" >"$marker_file"
-      fi
-    ' -- "$SCRIPT_DIR" "$SESSION" "$AGENT" "$marker_file" "$digest"
-  ) >/dev/null 2>&1 &
-}
-
 bridge_run_schedule_idle_marker_and_inbox_bootstrap() {
   local next_file="$WORK_DIR/NEXT-SESSION.md"
   local marker_file=""
@@ -467,7 +434,6 @@ while true; do
     bridge_ensure_claude_launch_channel_plugins "$AGENT"
     bridge_run_schedule_dev_channels_accept "$LAUNCH_CMD"
     bridge_run_schedule_idle_marker_and_inbox_bootstrap
-    bridge_run_schedule_next_session_prompt
   fi
 
   log_line "실행: ${LAUNCH_CMD}"

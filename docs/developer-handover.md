@@ -165,6 +165,10 @@ Python으로 빠지는 패턴이 많다.
 - urgent send는 prompt state에 민감하다
 - trust prompt, blocker state, copy-mode 같은 예외 상태가 있다
 - tmux option 변경은 operator 체감 품질에 바로 반영된다
+- `NEXT-SESSION.md` handoff는 SessionStart hook(`hooks/bridge_hook_common.py`의
+  `bootstrap_artifact_context`)으로만 전달된다. `bridge-run.sh`에서 tmux
+  send-keys로 동일 메시지를 재주입하던 경로(`bridge_run_schedule_next_session_prompt`)는
+  제거됐다 — 재도입하지 말 것
 
 ### 3. upgrade / deploy
 
