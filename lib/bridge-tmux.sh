@@ -435,7 +435,16 @@ bridge_tmux_send_and_submit() {
 bridge_capture_recent() {
   local session="$1"
   local lines="${2:-30}"
-  tmux capture-pane -t "$(bridge_tmux_pane_target "$session")" -p -S "-$lines"
+  # Pass "join" as $3 to join visually wrapped lines (-J). Needed when the
+  # caller regexes single-line artifacts (e.g., Claude HUD "Context <bar> NN%")
+  # that can wrap across physical pane lines on narrow terminals. Default
+  # behavior (unjoined) preserves every historical caller's output verbatim.
+  local mode="${3:-}"
+  if [[ "$mode" == "join" ]]; then
+    tmux capture-pane -t "$(bridge_tmux_pane_target "$session")" -p -J -S "-$lines"
+  else
+    tmux capture-pane -t "$(bridge_tmux_pane_target "$session")" -p -S "-$lines"
+  fi
 }
 
 bridge_sanitize_text() {

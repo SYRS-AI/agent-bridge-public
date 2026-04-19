@@ -1504,7 +1504,7 @@ process_context_pressure_reports() {
       continue
     fi
 
-    capture="$(bridge_capture_recent "$session" "${BRIDGE_CONTEXT_PRESSURE_CAPTURE_LINES:-160}" 2>/dev/null || true)"
+    capture="$(bridge_capture_recent "$session" "${BRIDGE_CONTEXT_PRESSURE_CAPTURE_LINES:-160}" join 2>/dev/null || true)"
     analysis_shell=""
     severity=""
     matched_pattern=""
