@@ -7,7 +7,7 @@
 # emits a [wiki-hub-candidates] task for the admin agent.
 #
 # Cron: "cron 0 23 * * 4 Asia/Seoul" (every Thursday 23:00 KST).
-# Ths gives the admin a full workday Friday and the weekend to review
+# This gives the admin a full workday Friday and the weekend to review
 # and author hubs before the Sunday weekly rollup reflects new content.
 
 set -euo pipefail
@@ -15,6 +15,11 @@ set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck disable=SC1091
 source "$HERE/_common.sh"
+
+# Admin agent resolves from env (default: patch). Per-install operators
+# that renamed the admin role set BRIDGE_ADMIN_AGENT in the roster or
+# at cron-creation time.
+: "${BRIDGE_ADMIN_AGENT:=patch}"
 
 JOB="wiki-hub-audit"
 LOG="$(audit_path "$JOB")"
@@ -27,7 +32,7 @@ REPORT_PATH="$BRIDGE_WIKI_ROOT/_audit/hub-candidates-$(abs_date).md"
 if ! run_with_timeout 120 "$BRIDGE_PYTHON" "$HERE/wiki-hub-audit.py" \
       --wiki-root "$BRIDGE_WIKI_ROOT" \
       --emit-task \
-      --admin-agent patch \
+      --admin-agent "$BRIDGE_ADMIN_AGENT" \
       --bridge-bin "$BRIDGE_AGB" \
       --out "$REPORT_PATH" \
       >>"$LOG" 2>&1; then

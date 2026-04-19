@@ -38,8 +38,13 @@ This does five things, all idempotent:
    every active Claude agent (Track 2).
 3. **V2 hybrid index** — rebuilds each agent's `bridge-wiki-hybrid-v2`
    search index (Track 3).
-4. **Crons** — registers the full cron set on the admin agent (default
-   `patch`):
+4. **Librarian provision** — creates the dynamic `librarian` agent
+   if it is not already provisioned. The librarian drains the Lane B
+   `[librarian-ingest]` queue; without it, `wiki-daily-ingest` would
+   fall back to queueing the admin directly. Idempotent: running
+   bootstrap twice never creates a duplicate agent.
+5. **Crons** — registers the full cron set on the admin agent (default
+   `patch`, override with `BRIDGE_ADMIN_AGENT` env):
     - `wiki-weekly-summarize` (Sun 22:00 KST)
     - `wiki-monthly-summarize` (1st 02:00 KST)
     - `wiki-repair-links` (Sat 05:00 KST)
@@ -48,7 +53,8 @@ This does five things, all idempotent:
     - `wiki-daily-ingest` (03:00 KST daily)
     - `wiki-mention-scan` (hourly :17)
     - `librarian-watchdog` (*/10 min)
-5. **Report** — writes `state/bootstrap-memory/report-<stamp>.json`
+    - `wiki-hub-audit` (Thu 23:00 KST)
+6. **Report** — writes `state/bootstrap-memory/report-<stamp>.json`
    with per-step status. Re-running shows `already-registered` for
    cron rows once the install is in the desired state.
 
@@ -169,19 +175,21 @@ section tells agents to close each daily note with a
 agb inbox librarian
 ```
 
-## Phase 2/3 — not today
+## Phase status
 
-The observation layer (L1) and the daily copy + hub-build manual flow
-are enough to bring a wiki system online. The next two phases are
-deferred until real distribution data is in hand:
-
-- **Phase 2 candidacy** — threshold-based auto-enqueue of hub-build
-  tasks when an entity crosses an agent-reach + mention-count threshold.
-  The thresholds are intentionally deferred so they can be derived from
-  real data per deployment, not guessed upfront.
-- **Phase 3 enrichment** — librarian LLM-synthesizes current-state
-  summaries into existing hubs, instead of static pointer pages.
-  Requires a rate-limit + quality gate design.
+- **Phase 1 observation (L1)** — **shipped.** `wiki-mention-scan`
+  runs hourly, `mentions.db` stays fresh, distribution report
+  regenerates every tick.
+- **Phase 2 candidacy (L2)** — **shipped.** `wiki-hub-audit` runs
+  weekly (Thu 23:00 KST), emits `[wiki-hub-candidates]` tasks to the
+  admin agent with pre-filtered hub candidates + sample source paths.
+  Default thresholds `min_agents=2, min_mentions=5` are conservative
+  on purpose; per-install operators can tune them at the cron payload
+  level once they have two weeks of distribution data.
+- **Phase 3 enrichment** — deferred. Librarian LLM-synthesizes
+  current-state summaries into existing hubs instead of static
+  pointer pages. Needs a rate-limit + quality gate design before it
+  can ship.
 
 A stub hub ("Agent X is our content editor, see daily/ for details") is
 already useful; full synthesis is an upgrade, not a blocker.

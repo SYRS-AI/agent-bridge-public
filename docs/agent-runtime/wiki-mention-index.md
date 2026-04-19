@@ -165,7 +165,7 @@ scanner is generic and ships the same on every deployment.
 
 ## 7. Distribution report format
 
-`distribution-report-YYYY-MM-DD.md` has five sections:
+`distribution-report-YYYY-MM-DD.md` has six sections:
 
 1. Summary counts (entities, aliases, mentions, unresolved, scan metadata)
 2. Top 40 entities by cross-agent reach

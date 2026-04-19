@@ -400,9 +400,14 @@ def build_alias_registry(conn: sqlite3.Connection, wiki: Path) -> int:
 
         # Redirect short-circuit: point every alias at the redirect target
         # slug (derived from the ``redirect_to`` frontmatter, if present).
+        # Legacy wiki-entity-lifecycle docs used ``moved_to`` for the
+        # same pointer; honor both so older installs don't have to
+        # rewrite their redirect stubs during upgrade.
         redirect_target_slug = ""
         if entity_type == "redirect":
-            redirect_to = fm.get("redirect_to") or ""
+            redirect_to = (
+                fm.get("redirect_to") or fm.get("moved_to") or ""
+            )
             if isinstance(redirect_to, str) and redirect_to:
                 # ``redirect_to`` is a wiki-relative path or slug. Take the
                 # last path segment as the target slug.

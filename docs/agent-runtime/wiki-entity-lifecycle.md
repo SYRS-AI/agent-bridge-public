@@ -109,13 +109,20 @@ When a merged file has no unique facts worth preserving, replace it with a redir
 
 ```markdown
 ---
-moved_to: cosmax
 type: redirect
+slug: <legacy-slug>
+redirect_to: entities/cosmax
+aliases: [<every legacy alias>]
 ---
+
 # COSMAX (moved)
 
 Canonical: [[cosmax]]. This file kept as a redirect stub for backward-compat links. It will be removed in a future cleanup pass.
 ```
+
+`redirect_to` is the canonical field (wiki-relative path or slug). The
+`moved_to` field name is accepted as a legacy synonym by the scanner
+but new stubs should use `redirect_to`.
 
 Obsidian `aliases` already routes `[[COSMAX]]` to the canonical file, so most existing links keep working without rewriting. The stub exists only for direct path references.
 

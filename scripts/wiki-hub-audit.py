@@ -57,13 +57,19 @@ def load_candidates(
     min_mentions: int,
     limit: int,
 ) -> list[dict]:
+    # Exclude the virtual `shared` bucket from the distinct-agent count
+    # — mentions coming from team-canonical pages (index, agents.md,
+    # operating-rules, etc.) are "system" references, not a separate
+    # agent collaborating on the topic. Otherwise an entity mentioned
+    # by a single real agent plus the index.md would inflate to
+    # agents=2 and enter the candidacy pool as a false positive.
     rows = conn.execute(
         """
         SELECT e.slug AS slug,
                e.title AS title,
                e.type AS type,
                e.hub_scope AS hub_scope,
-               COUNT(DISTINCT m.source_agent) AS agents,
+               COUNT(DISTINCT CASE WHEN m.source_agent = 'shared' THEN NULL ELSE m.source_agent END) AS agents,
                COALESCE(SUM(m.mention_count), 0) AS mentions,
                COUNT(DISTINCT m.source_path) AS sources
         FROM entities e
@@ -342,7 +348,15 @@ def main(argv: list[str] | None = None) -> int:
         if ok:
             print(f"wiki-hub-audit: task emitted to {args.admin_agent}")
         else:
-            print(f"wiki-hub-audit: task emit skipped (see warnings above)", file=sys.stderr)
+            print(
+                f"wiki-hub-audit: task emit FAILED (see stderr) — "
+                f"candidates still written to {out_path}",
+                file=sys.stderr,
+            )
+            # Non-zero when the caller asked for task emission but we
+            # could not deliver. Prevents the cron from reporting
+            # "healthy" while the admin never sees the candidates.
+            return 3
     return 0
 
 

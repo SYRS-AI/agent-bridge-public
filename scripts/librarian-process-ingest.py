@@ -210,8 +210,24 @@ def infer_page(envelope: dict) -> str:
 # imply a specific promote kind. Checked in order — first match wins.
 # Mirrors ENTITY_KIND_PREFIXES but reads from disk layout instead of
 # envelope metadata. Deterministic; no LLM.
+#
+# Research has nested subtypes per research-capture-protocol.md (papers,
+# ingredients, frameworks, products, regulations, competitors, trends,
+# reviews). Each subtype maps to a distinct promote kind so a paper
+# capture doesn't silently become a `project` page. The generic
+# `/memory/research/` prefix is the last-resort fallback and is
+# intentionally strict enough that unfamiliar subtypes fall through to
+# the ambiguous-kind reject path.
 PATH_KIND_HINTS = (
-    ("/memory/research/", "project"),
+    ("/memory/research/papers/", "project"),
+    ("/memory/research/ingredients/", "project"),
+    ("/memory/research/frameworks/", "playbook"),
+    ("/memory/research/regulations/", "operating-rules"),
+    ("/memory/research/competitors/", "project"),
+    ("/memory/research/products/", "project"),
+    ("/memory/research/trends/", "project"),
+    ("/memory/research/reviews/", "project"),
+    ("/memory/research/templates/", "playbook"),
     ("/memory/projects/", "project"),
     ("/memory/decisions/", "decision"),
     ("/memory/playbooks/", "playbook"),
@@ -353,6 +369,25 @@ def run_promote(
     return completed.returncode == 0, completed.stdout, completed.stderr
 
 
+_DAILY_NOTE_STEM_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+
+
+def is_daily_note_path(capture_path: Path) -> bool:
+    """Detect captures that are agent daily-note files.
+
+    Matches ``.../memory/YYYY-MM-DD.md``. These must never travel through
+    the promote path — wiki-graph-rules.md §2 requires byte-equivalent
+    replication via wiki-daily-copy.py instead. The 2026-04-19 incident
+    happened because such captures landed here and got silent-promoted
+    into operating-rules.md.
+    """
+    if not capture_path.name.endswith(".md"):
+        return False
+    if "/memory/" not in str(capture_path):
+        return False
+    return bool(_DAILY_NOTE_STEM_RE.match(capture_path.stem))
+
+
 def process_one(
     capture_path: Path,
     bridge_knowledge: Path,
@@ -369,6 +404,18 @@ def process_one(
         "title": "",
         "dry_run": dry_run,
     }
+
+    # Rule #8: daily-note captures are always rejected here. They are
+    # replicas, not promote candidates.
+    if is_daily_note_path(capture_path):
+        result["status"] = "rejected"
+        result["reason"] = "daily-note-misrouted"
+        result["error"] = (
+            "capture path is agent daily note (memory/YYYY-MM-DD.md); "
+            "wiki-daily-copy.py handles these, not promote"
+        )
+        return result
+
     envelope = load_envelope(capture_path)
     if envelope is None:
         envelope = build_envelope_from_fallback(capture_path)
@@ -380,6 +427,26 @@ def process_one(
     page = infer_page(envelope)
     title = infer_title(envelope)
     summary = infer_summary(envelope)
+
+    # Rule #9: envelope fallback with no path-derived kind hint must NOT
+    # silent-promote to DEFAULT_KIND (operating-rules). build_envelope_
+    # from_fallback sets ``_fallback_kind_hint`` iff the capture path
+    # matched a known layout hint; absence means we cannot classify
+    # safely. Reject + escalate instead of dumping into a single-file
+    # target.
+    if (
+        envelope.get("_fallback")
+        and not envelope.get("_fallback_kind_hint")
+    ):
+        result["status"] = "rejected"
+        result["reason"] = "ambiguous-kind"
+        result["kind"] = kind  # for audit: what we would have used
+        result["error"] = (
+            "capture has no schema_version=1 envelope and no path-based "
+            "kind hint; would have defaulted to operating-rules which is "
+            "forbidden by librarian CLAUDE.md §9"
+        )
+        return result
 
     result["kind"] = kind
     result["page"] = page

@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
-# bootstrap-memory-system.sh — idempotent provisioner for the Plan-D memory
-# stack (PreCompact hook + v2 hybrid index + 5 wiki-* crons).
+# bootstrap-memory-system.sh — idempotent provisioner for the v0.4.0+
+# wiki-graph automation stack: PreCompact hook + v2 hybrid index +
+# dynamic librarian agent + nine admin-owned crons (wiki-*,
+# librarian-watchdog).
 #
 # Modes:
 #   --apply   (default) : converge the install toward the target state.
@@ -25,6 +27,12 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 : "${BRIDGE_HOME:=$HOME/.agent-bridge}"
 export BRIDGE_HOME
 
+# Admin agent used as cron owner + escalation target. Defaults to
+# `patch` to preserve the reference-install convention, but any install
+# that names its admin differently can export BRIDGE_ADMIN_AGENT.
+: "${BRIDGE_ADMIN_AGENT:=patch}"
+export BRIDGE_ADMIN_AGENT
+
 # shellcheck disable=SC1091
 source "$SCRIPT_DIR/scripts/_common.sh"
 
@@ -48,7 +56,9 @@ usage: $(basename "$0") [--apply|--dry-run|--check] [--agent <name>] [--stale-da
 Steps:
   1. PreCompact hook per active claude agent.
   2. v2 hybrid index rebuild per active claude agent (skip if fresh).
-  3. Register 5 patch-owned wiki-* crons.
+  3. Ensure the dynamic `librarian` agent is provisioned.
+  4. Register the wiki-* + librarian-watchdog cron set on the admin
+     agent (default: `patch`; override with BRIDGE_ADMIN_AGENT env).
 
 JSON report written to \$BRIDGE_STATE_ROOT/bootstrap-memory/report-<stamp>.json
 EOF
@@ -290,7 +300,7 @@ CRON_SPECS=(
 
 # Fetch existing crons once, parse JSON, cache a title→{schedule,tz,id} map.
 EXISTING_CRONS_JSON="$(mktemp -t bootstrap-crons.XXXXXX.json)"
-"$BRIDGE_AGB" cron list --agent patch --json >"$EXISTING_CRONS_JSON" 2>/dev/null || echo '[]' > "$EXISTING_CRONS_JSON"
+"$BRIDGE_AGB" cron list --agent "$BRIDGE_ADMIN_AGENT" --json >"$EXISTING_CRONS_JSON" 2>/dev/null || echo '[]' > "$EXISTING_CRONS_JSON"
 
 cron_lookup() {
   # cron_lookup <title> — prints "id<TAB>schedule<TAB>tz" or empty.
@@ -347,38 +357,46 @@ step_cron_one() {
   local found
   found="$(cron_lookup "$title" || true)"
   if [[ -n "$found" ]]; then
-    local existing_sched
+    local existing_sched existing_tz
     existing_sched="$(printf '%s' "$found" | awk -F'\t' '{print $2}')"
+    existing_tz="$(printf '%s' "$found" | awk -F'\t' '{print $3}')"
     # Cron list may return several shapes across bridge-cron versions:
     #   "cron <expr>"                  e.g. "cron 0 22 * * 0"
     #   "<expr>"                       e.g. "0 22 * * 0"
     #   "cron <expr> <tz>"             e.g. "cron 0 22 * * 0 Asia/Seoul"
     #   "<expr> <tz>"                  e.g. "0 22 * * 0 Asia/Seoul"
     # Our expected value is the bare expression (no "cron " prefix, no tz).
-    # Normalize both sides to a 5-field cron expression before comparing.
-    local norm_existing norm_expected
+    # Normalize both sides to a 5-field cron expression before comparing
+    # AND separately compare the timezone — two identical 5-field
+    # expressions in different TZs fire at completely different wall
+    # times, so skipping tz can register `already` for the wrong slot.
+    local norm_existing norm_expected trailing_tz
     norm_existing="${existing_sched#cron }"
-    # If the expression carries a trailing timezone (contains '/' after
-    # the five cron fields), drop everything from the 6th whitespace run.
+    # Split the normalized string into (cron-expr, tz). Anything from
+    # the 6th whitespace run onward is treated as the tz expression.
+    trailing_tz="$("$BRIDGE_PYTHON" -c 'import sys; parts = sys.argv[1].split(); print(" ".join(parts[5:]))' "$norm_existing")"
     norm_existing="$("$BRIDGE_PYTHON" -c 'import sys; parts = sys.argv[1].split(); print(" ".join(parts[:5]))' "$norm_existing")"
+    # Prefer the explicit `tz` column from cron_lookup; fall back to the
+    # trailing-tz chunk of the schedule string.
+    local effective_existing_tz="${existing_tz:-$trailing_tz}"
     norm_expected="$sched"
-    if [[ "$norm_existing" == "$norm_expected" ]]; then
-      record "patch" "cron:$title" "already-registered" "$existing_sched"
+    if [[ "$norm_existing" == "$norm_expected" && "$effective_existing_tz" == "$tz" ]]; then
+      record "$BRIDGE_ADMIN_AGENT" "cron:$title" "already-registered" "$existing_sched tz=$effective_existing_tz"
       return 0
     else
-      record "patch" "cron:$title" "conflict" "existing=$existing_sched want=$sched — refusing"
+      record "$BRIDGE_ADMIN_AGENT" "cron:$title" "conflict" "existing=$existing_sched tz=$effective_existing_tz want=$sched tz=$tz — refusing"
       note_drift
       return 0
     fi
   fi
 
   if [[ "$MODE" == "check" ]]; then
-    record "patch" "cron:$title" "drift-missing" ""
+    record "$BRIDGE_ADMIN_AGENT" "cron:$title" "drift-missing" ""
     note_drift
     return 0
   fi
   if [[ "$MODE" == "dry-run" ]]; then
-    record "patch" "cron:$title" "would-register" "schedule=$sched tz=$tz"
+    record "$BRIDGE_ADMIN_AGENT" "cron:$title" "would-register" "schedule=$sched tz=$tz"
     return 0
   fi
 
@@ -386,7 +404,7 @@ step_cron_one() {
   # The operator is expected to have copied _common.sh as well (this bootstrap
   # does it below, before the loop runs — see bootstrap_install_scripts).
   if [[ ! -x "$installed_script" ]]; then
-    record "patch" "cron:$title" "skip-script-missing" "$installed_script"
+    record "$BRIDGE_ADMIN_AGENT" "cron:$title" "skip-script-missing" "$installed_script"
     note_drift
     return 0
   fi
@@ -394,15 +412,15 @@ step_cron_one() {
   local payload
   payload="bash $installed_script"
 
-  if "$BRIDGE_AGB" cron create --agent patch \
+  if "$BRIDGE_AGB" cron create --agent "$BRIDGE_ADMIN_AGENT" \
         --schedule "$sched" \
         --tz "$tz" \
         --title "$title" \
         --payload "$payload" \
         >/dev/null 2>&1; then
-    record "patch" "cron:$title" "registered" "$sched $tz"
+    record "$BRIDGE_ADMIN_AGENT" "cron:$title" "registered" "$sched $tz"
   else
-    record "patch" "cron:$title" "register-failed" ""
+    record "$BRIDGE_ADMIN_AGENT" "cron:$title" "register-failed" ""
   fi
 }
 
@@ -419,7 +437,7 @@ bootstrap_install_scripts() {
            wiki-mention-scan.py wiki-mention-scan.sh \
            wiki-hub-audit.py wiki-hub-audit.sh \
            sync-memory-schema.py \
-           librarian-watchdog.sh librarian-idle-exit.sh \
+           librarian-provision.sh librarian-watchdog.sh librarian-idle-exit.sh \
            librarian-process-ingest.py; do
     local src="$SCRIPT_DIR/scripts/$f"
     local dst="$target/$f"
@@ -448,9 +466,44 @@ bootstrap_install_scripts() {
 }
 
 # -----------------------------------------------------------------------------
+# librarian provisioning (dynamic agent — required for Lane B ingest)
+# -----------------------------------------------------------------------------
+step_librarian_provision() {
+  local provision_script="$BRIDGE_HOME/scripts/librarian-provision.sh"
+  if [[ ! -x "$provision_script" ]]; then
+    record "librarian" "provision" "skip-script-missing" "$provision_script"
+    note_drift
+    return 0
+  fi
+  # Fast-path: librarian already registered → no-op. The provision script
+  # is idempotent but this avoids an extra subprocess on common case.
+  if "$BRIDGE_AGB" agent list 2>/dev/null | awk '{print $1}' | grep -qx "librarian"; then
+    record "librarian" "provision" "already-provisioned" ""
+    return 0
+  fi
+  if [[ "$MODE" == "check" ]]; then
+    note_drift
+    record "librarian" "provision" "drift-missing" ""
+    return 0
+  fi
+  if [[ "$MODE" == "dry-run" ]]; then
+    record "librarian" "provision" "would-provision" ""
+    return 0
+  fi
+  if bash "$provision_script" >>"$RECORD_FILE.provision.log" 2>&1; then
+    record "librarian" "provision" "provisioned" ""
+  else
+    record "librarian" "provision" "provision-failed" \
+      "see $RECORD_FILE.provision.log"
+    note_drift
+  fi
+}
+
+# -----------------------------------------------------------------------------
 # run all steps
 # -----------------------------------------------------------------------------
 bootstrap_install_scripts
+step_librarian_provision
 
 while IFS=$'\t' read -r agent home; do
   [[ -z "$agent" || -z "$home" ]] && continue

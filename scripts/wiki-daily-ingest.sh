@@ -18,9 +18,19 @@
 # This script runs both lanes in sequence. Either can no-op cleanly.
 
 set -u
-AGENTS_ROOT=~/.agent-bridge/agents
-WIKI=~/.agent-bridge/shared/wiki
-SCRIPTS_ROOT=~/.agent-bridge/scripts
+# Resolve bridge home + paths from env with sane defaults. Do not
+# hardcode ~/.agent-bridge — other deployments may relocate.
+: "${BRIDGE_HOME:=$HOME/.agent-bridge}"
+: "${BRIDGE_AGENTS_ROOT:=$BRIDGE_HOME/agents}"
+: "${BRIDGE_SHARED_ROOT:=$BRIDGE_HOME/shared}"
+: "${BRIDGE_WIKI_ROOT:=$BRIDGE_SHARED_ROOT/wiki}"
+: "${BRIDGE_SCRIPTS_ROOT:=$BRIDGE_HOME/scripts}"
+: "${BRIDGE_AGB:=$BRIDGE_HOME/agent-bridge}"
+: "${BRIDGE_ADMIN_AGENT:=patch}"
+
+AGENTS_ROOT="$BRIDGE_AGENTS_ROOT"
+WIKI="$BRIDGE_WIKI_ROOT"
+SCRIPTS_ROOT="$BRIDGE_SCRIPTS_ROOT"
 DATE=$(date +%Y-%m-%d)
 YESTERDAY=$(date -v-1d +%Y-%m-%d 2>/dev/null || date -d 'yesterday' +%Y-%m-%d)
 LOG="$WIKI/_audit/ingest-$DATE.md"
@@ -97,13 +107,16 @@ non_daily_total=$(( research_count + other_count ))
 } > "$LOG"
 
 # Queue librarian task only for non-daily work. Lane A already handled
-# daily notes and did not produce a task.
+# daily notes and did not produce a task. Falls back to the admin agent
+# (default: patch) only if the librarian is not provisioned on this
+# install — treated as an install incompleteness signal, not a routine
+# routing choice.
 if [ "$non_daily_total" -gt 0 ]; then
-  target="patch"
-  if ~/.agent-bridge/agent-bridge agent show librarian >/dev/null 2>&1; then
+  target="$BRIDGE_ADMIN_AGENT"
+  if "$BRIDGE_AGB" agent show librarian >/dev/null 2>&1; then
     target="librarian"
   fi
-  ~/.agent-bridge/agent-bridge task create --to "$target" --priority normal --from patch \
+  "$BRIDGE_AGB" task create --to "$target" --priority normal --from "$BRIDGE_ADMIN_AGENT" \
     --title "[librarian-ingest] $non_daily_total 파일 ingest 필요 — $DATE" \
     --body-file "$LOG" >/dev/null 2>&1 || true
 fi
