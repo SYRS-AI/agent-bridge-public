@@ -273,6 +273,15 @@ CRON_SPECS=(
   "wiki-repair-links|0 5 * * 6|Asia/Seoul|wiki-repair-links.sh"
   "wiki-v2-rebuild|0 6 * * 6|Asia/Seoul|wiki-v2-rebuild.sh"
   "wiki-dedup-weekly|0 4 * * 0|Asia/Seoul|wiki-dedup-weekly.sh"
+  # Daily-note two-lane ingest. Lane A (wiki-daily-copy.py) runs inside
+  # the shell script; Lane B queues [librarian-ingest] for non-daily.
+  "wiki-daily-ingest|0 3 * * *|Asia/Seoul|wiki-daily-ingest.sh"
+  # L1 observation scanner. Populates shared/wiki/_index/mentions.db and
+  # the distribution-report snapshot. Offset :17 misses top-of-hour cluster.
+  "wiki-mention-scan|17 * * * *|Asia/Seoul|wiki-mention-scan.sh"
+  # Librarian is dynamic (session-type=dynamic). Watchdog polls every
+  # 10 min for [librarian-ingest] tasks and starts the agent on demand.
+  "librarian-watchdog|*/10 * * * *|Asia/Seoul|librarian-watchdog.sh"
 )
 
 # Fetch existing crons once, parse JSON, cache a title→{schedule,tz,id} map.
@@ -289,12 +298,34 @@ try:
 except Exception:
     sys.exit(0)
 title = sys.argv[2]
-for j in data if isinstance(data, list) else []:
+# `agent-bridge cron list --json` can emit either a bare list (older versions)
+# or an object with a `jobs` key (current). Handle both shapes.
+if isinstance(data, dict):
+    jobs = data.get("jobs") or []
+elif isinstance(data, list):
+    jobs = data
+else:
+    jobs = []
+for j in jobs:
     if not isinstance(j, dict):
         continue
-    if j.get("title") == title:
-        sched = j.get("schedule") or ""
-        tz = j.get("tz") or j.get("timezone") or ""
+    # `agent-bridge cron list --json` exposes the display name under
+    # either `title` (older tooling) or `name` (current bridge-cron.sh).
+    # Same story for schedule: `schedule` vs `schedule_text`. Try both.
+    name = j.get("title") or j.get("name") or ""
+    # Some installs also suffix a short uuid to the name (e.g. when two
+    # jobs share the canonical title). Tolerate that by matching on the
+    # stem before the first "-<hex>" or by exact match.
+    def _matches(candidate: str, wanted: str) -> bool:
+        if candidate == wanted:
+            return True
+        # Trim trailing "-<8 hex>" that some installs add after create.
+        import re
+        stem = re.sub(r"-[0-9a-f]{8,}$", "", candidate)
+        return stem == wanted
+    if _matches(name, title):
+        sched = j.get("schedule") or j.get("schedule_text") or ""
+        tz = j.get("tz") or j.get("timezone") or j.get("schedule_tz") or ""
         jid = j.get("id") or j.get("job_id") or ""
         print(f"{jid}\t{sched}\t{tz}")
         break
@@ -314,10 +345,18 @@ step_cron_one() {
   if [[ -n "$found" ]]; then
     local existing_sched
     existing_sched="$(printf '%s' "$found" | awk -F'\t' '{print $2}')"
-    # Cron list may return "cron <expr>" or just "<expr>"; normalize for
-    # comparison.
+    # Cron list may return several shapes across bridge-cron versions:
+    #   "cron <expr>"                  e.g. "cron 0 22 * * 0"
+    #   "<expr>"                       e.g. "0 22 * * 0"
+    #   "cron <expr> <tz>"             e.g. "cron 0 22 * * 0 Asia/Seoul"
+    #   "<expr> <tz>"                  e.g. "0 22 * * 0 Asia/Seoul"
+    # Our expected value is the bare expression (no "cron " prefix, no tz).
+    # Normalize both sides to a 5-field cron expression before comparing.
     local norm_existing norm_expected
     norm_existing="${existing_sched#cron }"
+    # If the expression carries a trailing timezone (contains '/' after
+    # the five cron fields), drop everything from the 6th whitespace run.
+    norm_existing="$("$BRIDGE_PYTHON" -c 'import sys; parts = sys.argv[1].split(); print(" ".join(parts[:5]))' "$norm_existing")"
     norm_expected="$sched"
     if [[ "$norm_existing" == "$norm_expected" ]]; then
       record "patch" "cron:$title" "already-registered" "$existing_sched"
@@ -371,7 +410,12 @@ bootstrap_install_scripts() {
   mkdir -p "$target"
   local changed=0
   for f in _common.sh wiki-weekly-summarize.sh wiki-monthly-summarize.sh \
-           wiki-repair-links.sh wiki-v2-rebuild.sh wiki-dedup-weekly.sh; do
+           wiki-repair-links.sh wiki-v2-rebuild.sh wiki-dedup-weekly.sh \
+           wiki-daily-ingest.sh wiki-daily-copy.py \
+           wiki-mention-scan.py wiki-mention-scan.sh \
+           sync-memory-schema.py \
+           librarian-watchdog.sh librarian-idle-exit.sh \
+           librarian-process-ingest.py; do
     local src="$SCRIPT_DIR/scripts/$f"
     local dst="$target/$f"
     if [[ ! -f "$src" ]]; then
