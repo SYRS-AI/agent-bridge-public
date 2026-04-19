@@ -143,6 +143,49 @@ run_cp_case "prose 'Context remaining 8%' -> warning via fallback" \
   "warning" "" \
   $'Context remaining 8%. Please compact soon.\n'
 
+log "tmux inject gate: input-buffer-content detection (issue #132)"
+# Self-contained coverage for bridge_tmux_session_has_pending_input_from_text.
+# Placed early so the harness's downstream pre-existing failures do not gate
+# this regression check. Uses an in-process bash sourcing of bridge-lib.sh so
+# the tmux helper functions become invokable without a real tmux session.
+"$BASH4_BIN" -s "$REPO_ROOT" <<'BASH_UT'
+set -u
+repo="$1"
+# shellcheck disable=SC1090
+source "$repo/bridge-lib.sh"
+fail() { printf '[smoke][error] inject-gate: %s\n' "$*" >&2; exit 1; }
+expect_pending() {
+  local label="$1"
+  local text="$2"
+  if bridge_tmux_session_has_pending_input_from_text claude "$text"; then
+    printf '[smoke]   [ok] %s\n' "$label"
+  else
+    fail "expected PENDING for: $label"
+  fi
+}
+expect_idle() {
+  local label="$1"
+  local text="$2"
+  if bridge_tmux_session_has_pending_input_from_text claude "$text"; then
+    fail "expected idle for: $label"
+  else
+    printf '[smoke]   [ok] %s\n' "$label"
+  fi
+}
+expect_pending "operator composing single word (> glyph)" \
+  $'some prior agent output\n> hello'
+expect_pending "operator composing (❯ glyph)" \
+  $'some prior agent output\n❯ thinking about this...'
+expect_pending "operator composing after scrollback quote" \
+  $'agent output\n> an earlier quoted line\nmore agent output\n> typed input'
+expect_idle "empty input box at bottom" \
+  $'agent output\n> an earlier quoted line\nmore agent output\n> '
+expect_idle "numbered-menu blocker (not a compose state)" \
+  $'Do you trust the files in this folder?\n> 1. Yes, proceed\n  2. No, exit'
+expect_idle "no prompt glyph anywhere" \
+  $'just text, nothing composable'
+BASH_UT
+
 TMP_ROOT="$(mktemp -d)"
 export BRIDGE_HOME="$TMP_ROOT/bridge-home"
 export BRIDGE_STATE_DIR="$BRIDGE_HOME/state"
