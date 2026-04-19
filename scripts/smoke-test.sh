@@ -104,6 +104,45 @@ else
   log "shellcheck not installed; skipping"
 fi
 
+log "context-pressure detector: HUD-authoritative classification (issue #126)"
+# Self-contained coverage for bridge-context-pressure.py analyze. Placed
+# early so it runs even when the downstream integration block at smoke-test
+# line ~5408 is gated by unrelated pre-existing failures.
+run_cp_case() {
+  local label="$1"
+  local expected_severity="$2"
+  local expected_pattern_substring="$3"
+  local input="$4"
+  local out
+  out="$(printf '%s' "$input" | python3 "$REPO_ROOT/bridge-context-pressure.py" analyze --format shell)"
+  assert_contains "$out" "CONTEXT_PRESSURE_SEVERITY=\"$expected_severity\""
+  if [[ -n "$expected_pattern_substring" ]]; then
+    assert_contains "$out" "$expected_pattern_substring"
+  fi
+  log "  [ok] $label"
+}
+# HUD authoritative — low reading silences the post-/compact scrollback that
+# previously fired the false-positive "conversation.+compact" match.
+run_cp_case "low HUD + post-compact scrollback -> no severity" \
+  "" "hud:context_pct=5" \
+  $'Conversation compacted (ctrl+o for history)\nContext ████ 5%\n> '
+# HUD warning threshold (default 60%)
+run_cp_case "HUD 70% -> warning" \
+  "warning" "hud:context_pct=70" \
+  $'Context ████████░░ 70%\n'
+# HUD critical threshold (default 85%)
+run_cp_case "HUD 95% -> critical" \
+  "critical" "hud:context_pct=95" \
+  $'Context ████████████ 95%\n'
+# HUD wrapped across a newline (defense-in-depth for non-joined captures)
+run_cp_case "HUD wrapped after 'Context' -> still matches" \
+  "warning" "hud:context_pct=70" \
+  $'Context\n████████░░ 70%\n'
+# Non-HUD prose with explicit compact hint -> fallback pattern groups still fire
+run_cp_case "prose 'Context remaining 8%' -> warning via fallback" \
+  "warning" "" \
+  $'Context remaining 8%. Please compact soon.\n'
+
 TMP_ROOT="$(mktemp -d)"
 export BRIDGE_HOME="$TMP_ROOT/bridge-home"
 export BRIDGE_STATE_DIR="$BRIDGE_HOME/state"
