@@ -59,6 +59,41 @@ Admin이 사용자의 "앞으로 계속" 지시를 받으면 [`user-preference-i
 3. `docs/agent-runtime/` 심볼릭 링크 배선 확인: `COMMON-INSTRUCTIONS.md`, `MEMORY-SCHEMA.md`, `ADMIN-PROTOCOL.md`. 누락되면 [`migration-guide.md`](migration-guide.md) §"Fresh install bootstrap"을 따라 재배선.
 4. 이후 일반 에이전트 생성은 `agb agent create <id> --role <role>` — `_template.<role>/CLAUDE.md`가 pointer-only 파일을 렌더링한다.
 
+## Wiki Canonical Hub Curation
+
+이 섹션은 admin 에이전트의 **주간 위키 큐레이션 책임**을 정의한다. L1 mention-scan(관측)과 L2 hub-audit(후보 도출)은 자동으로 돌지만, **canonical 허브 실제 생성은 admin 판단**이 필요하다. 자동 생성하지 않는다.
+
+### Trigger
+
+`wiki-hub-audit` 크론(매주 목요일 23:00 KST, patch 소유)이 `shared/wiki/_index/mentions.db`를 스캔해서 cross-agent reach가 높지만 shared 허브가 없는 엔티티를 골라낸다. 결과 리포트가 `shared/wiki/_audit/hub-candidates-YYYY-MM-DD.md`로 떨어지고, `[wiki-hub-candidates]` task가 admin agent inbox에 들어간다.
+
+### Task 처리 순서
+
+1. **claim**: `agb claim <task_id>`
+2. **리포트 읽기**: task body(또는 `shared/wiki/_audit/hub-candidates-YYYY-MM-DD.md`)에서 후보 엔티티 목록과 샘플 source paths를 확인한다.
+3. **판단**: 각 후보에 대해 다음 중 하나를 결정한다.
+   - **승격**: 팀 전체에서 반복 참조되는 개념·사람·제품·시스템 → `shared/wiki/entities/<slug>.md` 또는 `shared/wiki/people/<slug>.md`에 canonical 허브 작성.
+   - **스킵**: agent-specific 인프라(예: `memory-daily-cron`), 일회성 프로젝트, 이미 다른 허브의 alias로 커버되는 엔티티 → done-note에 "skipped: <이유>" 기록.
+   - **defer**: 판단이 어려우면 사용자(admin person)에게 에스컬레이션. 절대 자동으로 만들지 않는다.
+4. **허브 작성**은 [`wiki-entity-lifecycle.md`](wiki-entity-lifecycle.md) §3.3 스키마를 따른다:
+   - `type`, `slug`, `title`, `aliases` (원어·로마자·casing variants 전부), `canonical_from` (병합 대상 에이전트 경로), `date_captured`, `date_updated` frontmatter 필수
+   - 본문: 2~3 문장 역할·정의 + `## Key facts` + `## Related` fanout
+5. **Redirect 처리**: agent-scoped에 이미 rich 콘텐츠가 있으면 그 파일을 유지하고, 단순 stub이었다면 `type: redirect` + `redirect_to: entities/<slug>`로 변환한다.
+6. **index.md 업데이트**: `shared/wiki/index.md`의 "Canonical Entity Hubs" 섹션에 새 허브를 추가한다.
+7. **done**: `agb done <task_id> --note "promoted: A,B,C; skipped: D,E (이유); deferred: F"`. 빈 note 금지.
+
+### 자동 생성 금지 이유
+
+- 허브 본문은 "이 엔티티가 팀에게 무엇인가"의 정의 — 자동 합성이 어렵다(Phase 3 enrichment 작업).
+- 잘못 만든 허브는 다시 dedup으로 고쳐야 하고 audit trail이 지저분해진다.
+- L2 candidacy의 threshold(현재 min_agents=2, min_mentions=5)는 의도적으로 관대하다. 노이즈 후보가 섞이는 걸 전제로 admin이 걸러낸다.
+
+### 언제 기다려도 되는가
+
+- 후보 1~2개뿐인 주간: 노이즈일 가능성 있음. 다음 주 리포트에서도 반복되면 승격 검토.
+- 샘플 source가 모두 하나의 에이전트 namespace에서 왔는데 다른 에이전트 1~2개만 cross-reference한 경우: agent-scoped로 남겨도 무방.
+
 ## Changelog
 
 - 2026-04-19: initial ratified version. `patch/CLAUDE.md`의 admin-only 섹션 2개(`Admin First-Run Onboarding Defaults`, `Channel Setup Protocol`)를 canonical로 승격. SHA-256 `3476e00ffbd9652383c9a079b3d0abbf4c74c9ec85393367dbd21b3aeaf1401f` (patch/CLAUDE.md lines 66–98) 기반. people.md single-file anchor → per-person 파일 분리 반영. Bootstrap 섹션 추가.
+- 2026-04-19 (evening): Wiki Canonical Hub Curation 섹션 추가. L2 candidacy 자동화(`wiki-hub-audit` 크론 + `[wiki-hub-candidates]` task)의 admin-facing 처리 계약을 문서화. 허브 생성은 admin 판단 게이트 유지.

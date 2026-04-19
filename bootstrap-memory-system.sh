@@ -282,6 +282,10 @@ CRON_SPECS=(
   # Librarian is dynamic (session-type=dynamic). Watchdog polls every
   # 10 min for [librarian-ingest] tasks and starts the agent on demand.
   "librarian-watchdog|*/10 * * * *|Asia/Seoul|librarian-watchdog.sh"
+  # L2 candidacy. Weekly scan of mentions.db → candidate report +
+  # [wiki-hub-candidates] task for the admin agent. Admin judgement
+  # required before canonical hub authoring — automation stops here.
+  "wiki-hub-audit|0 23 * * 4|Asia/Seoul|wiki-hub-audit.sh"
 )
 
 # Fetch existing crons once, parse JSON, cache a title→{schedule,tz,id} map.
@@ -413,6 +417,7 @@ bootstrap_install_scripts() {
            wiki-repair-links.sh wiki-v2-rebuild.sh wiki-dedup-weekly.sh \
            wiki-daily-ingest.sh wiki-daily-copy.py \
            wiki-mention-scan.py wiki-mention-scan.sh \
+           wiki-hub-audit.py wiki-hub-audit.sh \
            sync-memory-schema.py \
            librarian-watchdog.sh librarian-idle-exit.sh \
            librarian-process-ingest.py; do

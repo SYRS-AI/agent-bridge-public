@@ -82,9 +82,28 @@ Open the distribution report. The five sections tell you:
 
 ### 4. Build the initial canonical hubs
 
-Pick the top ~20 cross-agent entities from §2. For each, author a
-canonical hub at `shared/wiki/entities/<slug>.md` (or
-`shared/wiki/people/<slug>.md` for a person). Follow the lifecycle doc:
+The weekly `wiki-hub-audit` cron (Thu 23:00 KST) emits a
+`[wiki-hub-candidates]` task to the admin agent with a pre-filtered
+list of entities that meet the cross-agent threshold but lack a shared
+hub. You can trigger it manually the first time:
+
+```bash
+<bridge-home>/scripts/wiki-hub-audit.py \
+  --emit-task \
+  --admin-agent patch \
+  --bridge-bin <bridge-home>/agent-bridge \
+  --out <bridge-home>/shared/wiki/_audit/hub-candidates-$(date +%Y-%m-%d).md
+```
+
+The admin agent's processing contract for this task is documented in
+[`admin-protocol.md`](admin-protocol.md) — "Wiki Canonical Hub
+Curation". In short: review the candidate list, decide per entity
+whether to promote / skip / defer, then author hubs for the approved
+ones.
+
+For each promoted candidate, author a canonical hub at
+`shared/wiki/entities/<slug>.md` (or `shared/wiki/people/<slug>.md`
+for a person). Follow the lifecycle doc:
 
 - `type: entity` (or `person`) in the frontmatter
 - `slug: <ascii-kebab>` matching the filename
