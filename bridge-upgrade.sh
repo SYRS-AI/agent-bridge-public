@@ -880,18 +880,21 @@ fi
 # first run self-announcing. Skipped on dry-runs and when no admin
 # agent is configured.
 if [[ $DRY_RUN -eq 0 ]]; then
-  # Resolve admin id: env override → roster file → skip.
+  # Resolve admin id: env override → grep the roster → skip.
+  # We grep instead of sourcing because the roster files reference
+  # bridge-lib arrays/functions that are not loaded in this scope;
+  # `source` would error out and leave _post_admin empty.
   _post_admin="${BRIDGE_ADMIN_AGENT:-${BRIDGE_ADMIN_AGENT_ID:-}}"
   if [[ -z "$_post_admin" ]]; then
     for _roster in "$TARGET_ROOT/agent-roster.local.sh" "$TARGET_ROOT/agent-roster.sh"; do
       if [[ -r "$_roster" ]]; then
-        set +u
-        # shellcheck disable=SC1090,SC1091
-        source "$_roster" 2>/dev/null || true
-        set -u
+        _admin_line="$(grep -E '^[[:space:]]*(export[[:space:]]+)?BRIDGE_ADMIN_AGENT_ID=' "$_roster" 2>/dev/null | head -n 1 | sed -E 's/^[[:space:]]*(export[[:space:]]+)?BRIDGE_ADMIN_AGENT_ID=//; s/^"([^"]*)".*/\1/; s/^'"'"'([^'"'"']*)'"'"'.*/\1/; s/[[:space:]]*#.*$//')"
+        if [[ -n "$_admin_line" ]]; then
+          _post_admin="$_admin_line"
+          break
+        fi
       fi
     done
-    _post_admin="${BRIDGE_ADMIN_AGENT_ID:-}"
   fi
   if [[ -n "$_post_admin" && -x "$TARGET_ROOT/agent-bridge" ]]; then
     _post_body="$(mktemp -t bridge-upgrade-post.XXXXXX)"
@@ -921,11 +924,23 @@ drift if the state is already converged.
    today's distribution report.
 
 3. Review the distribution report at
-   \`$TARGET_ROOT/shared/wiki/_index/distribution-report-<date>.md\`
-   — section 2 lists L2 hub candidates. The weekly
-   \`wiki-hub-audit\` cron will resurface these as
-   \`[wiki-hub-candidates]\` tasks; you can also trigger it now:
-   \`$TARGET_ROOT/scripts/wiki-hub-audit.py --emit-task\`.
+   \`$TARGET_ROOT/shared/wiki/_index/distribution-report-<date>.md\`.
+   - §1 cross-agent reach (how entities are connected).
+   - §2 L2 hub candidates (the weekly cron resurfaces these as
+     \`[wiki-hub-candidates]\` tasks; trigger now with the full
+     command below).
+   - §3 unresolved wikilinks (stubs to create or link typos to
+     fix via \`agb wiki repair-links --apply\`).
+   - §4 orphan entity slugs (delete candidates per
+     \`wiki-entity-lifecycle.md\` §3.6).
+
+4. Trigger the first L2 sweep manually (cron will run weekly from now on):
+   \`\`\`
+   $TARGET_ROOT/scripts/wiki-hub-audit.py \\
+     --emit-task --admin-agent "$_post_admin" \\
+     --bridge-bin "$TARGET_ROOT/agent-bridge" \\
+     --out "$TARGET_ROOT/shared/wiki/_audit/hub-candidates-\$(date +%Y-%m-%d).md"
+   \`\`\`
 
 ## Full onboarding
 

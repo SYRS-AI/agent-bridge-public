@@ -84,8 +84,12 @@ points here. Process it in this order — everything is idempotent.
    - §1 cross-agent reach (how entities are connected).
    - §2 L2 hub candidates (entities with cross-agent mentions but
      no shared canonical hub).
-   - §3 unresolved wikilinks (stubs to create or link typos to fix).
-   - §4 orphan entity slugs (delete candidates).
+   - §3 unresolved wikilinks — fix unambiguous targets with
+     `agb wiki repair-links --apply`. Genuinely missing entities
+     become stub candidates.
+   - §4 orphan entity slugs — delete per
+     `wiki-entity-lifecycle.md` §3.6 only when no inbound path
+     references remain. Leave ambiguous ones for next cycle.
 
 4. **Trigger the first L2 candidacy sweep**
    `$BRIDGE_HOME/scripts/wiki-hub-audit.py --emit-task \

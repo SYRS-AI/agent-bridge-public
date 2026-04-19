@@ -579,7 +579,15 @@ rm -f "$EXISTING_CRONS_JSON" "$AGENT_LIST_TMP"
 # subsequent --apply runs skip so the admin isn't spammed.
 # -----------------------------------------------------------------------------
 FIRST_RUN_MARKER="$REPORT_DIR/.first-run-complete"
-if [[ "$MODE" == "apply" && ! -f "$FIRST_RUN_MARKER" && -x "$BRIDGE_AGB" ]]; then
+# Only emit the first-run task when:
+#   - mode is apply (dry-run / check never notify)
+#   - marker does not yet exist (prevents spam on re-applies)
+#   - bootstrap converged (DRIFT=0 — no install/register failures)
+#   - bridge CLI is executable
+# AND only write the marker AFTER `agb task create` succeeds, so if
+# task creation fails we retry the signal on the next --apply.
+if [[ "$MODE" == "apply" && ! -f "$FIRST_RUN_MARKER" \
+      && "$DRIFT" -eq 0 && -x "$BRIDGE_AGB" ]]; then
   FIRST_RUN_BODY="$(mktemp -t bootstrap-first-run.XXXXXX)"
   cat >"$FIRST_RUN_BODY" <<FR_EOF
 # Wiki pipeline bootstrap completed — first run on this host
@@ -595,13 +603,27 @@ if [[ "$MODE" == "apply" && ! -f "$FIRST_RUN_MARKER" && -x "$BRIDGE_AGB" ]]; the
    today's distribution report. Idempotent, safe to re-run.
    \`$BRIDGE_HOME/scripts/wiki-mention-scan.py --full-rebuild\`
 
-2. Review the distribution report. Section 2 lists cross-agent
-   entities with no shared canonical hub — these are hub candidates.
-   \`$BRIDGE_WIKI_ROOT/_index/distribution-report-<date>.md\`
+2. Review the distribution report. Use every section:
+   - §1 cross-agent reach — sanity check.
+   - §2 L2 hub candidates — the weekly cron resurfaces these as
+     \`[wiki-hub-candidates]\` tasks; trigger now in step 3.
+   - §3 unresolved wikilinks — typos or missing stubs. Fix
+     unambiguous targets with \`agb wiki repair-links --apply\`.
+   - §4 orphan entity slugs — delete per
+     \`docs/agent-runtime/wiki-entity-lifecycle.md\` §3.6 or
+     leave until Phase 3 LLM can classify.
+   Path: \`$BRIDGE_WIKI_ROOT/_index/distribution-report-<date>.md\`
 
 3. Trigger the first L2 candidacy sweep now (cron will run this
    weekly on Thursday 23:00 KST from now on):
-   \`$BRIDGE_HOME/scripts/wiki-hub-audit.py --emit-task --admin-agent $BRIDGE_ADMIN_AGENT --bridge-bin $BRIDGE_AGB --out $BRIDGE_WIKI_ROOT/_audit/hub-candidates-\$(date +%Y-%m-%d).md\`
+   \`\`\`
+   $BRIDGE_HOME/scripts/wiki-hub-audit.py \\
+     --emit-task --admin-agent $BRIDGE_ADMIN_AGENT \\
+     --bridge-bin $BRIDGE_AGB \\
+     --out $BRIDGE_WIKI_ROOT/_audit/hub-candidates-\$(date +%Y-%m-%d).md
+   \`\`\`
+   Note: \`--emit-task\` requires \`--out\`; without \`--out\`
+   the script writes to stdout and skips the task creation.
 
 4. When the \`[wiki-hub-candidates]\` task lands, process per
    \`docs/agent-runtime/admin-protocol.md\` "Wiki Canonical Hub
@@ -619,12 +641,18 @@ if [[ "$MODE" == "apply" && ! -f "$FIRST_RUN_MARKER" && -x "$BRIDGE_AGB" ]]; the
 
 Close with: \`agb done <task_id> --note "first scan <N> files / <E> entities; <C> hub candidates for review"\`
 FR_EOF
-  "$BRIDGE_AGB" task create \
-    --to "$BRIDGE_ADMIN_AGENT" --priority normal --from "$BRIDGE_ADMIN_AGENT" \
-    --title "[wiki-system-first-run] bootstrap complete — do initial scan" \
-    --body-file "$FIRST_RUN_BODY" >/dev/null 2>&1 || true
+  if "$BRIDGE_AGB" task create \
+      --to "$BRIDGE_ADMIN_AGENT" --priority normal --from "$BRIDGE_ADMIN_AGENT" \
+      --title "[wiki-system-first-run] bootstrap complete — do initial scan" \
+      --body-file "$FIRST_RUN_BODY" >/dev/null 2>&1; then
+    : > "$FIRST_RUN_MARKER"
+  fi
   rm -f "$FIRST_RUN_BODY"
-  : > "$FIRST_RUN_MARKER"
+elif [[ "$MODE" == "apply" && ! -f "$FIRST_RUN_MARKER" && "$DRIFT" -gt 0 ]]; then
+  # Bootstrap did not converge cleanly. Do NOT emit a "complete" task
+  # and do NOT write the marker — the next --apply will retry once
+  # the underlying failures are fixed.
+  log "first-run signal deferred: drift=$DRIFT (bootstrap did not converge)"
 fi
 
 # -----------------------------------------------------------------------------
