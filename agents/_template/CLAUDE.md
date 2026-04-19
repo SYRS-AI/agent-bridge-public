@@ -38,6 +38,32 @@ task를 수신하면 아래 순서를 반드시 따른다:
 - 사용자 답이 필요한 질문을 두 번째로 반복하려고 하면, 다시 묻기 전에 `~/.agent-bridge/agent-bridge escalate question --agent <self> --question "<question>" --context "<why the answer is needed>"`로 관리자 외부 채널에 먼저 에스컬레이션한다.
 - 15분 이상 blocked → `agb update <task_id> --status blocked --note "사유"`
 
+## Agent Bridge external push policy
+When the daemon injects a line that starts with `[Agent Bridge] event=` (queue inbox, pending-attention flush, watchdog nudge, or other external push), follow this 7-step routine. Detailed guidance and a worked example live in the `external-push-handling` skill.
+1. **Parse metadata.** Extract `event`, `count`, `top` (top task id), `title`, `from` from the injected line. Do not infer fields from prose around it.
+2. **Read the spec.** `agb show-task <id>` before acting. Never act on the title alone.
+3. **Decide handle vs delegate.** Default for inbox/pending-attention events: **delegate via the `Task` tool**. Inline handling is OK only for trivial work (one-line doc typo, housekeeping ack). `[PERMISSION]` and `[cron-followup]` tasks defer to their own skills (`patch-permission-approval`, cron-followup rules above).
+4. **Compose the subagent prompt in your own words.** Rewrite the spec's intent as 3–6 sentences: goal, inputs (paths, constraints), and explicit acceptance criteria (files that must change, checks that must pass, what proves done). Do not paste the task body verbatim.
+5. **Dispatch.** Call the `Task` tool with that prompt. Require the subagent to return the JSON schema below.
+6. **Verify the return.** Check each acceptance criterion positionally against `acceptance_met`. Re-read 1–2 target files briefly whenever `files_changed` is empty, `blockers` is non-empty, or the claim does not match the spec. Never accept self-reports blindly.
+7. **Close out.**
+   - Success → `agb done <id> --note "<one-line summary>"`.
+   - `user_review_needed=true` → surface `user_message` to the operator as a **single line**, then await reply or escalate per role rules.
+   - Failure / blockers → fix inline if the gap is cheap, else re-dispatch with corrected criteria.
+
+### Subagent return JSON schema
+```json
+{
+  "files_changed": ["path/to/file.md"],
+  "checks_run": ["bash -n", "smoke-test"],
+  "acceptance_met": [true, true],
+  "blockers": [],
+  "user_review_needed": false,
+  "user_message": ""
+}
+```
+`acceptance_met` indices align positionally with the criteria you set in step 4. If a subagent omits or malforms the schema, treat the work as unverified and re-dispatch.
+
 ## Autonomy & Anti-Stall
 - 기본값은 **묻지 말고 진행**이다. 금전, 파괴적 삭제, 외부 전송처럼 실제 승인 필요 작업만 질문한다.
 - `"어떻게 할까요?"`, `"진행할까요?"`, `"원하면 해드릴게요"`로 턴을 끝내지 않는다. 안전한 기본안을 선택하고 진행한 뒤 보고한다.
