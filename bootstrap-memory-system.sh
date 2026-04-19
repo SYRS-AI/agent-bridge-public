@@ -30,17 +30,20 @@ export BRIDGE_HOME
 # Admin agent used as cron owner + escalation target. Defaults to
 # `patch` to preserve the reference-install convention, but any install
 # that names its admin differently can export BRIDGE_ADMIN_AGENT.
-# If no admin env is set at invocation time, ask the bridge CLI for the
-# configured admin id (stored in roster/state by `agb setup admin`). This
-# means operator-shell bootstrap runs pick up the real admin even when
-# the calling shell has not inherited BRIDGE_ADMIN_AGENT_ID from a
-# bridge-managed session. Defaults to ``patch`` only as the last resort.
+# If no admin env is set at invocation time, source the agent roster to
+# pick up BRIDGE_ADMIN_AGENT_ID persisted by `agb setup admin`. Operator-
+# shell bootstrap runs then resolve the real admin name even when the
+# calling shell has not inherited the env from a bridge-managed session.
+# The roster files are plain shell that set `BRIDGE_ADMIN_AGENT_ID="..."`.
 if [[ -z "${BRIDGE_ADMIN_AGENT:-}${BRIDGE_ADMIN_AGENT_ID:-}" ]]; then
-  _bridge_roster_admin="$("$BRIDGE_HOME/agent-bridge" admin id 2>/dev/null || true)"
-  if [[ -n "$_bridge_roster_admin" ]]; then
-    BRIDGE_ADMIN_AGENT_ID="$_bridge_roster_admin"
-    export BRIDGE_ADMIN_AGENT_ID
-  fi
+  # shellcheck disable=SC1090,SC1091
+  for _roster in "$BRIDGE_HOME/agent-roster.local.sh" "$BRIDGE_HOME/agent-roster.sh"; do
+    if [[ -r "$_roster" ]]; then
+      set +u
+      source "$_roster" 2>/dev/null || true
+      set -u
+    fi
+  done
 fi
 
 : "${BRIDGE_ADMIN_AGENT:=${BRIDGE_ADMIN_AGENT_ID:-patch}}"
