@@ -17,7 +17,7 @@ export BRIDGE_HOME
 # Admin agent used as cron-failure escalation target + fallback librarian
 # queue owner. Defaults to `patch` on the reference install. Other
 # deployments override BRIDGE_ADMIN_AGENT in the roster or via env.
-: "${BRIDGE_ADMIN_AGENT:=patch}"
+: "${BRIDGE_ADMIN_AGENT:=${BRIDGE_ADMIN_AGENT_ID:-patch}}"
 
 mkdir -p "$BRIDGE_AUDIT_ROOT" "$BRIDGE_STATE_ROOT"
 

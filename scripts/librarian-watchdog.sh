@@ -27,7 +27,7 @@ AGB="$BRIDGE_HOME/agb"
 AGENT="librarian"
 # Admin escalation target for overload / stuck signals. Defaults to
 # `patch` but can be overridden per-install via BRIDGE_ADMIN_AGENT env.
-BRIDGE_ADMIN_AGENT="${BRIDGE_ADMIN_AGENT:-patch}"
+BRIDGE_ADMIN_AGENT="${BRIDGE_ADMIN_AGENT:-${BRIDGE_ADMIN_AGENT_ID:-patch}}"
 OVERLOAD_THRESHOLD=50
 LOG="$BRIDGE_HOME/state/librarian-watchdog.log"
 

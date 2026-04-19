@@ -30,7 +30,7 @@ export BRIDGE_HOME
 # Admin agent used as cron owner + escalation target. Defaults to
 # `patch` to preserve the reference-install convention, but any install
 # that names its admin differently can export BRIDGE_ADMIN_AGENT.
-: "${BRIDGE_ADMIN_AGENT:=patch}"
+: "${BRIDGE_ADMIN_AGENT:=${BRIDGE_ADMIN_AGENT_ID:-patch}}"
 export BRIDGE_ADMIN_AGENT
 
 # shellcheck disable=SC1091

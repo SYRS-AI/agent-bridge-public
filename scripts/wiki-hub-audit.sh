@@ -19,7 +19,7 @@ source "$HERE/_common.sh"
 # Admin agent resolves from env (default: patch). Per-install operators
 # that renamed the admin role set BRIDGE_ADMIN_AGENT in the roster or
 # at cron-creation time.
-: "${BRIDGE_ADMIN_AGENT:=patch}"
+: "${BRIDGE_ADMIN_AGENT:=${BRIDGE_ADMIN_AGENT_ID:-patch}}"
 
 JOB="wiki-hub-audit"
 LOG="$(audit_path "$JOB")"

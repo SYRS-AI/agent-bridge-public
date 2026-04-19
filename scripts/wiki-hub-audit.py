@@ -288,7 +288,9 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument(
         "--admin-agent",
-        default=os.environ.get("BRIDGE_ADMIN_AGENT", "patch"),
+        default=os.environ.get("BRIDGE_ADMIN_AGENT")
+        or os.environ.get("BRIDGE_ADMIN_AGENT_ID")
+        or "patch",
         help="Admin agent to notify (default: patch).",
     )
     parser.add_argument(
