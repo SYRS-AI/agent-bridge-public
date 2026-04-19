@@ -211,23 +211,18 @@ def infer_page(envelope: dict) -> str:
 # Mirrors ENTITY_KIND_PREFIXES but reads from disk layout instead of
 # envelope metadata. Deterministic; no LLM.
 #
-# Research has nested subtypes per research-capture-protocol.md (papers,
-# ingredients, frameworks, products, regulations, competitors, trends,
-# reviews). Each subtype maps to a distinct promote kind so a paper
-# capture doesn't silently become a `project` page. The generic
-# `/memory/research/` prefix is the last-resort fallback and is
-# intentionally strict enough that unfamiliar subtypes fall through to
-# the ambiguous-kind reject path.
+# Research captures (`memory/research/**`) are **deliberately not
+# mapped here**. The research subtree mixes papers, ingredients,
+# frameworks, competitors, and regulations — each of which belongs
+# under a different canonical location per wiki-entity-lifecycle.md
+# (ingredients → entities/, papers → research/papers/, regulations →
+# operating-rules/, etc.). Auto-collapsing all of them to a single
+# promote kind is a semantic misroute. We let research captures fall
+# through to the ambiguous-kind reject gate instead, which puts the
+# categorization in human hands rather than guessing wrong. If a
+# deployment has research subtypes it wants auto-routed, it can add
+# explicit hints here with confidence in the target mapping.
 PATH_KIND_HINTS = (
-    ("/memory/research/papers/", "project"),
-    ("/memory/research/ingredients/", "project"),
-    ("/memory/research/frameworks/", "playbook"),
-    ("/memory/research/regulations/", "operating-rules"),
-    ("/memory/research/competitors/", "project"),
-    ("/memory/research/products/", "project"),
-    ("/memory/research/trends/", "project"),
-    ("/memory/research/reviews/", "project"),
-    ("/memory/research/templates/", "playbook"),
     ("/memory/projects/", "project"),
     ("/memory/decisions/", "decision"),
     ("/memory/playbooks/", "playbook"),

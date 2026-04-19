@@ -25,6 +25,9 @@ BRIDGE_HOME="${BRIDGE_HOME:-$HOME/.agent-bridge}"
 BRIDGE_CLI="$BRIDGE_HOME/agent-bridge"
 AGB="$BRIDGE_HOME/agb"
 AGENT="librarian"
+# Admin escalation target for overload / stuck signals. Defaults to
+# `patch` but can be overridden per-install via BRIDGE_ADMIN_AGENT env.
+BRIDGE_ADMIN_AGENT="${BRIDGE_ADMIN_AGENT:-patch}"
 OVERLOAD_THRESHOLD=50
 LOG="$BRIDGE_HOME/state/librarian-watchdog.log"
 
@@ -50,19 +53,20 @@ if [[ "$INGEST_OPEN" -eq 0 ]]; then
   exit 0
 fi
 
-# 3. overload guard — create a single [librarian-overload] task to patch, don't
-# flood if one already exists (check patch inbox first).
+# 3. overload guard — create a single [librarian-overload] task to the
+# admin agent, don't flood if one already exists (check admin inbox first).
 if [[ "$INGEST_OPEN" -gt "$OVERLOAD_THRESHOLD" ]]; then
-  PATCH_OPEN_OVERLOAD="$("$AGB" inbox patch 2>/dev/null | grep -cE '\[librarian-overload\]' || true)"
-  PATCH_OPEN_OVERLOAD="${PATCH_OPEN_OVERLOAD:-0}"
-  if [[ "$PATCH_OPEN_OVERLOAD" -eq 0 ]]; then
-    log "overload: $INGEST_OPEN > $OVERLOAD_THRESHOLD, notifying patch"
-    "$BRIDGE_CLI" task create --to patch --priority high --from patch \
+  ADMIN_OPEN_OVERLOAD="$("$AGB" inbox "$BRIDGE_ADMIN_AGENT" 2>/dev/null | grep -cE '\[librarian-overload\]' || true)"
+  ADMIN_OPEN_OVERLOAD="${ADMIN_OPEN_OVERLOAD:-0}"
+  if [[ "$ADMIN_OPEN_OVERLOAD" -eq 0 ]]; then
+    log "overload: $INGEST_OPEN > $OVERLOAD_THRESHOLD, notifying $BRIDGE_ADMIN_AGENT"
+    "$BRIDGE_CLI" task create \
+      --to "$BRIDGE_ADMIN_AGENT" --priority high --from "$BRIDGE_ADMIN_AGENT" \
       --title "[librarian-overload] queue $INGEST_OPEN > $OVERLOAD_THRESHOLD" \
       --body "librarian-watchdog halted start. Investigate wiki-daily-ingest rate or drain manually." \
       >/dev/null 2>&1 || log "failed to create overload task"
   else
-    log "overload: $INGEST_OPEN, patch already notified — skip"
+    log "overload: $INGEST_OPEN, $BRIDGE_ADMIN_AGENT already notified — skip"
   fi
   exit 0
 fi
@@ -79,7 +83,8 @@ if "$BRIDGE_CLI" agent start "$AGENT" --no-attach >>"$LOG" 2>&1; then
   log "librarian start ok"
 else
   log "librarian start FAILED"
-  "$BRIDGE_CLI" task create --to patch --priority high --from patch \
+  "$BRIDGE_CLI" task create \
+    --to "$BRIDGE_ADMIN_AGENT" --priority high --from "$BRIDGE_ADMIN_AGENT" \
     --title "[librarian-stuck] agent start failed" \
     --body "librarian-watchdog could not start librarian. Check $LOG." \
     >/dev/null 2>&1 || true

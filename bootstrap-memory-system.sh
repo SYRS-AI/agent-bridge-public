@@ -463,6 +463,38 @@ bootstrap_install_scripts() {
     record "install" "script:$f" "installed" ""
   done
   log "scripts changed: $changed"
+
+  # librarian-provision.sh resolves its CLAUDE.md template at
+  # $SCRIPT_DIR/agents/librarian/CLAUDE.md. On a downstream install
+  # where $BRIDGE_HOME != the repo checkout, this file is missing
+  # unless we explicitly stage it. Ensure the template sits next to
+  # the provisioner before step_librarian_provision runs.
+  local agents_src="$SCRIPT_DIR/scripts/agents"
+  local agents_dst="$BRIDGE_HOME/scripts/agents"
+  if [[ -d "$agents_src" ]]; then
+    local templ_changed=0
+    while IFS= read -r -d '' src; do
+      local rel="${src#$agents_src/}"
+      local dst="$agents_dst/$rel"
+      if [[ -f "$dst" ]] && cmp -s "$src" "$dst"; then
+        continue
+      fi
+      if [[ "$MODE" == "check" ]]; then
+        note_drift
+        record "install" "template:agents/$rel" "drift-mismatch" ""
+        continue
+      fi
+      if [[ "$MODE" == "dry-run" ]]; then
+        record "install" "template:agents/$rel" "would-install" ""
+        continue
+      fi
+      mkdir -p "$(dirname "$dst")"
+      cp "$src" "$dst"
+      templ_changed=$((templ_changed + 1))
+      record "install" "template:agents/$rel" "installed" ""
+    done < <(find "$agents_src" -type f -name '*.md' -print0 2>/dev/null)
+    [[ "$templ_changed" -gt 0 ]] && log "agent templates changed: $templ_changed"
+  fi
 }
 
 # -----------------------------------------------------------------------------

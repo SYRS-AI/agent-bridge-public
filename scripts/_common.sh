@@ -14,6 +14,10 @@ export BRIDGE_HOME
 : "${BRIDGE_WIKI_ROOT:=$BRIDGE_SHARED_ROOT/wiki}"
 : "${BRIDGE_AUDIT_ROOT:=$BRIDGE_WIKI_ROOT/_audit}"
 : "${BRIDGE_STATE_ROOT:=$BRIDGE_HOME/state}"
+# Admin agent used as cron-failure escalation target + fallback librarian
+# queue owner. Defaults to `patch` on the reference install. Other
+# deployments override BRIDGE_ADMIN_AGENT in the roster or via env.
+: "${BRIDGE_ADMIN_AGENT:=patch}"
 
 mkdir -p "$BRIDGE_AUDIT_ROOT" "$BRIDGE_STATE_ROOT"
 
@@ -52,7 +56,10 @@ file_failure_task() {
   local log="$2"
   local title="[cron-failure] $job — $(abs_date)"
   if [[ -x "$BRIDGE_AGB" ]]; then
-    "$BRIDGE_AGB" task create --to patch --priority high --from patch \
+    "$BRIDGE_AGB" task create \
+      --to "$BRIDGE_ADMIN_AGENT" \
+      --priority high \
+      --from "$BRIDGE_ADMIN_AGENT" \
       --title "$title" \
       --body-file "$log" >/dev/null 2>&1 || true
   fi

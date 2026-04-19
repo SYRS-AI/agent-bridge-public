@@ -77,7 +77,8 @@ log_audit "$JOB" "ambiguous clusters (pre-filter): $cand_count auto_safe_applied
 
 if [[ "$cand_count" -gt 0 ]]; then
   title="[wiki-dedup-review] $cand_count dup clusters — $(abs_date)"
-  "$BRIDGE_AGB" task create --to patch --priority normal --from patch \
+  "$BRIDGE_AGB" task create \
+    --to "$BRIDGE_ADMIN_AGENT" --priority normal --from "$BRIDGE_ADMIN_AGENT" \
     --title "$title" \
     --body-file "$PLAN_FILE" >/dev/null 2>&1 || true
 fi

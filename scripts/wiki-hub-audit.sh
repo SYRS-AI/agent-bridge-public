@@ -29,14 +29,20 @@ trap 'file_failure_task "$JOB" "$LOG"' ERR
 
 REPORT_PATH="$BRIDGE_WIKI_ROOT/_audit/hub-candidates-$(abs_date).md"
 
-if ! run_with_timeout 120 "$BRIDGE_PYTHON" "$HERE/wiki-hub-audit.py" \
-      --wiki-root "$BRIDGE_WIKI_ROOT" \
-      --emit-task \
-      --admin-agent "$BRIDGE_ADMIN_AGENT" \
-      --bridge-bin "$BRIDGE_AGB" \
-      --out "$REPORT_PATH" \
-      >>"$LOG" 2>&1; then
-  rc=$?
+# Capture the underlying Python exit code directly. `if ! cmd; then rc=$?; fi`
+# is unsafe here because the `!` inversion resets `$?` to 0 inside the
+# then-branch, masking a non-zero emit-task failure (exit 3).
+set +e
+run_with_timeout 120 "$BRIDGE_PYTHON" "$HERE/wiki-hub-audit.py" \
+  --wiki-root "$BRIDGE_WIKI_ROOT" \
+  --emit-task \
+  --admin-agent "$BRIDGE_ADMIN_AGENT" \
+  --bridge-bin "$BRIDGE_AGB" \
+  --out "$REPORT_PATH" \
+  >>"$LOG" 2>&1
+rc=$?
+set -e
+if [[ "$rc" -ne 0 ]]; then
   log_audit "$JOB" "wiki-hub-audit.py FAILED rc=$rc" >/dev/null
   file_failure_task "$JOB" "$LOG"
   exit "$rc"
