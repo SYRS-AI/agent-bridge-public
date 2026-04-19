@@ -109,6 +109,73 @@ bridge_notification_text() {
   printf '%s' "$header"
 }
 
+# ---------------------------------------------------------------------------
+# Issue #132b: metadata-only injection payload helper.
+#
+# Legacy injections embed an execution verb
+# ("Run exactly: ~/.agent-bridge/agb inbox $agent"). The redesigned payload
+# is metadata-only so the main agent can parse the event, read the task
+# spec via `agb show-task`, compose its own subagent prompt with acceptance
+# criteria, dispatch via Task, verify, and report one line — keeping the
+# main context clean. See upstream #132 Axis B and the external-push-handling
+# shared skill (#132c) for the handling routine.
+#
+# This PR adds the helper + opt-in flag only. Call sites emit legacy output
+# unless BRIDGE_INJECT_METADATA_ONLY=1. Flip the flag only after the
+# external-push-handling skill is shipped — otherwise agents would receive
+# metadata without a handler.
+#
+# Payload shape:
+#   [Agent Bridge] event=inbox count=3 top=X12 title='fix docs typo' from=patch
+#
+# Value encoding: bare token for letters/digits/.-_@:/, otherwise
+# single-quoted with '\'' escape for embedded single quotes.
+# ---------------------------------------------------------------------------
+
+bridge_inject_metadata_only_enabled() {
+  [[ "${BRIDGE_INJECT_METADATA_ONLY:-0}" == "1" ]]
+}
+
+bridge_inject_meta_escape_value() {
+  local v="$1"
+  if [[ -z "$v" ]]; then
+    printf "''"
+    return 0
+  fi
+  # Metadata injections are a single logical line — so any embedded CR/LF in
+  # a value (e.g., a task title that survived `.strip()` but contained a
+  # newline) must be folded to an ASCII sentinel to avoid producing a
+  # payload the parser would split into two events. The "\\n" sentinel is
+  # chosen so a consumer can reliably reverse it when displaying the title.
+  v="${v//$'\r'/}"
+  v="${v//$'\n'/\\n}"
+  if [[ "$v" =~ ^[A-Za-z0-9._/@:-]+$ ]]; then
+    printf '%s' "$v"
+    return 0
+  fi
+  local escaped="${v//\'/\'\\\'\'}"
+  printf "'%s'" "$escaped"
+}
+
+bridge_format_injection_meta() {
+  # Usage: bridge_format_injection_meta <kind> [<key>=<val> ...]
+  # Emits: [Agent Bridge] event=<kind> <key>=<escaped-val> ...
+  local kind="$1"
+  shift
+  local out="[Agent Bridge] event="
+  out+="$(bridge_inject_meta_escape_value "$kind")"
+  local pair=""
+  local key=""
+  local val=""
+  for pair in "$@"; do
+    key="${pair%%=*}"
+    val="${pair#*=}"
+    [[ -n "$key" ]] || continue
+    out+=" ${key}=$(bridge_inject_meta_escape_value "$val")"
+  done
+  printf '%s' "$out"
+}
+
 bridge_queue_attention_title() {
   local queued="$1"
   printf '%s' "ACTION REQUIRED — queued tasks (${queued})"
@@ -120,6 +187,21 @@ bridge_queue_attention_message() {
   local task_id="${3:-}"
   local task_priority="${4:-normal}"
   local task_title="${5:-}"
+
+  if bridge_inject_metadata_only_enabled; then
+    # Issue #132b: no execution verb; main agent parses metadata and drives
+    # the flow via the external-push-handling shared skill (#132c). Emit a
+    # single logical line — no trailing newline — so the injected payload is
+    # one event, not two (the blank follow-up would otherwise be read as a
+    # separate message by the injection path).
+    bridge_format_injection_meta inbox \
+      agent="$agent" \
+      count="$queued" \
+      top="${task_id:-}" \
+      priority="$task_priority" \
+      title="${task_title:-}"
+    return 0
+  fi
 
   printf '[Agent Bridge] %s pending task(s) for %s.\n' "$queued" "$agent"
   if [[ -n "$task_id" && -n "$task_title" ]]; then
@@ -158,7 +240,20 @@ bridge_dispatch_notification() {
         fi
       fi
 
-      text="$(bridge_notification_text "$title" "$message" "$task_id" "$priority")"
+      # Issue #132b: bridge_dispatch_notification is a shared helper called
+      # from many places (bridge-task.sh, bridge-send.sh, bridge-intake.sh,
+      # bridge-review.sh, bridge-bundle.sh) with PLAIN messages that still
+      # need the legacy header. Only skip header-wrapping when the caller
+      # has already produced a metadata payload — i.e., $message begins
+      # with the "[Agent Bridge] event=" header emitted by
+      # bridge_format_injection_meta. This keeps legacy callers' output
+      # byte-identical even when the flag is on.
+      if bridge_inject_metadata_only_enabled \
+         && [[ "$message" == "[Agent Bridge] event="* ]]; then
+        text="$message"
+      else
+        text="$(bridge_notification_text "$title" "$message" "$task_id" "$priority")"
+      fi
       # Issue #132a: pass $agent so a busy gate at inject time routes through
       # the pending-attention spool instead of silently dropping the wake.
       if bridge_tmux_send_and_submit "$session" "$engine" "$text" "$agent"; then

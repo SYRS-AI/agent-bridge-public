@@ -147,6 +147,106 @@ expect_idle "no prompt glyph anywhere" \
   $'just text, nothing composable'
 BASH_UT
 
+log "injection metadata-only payload format (issue #132b)"
+# Self-contained coverage for bridge_format_injection_meta and the opt-in
+# flag. Placed early alongside the other #132* regressions.
+"$BASH4_BIN" -s "$REPO_ROOT" <<'META_UT'
+set -u
+repo="$1"
+# shellcheck disable=SC1090
+source "$repo/bridge-lib.sh"
+fail() { printf '[smoke][error] meta: %s\n' "$*" >&2; exit 1; }
+assert_eq() {
+  local label="$1" expected="$2" actual="$3"
+  if [[ "$actual" == "$expected" ]]; then
+    printf '[smoke]   [ok] %s\n' "$label"
+  else
+    fail "$label: expected [$expected], got [$actual]"
+  fi
+}
+
+# Bare-token values preserve shape; quoted values only when necessary.
+assert_eq "meta bare" "[Agent Bridge] event=inbox count=3 top=X12 from=patch" \
+  "$(bridge_format_injection_meta inbox count=3 top=X12 from=patch)"
+assert_eq "meta quoted title with spaces" \
+  "[Agent Bridge] event=inbox count=1 top=Y55 title='fix docs typo' from=patch" \
+  "$(bridge_format_injection_meta inbox count=1 top=Y55 title='fix docs typo' from=patch)"
+assert_eq "meta empty value quoted" \
+  "[Agent Bridge] event=idle agent=worker-a from=''" \
+  "$(bridge_format_injection_meta idle agent=worker-a from=)"
+# Value with an embedded single quote uses '\''  escape
+assert_eq "meta single-quote escape" \
+  "[Agent Bridge] event=inbox title='it'\\''s fine'" \
+  "$(bridge_format_injection_meta inbox title="it's fine")"
+assert_eq "meta dot-dash-underscore bare" \
+  "[Agent Bridge] event=context-pressure agent=admin.1 severity=warning" \
+  "$(bridge_format_injection_meta context-pressure agent=admin.1 severity=warning)"
+# Embedded newline in value is folded to literal "\n" so the payload stays
+# on one logical line (protects parser from mis-splitting).
+assert_eq "meta newline folded to sentinel" \
+  "[Agent Bridge] event=inbox title='line-1\\nline-2'" \
+  "$(bridge_format_injection_meta inbox title="$(printf 'line-1\nline-2')")"
+
+# Flag gating — default off emits legacy text; on emits metadata-only.
+unset BRIDGE_INJECT_METADATA_ONLY
+default_text="$(bridge_queue_attention_message "claude-static" 2 X1 urgent "do the thing")"
+case "$default_text" in
+  *"ACTION REQUIRED"*"Run exactly"*) printf '[smoke]   [ok] flag off: legacy format retained\n' ;;
+  *) fail "flag off should emit legacy text, got: $default_text" ;;
+esac
+
+meta_text="$(BRIDGE_INJECT_METADATA_ONLY=1 bridge_queue_attention_message "claude-static" 2 X1 urgent "do the thing")"
+expected_meta="[Agent Bridge] event=inbox agent=claude-static count=2 top=X1 priority=urgent title='do the thing'"
+[[ "$meta_text" == "$expected_meta" ]] \
+  || fail "flag on: expected exact meta, got '$meta_text'"
+# $() strips trailing newlines — so re-run with explicit byte capture to
+# verify the payload really is single-line (no \n tail). Required coverage
+# per codex review: `wc -c` / `od -c` style byte check.
+meta_raw_file="$(mktemp)"
+BRIDGE_INJECT_METADATA_ONLY=1 bridge_queue_attention_message \
+  "claude-static" 2 X1 urgent "do the thing" >"$meta_raw_file"
+last_byte_octal="$(tail -c 1 "$meta_raw_file" | od -An -c | tr -d ' ')"
+# Expect the last byte to be the closing "'" of the quoted title, NOT \n.
+[[ "$last_byte_octal" == "'" ]] \
+  || fail "metadata-only must not end with newline; last byte octal: $last_byte_octal"
+rm -f "$meta_raw_file"
+printf '[smoke]   [ok] flag on: metadata-only single logical line, no trailing newline (byte-verified)\n'
+
+# Passthrough is GATED on the payload already being a metadata header. A
+# plain message must still go through bridge_notification_text wrapping so
+# the bridge-task.sh / bridge-send.sh / bridge-intake.sh / bridge-review.sh /
+# bridge-bundle.sh callers don't lose their legacy header under the flag.
+BRIDGE_INJECT_METADATA_ONLY=1
+# Shadow `bridge_tmux_send_and_submit` to capture the emitted text rather
+# than hitting tmux, then invoke dispatcher through the public helper.
+captured_text=""
+bridge_tmux_send_and_submit() { captured_text="$3"; return 0; }
+bridge_agent_engine() { printf 'claude'; }
+bridge_agent_session() { printf 'fake-session'; }
+bridge_tmux_session_exists() { return 0; }
+bridge_agent_has_wake_channel() { return 0; }
+bridge_claude_session_can_wake() { return 0; }
+bridge_claude_session_try_mark_prompt_ready() { return 0; }
+
+# Plain message (legacy caller style) — should get the legacy header wrap
+# even when the flag is on.
+bridge_dispatch_notification "claude-static" "review needed" "plain reviewer note." "" "normal" >/dev/null 2>&1 || true
+case "$captured_text" in
+  "[Agent Bridge]"*"plain reviewer note."*) \
+    printf '[smoke]   [ok] passthrough gate: plain message still gets legacy header wrap under flag\n' ;;
+  *) fail "plain msg under flag should get legacy header, got: $captured_text" ;;
+esac
+
+# Metadata-prefixed message should pass through unchanged.
+captured_text=""
+bridge_dispatch_notification "claude-static" "" "[Agent Bridge] event=inbox agent=claude-static count=1" "" "normal" >/dev/null 2>&1 || true
+case "$captured_text" in
+  "[Agent Bridge] event=inbox agent=claude-static count=1") \
+    printf '[smoke]   [ok] passthrough gate: metadata message passes through verbatim\n' ;;
+  *) fail "metadata msg should pass through, got: $captured_text" ;;
+esac
+META_UT
+
 log "tmux pending-attention spool: escape/drain/prepend/deferral-cap (issue #132a)"
 "$BASH4_BIN" -s "$REPO_ROOT" <<'SPOOL_UT'
 set -u

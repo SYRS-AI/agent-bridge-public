@@ -312,7 +312,12 @@ bridge_run_schedule_idle_marker_and_inbox_bootstrap() {
         if [[ ! -f "$next_file" && ! -f "$marker_file" ]]; then
           task_id="$(bridge_queue_cli find-open --agent "$agent" 2>/dev/null | head -n 1 || true)"
           if [[ -n "$task_id" ]]; then
-            bridge_tmux_send_and_submit "$session" claude "[Agent Bridge] ACTION REQUIRED — queued tasks detected. Run exactly: ~/.agent-bridge/agb inbox $agent" "$agent"
+            if bridge_inject_metadata_only_enabled; then
+              inject_text="$(bridge_format_injection_meta inbox-bootstrap agent="$agent" top="$task_id")"
+            else
+              inject_text="[Agent Bridge] ACTION REQUIRED — queued tasks detected. Run exactly: ~/.agent-bridge/agb inbox $agent"
+            fi
+            bridge_tmux_send_and_submit "$session" claude "$inject_text" "$agent"
           fi
           mkdir -p "$(dirname "$marker_file")"
           printf "%s\n" "$(date +%s)" >"$marker_file"
