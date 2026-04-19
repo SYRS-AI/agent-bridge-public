@@ -25,13 +25,15 @@ JOB="wiki-hub-audit"
 LOG="$(audit_path "$JOB")"
 log_audit "$JOB" "starting $JOB" >/dev/null
 
-trap 'file_failure_task "$JOB" "$LOG"' ERR
-
 REPORT_PATH="$BRIDGE_WIKI_ROOT/_audit/hub-candidates-$(abs_date).md"
 
 # Capture the underlying Python exit code directly. `if ! cmd; then rc=$?; fi`
 # is unsafe here because the `!` inversion resets `$?` to 0 inside the
-# then-branch, masking a non-zero emit-task failure (exit 3).
+# then-branch, masking a non-zero emit-task failure (exit 3). We also
+# intentionally do NOT install an ERR trap here — the combination of an
+# ERR trap + an explicit "if rc != 0" block fires `file_failure_task`
+# twice on the same failure (noted in Codex R3). The explicit block is
+# the only path that surfaces a failure to patch.
 set +e
 run_with_timeout 120 "$BRIDGE_PYTHON" "$HERE/wiki-hub-audit.py" \
   --wiki-root "$BRIDGE_WIKI_ROOT" \
