@@ -308,6 +308,20 @@ bridge_migration_unisolate() {
     fi
   fi
 
+  # Remove the per-UID Claude credentials symlink installed by
+  # bridge_linux_grant_claude_credentials_access (#125). The ACL on the
+  # controller's ~/.claude/.credentials.json is intentionally kept — other
+  # isolated agents on the same host may still rely on it, and the entry
+  # is per-UID so it is harmless once this agent's UID is no longer in use.
+  local isolated_cred_link=""
+  isolated_cred_link="$(bridge_migration_user_home "$os_user")/.claude/.credentials.json"
+  if [[ -L "$isolated_cred_link" ]]; then
+    bridge_migration_print_step "$dry_run" "rm $isolated_cred_link"
+    if [[ "$dry_run" != "1" ]]; then
+      bridge_linux_sudo_root rm -f "$isolated_cred_link" || true
+    fi
+  fi
+
   bridge_migration_roster_upsert "$dry_run" "$agent" "shared" ""
 
   if [[ "$dry_run" == "1" ]]; then

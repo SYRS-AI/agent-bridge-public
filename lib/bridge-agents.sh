@@ -595,6 +595,77 @@ bridge_linux_grant_engine_cli_access() {
   fi
 }
 
+# Claude Code reads its auth from $CLAUDE_CONFIG_DIR/.credentials.json
+# (default $HOME/.claude/.credentials.json). Under linux-user isolation
+# the agent runs as a dedicated UID whose $HOME is /home/<os_user>/,
+# and the operator's `.credentials.json` is not present there — Claude
+# falls back to the first-launch login picker and the agent cannot
+# process work. Fix (#125):
+#
+# - Symlink /home/<os_user>/.claude/.credentials.json to the
+#   controller's credentials file so Claude on the isolated UID resolves
+#   `$HOME/.claude/.credentials.json` to the operator's file.
+# - Grant the isolated UID traverse + read-exec ACL on the controller's
+#   `.claude/` and r-- on the file itself.
+# - Set a default ACL (u:<os_user>:r--) on the controller's `.claude/`
+#   so a re-auth — which Claude performs via atomic rename, producing a
+#   new inode — still inherits the grant without another `isolate` run.
+#
+# Intentionally does NOT share the whole `.claude/` via
+# `CLAUDE_CONFIG_DIR`: projects/, sessions/, plugins/, and
+# settings.json benefit from per-agent write isolation. Only the
+# credentials file is shared across the controller's agents, matching
+# the reality that there is one Claude account per controller.
+bridge_linux_grant_claude_credentials_access() {
+  local os_user="$1"
+  local user_home="$2"
+  local controller_user="$3"
+  local engine="$4"
+  local controller_home=""
+  local controller_claude_dir=""
+  local controller_cred_file=""
+  local isolated_claude_dir=""
+  local isolated_cred_link=""
+  local current_target=""
+
+  [[ "$engine" == "claude" ]] || return 0
+  [[ -n "$os_user" && -n "$user_home" && -n "$controller_user" ]] || return 0
+
+  controller_home="$(getent passwd "$controller_user" 2>/dev/null | cut -d: -f6 || true)"
+  [[ -n "$controller_home" && -d "$controller_home" ]] || return 0
+
+  controller_claude_dir="$controller_home/.claude"
+  controller_cred_file="$controller_claude_dir/.credentials.json"
+  isolated_claude_dir="$user_home/.claude"
+  isolated_cred_link="$isolated_claude_dir/.credentials.json"
+
+  if [[ ! -f "$controller_cred_file" ]]; then
+    bridge_warn "claude credentials not found at $controller_cred_file — run 'claude login' as the operator, then re-run 'agent-bridge isolate <agent>' to wire them into the isolated UID"
+    return 0
+  fi
+
+  bridge_linux_sudo_root mkdir -p "$isolated_claude_dir"
+  bridge_linux_sudo_root chown "$os_user" "$isolated_claude_dir"
+  bridge_linux_sudo_root chmod 0700 "$isolated_claude_dir"
+
+  bridge_linux_grant_traverse_chain "$os_user" "$controller_claude_dir"
+  bridge_linux_acl_add "u:${os_user}:r-x" "$controller_claude_dir" >/dev/null 2>&1 || true
+  bridge_linux_acl_add "u:${os_user}:r--" "$controller_cred_file" >/dev/null 2>&1 || true
+  bridge_linux_sudo_root setfacl -d -m "u:${os_user}:r--" "$controller_claude_dir" >/dev/null 2>&1 || true
+
+  if [[ -L "$isolated_cred_link" ]]; then
+    current_target="$(readlink "$isolated_cred_link" 2>/dev/null || printf '')"
+    if [[ "$current_target" == "$controller_cred_file" ]]; then
+      return 0
+    fi
+    bridge_linux_sudo_root rm -f "$isolated_cred_link"
+  elif [[ -e "$isolated_cred_link" ]]; then
+    bridge_linux_sudo_root rm -f "$isolated_cred_link"
+  fi
+  bridge_linux_sudo_root ln -s "$controller_cred_file" "$isolated_cred_link"
+  bridge_linux_sudo_root chown -h "$os_user" "$isolated_cred_link" >/dev/null 2>&1 || true
+}
+
 bridge_linux_acl_add_recursive() {
   local spec="$1"
   shift || true
@@ -907,6 +978,7 @@ bridge_linux_prepare_agent_isolation() {
   done
   shopt -u nullglob
   bridge_linux_grant_engine_cli_access "$os_user" "$(bridge_agent_engine "$agent")"
+  bridge_linux_grant_claude_credentials_access "$os_user" "$user_home" "$controller_user" "$(bridge_agent_engine "$agent")"
   bridge_linux_acl_add_recursive "u:${os_user}:r-X" "${recursive_read_paths[@]}"
   bridge_linux_acl_add_recursive "u:${os_user}:rwX" "${recursive_write_paths[@]}"
   bridge_linux_acl_add_default_dirs_recursive "u:${os_user}:rwX" "$runtime_state_dir" "$log_dir" "$request_dir" "$response_dir"

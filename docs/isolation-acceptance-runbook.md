@@ -167,6 +167,39 @@ roster_exit=1
 - **FAIL** on any other combination — especially `other_exit=0` (cross-agent
   snapshot leak) or `roster_exit=0` (token leak via the shared roster).
 
+### 1.4 Claude credentials reachable via per-UID symlink
+
+Under isolation the isolated UID's `$HOME/.claude/.credentials.json` is
+a symlink back to the operator's credentials file, with `u:<os_user>:r--`
+ACL on the target and a default ACL on the operator's `.claude/` so
+atomic-rename re-auths (new inode) still inherit the grant. Without
+this, Claude on the isolated UID lands at the first-launch login
+picker and the agent cannot process work. See issue `#125`.
+
+```bash
+sudo -u agent-bridge-agenta bash -lc \
+  'readlink ~/.claude/.credentials.json'
+sudo -u agent-bridge-agenta bash -lc \
+  'test -r ~/.claude/.credentials.json && echo own_read=ok || echo own_read=fail'
+sudo -u agent-bridge-agenta bash -lc \
+  'test -r /home/agent-bridge-agentb/.claude/.credentials.json 2>/dev/null && echo other_read=leak || echo other_read=blocked'
+```
+
+Expected output (substitute your operator home for the first line):
+
+```
+/home/<operator>/.claude/.credentials.json
+own_read=ok
+other_read=blocked
+```
+
+- **PASS** if `own_read=ok` (isolated UID follows the symlink and reads
+  the operator's credentials) and `other_read=blocked` (cannot reach
+  another agent's home chain).
+- **FAIL** if `own_read=fail` (Claude will land at the login picker) or
+  `other_read=leak` (cross-agent home leak that the mode-0700 on
+  `/home/agent-bridge-<slug>/` should have prevented).
+
 ---
 
 ## 2. Queue gateway round-trip
