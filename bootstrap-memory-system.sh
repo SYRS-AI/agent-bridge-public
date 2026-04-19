@@ -36,12 +36,18 @@ export BRIDGE_HOME
 # calling shell has not inherited the env from a bridge-managed session.
 # The roster files are plain shell that set `BRIDGE_ADMIN_AGENT_ID="..."`.
 if [[ -z "${BRIDGE_ADMIN_AGENT:-}${BRIDGE_ADMIN_AGENT_ID:-}" ]]; then
-  # shellcheck disable=SC1090,SC1091
+  # Roster files assume bridge-lib.sh is already loaded (they call
+  # `bridge_add_agent_id_if_missing` and write into declared -A arrays).
+  # We don't need any of that — only the BRIDGE_ADMIN_AGENT_ID line.
+  # Extract it without executing the rest of the file.
   for _roster in "$BRIDGE_HOME/agent-roster.local.sh" "$BRIDGE_HOME/agent-roster.sh"; do
     if [[ -r "$_roster" ]]; then
-      set +u
-      source "$_roster" 2>/dev/null || true
-      set -u
+      _admin_line="$(grep -E '^[[:space:]]*(export[[:space:]]+)?BRIDGE_ADMIN_AGENT_ID=' "$_roster" | head -n 1 | sed -E 's/^[[:space:]]*(export[[:space:]]+)?BRIDGE_ADMIN_AGENT_ID=//; s/^"([^"]*)".*/\1/; s/^'"'"'([^'"'"']*)'"'"'.*/\1/; s/[[:space:]]*#.*$//')"
+      if [[ -n "$_admin_line" ]]; then
+        BRIDGE_ADMIN_AGENT_ID="$_admin_line"
+        export BRIDGE_ADMIN_AGENT_ID
+        break
+      fi
     fi
   done
 fi
@@ -566,6 +572,60 @@ for spec in "${CRON_SPECS[@]}"; do
 done
 
 rm -f "$EXISTING_CRONS_JSON" "$AGENT_LIST_TMP"
+
+# -----------------------------------------------------------------------------
+# first-run post-bootstrap signal — queue the "do the first scan + hub
+# candidate review" task for the admin agent. Only fires once per install;
+# subsequent --apply runs skip so the admin isn't spammed.
+# -----------------------------------------------------------------------------
+FIRST_RUN_MARKER="$REPORT_DIR/.first-run-complete"
+if [[ "$MODE" == "apply" && ! -f "$FIRST_RUN_MARKER" && -x "$BRIDGE_AGB" ]]; then
+  FIRST_RUN_BODY="$(mktemp -t bootstrap-first-run.XXXXXX)"
+  cat >"$FIRST_RUN_BODY" <<FR_EOF
+# Wiki pipeline bootstrap completed — first run on this host
+
+- bootstrap_report: $REPORT
+- admin_agent: $BRIDGE_ADMIN_AGENT
+- bridge_home: $BRIDGE_HOME
+- completed_at: $(date -Iseconds 2>/dev/null || date)
+
+## Next steps (one-time)
+
+1. Full mention scan — builds shared/wiki/_index/mentions.db and
+   today's distribution report. Idempotent, safe to re-run.
+   \`$BRIDGE_HOME/scripts/wiki-mention-scan.py --full-rebuild\`
+
+2. Review the distribution report. Section 2 lists cross-agent
+   entities with no shared canonical hub — these are hub candidates.
+   \`$BRIDGE_WIKI_ROOT/_index/distribution-report-<date>.md\`
+
+3. Trigger the first L2 candidacy sweep now (cron will run this
+   weekly on Thursday 23:00 KST from now on):
+   \`$BRIDGE_HOME/scripts/wiki-hub-audit.py --emit-task --admin-agent $BRIDGE_ADMIN_AGENT --bridge-bin $BRIDGE_AGB --out $BRIDGE_WIKI_ROOT/_audit/hub-candidates-\$(date +%Y-%m-%d).md\`
+
+4. When the \`[wiki-hub-candidates]\` task lands, process per
+   \`docs/agent-runtime/admin-protocol.md\` "Wiki Canonical Hub
+   Curation" section.
+
+## Pipeline reference
+
+- \`docs/agent-runtime/wiki-onboarding.md\` — full admin walkthrough
+- \`docs/agent-runtime/admin-protocol.md\` — weekly hub curation ritual
+- \`docs/agent-runtime/wiki-mention-index.md\` — L1 schema + cadence
+- \`docs/agent-runtime/wiki-entity-lifecycle.md\` — entity frontmatter rules
+- \`docs/agent-runtime/wiki-graph-rules.md\` — graph edge policy
+
+## Done
+
+Close with: \`agb done <task_id> --note "first scan <N> files / <E> entities; <C> hub candidates for review"\`
+FR_EOF
+  "$BRIDGE_AGB" task create \
+    --to "$BRIDGE_ADMIN_AGENT" --priority normal --from "$BRIDGE_ADMIN_AGENT" \
+    --title "[wiki-system-first-run] bootstrap complete — do initial scan" \
+    --body-file "$FIRST_RUN_BODY" >/dev/null 2>&1 || true
+  rm -f "$FIRST_RUN_BODY"
+  : > "$FIRST_RUN_MARKER"
+fi
 
 # -----------------------------------------------------------------------------
 # emit JSON report

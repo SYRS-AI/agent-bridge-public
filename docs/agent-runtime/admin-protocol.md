@@ -59,6 +59,51 @@ Admin이 사용자의 "앞으로 계속" 지시를 받으면 [`user-preference-i
 3. `docs/agent-runtime/` 심볼릭 링크 배선 확인: `COMMON-INSTRUCTIONS.md`, `MEMORY-SCHEMA.md`, `ADMIN-PROTOCOL.md`. 누락되면 [`migration-guide.md`](migration-guide.md) §"Fresh install bootstrap"을 따라 재배선.
 4. 이후 일반 에이전트 생성은 `agb agent create <id> --role <role>` — `_template.<role>/CLAUDE.md`가 pointer-only 파일을 렌더링한다.
 
+## Post-Upgrade Onboarding (first run after v0.4.0+ upgrade)
+
+When `agb upgrade` lands a v0.4.0-or-later release, the upgrader
+creates a `[upgrade-complete]` task in this admin's inbox. That task
+points here. Process it in this order — everything is idempotent.
+
+1. **Bootstrap**
+   `$BRIDGE_HOME/bootstrap-memory-system.sh --apply`
+   - Registers all wiki + librarian crons.
+   - Provisions the dynamic `librarian` agent if absent.
+   - Copies Phase 1/2 scripts into `$BRIDGE_HOME/scripts/`.
+   - A first-run success also files a
+     `[wiki-system-first-run]` task with the exact commands for
+     steps 2–4 below.
+
+2. **First full mention scan**
+   `$BRIDGE_HOME/scripts/wiki-mention-scan.py --full-rebuild`
+   - Walks `shared/wiki/`, resolves every `[[wikilink]]`, writes
+     `shared/wiki/_index/mentions.db` (schema v1).
+
+3. **Review the distribution report**
+   `shared/wiki/_index/distribution-report-YYYY-MM-DD.md`
+   - §1 cross-agent reach (how entities are connected).
+   - §2 L2 hub candidates (entities with cross-agent mentions but
+     no shared canonical hub).
+   - §3 unresolved wikilinks (stubs to create or link typos to fix).
+   - §4 orphan entity slugs (delete candidates).
+
+4. **Trigger the first L2 candidacy sweep**
+   `$BRIDGE_HOME/scripts/wiki-hub-audit.py --emit-task \
+      --admin-agent "$BRIDGE_ADMIN_AGENT" \
+      --bridge-bin "$BRIDGE_AGB" \
+      --out "$BRIDGE_WIKI_ROOT/_audit/hub-candidates-$(date +%Y-%m-%d).md"`
+   - Queues a `[wiki-hub-candidates]` task into this inbox.
+   - The weekly cron (`wiki-hub-audit`, Thu 23:00 KST) fires this
+     automatically from now on.
+
+5. **Process the `[wiki-hub-candidates]` task** per §"Wiki Canonical
+   Hub Curation" below. That is the recurring admin ritual.
+
+Close the original `[upgrade-complete]` task with:
+```
+agb done <task_id> --note "bootstrap OK; first scan <N> files / <E> entities; <C> hub candidates queued"
+```
+
 ## Wiki Canonical Hub Curation
 
 이 섹션은 admin 에이전트의 **주간 위키 큐레이션 책임**을 정의한다. L1 mention-scan(관측)과 L2 hub-audit(후보 도출)은 자동으로 돌지만, **canonical 허브 실제 생성은 admin 판단**이 필요하다. 자동 생성하지 않는다.

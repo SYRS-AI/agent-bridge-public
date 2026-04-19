@@ -874,6 +874,86 @@ if [[ $DRY_RUN -eq 0 ]]; then
     --channel "$CHANNEL" >/dev/null
 fi
 
+# Post-upgrade admin signal: file a [upgrade-complete] task with a
+# ready-to-execute checklist. Without this the admin has to know to
+# go read docs/agent-runtime/wiki-onboarding.md; the task makes the
+# first run self-announcing. Skipped on dry-runs and when no admin
+# agent is configured.
+if [[ $DRY_RUN -eq 0 ]]; then
+  # Resolve admin id: env override → roster file → skip.
+  _post_admin="${BRIDGE_ADMIN_AGENT:-${BRIDGE_ADMIN_AGENT_ID:-}}"
+  if [[ -z "$_post_admin" ]]; then
+    for _roster in "$TARGET_ROOT/agent-roster.local.sh" "$TARGET_ROOT/agent-roster.sh"; do
+      if [[ -r "$_roster" ]]; then
+        set +u
+        # shellcheck disable=SC1090,SC1091
+        source "$_roster" 2>/dev/null || true
+        set -u
+      fi
+    done
+    _post_admin="${BRIDGE_ADMIN_AGENT_ID:-}"
+  fi
+  if [[ -n "$_post_admin" && -x "$TARGET_ROOT/agent-bridge" ]]; then
+    _post_body="$(mktemp -t bridge-upgrade-post.XXXXXX)"
+    cat >"$_post_body" <<POST_EOF
+# Agent Bridge upgrade completed
+
+- from_version: ${INSTALLED_VERSION:-unknown}
+- to_version: $SOURCE_VERSION
+- ref: $SOURCE_REF
+- channel: $CHANNEL
+- upgraded_at: $(date -Iseconds 2>/dev/null || date)
+
+## Immediate action
+
+The v0.4.0 wiki-graph pipeline requires a one-time bootstrap on this
+host. The following sequence is idempotent — re-running produces no
+drift if the state is already converged.
+
+1. \`$TARGET_ROOT/bootstrap-memory-system.sh --apply\`
+   Registers all wiki + librarian crons, provisions the dynamic
+   librarian agent, and installs the Phase 1/2 scripts into
+   \`$TARGET_ROOT/scripts/\`.
+
+2. \`$TARGET_ROOT/scripts/wiki-mention-scan.py --full-rebuild\`
+   Builds the initial L1 observation index
+   (\`$TARGET_ROOT/shared/wiki/_index/mentions.db\`) and generates
+   today's distribution report.
+
+3. Review the distribution report at
+   \`$TARGET_ROOT/shared/wiki/_index/distribution-report-<date>.md\`
+   — section 2 lists L2 hub candidates. The weekly
+   \`wiki-hub-audit\` cron will resurface these as
+   \`[wiki-hub-candidates]\` tasks; you can also trigger it now:
+   \`$TARGET_ROOT/scripts/wiki-hub-audit.py --emit-task\`.
+
+## Full onboarding
+
+- \`docs/agent-runtime/wiki-onboarding.md\` — complete v0.4.0 admin walkthrough
+- \`docs/agent-runtime/admin-protocol.md\` — Wiki Canonical Hub Curation section (weekly ritual)
+- \`docs/agent-runtime/wiki-mention-index.md\` — L1 observation layer spec
+- \`docs/agent-runtime/wiki-entity-lifecycle.md\` — entity schema + dedup rules
+- \`docs/agent-runtime/wiki-graph-rules.md\` — graph edge policy
+
+## What's already automatic
+
+- MEMORY-SCHEMA.md sync to every agent home (just ran via \`bridge-docs.py apply --all\`)
+- Librarian CLAUDE.md template propagation
+- PreCompact hook registration on active claude agents (from bootstrap)
+
+## Done note format
+
+When you finish the three steps above, close this task with:
+\`agb done <task_id> --note "bootstrap OK; first-scan <N> files / <M> entities; distribution report at <path>"\`
+POST_EOF
+    "$TARGET_ROOT/agent-bridge" task create \
+      --to "$_post_admin" --priority normal --from "$_post_admin" \
+      --title "[upgrade-complete] Agent Bridge $SOURCE_VERSION — run bootstrap" \
+      --body-file "$_post_body" >/dev/null 2>&1 || true
+    rm -f "$_post_body"
+  fi
+fi
+
 if [[ $RESTART_AGENTS -eq 1 ]]; then
   AGENT_RESTART_REPORT="$(bridge_upgrade_collect_agent_restart_report "$TARGET_ROOT" "$DRY_RUN")"
   AGENT_RESTART_JSON="$(bridge_upgrade_agent_restart_json "$AGENT_RESTART_REPORT" 1 "$DRY_RUN")"
