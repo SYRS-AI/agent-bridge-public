@@ -159,7 +159,9 @@ bridge_dispatch_notification() {
       fi
 
       text="$(bridge_notification_text "$title" "$message" "$task_id" "$priority")"
-      if bridge_tmux_send_and_submit "$session" "$engine" "$text"; then
+      # Issue #132a: pass $agent so a busy gate at inject time routes through
+      # the pending-attention spool instead of silently dropping the wake.
+      if bridge_tmux_send_and_submit "$session" "$engine" "$text" "$agent"; then
         return 0
       fi
       bridge_warn "Claude idle wake delivery failed for '${agent}'"
@@ -176,7 +178,7 @@ bridge_dispatch_notification() {
         return 1
       fi
       text="$(bridge_notification_text "$title" "$message" "$task_id" "$priority")"
-      bridge_tmux_send_and_submit "$session" "$engine" "$text"
+      bridge_tmux_send_and_submit "$session" "$engine" "$text" "$agent"
       ;;
   esac
 }

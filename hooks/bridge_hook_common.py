@@ -245,6 +245,26 @@ def bootstrap_artifact_context(agent: str) -> str:
             "Stay in onboarding flow until it is complete before doing unrelated work."
         )
 
+    # Issue #132a: surface any pending-attention spool entries queued while the
+    # agent was busy so the operator knows replays will follow once the input
+    # box becomes idle. The spool path mirrors lib/bridge-state.sh.
+    spool_path = (
+        bridge_state_dir() / "agents" / agent / "pending-attention.env"
+    )
+    try:
+        pending_count = sum(
+            1
+            for line in spool_path.read_text(encoding="utf-8").splitlines()
+            if line.strip()
+        )
+    except (OSError, UnicodeDecodeError):
+        pending_count = 0
+    if pending_count > 0:
+        lines.append(
+            f"Agent Bridge has {pending_count} queued external event(s); "
+            "they will replay into this session as the input box becomes idle."
+        )
+
     if not lines:
         return ""
     return "\n".join(lines)

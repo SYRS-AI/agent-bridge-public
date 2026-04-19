@@ -1090,6 +1090,16 @@ bridge_agent_next_session_marker_file() {
   printf '%s/next-session.sha' "$(bridge_agent_runtime_state_dir "$agent")"
 }
 
+bridge_agent_pending_attention_file() {
+  local agent="$1"
+  printf '%s/pending-attention.env' "$(bridge_agent_runtime_state_dir "$agent")"
+}
+
+bridge_agent_pending_attention_lock_dir() {
+  local agent="$1"
+  printf '%s/pending-attention.lock' "$(bridge_agent_runtime_state_dir "$agent")"
+}
+
 bridge_agent_initial_inbox_marker_file() {
   local agent="$1"
   printf '%s/initial-inbox.started' "$(bridge_agent_runtime_state_dir "$agent")"
