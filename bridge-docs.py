@@ -1032,12 +1032,51 @@ def cleanup_broken_shared_doc_links(agent_dir: Path, dry_run: bool, backup_root:
     return changed
 
 
+def sync_memory_schema_from_template(
+    agent_dir: Path,
+    bridge_home: Path,
+    dry_run: bool,
+    backup_root: Path,
+) -> list[str]:
+    """Overwrite an agent's MEMORY-SCHEMA.md with the template version
+    when they differ, keeping a timestamped backup of the previous copy.
+
+    Rationale: agents drift from the template because nothing else syncs
+    this file during `agb upgrade`. When the team-wide memory schema
+    evolves (e.g. the 2026-04-19 Daily Note Hygiene addition), agent
+    homes silently fall behind and downstream pipelines starve. The
+    template is the source of truth; local edits should be rare and
+    documented — if someone did hand-edit, the backup preserves it.
+    """
+    changed: list[str] = []
+    template = bridge_home / "agents" / "_template" / "MEMORY-SCHEMA.md"
+    target = agent_dir / "MEMORY-SCHEMA.md"
+    if not template.exists() or not target.exists():
+        return changed
+    try:
+        template_bytes = template.read_bytes()
+    except OSError:
+        return changed
+    try:
+        target_bytes = target.read_bytes()
+    except OSError:
+        return changed
+    if template_bytes == target_bytes:
+        return changed
+    backup_file(target, backup_root, dry_run)
+    if not dry_run:
+        target.write_bytes(template_bytes)
+    changed.append(str(target))
+    return changed
+
+
 def sync_agent_docs(agent_dir: Path, bridge_home: Path, dry_run: bool, stamp: str, registry: dict[str, SkillEntry]) -> list[str]:
     changed: list[str] = []
     backup_root = bridge_home / "state" / "doc-migration" / "backups" / stamp / agent_dir.name
 
     changed.extend(cleanup_broken_shared_doc_links(agent_dir, dry_run, backup_root))
     changed.extend(ensure_agent_shared_links(agent_dir, dry_run, backup_root))
+    changed.extend(sync_memory_schema_from_template(agent_dir, bridge_home, dry_run, backup_root))
 
     if normalize_claude(agent_dir, dry_run, backup_root):
         changed.append(str(agent_dir / "CLAUDE.md"))
