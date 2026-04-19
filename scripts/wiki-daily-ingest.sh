@@ -1,70 +1,111 @@
 #!/bin/bash
-# Wiki daily LLM-ingest — patch가 librarian 겸임 (librarian 전담 에이전트 생성은 agent create bug 수리 후).
+# Wiki daily ingest orchestrator (Phase 1 hardening — 2026-04-19).
 #
-# 역할: Karpathy LLM-wiki의 Ingest 루프.
-# 매일 밤, 각 에이전트의 오늘자 daily + 신규 research 파일을 수집해서
-# patch inbox에 "ingest 대상 N건" task 생성. patch claim 후 서브에이전트 spawn으로 LLM 분석 수행.
+# Two lanes:
 #
-# 장기: bridge-wiki.py ingest --llm 구현되면 여기서 직접 호출로 대체.
+#   Lane A — daily-note replication (deterministic, no LLM):
+#     Agent memory/YYYY-MM-DD.md files are copied as byte-equivalent
+#     replicas to shared/wiki/agents/<agent>/daily/<agent>-YYYY-MM-DD.md
+#     per wiki-graph-rules.md §2. Handled by wiki-daily-copy.py.
+#
+#   Lane B — non-daily capture ingest (LLM-assisted):
+#     Research/project/decision/shared files modified in the last 24h
+#     are queued as a [librarian-ingest] task. Daily notes are NEVER
+#     included in this lane — previously that caused misrouting into
+#     operating-rules.md because daily notes carry no schema_version=1
+#     envelope and hit the librarian ambiguous-fallback path.
+#
+# This script runs both lanes in sequence. Either can no-op cleanly.
 
 set -u
 AGENTS_ROOT=~/.agent-bridge/agents
 WIKI=~/.agent-bridge/shared/wiki
+SCRIPTS_ROOT=~/.agent-bridge/scripts
 DATE=$(date +%Y-%m-%d)
 YESTERDAY=$(date -v-1d +%Y-%m-%d 2>/dev/null || date -d 'yesterday' +%Y-%m-%d)
 LOG="$WIKI/_audit/ingest-$DATE.md"
 mkdir -p "$(dirname "$LOG")"
 
-# 1. 어제~오늘 daily 변경 파일 수집
-touched_daily=()
-for home in "$AGENTS_ROOT"/*/; do
-  agent=$(basename "$home")
-  case "$agent" in --help|_template|shared) continue ;; esac
-  for d in "$home/memory/$DATE.md" "$home/memory/$YESTERDAY.md"; do
-    [ -f "$d" ] && touched_daily+=("$d")
-  done
-done
+# -------------------------------------------------------------------------
+# Lane A — daily-note byte-replica copy (no librarian involvement)
+# -------------------------------------------------------------------------
 
-# 2. 신규/갱신 research 파일 수집 (최근 24시간)
+COPY_JSON="$(mktemp -t wiki-daily-copy.XXXXXX.json)"
+# shellcheck disable=SC2064
+trap "rm -f '$COPY_JSON'" EXIT
+
+copy_rc=0
+python3 "$SCRIPTS_ROOT/wiki-daily-copy.py" \
+  --since "$YESTERDAY" --until "$DATE" --json \
+  >"$COPY_JSON" 2>>"$LOG" || copy_rc=$?
+
+copy_summary=$(python3 - "$COPY_JSON" <<'PYEOF'
+import json
+import sys
+try:
+    with open(sys.argv[1], encoding="utf-8") as handle:
+        data = json.load(handle)
+except Exception:
+    print("copy-summary-unavailable")
+    sys.exit(0)
+print(
+    f"agents={data.get('agents_seen',0)} "
+    f"files={data.get('files_seen',0)} "
+    f"created={data.get('created',0)} "
+    f"replaced={data.get('replaced',0)} "
+    f"unchanged={data.get('unchanged',0)} "
+    f"errors={data.get('errors',0)}"
+)
+PYEOF
+)
+
+# -------------------------------------------------------------------------
+# Lane B — non-daily captures for librarian ingest
+# -------------------------------------------------------------------------
+
+# Research files touched in last 24h.
 touched_research=$(find "$AGENTS_ROOT"/*/memory/research -type f -name '*.md' -mtime -1 2>/dev/null | sort)
 research_count=$(printf '%s\n' "$touched_research" | grep -c '[^[:space:]]' || true)
 research_count=${research_count:-0}
 
-# 3. 신규/갱신 projects/shared/decisions 파일 (최근 24시간)
+# projects/shared/decisions files touched in last 24h.
 touched_other=$(find "$AGENTS_ROOT"/*/memory/projects "$AGENTS_ROOT"/*/memory/shared "$AGENTS_ROOT"/*/memory/decisions -type f -name '*.md' -mtime -1 2>/dev/null | sort)
 other_count=$(printf '%s\n' "$touched_other" | grep -c '[^[:space:]]' || true)
 other_count=${other_count:-0}
 
-daily_count=${#touched_daily[@]}
-total=$(( daily_count + research_count + other_count ))
+non_daily_total=$(( research_count + other_count ))
 
-# 4. 리포트
+# Audit log — always written.
 {
   echo "# Wiki Daily Ingest Queue — $DATE"
   echo ""
-  echo "## 총 ingest 대상: $total"
+  echo "## Lane A (daily byte-replica copy, no librarian)"
   echo ""
-  echo "### Daily notes ($daily_count)"
-  for d in "${touched_daily[@]:-}"; do
-    [ -n "$d" ] && echo "- $d"
-  done
+  echo "$copy_summary"
+  if [ "$copy_rc" -ne 0 ]; then
+    echo ""
+    echo "**Lane A exit code:** $copy_rc — see stderr above."
+  fi
+  echo ""
+  echo "## Lane B (non-daily captures for librarian)"
   echo ""
   echo "### Research files ($research_count)"
-  echo "$touched_research" | while read f; do [ -n "$f" ] && echo "- $f"; done
+  echo "$touched_research" | while read -r f; do [ -n "$f" ] && echo "- $f"; done
   echo ""
-  echo "### Other (projects/shared/decisions) ($other_count)"
-  echo "$touched_other" | while read f; do [ -n "$f" ] && echo "- $f"; done
+  echo "### Other projects/shared/decisions ($other_count)"
+  echo "$touched_other" | while read -r f; do [ -n "$f" ] && echo "- $f"; done
 } > "$LOG"
 
-# 5. task 생성 (대상 있을 때만). 가능하면 librarian에게, 없으면 patch로 폴백.
-if [ "$total" -gt 0 ]; then
+# Queue librarian task only for non-daily work. Lane A already handled
+# daily notes and did not produce a task.
+if [ "$non_daily_total" -gt 0 ]; then
   target="patch"
   if ~/.agent-bridge/agent-bridge agent show librarian >/dev/null 2>&1; then
     target="librarian"
   fi
   ~/.agent-bridge/agent-bridge task create --to "$target" --priority normal --from patch \
-    --title "[librarian-ingest] $total 파일 ingest 필요 — $DATE" \
+    --title "[librarian-ingest] $non_daily_total 파일 ingest 필요 — $DATE" \
     --body-file "$LOG" >/dev/null 2>&1 || true
 fi
 
-echo "wiki-daily-ingest: date=$DATE daily=$daily_count research=$research_count other=$other_count total=$total log=$LOG"
+echo "wiki-daily-ingest: date=$DATE lane-a ${copy_summary} lane-b research=$research_count other=$other_count total=$non_daily_total log=$LOG"

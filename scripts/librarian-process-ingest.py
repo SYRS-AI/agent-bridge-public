@@ -206,20 +206,81 @@ def infer_page(envelope: dict) -> str:
     return ""
 
 
+# Filesystem segments that, when present in the capture path, reliably
+# imply a specific promote kind. Checked in order — first match wins.
+# Mirrors ENTITY_KIND_PREFIXES but reads from disk layout instead of
+# envelope metadata. Deterministic; no LLM.
+PATH_KIND_HINTS = (
+    ("/memory/research/", "project"),
+    ("/memory/projects/", "project"),
+    ("/memory/decisions/", "decision"),
+    ("/memory/playbooks/", "playbook"),
+    ("/memory/tools/", "tools"),
+    ("/memory/people/", "people"),
+    ("/memory/users/", "people"),
+    ("/memory/data-sources/", "data-sources"),
+    ("/memory/shared/", "operating-rules"),
+)
+
+
+def infer_kind_from_path(capture_path: Path) -> str:
+    """Derive a promote --kind from the capture's filesystem location.
+
+    Returns "" when the path does not carry a recognizable hint, so the
+    caller can fall back to explicit-reject behavior (CLAUDE.md §9)
+    instead of silently defaulting to `operating-rules`.
+    """
+    path_str = str(capture_path)
+    for needle, kind in PATH_KIND_HINTS:
+        if needle in path_str:
+            return kind
+    return ""
+
+
+def suggested_entity_from_path(capture_path: Path, kind: str) -> str:
+    """Build a synthetic `<prefix>/<slug>` so promote routing has a page.
+
+    Paired with `infer_kind_from_path`. Example:
+      ``.../memory/projects/formulation-science.md`` + kind="project"
+      → ``projects/formulation-science``
+    """
+    if not kind:
+        return ""
+    prefix_map = {
+        "project": "projects",
+        "decision": "decisions",
+        "playbook": "playbooks",
+        "tools": "tools",
+        "people": "people",
+        "data-sources": "data-sources",
+        "operating-rules": "shared",
+    }
+    prefix = prefix_map.get(kind, kind)
+    return f"{prefix}/{capture_path.stem}"
+
+
 def build_envelope_from_fallback(capture_path: Path) -> dict:
     """Minimal envelope when schema_version=1 is absent.
 
     The librarian CLAUDE.md allows LLM fallback but this reference script
-    stays deterministic: default to shared kind, use filename stem as slug,
-    and excerpt = first 1500 chars of the raw file. The real librarian can
-    replace this with a Claude-based inference.
+    stays deterministic. Inference order:
+
+      1. Path-based hint (``memory/projects/*.md`` → kind=project, etc.).
+         When matched we populate ``suggested_entities`` with a synthetic
+         ``<prefix>/<stem>`` so downstream ``infer_kind`` picks up the
+         non-default mapping. This rescues the common case where an
+         agent writes a structured memory file without a PreCompact
+         envelope.
+      2. No hint → return an empty envelope. Callers treat this as
+         ``ambiguous-kind`` and escalate per CLAUDE.md §9 rather than
+         silently promoting to ``operating-rules``.
     """
     text = ""
     try:
         text = capture_path.read_text(encoding="utf-8", errors="replace")
     except OSError:
         pass
-    return {
+    envelope: dict = {
         "schema_version": SCHEMA_VERSION,
         "suggested_entities": [],
         "suggested_concepts": [],
@@ -228,6 +289,13 @@ def build_envelope_from_fallback(capture_path: Path) -> dict:
         "excerpt": text[:1500],
         "_fallback": True,
     }
+    path_kind = infer_kind_from_path(capture_path)
+    if path_kind:
+        synthetic_entity = suggested_entity_from_path(capture_path, path_kind)
+        if synthetic_entity:
+            envelope["suggested_entities"] = [synthetic_entity]
+            envelope["_fallback_kind_hint"] = path_kind
+    return envelope
 
 
 def capture_id_for(shared_root: Path, capture_path: Path) -> str:

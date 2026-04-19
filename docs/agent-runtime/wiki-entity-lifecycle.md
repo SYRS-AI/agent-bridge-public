@@ -4,7 +4,7 @@
 >
 > Promoted from `shared/upstream-candidates/2026-04-19-wiki-entity-cleanup-dedup.md` + lifecycle elements of `research-capture-protocol.md` §§"Update vs new-file" and "Legacy file migration".
 >
-> Related: [`wiki-graph-rules.md`](wiki-graph-rules.md), [`memory-schema.md`](memory-schema.md), [`research-capture-protocol.md`](research-capture-protocol.md).
+> Related: [`wiki-graph-rules.md`](wiki-graph-rules.md), [`memory-schema.md`](memory-schema.md), [`research-capture-protocol.md`](research-capture-protocol.md), [`wiki-mention-index.md`](wiki-mention-index.md).
 
 ## 1. What is an entity
 
@@ -184,3 +184,10 @@ Before merging a rollout or dedup pass:
 ## 8. Changelog
 
 - 2026-04-19: initial ratified version. Consolidates `shared/upstream-candidates/2026-04-19-wiki-entity-cleanup-dedup.md` + the "Update vs new-file" and "Legacy file migration" sections of `research-capture-protocol.md`. Obsidian aliases frontmatter formalized as standard. Single-file-with-anchors antipattern promoted to CRITICAL section with explicit split procedure.
+- 2026-04-19 (evening): daily-note ingest path split into two lanes
+  after the operating-rules.md misroute incident (see
+  `_audit/incident-2026-04-19-daily-note-misroute.md`). Daily notes are
+  now **never** routed through the librarian promote pipeline. They are
+  byte-equivalent copies handled by `scripts/wiki-daily-copy.py`. The
+  librarian only handles research/project/decision captures and has a
+  hard reject gate against daily-shaped paths and ambiguous kinds.

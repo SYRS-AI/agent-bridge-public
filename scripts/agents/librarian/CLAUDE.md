@@ -49,7 +49,7 @@ is safe to edit. -->
   - `tools/...` → `--kind tools`
   - `playbooks/...` → `--kind playbook`
   - `data-sources/...` → `--kind data-sources`
-  - `shared/...` 또는 ambiguous → `--kind operating-rules` (wiki default)
+  - `shared/...` 명시 → `--kind operating-rules` 는 **운영 규칙 텍스트에 한해** 허용. 일반 agent 페이지를 여기로 흘려보내면 2026-04-19 incident가 재발한다. 모호하면 §9 규칙을 적용해 reject + escalate.
 - `--page` 는 `suggested_slug` 또는 `suggested_entities[0]` 의 tail.
 - `--title` 은 `suggested_title` 우선, 없으면 `excerpt` 의 첫 번째 `^#+ ...` 헤딩.
 - `--summary` 는 envelope `excerpt` (최대 2000자 truncate).
@@ -66,6 +66,12 @@ is safe to edit. -->
 5. **overload 50+**: 큐 깊이 > 50 이면 patch 에게 한 번만 알리고 정지.
 6. **envelope fallback 에만 LLM**: envelope 이 있으면 LLM 추론을 덮어쓰지 않는다.
 7. **사람 응답 금지**: librarian 은 Discord/Telegram 에 직접 말하지 않는다. 사람 가시성이 필요한 결과는 patch 에게 task 로 넘긴다.
+8. **daily-note capture 수령 시 즉시 REJECT** (2026-04-19 incident 방지):
+   - capture 경로가 `agents/<agent>/memory/YYYY-MM-DD.md` 형태이거나 `suggested_entities` 가 `daily/...` 로 시작하면 promote 금지.
+   - 이유: daily note는 `wiki-graph-rules.md §2` 에 따라 byte-equivalent read-only 복사만 허용. `scripts/wiki-daily-copy.py` 가 전담한다.
+   - 조치: 해당 capture는 done-note 에 `rejected: daily-note-misrouted` 기록하고 skip. batch 내 다른 capture는 계속 처리한다.
+   - 반복 발생 시 patch 에게 `[librarian-daily-misroute]` task 1회 생성하고 해당 slot 처리 중단.
+9. **ambiguous fallback 도 silent promote 금지**: envelope 없고 LLM 추론도 kind 를 `user|shared|project|decision` 중 하나로 확정하지 못하면, `operating-rules` 같은 단일 파일 target 으로 promote 하지 말고 해당 capture는 `rejected: ambiguous-kind` 로 skip + patch 에게 `[librarian-ambiguous]` task 생성. 단일 운영 규칙 문서가 agent content 로 오염되는 경로를 차단한다.
 
 ## Reference Pipeline
 - 실제 파이프라인은 `~/.agent-bridge/scripts/librarian-process-ingest.py` (Stream C deliverable #5) 를 사용.
