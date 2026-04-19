@@ -369,6 +369,12 @@ def build_alias_registry(conn: sqlite3.Connection, wiki: Path) -> int:
     """Walk every wiki file; for each with a ``slug`` frontmatter, register
     the slug itself + every alias + the filename stem as lookup keys.
 
+    Redirect stubs (``type: redirect`` with a ``redirect_to`` pointer)
+    contribute their aliases to the redirect target, not to themselves —
+    otherwise their local slug competes with the canonical and steals
+    cross-agent references. If the stub has no ``redirect_to`` field
+    (malformed), it falls back to registering itself.
+
     Files without ``slug`` contribute nothing to the registry but still
     participate as mention sources in Pass 2.
     """
@@ -391,6 +397,18 @@ def build_alias_registry(conn: sqlite3.Connection, wiki: Path) -> int:
         rel = path.relative_to(wiki)
         entity_type = fm.get("type") or ""
         title = fm.get("title") or ""
+
+        # Redirect short-circuit: point every alias at the redirect target
+        # slug (derived from the ``redirect_to`` frontmatter, if present).
+        redirect_target_slug = ""
+        if entity_type == "redirect":
+            redirect_to = fm.get("redirect_to") or ""
+            if isinstance(redirect_to, str) and redirect_to:
+                # ``redirect_to`` is a wiki-relative path or slug. Take the
+                # last path segment as the target slug.
+                redirect_target_slug = redirect_to.rsplit("/", 1)[-1]
+                redirect_target_slug = redirect_target_slug.rsplit(".", 1)[0]
+
         # Determine hub scope: 'shared' if the canonical file itself lives
         # under a shared top-level dir (entities/, people/, concepts/, etc.
         # — NOT under agents/).
@@ -412,7 +430,10 @@ def build_alias_registry(conn: sqlite3.Connection, wiki: Path) -> int:
             entity_rows.append(
                 (slug, title, entity_type, hub_path, hub_scope, now, now, now)
             )
-        # Register aliases + slug self + filename stem
+
+        # Register aliases + slug self + filename stem. For redirects the
+        # target_slug is used so aliases map to the canonical, not the stub.
+        alias_target = redirect_target_slug or slug
         seen_aliases: set[str] = set()
         to_register: list[str] = [slug, path.stem]
         aliases_field = fm.get("aliases") or []
@@ -423,7 +444,7 @@ def build_alias_registry(conn: sqlite3.Connection, wiki: Path) -> int:
             if not norm or norm in seen_aliases:
                 continue
             seen_aliases.add(norm)
-            alias_rows.append((norm, surface, slug, str(rel)))
+            alias_rows.append((norm, surface, alias_target, str(rel)))
 
     cursor = conn.cursor()
     # Upsert entity rows. Use INSERT OR REPLACE on primary key.
