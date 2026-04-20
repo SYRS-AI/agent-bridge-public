@@ -26,6 +26,8 @@ agents/*/.claude/
 !agents/.claude/settings.json
 !agents/_template/session-type-files/
 !agents/_template/session-type-files/**
+!agents/_template/.claude/
+!agents/_template/.claude/settings.json
 agents/.claude/settings.local.json
 agents/.claude/settings.effective.json
 

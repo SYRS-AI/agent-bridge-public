@@ -57,6 +57,15 @@ Usage:
   $CLI_NAME migrate workspace plan <agent>
   $CLI_NAME migrate workspace copy <agent> [--dry-run]
   $CLI_NAME migrate workspace cutover <agent> --dry-run
+  $CLI_NAME migrate overhead pre-migrate [--output <file>] [--json]
+  $CLI_NAME migrate overhead dry-run [--agent <name>|--all] [--json]
+  $CLI_NAME migrate overhead apply [--agent <name>|--all] --yes [--dry-run] [--json]
+  $CLI_NAME migrate overhead rollback --stamp <YYYYMMDD-HHMMSS-<pid>> [--json]
+  $CLI_NAME wiki bootstrap [--agent <name>] [--shared-root <path>] [--dry-run] [--json]
+  $CLI_NAME wiki validate [--full|--frontmatter|--broken-link|--tree-edge] [--json]
+  $CLI_NAME wiki dedup-scan [--output <file>] [--json]
+  $CLI_NAME wiki dedup-apply --plan <file> [--dry-run] [--json]
+  $CLI_NAME wiki repair-links [--apply] [--limit N] [--json]
   $CLI_NAME isolate <agent> [--dry-run]
   $CLI_NAME unisolate <agent> [--dry-run]
   $CLI_NAME inbox [agent] [--all]
@@ -603,6 +612,11 @@ PY
     migrate)
       shift
       exec "$BRIDGE_BASH_BIN" "$SCRIPT_DIR/bridge-migrate.sh" "$@"
+      ;;
+    wiki)
+      shift
+      bridge_require_python
+      exec python3 "$SCRIPT_DIR/bridge-wiki.py" "$@"
       ;;
     isolate)
       shift

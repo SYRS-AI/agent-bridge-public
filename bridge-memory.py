@@ -4,14 +4,18 @@
 from __future__ import annotations
 
 import argparse
+import fcntl
 import hashlib
 import json
+import os
 import re
 import shutil
 import sqlite3
+import subprocess
 import sys
+import tempfile
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 
 
@@ -19,6 +23,8 @@ USER_ID_RE = re.compile(r"^[A-Za-z0-9._-]+$")
 SEARCH_SCOPES = ("wiki", "all", "user", "daily", "shared", "project", "decision", "raw")
 QUERY_SCOPES = ("all", "wiki", "user", "daily", "shared", "project", "decision", "raw")
 INDEX_KIND = "bridge-wiki-fts-v1"
+INDEX_KIND_WIKI_HYBRID_V2 = "bridge-wiki-hybrid-v2"
+KNOWN_INDEX_KINDS = (INDEX_KIND, INDEX_KIND_WIKI_HYBRID_V2)
 
 
 @dataclass
@@ -36,10 +42,37 @@ def read_text(path: Path) -> str:
 
 
 def write_text(path: Path, text: str, dry_run: bool) -> None:
+    """Atomic + locked text write.
+
+    Writes to a same-directory tempfile, fsyncs, and renames into place.
+    Serializes concurrent writers by holding an exclusive flock on a
+    sibling `<name>.lock` file — this prevents two summarize runs for the
+    same week/month from clobbering each other.
+    """
     if dry_run:
         return
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(text, encoding="utf-8")
+    lock_path = path.with_name(path.name + ".lock")
+    with lock_path.open("a") as lock_handle:
+        try:
+            fcntl.flock(lock_handle.fileno(), fcntl.LOCK_EX)
+            tmp = tempfile.NamedTemporaryFile(
+                mode="w", encoding="utf-8",
+                dir=str(path.parent), prefix=f".{path.name}.", suffix=".tmp",
+                delete=False,
+            )
+            try:
+                tmp.write(text)
+                tmp.flush()
+                os.fsync(tmp.fileno())
+            finally:
+                tmp.close()
+            os.replace(tmp.name, path)
+        finally:
+            try:
+                fcntl.flock(lock_handle.fileno(), fcntl.LOCK_UN)
+            except OSError:
+                pass
 
 
 def append_text(path: Path, text: str, dry_run: bool) -> None:
@@ -47,7 +80,24 @@ def append_text(path: Path, text: str, dry_run: bool) -> None:
         return
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("a", encoding="utf-8") as handle:
-        handle.write(text)
+        try:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+            handle.write(text)
+            handle.flush()
+        finally:
+            try:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+            except OSError:
+                pass
+
+
+def _safe_excerpt(path: Path, limit: int) -> str | None:
+    """Read first `limit` chars from `path`. Returns None on any OSError or decode issue."""
+    try:
+        text = path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        return None
+    return text[:limit]
 
 
 def load_template_files(template_root: Path) -> dict[str, str]:
@@ -230,11 +280,45 @@ def slugify(text: str) -> str:
     return slug or "capture"
 
 
+ENVELOPE_SCHEMA_VERSIONS = {"1"}
+
+
+def _sniff_envelope(text: str) -> dict | None:
+    """Return parsed envelope dict if `text` carries a structured capture.
+
+    Two accepted shapes (both produced by hooks/pre-compact.py):
+        1) Pure JSON body whose top-level `schema_version` is known.
+        2) A short head line (e.g. `schema_version=1 | excerpt=...`)
+           followed by a blank line, then a JSON object body.
+    Anything else returns None and the caller falls back to text-only.
+    """
+    if not text:
+        return None
+    stripped = text.lstrip()
+    if stripped.startswith("{"):
+        try:
+            data = json.loads(stripped)
+        except (json.JSONDecodeError, ValueError):
+            data = None
+        if isinstance(data, dict) and str(data.get("schema_version") or "") in ENVELOPE_SCHEMA_VERSIONS:
+            return data
+    brace_idx = text.find("\n{")
+    if brace_idx != -1:
+        candidate = text[brace_idx + 1:].strip()
+        try:
+            data = json.loads(candidate)
+        except (json.JSONDecodeError, ValueError):
+            return None
+        if isinstance(data, dict) and str(data.get("schema_version") or "") in ENVELOPE_SCHEMA_VERSIONS:
+            return data
+    return None
+
+
 def capture_payload(args: argparse.Namespace) -> dict:
     now = datetime.now().astimezone()
     capture_id = now.strftime("%Y%m%dT%H%M%S%z")
     capture_id = f"{capture_id[:15]}-{slugify(args.title or args.source or args.agent)}"
-    return {
+    payload: dict = {
         "capture_id": capture_id,
         "agent": args.agent,
         "user": args.user,
@@ -245,6 +329,15 @@ def capture_payload(args: argparse.Namespace) -> dict:
         "text": args.text,
         "created_at": now.isoformat(),
     }
+    envelope = _sniff_envelope(args.text or "")
+    if envelope is not None:
+        payload["envelope"] = envelope
+        payload["schema_version"] = envelope.get("schema_version")
+        for key in ("suggested_slug", "suggested_title", "session_type", "trigger"):
+            value = envelope.get(key)
+            if value and key not in payload:
+                payload[key] = value
+    return payload
 
 
 def write_capture_payload(home: Path, payload: dict, dry_run: bool) -> Path:
@@ -900,7 +993,7 @@ def cmd_search(args: argparse.Namespace) -> int:
     return 0
 
 
-def collect_index_documents(home: Path) -> list[dict]:
+def collect_index_documents(home: Path, shared_root: Path | None = None, include_cascade: bool = False) -> list[dict]:
     documents: list[dict] = []
 
     def add_markdown(path: Path, kind: str, user_id: str = "") -> None:
@@ -942,6 +1035,35 @@ def collect_index_documents(home: Path) -> list[dict]:
         if raw_root.exists():
             for path in sorted(raw_root.glob("*.json")):
                 add_json(path, kind)
+
+    if include_cascade:
+        # v2 cascade sources — weekly + monthly summaries produced by the
+        # `summarize` subcommands.
+        #
+        # Note: ingested captures are ALREADY collected by the base flow
+        # above as kind="raw-ingested". We do NOT re-add them here because
+        # `documents.path` is a PRIMARY KEY and the same file would cause a
+        # UNIQUE constraint violation on rebuild. The v2 search path maps
+        # both "raw-ingested" and "capture-ingested" via the consumer's
+        # `--source` filter, so no content is lost by skipping the re-add.
+        for cascade_dir, kind in (
+            (home / "memory" / "weekly", "memory-weekly"),
+            (home / "memory" / "monthly", "memory-monthly"),
+        ):
+            if cascade_dir.exists():
+                for path in sorted(cascade_dir.glob("*.md")):
+                    add_markdown(path, kind)
+
+    if shared_root is not None:
+        wiki_root = shared_root / "wiki"
+        if wiki_root.exists():
+            for path in sorted(wiki_root.rglob("*.md")):
+                # Skip workspace + audit scratch areas — they are noisy
+                # and change on every hygiene run.
+                rel = path.relative_to(shared_root)
+                if rel.parts[:2] in (("wiki", "_workspace"), ("wiki", "_audit")):
+                    continue
+                add_markdown(path, "wiki")
 
     return documents
 
@@ -1081,23 +1203,61 @@ def default_index_db_path(bridge_home: Path, agent: str) -> Path:
 def cmd_rebuild_index(args: argparse.Namespace) -> int:
     home = Path(args.home)
     bridge_home = Path(args.bridge_home)
+    index_kind = getattr(args, "index_kind", INDEX_KIND) or INDEX_KIND
+    if index_kind not in KNOWN_INDEX_KINDS:
+        die(f"unknown --index-kind: {index_kind!r}. known: {', '.join(KNOWN_INDEX_KINDS)}")
+    shared_root = Path(args.shared_root) if getattr(args, "shared_root", None) else None
+    include_cascade = index_kind == INDEX_KIND_WIKI_HYBRID_V2
+    if include_cascade and shared_root is None:
+        # v2 without shared wiki still works (memory-only), but we warn.
+        print(
+            "note: --index-kind bridge-wiki-hybrid-v2 without --shared-root ingests local "
+            "agent home only; pass --shared-root <path> to include shared/wiki/*",
+            file=sys.stderr,
+        )
     db_path = Path(args.db_path) if args.db_path else default_index_db_path(bridge_home, args.agent)
     indexed_at = datetime.now().astimezone().isoformat()
-    documents = collect_index_documents(home)
+    documents = collect_index_documents(home, shared_root=shared_root, include_cascade=include_cascade)
 
     chunk_count = 0
     if not args.dry_run:
         db_path.parent.mkdir(parents=True, exist_ok=True)
         conn = sqlite3.connect(db_path)
         try:
+            # Drop stale content tables first so a DB built against an older
+            # schema does not break the new FTS triggers (which reference
+            # columns that may not have existed before).
+            conn.executescript(
+                """
+                DROP TRIGGER IF EXISTS chunks_ai;
+                DROP TRIGGER IF EXISTS chunks_ad;
+                DROP TRIGGER IF EXISTS chunks_au;
+                DROP TABLE IF EXISTS chunks_fts;
+                DROP TABLE IF EXISTS chunks;
+                DROP TABLE IF EXISTS documents;
+                DROP TABLE IF EXISTS meta;
+                """
+            )
             ensure_index_schema(conn)
             recreate_index_fts(conn)
-            conn.execute("DELETE FROM chunks")
-            conn.execute("DELETE FROM documents")
-            conn.execute("DELETE FROM meta")
             for doc in documents:
                 path = doc["path"]
-                relpath = str(path.relative_to(home))
+                # Paths may live under `home` (legacy) or under `shared_root`
+                # (v2 wiki cascade). Store a stable relative form anchored at
+                # whichever root the file actually came from.
+                try:
+                    relpath = str(path.relative_to(home))
+                except ValueError:
+                    if shared_root is not None:
+                        try:
+                            # Tag shared paths with a `shared:` prefix so they
+                            # don't collide with agent-local paths in the
+                            # documents PRIMARY KEY.
+                            relpath = "shared:" + str(path.relative_to(shared_root))
+                        except ValueError:
+                            relpath = str(path)
+                    else:
+                        relpath = str(path)
                 if doc["format"] == "markdown":
                     text = read_text(path)
                     chunks = chunk_markdown_text(text)
@@ -1121,21 +1281,30 @@ def cmd_rebuild_index(args: argparse.Namespace) -> int:
                 for start_line, end_line, text in chunks:
                     if not text.strip():
                         continue
+                    # v2 uses the same schema; differs only in source-kind
+                    # diversity and the meta.index_kind value. Embeddings are
+                    # left empty; if/when a Gemini-backed embedder runs, it
+                    # can UPDATE embedding in-place. Search falls back to
+                    # keyword-only until embeddings exist (see
+                    # `_index_has_embeddings` in tools/memory-manager.py).
+                    # `chunks.source` is set to `doc["kind"]` so memory-manager
+                    # search can filter via `--source`.
                     conn.execute(
                         """
                         INSERT INTO chunks(path, source, model, kind, user_id, start_line, end_line, text, embedding)
-                        VALUES (?, ?, 'bridge-wiki-fts-v1', ?, ?, ?, ?, ?, '[]')
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, '[]')
                         """,
-                        (relpath, doc["kind"], doc["kind"], user_id, start_line, end_line, text),
+                        (relpath, doc["kind"], index_kind, doc["kind"], user_id, start_line, end_line, text),
                     )
                     chunk_count += 1
 
             conn.executemany(
                 "INSERT INTO meta(key, value) VALUES (?, ?)",
                 {
-                    "index_kind": INDEX_KIND,
+                    "index_kind": index_kind,
                     "agent": args.agent,
                     "home": str(home),
+                    "shared_root": str(shared_root) if shared_root else "",
                     "indexed_at": indexed_at,
                     "document_count": str(len(documents)),
                     "chunk_count": str(chunk_count),
@@ -1154,6 +1323,8 @@ def cmd_rebuild_index(args: argparse.Namespace) -> int:
     payload = {
         "agent": args.agent,
         "db_path": str(db_path),
+        "index_kind": index_kind,
+        "shared_root": str(shared_root) if shared_root else "",
         "document_count": len(documents),
         "chunk_count": chunk_count,
         "indexed_at": indexed_at,
@@ -1164,6 +1335,9 @@ def cmd_rebuild_index(args: argparse.Namespace) -> int:
     else:
         print(f"agent: {args.agent}")
         print(f"db_path: {db_path}")
+        print(f"index_kind: {index_kind}")
+        if shared_root:
+            print(f"shared_root: {shared_root}")
         print(f"document_count: {len(documents)}")
         print(f"chunk_count: {chunk_count}")
         print(f"dry_run: {'yes' if args.dry_run else 'no'}")
@@ -1273,6 +1447,449 @@ def cmd_query(args: argparse.Namespace) -> int:
     return 0
 
 
+# ---------------------------------------------------------------------------
+# summarize weekly / monthly (cascading summarizer)
+# ---------------------------------------------------------------------------
+
+def _parse_iso_week(value: str) -> tuple[int, int]:
+    """Parse `YYYY-W##` into (year, week_number). Raise SystemExit on bad format."""
+    match = re.fullmatch(r"(\d{4})-W(\d{2})", value.strip())
+    if not match:
+        die(f"invalid --week (expected YYYY-W##): {value}")
+    return int(match.group(1)), int(match.group(2))
+
+
+def _previous_iso_week() -> tuple[int, int]:
+    today = datetime.now().astimezone().date()
+    monday_this = today - timedelta(days=today.isoweekday() - 1)
+    prev_any_day = monday_this - timedelta(days=3)  # safely inside last week
+    year, week, _ = prev_any_day.isocalendar()
+    return year, week
+
+
+def _iso_week_range(year: int, week: int) -> tuple[datetime, datetime]:
+    monday = datetime.fromisocalendar(year, week, 1)
+    sunday = datetime.fromisocalendar(year, week, 7)
+    return monday, sunday
+
+
+def _daily_notes_base(home: Path, user: str) -> Path:
+    """Resolve the daily-notes root for a user.
+
+    Contract:
+    - `default` (or empty) user → `<home>/memory` is the canonical root.
+    - Non-default user → `<home>/users/<user>/memory` only. No silent fallback to
+      the shared root; absent directory = zero notes.
+    """
+    if not user or user == "default":
+        return home / "memory"
+    return home / "users" / user / "memory"
+
+
+def _collect_daily_notes(home: Path, user: str, start: datetime, end: datetime) -> list[Path]:
+    base = _daily_notes_base(home, user)
+    if not base.exists():
+        return []
+    out: list[Path] = []
+    cur = start.date()
+    while cur <= end.date():
+        candidate = base / f"{cur.isoformat()}.md"
+        if candidate.exists():
+            out.append(candidate)
+        cur = cur + timedelta(days=1)
+    return out
+
+
+def _collect_ingested_captures(home: Path, start: datetime, end: datetime) -> list[Path]:
+    ingested = home / "raw" / "captures" / "ingested"
+    if not ingested.exists():
+        return []
+    out: list[Path] = []
+    for path in sorted(ingested.glob("*.json")):
+        try:
+            payload = json.loads(read_text(path))
+        except (OSError, json.JSONDecodeError):
+            continue
+        created_raw = payload.get("created_at") or ""
+        try:
+            ts = datetime.fromisoformat(created_raw)
+        except ValueError:
+            continue
+        if ts.tzinfo is not None:
+            ts = ts.replace(tzinfo=None)
+        if start <= ts <= end:
+            out.append(path)
+    return out
+
+
+def _llm_summarize(prompt: str, model: str = "") -> str | None:
+    """Best-effort LLM summarization via claude CLI. Returns None on any failure."""
+    claude = shutil.which("claude")
+    if not claude:
+        return None
+    command = [claude, "-p", "--no-session-persistence", "--dangerously-skip-permissions", "--output-format", "text"]
+    if model:
+        command.extend(["--model", model])
+    command.append(prompt)
+    try:
+        completed = subprocess.run(command, capture_output=True, text=True, timeout=90, check=True)
+        return completed.stdout.strip() or None
+    except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired):
+        return None
+
+
+def _fallback_merge(sources: list[Path]) -> str:
+    """Heading-based fallback merge when no LLM is available."""
+    chunks: list[str] = []
+    for path in sources:
+        try:
+            text = read_text(path)
+        except OSError:
+            continue
+        headings = [line for line in text.splitlines() if line.startswith("#")]
+        if headings:
+            chunks.append(f"### {path.name}\n" + "\n".join(headings[:10]))
+    return "\n\n".join(chunks) if chunks else "(no source headings available)"
+
+
+def cmd_summarize_weekly(args: argparse.Namespace) -> int:
+    home = Path(args.home)
+    user = args.user or "default"
+    if args.week:
+        year, week = _parse_iso_week(args.week)
+    else:
+        year, week = _previous_iso_week()
+    start, end = _iso_week_range(year, week)
+
+    daily_notes = _collect_daily_notes(home, user, start, end)
+    ingested = _collect_ingested_captures(home, start, end)
+
+    header = f"# {year}-W{week:02d} Weekly Summary\n\n"
+    header += f"Range: {start.date().isoformat()} .. {end.date().isoformat()}\n"
+    header += f"Agent: {args.agent}\n"
+    header += f"User: {user}\n\n"
+
+    if args.llm and daily_notes + ingested:
+        chunks: list[str] = []
+        for p in (daily_notes + ingested[:8]):
+            excerpt = _safe_excerpt(p, 2000)
+            if excerpt is not None:
+                chunks.append(f"## {p.name}\n{excerpt}")
+        excerpt_text = "\n\n".join(chunks)
+        prompt = (
+            "Summarize this agent's week. Extract: (1) major events, "
+            "(2) explicit user/operator decisions, (3) numeric results "
+            "that changed, (4) unresolved items carried to next week. "
+            "Return plain markdown with these four sub-sections.\n\n"
+            f"{excerpt_text}"
+        )
+        body = _llm_summarize(prompt, args.llm_model) or _fallback_merge(daily_notes + ingested)
+    else:
+        body = _fallback_merge(daily_notes + ingested)
+
+    out_path = home / "memory" / "weekly" / f"{year}-W{week:02d}.md"
+    write_text(out_path, header + body + "\n", args.dry_run)
+
+    log_line = (
+        f"- {datetime.now().astimezone().isoformat(timespec='seconds')} "
+        f"kind=summarize-weekly target=`{out_path.relative_to(home)}` "
+        f"sources={len(daily_notes)}+{len(ingested)}\n"
+    )
+    append_text(home / "memory" / "log.md", log_line, args.dry_run)
+
+    payload = {
+        "agent": args.agent,
+        "user": user,
+        "year": year,
+        "week": week,
+        "range": [start.date().isoformat(), end.date().isoformat()],
+        "daily_note_count": len(daily_notes),
+        "ingested_count": len(ingested),
+        "output": str(out_path),
+        "dry_run": args.dry_run,
+    }
+    if args.json:
+        print(json.dumps(payload, ensure_ascii=False, indent=2))
+    else:
+        print(f"weekly: {out_path}")
+        print(f"sources: daily={len(daily_notes)} ingested={len(ingested)}")
+    return 0
+
+
+def cmd_summarize_monthly(args: argparse.Namespace) -> int:
+    home = Path(args.home)
+    user = args.user or "default"
+    if args.month:
+        match = re.fullmatch(r"(\d{4})-(\d{2})", args.month.strip())
+        if not match:
+            die(f"invalid --month (expected YYYY-MM): {args.month}")
+        year, month = int(match.group(1)), int(match.group(2))
+    else:
+        today = datetime.now().astimezone().date()
+        first_this = today.replace(day=1)
+        last_prev = first_this - timedelta(days=1)
+        year, month = last_prev.year, last_prev.month
+
+    month_start = datetime(year, month, 1).astimezone()
+    if month == 12:
+        month_end = datetime(year + 1, 1, 1).astimezone() - timedelta(seconds=1)
+    else:
+        month_end = datetime(year, month + 1, 1).astimezone() - timedelta(seconds=1)
+
+    weekly_dir = home / "memory" / "weekly"
+    weekly_notes: list[Path] = []
+    if weekly_dir.exists():
+        for path in sorted(weekly_dir.glob("*.md")):
+            match = re.fullmatch(r"(\d{4})-W(\d{2})\.md", path.name)
+            if not match:
+                continue
+            wy, ww = int(match.group(1)), int(match.group(2))
+            try:
+                week_start = datetime.fromisocalendar(wy, ww, 1).astimezone()
+                week_end = (datetime.fromisocalendar(wy, ww, 7)
+                            .astimezone() + timedelta(hours=23, minutes=59, seconds=59))
+            except ValueError:
+                continue
+            # Include the week if *any* day of it falls inside the target month.
+            if week_end < month_start or week_start > month_end:
+                continue
+            weekly_notes.append(path)
+
+    daily_notes = _collect_daily_notes(home, user, month_start, month_end)
+
+    header = f"# {year}-{month:02d} Monthly Summary\n\n"
+    header += f"Agent: {args.agent}\nUser: {user}\n\n"
+
+    if args.llm and (weekly_notes or daily_notes):
+        chunks: list[str] = []
+        for p in (weekly_notes + daily_notes[:10]):
+            excerpt = _safe_excerpt(p, 2500)
+            if excerpt is not None:
+                chunks.append(f"## {p.name}\n{excerpt}")
+        excerpt_text = "\n\n".join(chunks)
+        prompt = (
+            "Summarize this agent's month. Extract: (1) monthly trends, "
+            "(2) major decisions, (3) recurring patterns, (4) in-flight "
+            "long-running projects. Flag any daily notes older than 60 "
+            "days as candidates for archive-only retention. Return plain "
+            "markdown with these sub-sections.\n\n"
+            f"{excerpt_text}"
+        )
+        body = _llm_summarize(prompt, args.llm_model) or _fallback_merge(weekly_notes + daily_notes)
+    else:
+        body = _fallback_merge(weekly_notes + daily_notes)
+
+    out_path = home / "memory" / "monthly" / f"{year}-{month:02d}.md"
+    write_text(out_path, header + body + "\n", args.dry_run)
+
+    log_line = (
+        f"- {datetime.now().astimezone().isoformat(timespec='seconds')} "
+        f"kind=summarize-monthly target=`{out_path.relative_to(home)}` "
+        f"sources={len(weekly_notes)}w+{len(daily_notes)}d\n"
+    )
+    append_text(home / "memory" / "log.md", log_line, args.dry_run)
+
+    payload = {
+        "agent": args.agent,
+        "user": user,
+        "year": year,
+        "month": month,
+        "weekly_count": len(weekly_notes),
+        "daily_count": len(daily_notes),
+        "output": str(out_path),
+        "dry_run": args.dry_run,
+    }
+    if args.json:
+        print(json.dumps(payload, ensure_ascii=False, indent=2))
+    else:
+        print(f"monthly: {out_path}")
+        print(f"sources: weekly={len(weekly_notes)} daily={len(daily_notes)}")
+    return 0
+
+
+_RECONCILE_MARKERS = (
+    # phrase must look like an explicit contradiction statement, not a bare word.
+    "is no longer",
+    "is incorrect",
+    "is deprecated",
+    "superseded by",
+    "was wrong",
+    "should be",
+    "actually,",
+)
+
+
+def _unique_report_path(out_dir: Path, ts: str, suffix: str) -> Path:
+    """Return a non-colliding report path under `out_dir`. Adds `-pid-N` as needed."""
+    pid = os.getpid()
+    candidate = out_dir / f"{ts}-{pid}-{suffix}.json"
+    counter = 0
+    while candidate.exists():
+        counter += 1
+        candidate = out_dir / f"{ts}-{pid}-{counter}-{suffix}.json"
+    return candidate
+
+
+def _resolve_bridge_bin() -> Path | None:
+    """Resolve the `agent-bridge` CLI binary, honoring BRIDGE_HOME and install-relative layout."""
+    candidates: list[Path] = []
+    env_home = os.environ.get("BRIDGE_HOME")
+    if env_home:
+        candidates.append(Path(env_home) / "agent-bridge")
+    script_dir = Path(__file__).resolve().parent
+    candidates.append(script_dir / "agent-bridge")
+    candidates.append(Path.home() / ".agent-bridge" / "agent-bridge")
+    for c in candidates:
+        if c.exists() and os.access(c, os.X_OK):
+            return c
+    return None
+
+
+def _reconcile_task_exists(agent: str) -> bool:
+    """Return True if there is an existing open reconcile task for `agent`."""
+    binary = _resolve_bridge_bin()
+    if binary is None:
+        return False
+    try:
+        completed = subprocess.run(
+            [str(binary), "inbox", "patch", "--json"],
+            capture_output=True, text=True, timeout=10, check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    try:
+        rows = json.loads(completed.stdout or "[]")
+    except json.JSONDecodeError:
+        return False
+    needle = f"[reconcile] {agent}"
+    for row in rows if isinstance(rows, list) else []:
+        title = (row.get("title") or "") if isinstance(row, dict) else ""
+        status = (row.get("status") or "") if isinstance(row, dict) else ""
+        if status in {"queued", "claimed", "blocked"} and title.startswith(needle):
+            return True
+    return False
+
+
+def cmd_reconcile(args: argparse.Namespace) -> int:
+    """Flag candidate memory/wiki contradictions (heuristic).
+
+    Limitation (by design): this is a *candidate* flagger driven by explicit
+    contradiction phrases in the agent's memory notes that are absent from the
+    canonical wiki page. False positives are possible (editorial prose) and
+    false negatives are common (semantic contradictions without marker words).
+    Use output as input for human review, not as a final verdict.
+    """
+    home = Path(args.home)
+    shared_root = Path(args.shared_root) if args.shared_root else None
+    now = datetime.now().astimezone()
+    ts = now.strftime("%Y%m%dT%H%M%S")
+    out_dir = home / "raw" / "captures" / "conflicts"
+    out_path = _unique_report_path(out_dir, ts, "reconcile")
+
+    conflicts: list[dict] = []
+    if shared_root and shared_root.exists():
+        wiki_pages = list((shared_root / "wiki").rglob("*.md")) if (shared_root / "wiki").exists() else []
+        mem_pages = list((home / "memory").rglob("*.md"))
+        wiki_stems: dict[str, Path] = {}
+        for p in wiki_pages:
+            # Prefer the first occurrence; if a stem collides, don't stomp.
+            wiki_stems.setdefault(p.stem, p)
+        for mp in mem_pages:
+            if mp.stem not in wiki_stems:
+                continue
+            try:
+                mem_text = read_text(mp).lower()
+                wiki_text = read_text(wiki_stems[mp.stem]).lower()
+            except (OSError, UnicodeDecodeError):
+                continue
+            hits: list[str] = []
+            for marker in _RECONCILE_MARKERS:
+                if marker in mem_text and marker not in wiki_text:
+                    hits.append(marker)
+            if hits:
+                conflicts.append({
+                    "stem": mp.stem,
+                    "memory_path": str(mp),
+                    "wiki_path": str(wiki_stems[mp.stem]),
+                    "markers": hits,
+                })
+
+    report = {
+        "agent": args.agent,
+        "timestamp": ts,
+        "pid": os.getpid(),
+        "shared_root": str(shared_root) if shared_root else None,
+        "conflict_count": len(conflicts),
+        "conflicts": conflicts,
+        "caveat": "heuristic flagger; requires human review",
+    }
+    if not args.dry_run:
+        out_dir.mkdir(parents=True, exist_ok=True)
+        # Atomic write.
+        tmp = tempfile.NamedTemporaryFile(
+            mode="w", encoding="utf-8",
+            dir=str(out_dir), prefix=f".{out_path.name}.", suffix=".tmp",
+            delete=False,
+        )
+        try:
+            tmp.write(json.dumps(report, ensure_ascii=False, indent=2) + "\n")
+            tmp.flush()
+            os.fsync(tmp.fileno())
+        finally:
+            tmp.close()
+        os.replace(tmp.name, out_path)
+
+    task_created = False
+    task_skipped_reason: str | None = None
+    if conflicts and args.create_task and not args.dry_run:
+        if _reconcile_task_exists(args.agent):
+            task_skipped_reason = "existing open reconcile task"
+        else:
+            binary = _resolve_bridge_bin()
+            if binary is None:
+                task_skipped_reason = "agent-bridge binary not found"
+            else:
+                try:
+                    completed = subprocess.run(
+                        [
+                            str(binary),
+                            "task", "create",
+                            "--to", "patch",
+                            "--priority", "normal",
+                            "--title", f"[reconcile] {args.agent}: {len(conflicts)} memory/wiki conflict(s)",
+                            "--body", f"Reconcile report: {out_path}\nConflicts: {len(conflicts)}",
+                        ],
+                        check=False,
+                        timeout=15,
+                        capture_output=True,
+                        text=True,
+                    )
+                    if completed.returncode == 0:
+                        task_created = True
+                    else:
+                        task_skipped_reason = (
+                            f"task create exited with rc={completed.returncode}: "
+                            f"{(completed.stderr or completed.stdout or '').strip()[:200]}"
+                        )
+                except (OSError, subprocess.TimeoutExpired) as exc:
+                    task_skipped_reason = f"task create failed: {exc}"
+
+    report["task_created"] = task_created
+    if task_skipped_reason:
+        report["task_skipped_reason"] = task_skipped_reason
+
+    if args.json:
+        print(json.dumps(report, ensure_ascii=False, indent=2))
+    else:
+        print(f"conflicts: {len(conflicts)}")
+        print(f"report: {out_path}")
+        if task_skipped_reason:
+            print(f"task: skipped ({task_skipped_reason})")
+        elif task_created:
+            print("task: created")
+    return 0 if not conflicts else 2
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser()
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -1356,6 +1973,16 @@ def build_parser() -> argparse.ArgumentParser:
     rebuild_parser.add_argument("--home", required=True)
     rebuild_parser.add_argument("--bridge-home", required=True)
     rebuild_parser.add_argument("--db-path")
+    rebuild_parser.add_argument(
+        "--index-kind",
+        choices=list(KNOWN_INDEX_KINDS),
+        default=INDEX_KIND,
+        help="index kind to build (default: bridge-wiki-fts-v1)",
+    )
+    rebuild_parser.add_argument(
+        "--shared-root",
+        help="path to shared/ root; required for full v2 wiki cascade ingestion",
+    )
     rebuild_parser.add_argument("--dry-run", action="store_true")
     rebuild_parser.add_argument("--json", action="store_true")
     rebuild_parser.set_defaults(func=cmd_rebuild_index)
@@ -1381,6 +2008,43 @@ def build_parser() -> argparse.ArgumentParser:
     query_parser.add_argument("--limit", type=int, default=10)
     query_parser.add_argument("--json", action="store_true")
     query_parser.set_defaults(func=cmd_query)
+
+    # -----------------------------------------------------------------
+    # summarize — two-level subcommand: `summarize weekly` / `summarize monthly`.
+    # -----------------------------------------------------------------
+    summarize_parser = subparsers.add_parser("summarize")
+    summarize_sub = summarize_parser.add_subparsers(dest="level", required=True)
+
+    weekly_parser = summarize_sub.add_parser("weekly")
+    weekly_parser.add_argument("--agent", required=True)
+    weekly_parser.add_argument("--home", required=True)
+    weekly_parser.add_argument("--user", default="default")
+    weekly_parser.add_argument("--week", help="YYYY-W## (defaults to previous ISO week)")
+    weekly_parser.add_argument("--llm", action="store_true", help="use claude CLI to generate summary")
+    weekly_parser.add_argument("--llm-model", default="")
+    weekly_parser.add_argument("--dry-run", action="store_true")
+    weekly_parser.add_argument("--json", action="store_true")
+    weekly_parser.set_defaults(func=cmd_summarize_weekly)
+
+    monthly_parser = summarize_sub.add_parser("monthly")
+    monthly_parser.add_argument("--agent", required=True)
+    monthly_parser.add_argument("--home", required=True)
+    monthly_parser.add_argument("--user", default="default")
+    monthly_parser.add_argument("--month", help="YYYY-MM (defaults to previous month)")
+    monthly_parser.add_argument("--llm", action="store_true")
+    monthly_parser.add_argument("--llm-model", default="")
+    monthly_parser.add_argument("--dry-run", action="store_true")
+    monthly_parser.add_argument("--json", action="store_true")
+    monthly_parser.set_defaults(func=cmd_summarize_monthly)
+
+    reconcile_parser = subparsers.add_parser("reconcile")
+    reconcile_parser.add_argument("--agent", required=True)
+    reconcile_parser.add_argument("--home", required=True)
+    reconcile_parser.add_argument("--shared-root", help="path to ~/.agent-bridge/shared (or test fixture)")
+    reconcile_parser.add_argument("--create-task", action="store_true", help="file a patch task on conflict")
+    reconcile_parser.add_argument("--dry-run", action="store_true")
+    reconcile_parser.add_argument("--json", action="store_true")
+    reconcile_parser.set_defaults(func=cmd_reconcile)
 
     return parser
 

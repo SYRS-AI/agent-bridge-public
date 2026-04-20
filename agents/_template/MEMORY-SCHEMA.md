@@ -79,6 +79,59 @@ If a message naturally contains durable preferences, stable context, or importan
 - a repeated policy is agreed
 - a project-level choice needs future traceability
 
+## Daily Note Hygiene
+
+Agent daily notes live at `memory/YYYY-MM-DD.md`. These are the raw source
+that Agent Bridge copies byte-equivalent into
+`~/.agent-bridge/shared/wiki/agents/<self>/daily/<self>-YYYY-MM-DD.md` as
+read-only replicas (see `wiki-graph-rules.md §2`).
+
+When you finish a daily note, close it with two things — in this order —
+so the shared wiki graph picks up cross-references without post-hoc edits:
+
+1. A `## Related (auto-wiki)` section, **only if the day surfaced
+   durable cross-references**. Group the wikilinks by kind and keep each
+   group on one line:
+
+   ```markdown
+   ## Related (auto-wiki)
+
+   - **Entities:** [[cosmax]] · [[signature-set]]
+   - **Concepts:** [[lp-atc-bottleneck]]
+   - **Decisions:** [[2026-04-18-price-revert]]
+   - **Systems:** [[meta-ads-api]]
+   - **People:** [[myo|묘님]] · [[sean|션]]
+   ```
+
+   Rules:
+   - Use `[[slug]]` for canonical entities you already know. If you
+     introduce a new concept or entity, pick a stable kebab-case slug
+     now; the wiki graph resolves aliases later.
+   - Reference humans by per-person file with display alias:
+     `[[myo|묘님]]`, not `[[people#묘님]]` (single-file-with-anchors is
+     retired, see `wiki-entity-lifecycle.md`).
+   - **Do not** include tree edges: no `[[<agent>-weekly-summary]]`,
+     `[[<agent>-monthly-summary]]`, `[[agents#<self>]]`, or any
+     self-reference. Daily ↔ rollup edges are forbidden by
+     `wiki-graph-rules.md §1`.
+   - Omit the whole section if nothing durable came up. An empty
+     footer is worse than no footer — the auto-wiki scanner treats a
+     present but empty `## Related` as a graph regression.
+
+2. A tag line at the very end:
+
+   ```markdown
+   #<self> #daily #YYYY-MM
+   ```
+
+   Replace `<self>` with this agent's bridge id (e.g. `#syrs-meta`) and
+   `YYYY-MM` with the current month (e.g. `#2026-04`). Tags let Obsidian
+   group daily notes by agent and by month without tree edges.
+
+The body of the daily note itself stays free-form prose. Only the
+closing block is structural. Do not duplicate the Related footer at the
+top of the note or mid-body — it belongs at the bottom, once.
+
 ## Separation Rules
 
 - Do not mix one human's preferences into another human's memory files.

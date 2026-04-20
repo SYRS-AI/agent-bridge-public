@@ -252,6 +252,63 @@ def open_db(path):
     return connection
 
 
+# Known index kinds. `bridge-wiki-fts-v1` and the implicit `legacy-hybrid`
+# were the original two shapes; `bridge-wiki-hybrid-v2` is additive and
+# introduced by the Track 3 cascading summarizer so that weekly/monthly
+# summaries and ingested captures are all searchable through the same
+# hybrid engine.
+#
+# IMPORTANT: do NOT alter behavior for the existing kinds. Detection is
+# additive and fall-through; any kind other than the v2 marker still hits
+# the legacy code paths unchanged.
+INDEX_KIND_WIKI_FTS = "bridge-wiki-fts-v1"
+INDEX_KIND_WIKI_HYBRID_V2 = "bridge-wiki-hybrid-v2"
+
+
+def sources_for_index_kind(kind, default_sources):
+    """Return the effective `sources` filter for an index kind.
+
+    The v2 hybrid index is populated from:
+      - shared/wiki/**/*.md   (source="wiki")
+      - memory/weekly/*.md    (source="memory-weekly")
+      - memory/monthly/*.md   (source="memory-monthly")
+      - raw/captures/ingested/**/*.json   (source="capture-ingested")
+
+    Contract:
+    - If the caller passes a non-empty `default_sources` list, it is
+      authoritative and returned verbatim — callers that explicitly scope
+      the search are trusted to mean what they asked for.
+    - If the caller passes an empty/None list, the v2 defaults (all four
+      source families above) are substituted, so ad-hoc callers get a
+      useful result. Non-v2 kinds see no expansion.
+    """
+    if default_sources:
+        # Caller-provided filter is authoritative — never broaden it.
+        return list(default_sources)
+    if kind == INDEX_KIND_WIKI_HYBRID_V2:
+        return ["wiki", "memory-weekly", "memory-monthly", "capture-ingested"]
+    return default_sources
+
+
+def _index_has_embeddings(connection) -> bool:
+    """Return True if at least one chunk row has a non-empty embedding vector.
+
+    An embedding that is literally `[]` (JSON empty array) counts as absent;
+    this is how the FTS-only build marks un-embedded chunks. Embedding
+    presence is the only reliable signal here. `chunks.model` is a
+    provenance tag (set by the index builder to the index_kind, e.g.
+    `bridge-wiki-hybrid-v2`) and must not be conflated with the embedding
+    model name — hence no model argument.
+    """
+    try:
+        row = connection.execute(
+            "SELECT 1 FROM chunks WHERE embedding IS NOT NULL AND embedding != '[]' LIMIT 1"
+        ).fetchone()
+    except sqlite3.DatabaseError:
+        return False
+    return row is not None
+
+
 def detect_index_kind(connection):
     tables = {
         row["name"]
@@ -568,7 +625,7 @@ def search_memory(settings, query, sources_override=None, max_results=None, min_
         min_score = settings["min_score"] if min_score is None else min_score
         candidate_limit = min(200, max(1, int(math.floor(max_results * settings["candidate_multiplier"]))))
 
-        if index_kind == "bridge-wiki-fts-v1":
+        if index_kind == INDEX_KIND_WIKI_FTS:
             keyword_results = search_keyword(connection, query, candidate_limit, sources=None, model=None)
             seen = {}
             for item in keyword_results:
@@ -588,6 +645,75 @@ def search_memory(settings, query, sources_override=None, max_results=None, min_
             base = sorted(seen.values(), key=lambda item: item["score"], reverse=True)
             strict = [item for item in base if item["score"] >= min_score]
             return strict[:max_results]
+
+        if index_kind == INDEX_KIND_WIKI_HYBRID_V2:
+            # Same hybrid pipeline as legacy-hybrid (vector 0.7 / BM25 0.3,
+            # MMR dedup, 30-day half-life decay); the ONLY difference is the
+            # expanded `sources` filter so cascading summaries and ingested
+            # captures are visible alongside wiki pages.
+            #
+            # Degradation path: if the index has no embeddings (built without
+            # a Gemini key) or the query-time embed call fails, fall through
+            # to the keyword-only branch below rather than 500'ing the search.
+            expanded_sources = sources_for_index_kind(index_kind, sources)
+            has_embeddings = _index_has_embeddings(connection)
+            # v2 tags `chunks.model` with the index_kind string (e.g.
+            # `bridge-wiki-hybrid-v2`), not the embedding model name. The
+            # keyword/vector search paths therefore skip the model filter
+            # here so results are not accidentally narrowed to zero when
+            # settings["model"] (the Gemini embed model) does not match
+            # what the writer actually stored. Embedding presence is the
+            # correct gating signal for the vector branch.
+            query_vec = None
+            if has_embeddings:
+                try:
+                    query_vec = embed_query(
+                        query,
+                        settings["api_key"],
+                        settings["model"],
+                        settings["output_dimensionality"],
+                    )
+                except RuntimeError:
+                    query_vec = None
+            vector_results = (
+                search_vector(
+                    connection, query_vec, candidate_limit, expanded_sources, None
+                )
+                if query_vec is not None else []
+            )
+            keyword_results = search_keyword(
+                connection, query, candidate_limit, expanded_sources, None
+            )
+            if not vector_results:
+                seen = {}
+                for item in keyword_results:
+                    key = item["id"]
+                    if key not in seen or item["textScore"] > seen[key]["score"]:
+                        seen[key] = {
+                            "id": item["id"],
+                            "path": item["path"],
+                            "startLine": item["startLine"],
+                            "endLine": item["endLine"],
+                            "source": item["source"],
+                            "snippet": item["snippet"],
+                            "vectorScore": 0.0,
+                            "textScore": item["textScore"],
+                            "score": item["textScore"],
+                        }
+                base = sorted(seen.values(), key=lambda item: item["score"], reverse=True)
+                return [item for item in base if item["score"] >= min_score][:max_results]
+            merged = merge_hybrid_results(
+                vector_results,
+                keyword_results,
+                settings["vector_weight"],
+                settings["text_weight"],
+                settings["workspace_dir"],
+                settings["temporal_decay_enabled"],
+                settings["half_life_days"],
+                settings["mmr_enabled"],
+                settings["mmr_lambda"],
+            )
+            return [item for item in merged if item["score"] >= min_score][:max_results]
 
         query_vec = embed_query(query, settings["api_key"], settings["model"], settings["output_dimensionality"])
 

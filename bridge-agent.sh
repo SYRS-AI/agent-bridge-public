@@ -64,6 +64,36 @@ bridge_agent_manage_python() {
   python3 - "$@"
 }
 
+# bridge_ensure_memory_precompact_hook — wire the Plan-D PreCompact hook
+# into an agent's .claude/settings.json. Safe to call repeatedly; the
+# bridge-hooks.py helper already short-circuits when the hook is present.
+#
+# Called from:
+#   - agent create (claude engine path)
+#   - agent restart (as a safety net for pre-Plan-D installs)
+bridge_ensure_memory_precompact_hook() {
+  local agent="$1"
+  local workdir="$2"
+  local settings
+  settings="$workdir/.claude/settings.json"
+  if [[ -z "$workdir" || ! -f "$settings" ]]; then
+    return 0
+  fi
+  local python_bin
+  python_bin="${BRIDGE_PYTHON_BIN:-$(command -v python3 || echo /usr/bin/python3)}"
+  if ! "$python_bin" "$SCRIPT_DIR/bridge-hooks.py" status-pre-compact-hook \
+        --workdir "$workdir" \
+        --bridge-home "$SCRIPT_DIR" \
+        --python-bin "$python_bin" \
+        --settings-file "$settings" >/dev/null 2>&1; then
+    "$python_bin" "$SCRIPT_DIR/bridge-hooks.py" ensure-pre-compact-hook \
+      --workdir "$workdir" \
+      --bridge-home "$SCRIPT_DIR" \
+      --python-bin "$python_bin" \
+      --settings-file "$settings" >/dev/null 2>&1 || true
+  fi
+}
+
 bridge_agent_default_launch_cmd() {
   local engine="$1"
 
@@ -387,6 +417,8 @@ bridge_write_role_block() {
   local loop_mode="${13}"
   local continue_mode="${14}"
   local always_on="${15}"
+  local isolation_mode="${16:-}"
+  local os_user="${17:-}"
 
   bridge_agent_manage_python \
     "$BRIDGE_ROSTER_LOCAL_FILE" \
@@ -428,6 +460,8 @@ import sys
     loop_mode,
     continue_mode,
     always_on,
+    isolation_mode,
+    os_user,
 ) = sys.argv[1:]
 
 path = Path(path_str)
@@ -473,6 +507,13 @@ else:
     lines.append(f'BRIDGE_AGENT_CONTINUE["{agent}"]="0"')
 if always_on == "1":
     lines.append(f'BRIDGE_AGENT_IDLE_TIMEOUT["{agent}"]="0"')
+if isolation_mode:
+    # Emit the isolation mode verbatim (including "shared") so roster
+    # round-trips preserve explicit configuration. Downstream tooling that
+    # distinguishes "unset" from "shared" relies on this being present.
+    lines.append(f'BRIDGE_AGENT_ISOLATION_MODE["{agent}"]={sq(isolation_mode)}')
+if os_user:
+    lines.append(f'BRIDGE_AGENT_OS_USER["{agent}"]={sq(os_user)}')
 lines.append(end)
 
 block = "\n".join(lines) + "\n"
@@ -1075,6 +1116,9 @@ run_create() {
     bridge_bootstrap_project_skill "$engine" "$workdir" >/dev/null 2>&1 || true
     if [[ "$engine" == "claude" ]]; then
       bridge_bootstrap_claude_shared_skills "$agent" "$workdir" >/dev/null 2>&1 || true
+      # Plan-D memory stack: ensure PreCompact hook at scaffold time so new
+      # agents come up fully wired without a separate bootstrap pass.
+      bridge_ensure_memory_precompact_hook "$agent" "$workdir" >/dev/null 2>&1 || true
     fi
     bridge_write_role_block \
       "$agent" \
