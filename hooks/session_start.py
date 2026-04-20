@@ -16,11 +16,22 @@ import argparse
 import json
 import os
 import sys
+import time
+from pathlib import Path
 
-from bridge_hook_common import remember_session_start, session_start_context
+from bridge_hook_common import (
+    bridge_state_dir,
+    remember_session_start,
+    session_start_context,
+)
 
 
 _KNOWN_MATCHERS = {"startup", "resume", "compact"}
+# Compaction typically fires the SessionStart hook once, but upstream may
+# redeliver (retries, nested session-resumes). Suppress duplicate compact
+# notes that arrive within this window so the note is emitted at most once
+# per logical compact event.
+_COMPACT_NOTE_DEDUP_SECONDS = 300
 
 
 def _matcher_from_stdin() -> str:
@@ -46,6 +57,38 @@ def _compact_note() -> str:
     )
 
 
+def _compact_note_marker(agent: str) -> Path:
+    return bridge_state_dir() / "agents" / agent / "compact-note-last-ts"
+
+
+def _compact_note_should_emit(agent: str, now_epoch: int | None = None) -> bool:
+    """Return True iff we should emit the compact note for this invocation.
+
+    The marker stores the epoch of the last emission. If the previous
+    emission is within the dedup window we suppress; otherwise we update
+    the marker and emit. This stops duplicate compact notes when the
+    SessionStart hook is redelivered for the same underlying compact.
+    """
+    now_epoch = now_epoch or int(time.time())
+    marker = _compact_note_marker(agent)
+    try:
+        previous = int(marker.read_text(encoding="utf-8").strip() or "0")
+    except (OSError, ValueError):
+        previous = 0
+    if previous and now_epoch - previous < _COMPACT_NOTE_DEDUP_SECONDS:
+        return False
+    try:
+        marker.parent.mkdir(parents=True, exist_ok=True)
+        tmp = marker.with_suffix(".tmp")
+        tmp.write_text(f"{now_epoch}\n", encoding="utf-8")
+        tmp.replace(marker)
+    except OSError:
+        # Failing to write the marker must not block the hook from
+        # serving the session; worst case the dedup is a no-op.
+        return True
+    return True
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--format", choices=("text", "codex"), default="text")
@@ -69,7 +112,7 @@ def main(argv: list[str] | None = None) -> int:
 
     remember_session_start(agent)
     context = session_start_context(agent)
-    if matcher == "compact":
+    if matcher == "compact" and _compact_note_should_emit(agent):
         context = context + _compact_note()
 
     if args.format == "codex":

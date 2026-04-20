@@ -851,7 +851,22 @@ if [[ $MIGRATE_AGENTS -eq 1 ]]; then
   # only reachable via bridge_sync_skill_docs which had no upstream
   # caller — agents silently drifted from the template. See
   # bridge-docs.sync_memory_schema_from_template.
+  #
+  # Before mutating, preview the changes via a dry-run and extend the
+  # upgrade backup manifest so `upgrade rollback` can restore each
+  # touched file. Without this step MEMORY-SCHEMA.md etc. would be
+  # overwritten but NOT captured by bridge-upgrade.py's targeted
+  # backup — rollback would leave the v0.4.0 doc payload in place
+  # instead of restoring the pre-upgrade content. See codex review
+  # of the v0.3.8 -> v0.4.0 diff.
   if [[ $DRY_RUN -eq 0 ]]; then
+    DOCS_PREVIEW_JSON="$(python3 "$SOURCE_ROOT/bridge-docs.py" apply --all --dry-run --json \
+      --bridge-home "$TARGET_ROOT" \
+      --target-root "$TARGET_ROOT/agents" 2>/dev/null || printf '{"changed_paths":[]}')"
+    python3 "$SOURCE_ROOT/bridge-upgrade.py" backup-extend-live \
+      --target-root "$TARGET_ROOT" \
+      --backup-root "$BACKUP_ROOT" \
+      --paths-json "$DOCS_PREVIEW_JSON" >/dev/null 2>&1 || true
     python3 "$SOURCE_ROOT/bridge-docs.py" apply --all \
       --bridge-home "$TARGET_ROOT" \
       --target-root "$TARGET_ROOT/agents" >/dev/null 2>&1 || true

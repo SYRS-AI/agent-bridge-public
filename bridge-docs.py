@@ -1159,6 +1159,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("agents", nargs="*")
     parser.add_argument("--all", action="store_true", dest="all_agents")
     parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Emit JSON summary (mode, agent_count, changed_paths) to stdout instead of the human report.",
+    )
     parser.add_argument("--report", type=Path)
     parser.add_argument("--bridge-home", type=Path, default=bridge_home)
     parser.add_argument(
@@ -1198,6 +1203,15 @@ def main() -> int:
         changed.extend(sync_agent_docs(agent_dir, bridge_home, args.dry_run, stamp, registry))
 
     audits = [audit_agent(agent_dir) for agent_dir in agent_dirs]
+    if args.json:
+        payload = {
+            "mode": "dry-run" if args.dry_run else "apply",
+            "agent_count": len(agent_dirs),
+            "changed_paths": changed,
+        }
+        sys.stdout.write(json.dumps(payload, ensure_ascii=False))
+        return 0
+
     report_lines = [
         "# Agent Doc Migration",
         "",
