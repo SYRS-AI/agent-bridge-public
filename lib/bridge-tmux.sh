@@ -171,8 +171,6 @@ bridge_tmux_prompt_line_has_pending_input() {
       return 1
       ;;
   esac
-
-  return 1
 }
 
 bridge_tmux_session_has_prompt() {
