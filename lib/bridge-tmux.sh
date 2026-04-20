@@ -559,23 +559,44 @@ bridge_tmux_pending_attention_with_lock() {
   local action="$2"
   shift 2
   local lock_dir=""
+  local pid_file=""
+  local holder_pid=""
   local attempts=0
-  local max_attempts=200
+  local max_attempts="${BRIDGE_TMUX_PENDING_ATTENTION_LOCK_MAX_ATTEMPTS:-200}"
   local rc=0
+  [[ "$max_attempts" =~ ^[0-9]+$ ]] || max_attempts=200
 
   lock_dir="$(bridge_agent_pending_attention_lock_dir "$agent")"
+  pid_file="$lock_dir/holder.pid"
   mkdir -p "$(dirname "$lock_dir")"
   while ! mkdir "$lock_dir" 2>/dev/null; do
+    # Stale-lock recovery: if the holder PID file exists and the holder
+    # process is gone, reclaim the lock dir. This avoids the previous
+    # implementation's force-rmdir-after-N-attempts which could yank the
+    # lock from a still-live holder mid-critical-section and break FIFO
+    # ordering of the spool. (Codex review of #132a flagged this.)
+    if [[ -f "$pid_file" ]]; then
+      holder_pid="$(cat "$pid_file" 2>/dev/null || true)"
+      if [[ "$holder_pid" =~ ^[0-9]+$ ]] && ! kill -0 "$holder_pid" 2>/dev/null; then
+        rm -f "$pid_file" 2>/dev/null
+        rmdir "$lock_dir" 2>/dev/null
+        continue
+      fi
+    fi
     attempts=$((attempts + 1))
     if (( attempts >= max_attempts )); then
-      bridge_warn "pending-attention lock stuck for '$agent'; forcing"
-      rmdir "$lock_dir" >/dev/null 2>&1 || true
+      # Hard failure rather than lock theft. Caller can retry next pass
+      # (the daemon's flush is idempotent — a missed cycle just defers).
+      bridge_warn "pending-attention lock contention for '$agent'; giving up after ${max_attempts} attempts"
+      return 75
     fi
     sleep 0.05
   done
 
+  printf '%d' $$ >"$pid_file" 2>/dev/null
   "$action" "$agent" "$@"
   rc=$?
+  rm -f "$pid_file" 2>/dev/null
   rmdir "$lock_dir" >/dev/null 2>&1 || true
   return $rc
 }

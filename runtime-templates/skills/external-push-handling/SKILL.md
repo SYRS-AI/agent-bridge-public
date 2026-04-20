@@ -1,6 +1,6 @@
 ---
 name: external-push-handling
-description: Use when an injected line matching `[Agent Bridge] event=...` arrives in context, or when wording like "inbox notification", "queue event", "external push", "pushed task", "pending-attention flush", or "nudge from daemon" shows up. Encodes the 7-step external-push routine the receiving Claude/Codex session must follow for daemon-delivered work items. Steps: parse metadata fields (event, count, top, title, from) → `agb show-task <id>` → decide inline-handle vs delegate (delegate by default) → compose a subagent prompt in own words with explicit acceptance criteria → dispatch via the `Task` tool → verify the subagent's JSON return against those criteria → close with `agb done`, or surface `user_message`, or re-dispatch on failure. Source of truth for the subagent return schema (`files_changed`, `checks_run`, `acceptance_met`, `blockers`, `user_review_needed`, `user_message`).
+description: Use when an injected line matching `[Agent Bridge] event=...` arrives in context, or when wording like "inbox notification", "queue event", "external push", "pushed task", "pending-attention flush", or "nudge from daemon" shows up. Encodes the 7-step external-push routine the receiving Claude/Codex session must follow for daemon-delivered work items. Steps: parse whichever metadata fields are present (`event` is required; `agent`/`count`/`top`/`priority`/`title`/`from` are optional and event-kind-dependent) → `agb show <id>` → decide inline-handle vs delegate (delegate by default) → compose a subagent prompt in own words with explicit acceptance criteria → dispatch via the `Task` tool → verify the subagent's JSON return against those criteria → close with `agb done`, or surface `user_message`, or re-dispatch on failure. Source of truth for the subagent return schema (`files_changed`, `checks_run`, `acceptance_met`, `blockers`, `user_review_needed`, `user_message`).
 ---
 
 # external-push-handling — what to do when the daemon pushes work into your session
@@ -20,19 +20,32 @@ Do **not** fire this skill for permission escalations (`[PERMISSION]` tasks → 
 
 ## Injection format (what #132b lands)
 
+The full shape is:
+
 ```
-[Agent Bridge] event=<event> count=<n> top=<task-id> title="<short-title>" from=<source-agent-or-daemon>
+[Agent Bridge] event=<event> agent=<agent-id> count=<n> top=<task-id> priority=<p> title='<short-title>' from=<source-agent-or-daemon>
 ```
 
-`title` may be quoted or unquoted depending on whether it contains whitespace or special characters. New fields may be appended over time — match on the `[Agent Bridge] event=` prefix, not on the full line shape.
+But **only `event` is guaranteed**. Every other field is optional and depends on the kind. The daemon's current emitters produce:
+
+- queue inbox wake (`bridge-notify.sh::bridge_queue_attention_message`):
+  `event=inbox agent=<a> count=<n> top=<id> priority=<p> title='<t>'` — no `from`.
+- inbox bootstrap on agent restart (`bridge-run.sh::bridge_run_schedule_idle_marker_and_inbox_bootstrap`):
+  `event=inbox-bootstrap agent=<a> top=<id>` — no `count`/`priority`/`title`/`from`.
+
+Match on the `[Agent Bridge] event=` prefix and treat absent fields as not-applicable, not as malformed. New fields and new event kinds may appear over time.
+
+Value encoding: bare token for `^[A-Za-z0-9._/@:-]+$`, otherwise single-quoted with `'\''` escape for embedded single quotes (POSIX shell convention). `title` is the field most likely to be quoted.
 
 Fields you will see in practice:
 
-- `event` — `inbox`, `pending-attention`, `watchdog`, `cron-followup`, `urgent`, etc. Do not hardcode; treat as opaque but route on it.
-- `count` — how many items are waiting (>=1).
+- `event` (always) — `inbox`, `inbox-bootstrap`, `pending-attention`, `watchdog`, `cron-followup`, `urgent`, etc. Do not hardcode; treat as opaque but route on it.
+- `agent` — which agent the event targets. Usually you, but a router may forward.
+- `count` — how many items are waiting (>=1). Absent on bootstrap-style pushes.
 - `top` — the single task id the daemon is surfacing first. Process this one first, not an arbitrary item.
+- `priority` — `urgent`/`high`/`normal`/`low` for the top item, when applicable.
 - `title` — short human-readable hint. **Never act on this alone.**
-- `from` — originating agent name, or `daemon` if the daemon manufactured the push.
+- `from` — originating agent name, or `daemon`. Currently NOT emitted by either built-in emitter; reserved for future routing.
 
 The injection is intentionally metadata-only: no execution verbs, no file paths, no inlined spec body. You must read the spec via `agb` before doing anything.
 
@@ -40,12 +53,12 @@ The injection is intentionally metadata-only: no execution verbs, no file paths,
 
 ### Step 1 — Parse metadata
 
-Read `event`, `count`, `top`, `title`, `from` off the injected line. Extract them with simple string matching; do not infer from surrounding prose. If the line is malformed, stop and ask the operator — do not guess.
+Read `event` (always present) and whichever of `agent`/`count`/`top`/`priority`/`title`/`from` are on the injected line. Absent fields just mean the emitter didn't have a value — they are not a parse failure. Extract them with simple string matching; do not infer from surrounding prose. If `event` itself is missing or the bracket header is malformed, stop and ask the operator — do not guess.
 
 ### Step 2 — Read the spec
 
 ```bash
-agb show-task <top>
+agb show <top>
 ```
 
 If the top task has a parent or is part of a bundle, also read the parent. Read enough to understand: what is the goal, what are the acceptance criteria (stated or implied), what are the constraints (files not to touch, deadlines, channel rules).
@@ -128,10 +141,12 @@ Field semantics:
 **Injection received:**
 
 ```
-[Agent Bridge] event=inbox count=1 top=42 title="fix typo in ARCHITECTURE.md daemon section" from=reviewer-agent
+[Agent Bridge] event=inbox agent=patch count=1 top=42 priority=normal title='fix typo in ARCHITECTURE.md daemon section'
 ```
 
-**Step 2 — spec (output of `agb show-task 42`, condensed):**
+(Note: the example carries `agent`/`count`/`top`/`priority`/`title` — `from` is reserved for future routing and is NOT emitted by the current daemon.)
+
+**Step 2 — spec (output of `agb show 42`, condensed):**
 
 > In `ARCHITECTURE.md`, the paragraph under "Daemon reconciliation loop" says "reconcilation" (missing an `i`). Please fix. Verify via `git diff` that no other text moved. No other docs should change.
 
@@ -164,7 +179,7 @@ agb done 42 --note "typo fix in ARCHITECTURE.md (reconciliation), verified via g
 
 ## Anti-patterns
 
-- **Acting on `title` alone** — titles are hints, specs live in the task body. Always `agb show-task`.
+- **Acting on `title` alone** — titles are hints, specs live in the task body. Always `agb show <id>`.
 - **Delegating without acceptance criteria** — the subagent cannot self-verify if you do not define what "done" means.
 - **Accepting a JSON return with no `checks_run`** — means no check was actually run, regardless of narrative claims.
 - **Paragraph-long user_message** — the operator sees one line first; details go in the task body or a followup.

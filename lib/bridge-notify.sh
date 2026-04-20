@@ -224,6 +224,25 @@ bridge_dispatch_notification() {
   local text=""
 
   engine="$(bridge_agent_engine "$agent")"
+
+  # Issue #132b followup: compute the payload BEFORE the engine-specific
+  # dispatch so the passthrough gate (metadata-only mode + payload already
+  # carries the [Agent Bridge] event= header) applies uniformly to claude
+  # AND non-claude engines. The previous implementation gated only the
+  # claude branch, so a Codex agent's wake would get the legacy header
+  # wrapping reapplied even when $message was already a complete metadata
+  # payload — producing two-event injection text. Comment context: the
+  # gate matters because bridge_dispatch_notification is the shared helper
+  # called from bridge-task/send/intake/review/bundle with plain messages
+  # that still need the legacy header; only skip wrapping when the message
+  # has the metadata header verbatim.
+  if bridge_inject_metadata_only_enabled \
+     && [[ "$message" == "[Agent Bridge] event="* ]]; then
+    text="$message"
+  else
+    text="$(bridge_notification_text "$title" "$message" "$task_id" "$priority")"
+  fi
+
   case "$engine" in
     claude)
       session="$(bridge_agent_session "$agent")"
@@ -240,20 +259,6 @@ bridge_dispatch_notification() {
         fi
       fi
 
-      # Issue #132b: bridge_dispatch_notification is a shared helper called
-      # from many places (bridge-task.sh, bridge-send.sh, bridge-intake.sh,
-      # bridge-review.sh, bridge-bundle.sh) with PLAIN messages that still
-      # need the legacy header. Only skip header-wrapping when the caller
-      # has already produced a metadata payload — i.e., $message begins
-      # with the "[Agent Bridge] event=" header emitted by
-      # bridge_format_injection_meta. This keeps legacy callers' output
-      # byte-identical even when the flag is on.
-      if bridge_inject_metadata_only_enabled \
-         && [[ "$message" == "[Agent Bridge] event="* ]]; then
-        text="$message"
-      else
-        text="$(bridge_notification_text "$title" "$message" "$task_id" "$priority")"
-      fi
       # Issue #132a: pass $agent so a busy gate at inject time routes through
       # the pending-attention spool instead of silently dropping the wake.
       if bridge_tmux_send_and_submit "$session" "$engine" "$text" "$agent"; then
@@ -272,7 +277,6 @@ bridge_dispatch_notification() {
         bridge_warn "session unavailable; skipping direct send to '${agent}'"
         return 1
       fi
-      text="$(bridge_notification_text "$title" "$message" "$task_id" "$priority")"
       bridge_tmux_send_and_submit "$session" "$engine" "$text" "$agent"
       ;;
   esac

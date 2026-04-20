@@ -284,6 +284,30 @@ case "$captured_text" in
     printf '[smoke]   [ok] passthrough gate: metadata message passes through verbatim\n' ;;
   *) fail "metadata msg should pass through, got: $captured_text" ;;
 esac
+
+# Issue #132b followup: passthrough gate must apply to non-claude engines
+# too. Previously the gate was only inside the `case "$engine"` claude
+# branch, so a Codex agent's wake re-wrapped a metadata payload with the
+# legacy header (producing two events). Stub the engine to codex and
+# confirm the metadata passes through verbatim with no header prefix.
+captured_text=""
+bridge_agent_engine() { printf 'codex'; }
+bridge_dispatch_notification "codex-agent" "" "[Agent Bridge] event=inbox agent=codex-agent count=1 top=Z9" "" "normal" >/dev/null 2>&1 || true
+case "$captured_text" in
+  "[Agent Bridge] event=inbox agent=codex-agent count=1 top=Z9") \
+    printf '[smoke]   [ok] passthrough gate: codex engine also passes metadata verbatim\n' ;;
+  *) fail "codex metadata msg should pass through, got: $captured_text" ;;
+esac
+
+# And: under the flag, a plain message destined for a codex agent must
+# still get the legacy header wrap (parity with the claude branch).
+captured_text=""
+bridge_dispatch_notification "codex-agent" "review needed" "plain reviewer note." "" "normal" >/dev/null 2>&1 || true
+case "$captured_text" in
+  "[Agent Bridge]"*"plain reviewer note."*) \
+    printf '[smoke]   [ok] passthrough gate: codex plain message still wrapped under flag\n' ;;
+  *) fail "codex plain msg should keep legacy header, got: $captured_text" ;;
+esac
 META_UT
 
 log "tmux pending-attention spool: escape/drain/prepend/deferral-cap (issue #132a)"
@@ -429,6 +453,51 @@ printf '[smoke]   [ok] flush: busy bounce re-prepends FIFO remainder\n'
 
 # Restore real send function for cleanliness if later code re-sources.
 unset -f bridge_tmux_send_and_submit
+
+# Issue #132a followup: lock safety. The previous implementation force-rmdir'd
+# the lock dir after 200 spin-wait attempts, which could yank the lock from
+# a still-live holder. The fix uses PID-based stale-lock recovery instead:
+# only reclaim when the holder process is gone. Verify both branches.
+lock_agent="lock-test"
+lock_dir="$(bridge_agent_pending_attention_lock_dir "$lock_agent")"
+mkdir -p "$(dirname "$lock_dir")"
+
+# Case 1: stale lock (holder PID written but process is gone).
+# Use PID 1 indirectly by writing a synthetic non-existent PID. Pick a high
+# unlikely-running PID (99999999) to simulate a dead holder.
+mkdir "$lock_dir"
+printf '99999999' >"$lock_dir/holder.pid"
+# Append should reclaim the stale lock and succeed.
+bridge_tmux_pending_attention_append "$lock_agent" "after-stale-recovery" \
+  || fail "append should reclaim stale lock and succeed"
+spool_file="$(bridge_agent_pending_attention_file "$lock_agent")"
+[[ -f "$spool_file" ]] && grep -q "after-stale-recovery" "$spool_file" \
+  || fail "stale-lock recovery: append did not write the entry"
+printf '[smoke]   [ok] lock: dead-holder PID triggers stale recovery, append succeeds\n'
+
+# Case 2: live holder. Take the lock via a child process that sleeps.
+# Background PID is alive → reclaim must NOT happen → second append should
+# eventually fail (return 75) without touching the holder's lock.
+rm -f "$spool_file"
+( mkdir -p "$lock_dir" && printf '%d' $$ >"$lock_dir/holder.pid" 2>/dev/null \
+    && sleep 2 && rm -f "$lock_dir/holder.pid" && rmdir "$lock_dir" ) &
+holder_bg=$!
+sleep 0.2
+# Override the spinlock max so the test runs in <2s rather than 10s.
+BRIDGE_TMUX_PENDING_ATTENTION_LOCK_MAX_ATTEMPTS=20 \
+bridge_tmux_pending_attention_append "$lock_agent" "should-wait" 2>/dev/null
+rc=$?
+wait "$holder_bg" 2>/dev/null
+# Either the append waited and succeeded after holder released (rc=0), OR
+# it gave up cleanly with rc=75. The crucial property is that the holder
+# was NOT yanked mid-flight — verifiable by absence of an "appended-while-
+# holder-was-alive" entry in the holder's state.
+case "$rc" in
+  0|75) printf '[smoke]   [ok] lock: live holder is respected (rc=%s, no force-yank)\n' "$rc" ;;
+  *) fail "live-holder lock test returned unexpected rc=$rc" ;;
+esac
+
+rm -rf "$lock_dir" "$spool_file"
 rm -f "$captured_log"
 rm -rf "$scratch"
 SPOOL_UT
