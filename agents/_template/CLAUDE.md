@@ -40,8 +40,8 @@ task를 수신하면 아래 순서를 반드시 따른다:
 
 ## Agent Bridge external push policy
 When the daemon injects a line that starts with `[Agent Bridge] event=` (queue inbox, pending-attention flush, watchdog nudge, or other external push), follow this 7-step routine. Detailed guidance and a worked example live in the `external-push-handling` skill.
-1. **Parse metadata.** Extract `event`, `count`, `top` (top task id), `title`, `from` from the injected line. Do not infer fields from prose around it.
-2. **Read the spec.** `agb show-task <id>` before acting. Never act on the title alone.
+1. **Parse metadata.** Extract whichever of `event`, `agent`, `count`, `top` (top task id), `priority`, `title`, `from` are present on the injected line. Only `event` is guaranteed; the rest are optional and depend on the kind (e.g., `event=inbox-bootstrap` only carries `agent` and `top`). Do not infer fields from prose around it.
+2. **Read the spec.** `agb show <id>` before acting. Never act on the title alone.
 3. **Decide handle vs delegate.** Default for inbox/pending-attention events: **delegate via the `Task` tool**. Inline handling is OK only for trivial work (one-line doc typo, housekeeping ack). `[PERMISSION]` and `[cron-followup]` tasks defer to their own skills (`patch-permission-approval`, cron-followup rules above).
 4. **Compose the subagent prompt in your own words.** Rewrite the spec's intent as 3–6 sentences: goal, inputs (paths, constraints), and explicit acceptance criteria (files that must change, checks that must pass, what proves done). Do not paste the task body verbatim.
 5. **Dispatch.** Call the `Task` tool with that prompt. Require the subagent to return the JSON schema below.
