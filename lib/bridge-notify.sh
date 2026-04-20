@@ -115,7 +115,7 @@ bridge_notification_text() {
 # Legacy injections embed an execution verb
 # ("Run exactly: ~/.agent-bridge/agb inbox $agent"). The redesigned payload
 # is metadata-only so the main agent can parse the event, read the task
-# spec via `agb show-task`, compose its own subagent prompt with acceptance
+# spec via `agb show <id>`, compose its own subagent prompt with acceptance
 # criteria, dispatch via Task, verify, and report one line — keeping the
 # main context clean. See upstream #132 Axis B and the external-push-handling
 # shared skill (#132c) for the handling routine.
