@@ -1,0 +1,148 @@
+# Agent Runtime — Admin Protocol
+
+> Canonical SSOT for admin-only runtime behaviour. Only installed in agents whose `SESSION-TYPE.md` declares Session Type = `admin` (e.g. `patch`). Non-admin agents **do not** symlink this file.
+>
+> Scope: first-run onboarding for a brand-new install, and the channel setup flow that the admin runs on behalf of other agents. All other common rules (queue, task processing, autonomy, upstream policy) live in [`common-instructions.md`](common-instructions.md) and apply to admin sessions too.
+
+## When to apply
+
+- Session Type in `SESSION-TYPE.md` is `admin`.
+- Onboarding State is `pending` OR the user is explicitly performing a channel setup for some agent (admin or non-admin).
+- If Session Type is anything other than `admin`, stop reading this file — it does not apply.
+
+## Admin First-Run Onboarding Defaults
+
+- `SESSION-TYPE.md`의 Session Type이 `admin`이고 Onboarding State가 `pending`이면, 사용자에게는 필요한 것만 짧게 묻는다.
+- Onboarding State가 `pending`인 admin 세션에서 첫 사용자 메시지가 도착하면, queue/watchdog 처리 여부와 무관하게 먼저 짧게 인사하고 아래 두 질문을 실제로 물어본다. 사용자의 첫 메시지가 다른 요청이어도 일반 요청으로 처리하지 않는다.
+- 질문 1: `이름 또는 닉네임을 알려주세요.`
+- 질문 2: `처음 연결할 채널은 무엇인가요? 터미널만 사용할지, Discord, Telegram, 또는 둘 다 연결할지 알려주세요.`
+- 첫 사용자 메시지에 이름/닉네임과 채널 선택이 이미 모두 포함되어 있으면 다시 묻지 말고 `이름: <값>, 채널: <값>으로 진행하겠습니다.`라고 확인한 뒤 바로 설정을 진행한다.
+- Onboarding State가 `pending`인 동안에는 두 질문을 물었거나 두 답을 저장하고 다음 설정 단계로 넘어간 경우가 아니면 턴을 끝내지 않는다.
+- 이름/닉네임을 받으면 `~/.agent-bridge/agent-bridge user set --user owner --name "<name>"`, `~/.agent-bridge/agent-bridge knowledge init`, `~/.agent-bridge/agent-bridge knowledge operator set --user owner --name "<name>"`를 순서대로 실행한다. primary operator profile은 `shared/wiki/people/<slug>.md`가 canonical source다 (이전의 `shared/wiki/people.md` single-file anchor는 per-person 파일로 분리됐다 — [`wiki-entity-lifecycle.md`](wiki-entity-lifecycle.md) 참조).
+- 내부 파일명, `USER.md`, 사용자 partition 같은 구현 세부사항은 질문 문구에 넣지 않는다.
+- Discord 또는 Telegram을 선택하면 해당 에이전트 엔진은 Claude Code로 설정한다. Codex는 현재 외부 채널 연동용 엔진으로 사용하지 않는다.
+- 사용자가 Discord/Telegram과 Codex를 함께 선택하면, "Discord/Telegram 연동은 Claude Code가 필요합니다. 이 에이전트는 Claude Code로 설정하겠습니다."라고 설명하고 Claude Code로 진행한다.
+- admin 역할 이름, always-on 여부, 말투/보고 방식은 묻지 않는다. 현재 설정을 유지한다.
+- 기본 말투는 한국어, 직설적이고 논리적인 경어체다. 예: "확인하겠습니다", "이렇게 진행할게요", "원인은 ...입니다".
+- 답변을 받은 뒤 멈추지 않는다. 이름/닉네임은 로컬 사용자 메모리에 저장하고, 선택한 채널에 따라 바로 다음 설정 단계로 이어간다.
+- 터미널만 선택한 경우: `SOUL.md`, `SESSION-TYPE.md`, 사용자 메모리를 갱신하고 `Onboarding State: complete`로 바꾼 뒤 `agb status`, `agb agent create`, `agb task create`, `agb upgrade`를 자연어로 요청하면 된다고 안내한다.
+- Discord를 선택한 경우: Discord bot token, Application ID, Permissions Integer, 연결할 channel ID를 받는다. 값이 없으면 Discord Developer Portal에서 만드는 방법을 짧게 안내한다. 그 다음 `~/.agent-bridge/agent-bridge setup discord <admin-agent> --token <token> --channel <channel-id> --yes`를 실행하고, roster의 `BRIDGE_AGENT_CHANNELS["<admin-agent>"]`와 `BRIDGE_AGENT_DISCORD_CHANNEL_ID["<admin-agent>"]`가 맞는지 확인한다. 초대 URL은 `https://discord.com/oauth2/authorize?client_id=<application-id>&permissions=<permissions-integer>&scope=bot%20applications.commands` 형식으로 제공한다.
+- Telegram을 선택한 경우: Telegram bot token, 허용할 사용자 ID, default chat ID를 받는다. 값이 없으면 BotFather로 bot token을 만들고, 봇에게 메시지를 보낸 뒤 `getUpdates` 또는 user/chat ID 확인 봇으로 ID를 확인하는 방법을 짧게 안내한다. 그 다음 `~/.agent-bridge/agent-bridge setup telegram <admin-agent> --token <token> --allow-from <user-id> --default-chat <chat-id> --yes`를 실행하고, roster의 `BRIDGE_AGENT_CHANNELS["<admin-agent>"]`가 Telegram plugin으로 설정됐는지 확인한다.
+- 채널 setup이 끝났더라도 `SESSION-TYPE.md`가 `Onboarding State: pending`이면 admin은 `exit` 후 자동 재시작하지 않는다. `exit` 안내 전 반드시 `SESSION-TYPE.md`를 `Onboarding State: complete`로 갱신하고 파일을 다시 확인한다.
+- 채널 setup 때문에 현재 Claude 세션을 재시작해야 하면, `exit` 안내 전에 `NEXT-SESSION.md`를 작성한다. 포함할 내용: 왜 재시작하는지, 방금 설정한 채널, 다음 세션에서 실행할 검증 명령, 성공 후 사용자에게 보낼 안내, 검증 완료 후 `NEXT-SESSION.md` 삭제.
+- admin 온보딩이 끝나면 `agent start patch`, `agent restart patch`, `start patch` 같은 표현을 사용자에게 안내하지 않는다. 대신 "현재 Claude 세션에는 새 설정이 아직 완전히 붙지 않을 수 있습니다. 이 세션에서 `exit`로 종료하면 바깥 쉘로 돌아가고, 온보딩 완료된 admin은 백그라운드에서 다시 뜹니다. 그 다음 바깥 쉘에서 `agb admin`을 다시 실행하세요."라고 안내한다.
+
+## Channel Setup Protocol
+
+- 사용자가 어떤 에이전트든 새로 만들거나 설정하면서 채널을 언급하면, 먼저 선택지를 명확히 확인한다: `터미널만`, `Discord`, `Telegram`, `Discord와 Telegram 둘 다`.
+- Discord 또는 Telegram을 하나라도 선택하면 해당 에이전트는 Claude Code 엔진이어야 한다. Codex 요청과 외부 채널 요청이 충돌하면, 이유를 한 문장으로 설명하고 Claude Code로 진행한다.
+- Discord만 선택하면 Discord setup만 진행한다.
+- Telegram만 선택하면 Telegram setup만 진행한다.
+- Discord와 Telegram 둘 다 선택하면 둘 다 설정한다. 기본 순서는 Discord 먼저, Telegram 다음이다. 첫 번째 설정이 끝났다고 멈추지 말고 두 번째 설정까지 이어간다.
+- Discord setup에는 bot token, Application ID, Permissions Integer, channel ID가 필요하다. 부족하면 받는 방법을 안내하고 값을 받은 뒤 `~/.agent-bridge/agent-bridge setup discord <agent> --token <token> --channel <channel-id> --yes`를 실행한다.
+- Telegram setup에는 bot token, allowed user ID, default chat ID가 필요하다. 부족하면 받는 방법을 안내하고 값을 받은 뒤 `~/.agent-bridge/agent-bridge setup telegram <agent> --token <token> --allow-from <user-id> --default-chat <chat-id> --yes`를 실행한다.
+- `setup discord/telegram`과 에이전트 시작 경로는 필요한 Claude Code 플러그인을 자동으로 설치/enable한다. 오래된 `claude-plugins-official` marketplace mirror 때문에 plugin install이 실패하면 Agent Bridge가 mirror를 강제 갱신하고 1회 재시도한다. 그래도 채널 준비의 source of truth는 각 에이전트의 `~/.agent-bridge/agents/<agent>/.discord/.env`, `.discord/access.json`, `.telegram/.env`, `.telegram/access.json`다.
+- `claude mcp list`를 Agent Bridge 밖에서 실행하면 전역 `~/.claude/channels/...` 기준 오류가 보일 수 있다. Agent Bridge 검증은 `~/.agent-bridge/agent-bridge agent start <agent> --dry-run`, `~/.agent-bridge/agent-bridge status`, 그리고 에이전트별 state dir 파일 존재 여부로 한다.
+- setup 후에는 roster의 `BRIDGE_AGENT_CHANNELS["<agent>"]`가 선택한 plugin 채널과 일치하는지 확인한다. Discord는 `BRIDGE_AGENT_DISCORD_CHANNEL_ID["<agent>"]`도 확인한다.
+- 채널 설정이 끝난 대상이 admin 에이전트이면 `exit` 후 바깥 쉘에서 `agb admin`을 다시 실행하라고 안내한다. 대상이 일반 에이전트이면 `agb agent restart <agent>`를 사용한다.
+
+## Team-wide user preference promotion (admin responsibility)
+
+Admin이 사용자의 "앞으로 계속" 지시를 받으면 [`user-preference-injection.md`](user-preference-injection.md) 규칙을 따라 승격한다. Team-wide scope의 preference는 admin 승인 후에만 `docs/agent-runtime/active-preferences.md`에 쓴다. Agent-local scope는 대상 에이전트의 `ACTIVE-PREFERENCES.md`로 전달한다.
+
+## Bootstrap for a new server / new install
+
+새 서버에 Agent Bridge를 처음 설치할 때 admin이 수행할 순서:
+
+1. `~/.agent-bridge/agent-bridge bootstrap --yes` — 기본 구조 생성, admin 에이전트 `patch` scaffold.
+2. 첫 `agb admin` 세션에서 `SESSION-TYPE.md`가 `admin / pending`임을 확인하고 위 Onboarding Defaults 질문 2개를 수행.
+3. `docs/agent-runtime/` 심볼릭 링크 배선 확인: `COMMON-INSTRUCTIONS.md`, `MEMORY-SCHEMA.md`, `ADMIN-PROTOCOL.md`. 누락되면 [`migration-guide.md`](migration-guide.md) §"Fresh install bootstrap"을 따라 재배선.
+4. 이후 일반 에이전트 생성은 `agb agent create <id> --role <role>` — `_template.<role>/CLAUDE.md`가 pointer-only 파일을 렌더링한다.
+
+## Post-Upgrade Onboarding (first run after v0.4.0+ upgrade)
+
+When `agb upgrade` lands a v0.4.0-or-later release, the upgrader
+creates a `[upgrade-complete]` task in this admin's inbox. That task
+points here. Process it in this order — everything is idempotent.
+
+1. **Bootstrap**
+   `$BRIDGE_HOME/bootstrap-memory-system.sh --apply`
+   - Registers all wiki + librarian crons.
+   - Provisions the dynamic `librarian` agent if absent.
+   - Copies Phase 1/2 scripts into `$BRIDGE_HOME/scripts/`.
+   - A first-run success also files a
+     `[wiki-system-first-run]` task with the exact commands for
+     steps 2–4 below.
+
+2. **First full mention scan**
+   `$BRIDGE_HOME/scripts/wiki-mention-scan.py --full-rebuild`
+   - Walks `shared/wiki/`, resolves every `[[wikilink]]`, writes
+     `shared/wiki/_index/mentions.db` (schema v1).
+
+3. **Review the distribution report**
+   `shared/wiki/_index/distribution-report-YYYY-MM-DD.md`
+   - §1 cross-agent reach (how entities are connected).
+   - §2 L2 hub candidates (entities with cross-agent mentions but
+     no shared canonical hub).
+   - §3 unresolved wikilinks — fix unambiguous targets with
+     `agb wiki repair-links --apply`. Genuinely missing entities
+     become stub candidates.
+   - §4 orphan entity slugs — delete per
+     `wiki-entity-lifecycle.md` §3.6 only when no inbound path
+     references remain. Leave ambiguous ones for next cycle.
+
+4. **Trigger the first L2 candidacy sweep**
+   `$BRIDGE_HOME/scripts/wiki-hub-audit.py --emit-task \
+      --admin-agent "$BRIDGE_ADMIN_AGENT" \
+      --bridge-bin "$BRIDGE_AGB" \
+      --out "$BRIDGE_WIKI_ROOT/_audit/hub-candidates-$(date +%Y-%m-%d).md"`
+   - Queues a `[wiki-hub-candidates]` task into this inbox.
+   - The weekly cron (`wiki-hub-audit`, Thu 23:00 KST) fires this
+     automatically from now on.
+
+5. **Process the `[wiki-hub-candidates]` task** per §"Wiki Canonical
+   Hub Curation" below. That is the recurring admin ritual.
+
+Close the original `[upgrade-complete]` task with:
+```
+agb done <task_id> --note "bootstrap OK; first scan <N> files / <E> entities; <C> hub candidates queued"
+```
+
+## Wiki Canonical Hub Curation
+
+이 섹션은 admin 에이전트의 **주간 위키 큐레이션 책임**을 정의한다. L1 mention-scan(관측)과 L2 hub-audit(후보 도출)은 자동으로 돌지만, **canonical 허브 실제 생성은 admin 판단**이 필요하다. 자동 생성하지 않는다.
+
+### Trigger
+
+`wiki-hub-audit` 크론(매주 목요일 23:00 KST, patch 소유)이 `shared/wiki/_index/mentions.db`를 스캔해서 cross-agent reach가 높지만 shared 허브가 없는 엔티티를 골라낸다. 결과 리포트가 `shared/wiki/_audit/hub-candidates-YYYY-MM-DD.md`로 떨어지고, `[wiki-hub-candidates]` task가 admin agent inbox에 들어간다.
+
+### Task 처리 순서
+
+1. **claim**: `agb claim <task_id>`
+2. **리포트 읽기**: task body(또는 `shared/wiki/_audit/hub-candidates-YYYY-MM-DD.md`)에서 후보 엔티티 목록과 샘플 source paths를 확인한다.
+3. **판단**: 각 후보에 대해 다음 중 하나를 결정한다.
+   - **승격**: 팀 전체에서 반복 참조되는 개념·사람·제품·시스템 → `shared/wiki/entities/<slug>.md` 또는 `shared/wiki/people/<slug>.md`에 canonical 허브 작성.
+   - **스킵**: agent-specific 인프라(예: `memory-daily-cron`), 일회성 프로젝트, 이미 다른 허브의 alias로 커버되는 엔티티 → done-note에 "skipped: <이유>" 기록.
+   - **defer**: 판단이 어려우면 사용자(admin person)에게 에스컬레이션. 절대 자동으로 만들지 않는다.
+4. **허브 작성**은 [`wiki-entity-lifecycle.md`](wiki-entity-lifecycle.md) §3.3 스키마를 따른다:
+   - `type`, `slug`, `title`, `aliases` (원어·로마자·casing variants 전부), `canonical_from` (병합 대상 에이전트 경로), `date_captured`, `date_updated` frontmatter 필수
+   - 본문: 2~3 문장 역할·정의 + `## Key facts` + `## Related` fanout
+5. **Redirect 처리**: agent-scoped에 이미 rich 콘텐츠가 있으면 그 파일을 유지하고, 단순 stub이었다면 `type: redirect` + `redirect_to: entities/<slug>`로 변환한다.
+6. **index.md 업데이트**: `shared/wiki/index.md`의 "Canonical Entity Hubs" 섹션에 새 허브를 추가한다.
+7. **done**: `agb done <task_id> --note "promoted: A,B,C; skipped: D,E (이유); deferred: F"`. 빈 note 금지.
+
+### 자동 생성 금지 이유
+
+- 허브 본문은 "이 엔티티가 팀에게 무엇인가"의 정의 — 자동 합성이 어렵다(Phase 3 enrichment 작업).
+- 잘못 만든 허브는 다시 dedup으로 고쳐야 하고 audit trail이 지저분해진다.
+- L2 candidacy의 threshold(현재 min_agents=2, min_mentions=5)는 의도적으로 관대하다. 노이즈 후보가 섞이는 걸 전제로 admin이 걸러낸다.
+
+### 언제 기다려도 되는가
+
+- 후보 1~2개뿐인 주간: 노이즈일 가능성 있음. 다음 주 리포트에서도 반복되면 승격 검토.
+- 샘플 source가 모두 하나의 에이전트 namespace에서 왔는데 다른 에이전트 1~2개만 cross-reference한 경우: agent-scoped로 남겨도 무방.
+
+## Changelog
+
+- 2026-04-19: initial ratified version. `patch/CLAUDE.md`의 admin-only 섹션 2개(`Admin First-Run Onboarding Defaults`, `Channel Setup Protocol`)를 canonical로 승격. SHA-256 `3476e00ffbd9652383c9a079b3d0abbf4c74c9ec85393367dbd21b3aeaf1401f` (patch/CLAUDE.md lines 66–98) 기반. people.md single-file anchor → per-person 파일 분리 반영. Bootstrap 섹션 추가.
+- 2026-04-19 (evening): Wiki Canonical Hub Curation 섹션 추가. L2 candidacy 자동화(`wiki-hub-audit` 크론 + `[wiki-hub-candidates]` task)의 admin-facing 처리 계약을 문서화. 허브 생성은 admin 판단 게이트 유지.

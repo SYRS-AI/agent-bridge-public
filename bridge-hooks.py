@@ -95,6 +95,11 @@ def tool_policy_hook_command(bridge_home: Path, python_bin: str) -> str:
     return shell_command(python_bin, shell_path(hook_path))
 
 
+def pre_compact_hook_command(bridge_home: Path, python_bin: str) -> str:
+    hook_path = bridge_home / "hooks" / "pre-compact.py"
+    return shell_command(python_bin, shell_path(hook_path))
+
+
 def codex_session_start_hook_command(bridge_home: Path, python_bin: str) -> str:
     hook_path = bridge_home / "hooks" / "codex-session-start.py"
     return shell_command(python_bin, shell_path(hook_path))
@@ -159,6 +164,10 @@ def is_prompt_guard_hook(command: str) -> bool:
 
 def is_tool_policy_hook(command: str) -> bool:
     return "tool-policy.py" in str(command)
+
+
+def is_pre_compact_hook(command: str) -> bool:
+    return "pre-compact.py" in str(command)
 
 
 def is_codex_session_start_hook(command: str) -> bool:
@@ -363,6 +372,54 @@ def cmd_ensure_session_start_hook(args: argparse.Namespace) -> int:
     if args.format != "shell":
         print("session_start_hook: present")
     return 0
+
+
+def cmd_ensure_pre_compact_hook(args: argparse.Namespace) -> int:
+    """Register the Track 2 PreCompact event handler in settings.json.
+
+    The hook timeout is set to 20s (the documented ceiling for PreCompact
+    so a slow capture can't block compaction), and the hook always exits 0
+    on its own (see `hooks/pre-compact.py`). The failure-mode contract is
+    therefore: compaction proceeds regardless of capture success.
+    """
+    bridge_home = Path(args.bridge_home).expanduser()
+    settings_path = resolve_settings_path(args)
+    desired_command = pre_compact_hook_command(bridge_home, args.python_bin)
+    changed = ensure_command_hook(
+        settings_path,
+        "PreCompact",
+        desired_command,
+        is_pre_compact_hook,
+        timeout=20,
+    )
+    payload = {
+        "HOOK_SETTINGS_FILE": str(settings_path),
+        "HOOK_STATUS": "updated" if changed else "unchanged",
+        "HOOK_COMMAND": desired_command,
+        "HOOK_TIMEOUT": "20",
+    }
+    print_payload(payload, args.format)
+    if args.format != "shell":
+        print("pre_compact_hook: present")
+    return 0
+
+
+def cmd_status_pre_compact_hook(args: argparse.Namespace) -> int:
+    settings_path = resolve_settings_path(args)
+    settings = ensure_settings_root(settings_path)
+    hooks = hooks_list(settings, "PreCompact")
+    _group, hook = find_command_hook(hooks, is_pre_compact_hook)
+    command = str(hook.get("command") or "") if hook else ""
+    payload = {
+        "HOOK_SETTINGS_FILE": str(settings_path),
+        "HOOK_STATUS": "present" if hook else "missing",
+        "HOOK_COMMAND": command,
+        "HOOK_TIMEOUT": str(int(hook.get("timeout") or 0) if hook else 0),
+    }
+    print_payload(payload, args.format)
+    if args.format != "shell":
+        print(f"pre_compact_hook: {'present' if hook else 'missing'}")
+    return 0 if hook else 1
 
 
 def cmd_status_prompt_hook(args: argparse.Namespace) -> int:
@@ -833,6 +890,22 @@ def build_parser() -> argparse.ArgumentParser:
     status_session_parser.add_argument("--python-bin", required=True)
     status_session_parser.add_argument("--format", choices=("text", "shell"), default="text")
     status_session_parser.set_defaults(handler=cmd_status_session_start_hook)
+
+    ensure_pre_compact_parser = subparsers.add_parser("ensure-pre-compact-hook")
+    ensure_pre_compact_parser.add_argument("--workdir")
+    ensure_pre_compact_parser.add_argument("--settings-file")
+    ensure_pre_compact_parser.add_argument("--bridge-home", required=True)
+    ensure_pre_compact_parser.add_argument("--python-bin", required=True)
+    ensure_pre_compact_parser.add_argument("--format", choices=("text", "shell"), default="text")
+    ensure_pre_compact_parser.set_defaults(handler=cmd_ensure_pre_compact_hook)
+
+    status_pre_compact_parser = subparsers.add_parser("status-pre-compact-hook")
+    status_pre_compact_parser.add_argument("--workdir")
+    status_pre_compact_parser.add_argument("--settings-file")
+    status_pre_compact_parser.add_argument("--bridge-home", required=True)
+    status_pre_compact_parser.add_argument("--python-bin", required=True)
+    status_pre_compact_parser.add_argument("--format", choices=("text", "shell"), default="text")
+    status_pre_compact_parser.set_defaults(handler=cmd_status_pre_compact_hook)
 
     ensure_prompt_parser = subparsers.add_parser("ensure-prompt-hook")
     ensure_prompt_parser.add_argument("--workdir")

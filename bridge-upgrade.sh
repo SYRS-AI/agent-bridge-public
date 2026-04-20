@@ -249,66 +249,6 @@ for reason in sorted(payload.get("skipped_reasons", {})):
 PY
 }
 
-bridge_upgrade_detect_stuck_crash_loops() {
-  # Scan every agent's crash/state.env for the stuck-ack pattern from issue
-  # #109: a non-empty CRASH_LAST_HASH that has never been acked. The daemon
-  # re-queues [crash-loop] tasks indefinitely when this pattern persists.
-  local target_root="$1"
-  local agents_dir="$target_root/state/agents"
-  [[ -d "$agents_dir" ]] || return 0
-
-  local agent_dir name state_file
-  local CRASH_LAST_HASH=""
-  local CRASH_ACK_HASH=""
-  for agent_dir in "$agents_dir"/*/; do
-    [[ -d "$agent_dir" ]] || continue
-    name="$(basename "$agent_dir")"
-    state_file="$agent_dir/crash/state.env"
-    [[ -f "$state_file" ]] || continue
-    CRASH_LAST_HASH=""
-    CRASH_ACK_HASH=""
-    # shellcheck source=/dev/null
-    source "$state_file" 2>/dev/null || continue
-    if [[ -n "$CRASH_LAST_HASH" && "$CRASH_LAST_HASH" != "$CRASH_ACK_HASH" ]]; then
-      printf '%s\n' "$name"
-    fi
-  done
-}
-
-bridge_upgrade_print_post_upgrade_notices() {
-  local target_root="$1"
-  local target_version="$2"
-
-  printf '\n== Post-upgrade notices ==\n'
-  printf 'release_notes: https://github.com/SYRS-AI/agent-bridge-public/releases/tag/v%s\n' "$target_version"
-
-  local stuck
-  stuck="$(bridge_upgrade_detect_stuck_crash_loops "$target_root" 2>/dev/null || true)"
-  if [[ -z "$stuck" ]]; then
-    return 0
-  fi
-
-  printf '\n[action required] stale crash-loop ack state detected for these agents:\n'
-  while IFS= read -r agent; do
-    [[ -n "$agent" ]] || continue
-    printf '  - %s\n' "$agent"
-  done <<<"$stuck"
-
-  printf '\nOn v0.3.0 the ack path silently no-oped whenever crash/report.env had been\n'
-  printf 'cleaned up, so the daemon re-queued [crash-loop] urgent tasks on every sweep\n'
-  printf 'even after the operator ran agb done. v0.3.1 fixes the ack path AND ships a\n'
-  printf 'first-class recovery CLI. Run once per agent above to break the loop:\n\n'
-  while IFS= read -r agent; do
-    [[ -n "$agent" ]] || continue
-    printf '  agent-bridge agent ack-crash %s\n' "$agent"
-  done <<<"$stuck"
-
-  printf '\nReference:\n'
-  printf '  - Release notes (with runbook): https://github.com/SYRS-AI/agent-bridge-public/releases/tag/v%s\n' "$target_version"
-  printf '  - Fix PR: https://github.com/SYRS-AI/agent-bridge-public/pull/110\n'
-  printf '  - Issue #109: https://github.com/SYRS-AI/agent-bridge-public/issues/109\n'
-}
-
 bridge_upgrade_channel_guard_report() {
   local source_root="$1"
   local target_root="$2"
@@ -904,6 +844,18 @@ if [[ $MIGRATE_AGENTS -eq 1 ]]; then
       bridge_sync_claude_runtime_skills "$agent" "$(bridge_agent_workdir "$agent")" "$dry_run" >/dev/null 2>&1 || true
     done
   ' -- "$TARGET_ROOT" "$SOURCE_ROOT" "$DRY_RUN"
+
+  # Also propagate per-agent doc sync (bridge-docs.py apply) so
+  # MEMORY-SCHEMA.md / SKILLS.md / CLAUDE.md managed blocks track the
+  # canonical runtime on every upgrade. Before 2026-04-19 this hook was
+  # only reachable via bridge_sync_skill_docs which had no upstream
+  # caller — agents silently drifted from the template. See
+  # bridge-docs.sync_memory_schema_from_template.
+  if [[ $DRY_RUN -eq 0 ]]; then
+    python3 "$SOURCE_ROOT/bridge-docs.py" apply --all \
+      --bridge-home "$TARGET_ROOT" \
+      --target-root "$TARGET_ROOT/agents" >/dev/null 2>&1 || true
+  fi
 fi
 
 if [[ $RESTART_DAEMON -eq 1 && $DRY_RUN -eq 0 ]]; then
@@ -920,6 +872,134 @@ if [[ $DRY_RUN -eq 0 ]]; then
     --version "$SOURCE_VERSION" \
     --source-ref "$SOURCE_REF" \
     --channel "$CHANNEL" >/dev/null
+fi
+
+# Post-upgrade admin signal: file a [upgrade-complete] task with a
+# ready-to-execute checklist. Without this the admin has to know to
+# go read docs/agent-runtime/wiki-onboarding.md; the task makes the
+# first run self-announcing. Skipped on dry-runs and when no admin
+# agent is configured.
+if [[ $DRY_RUN -eq 0 ]]; then
+  # Resolve admin id: env override → grep the roster → skip.
+  # We grep instead of sourcing because the roster files reference
+  # bridge-lib arrays/functions that are not loaded in this scope;
+  # `source` would error out and leave _post_admin empty.
+  _post_admin="${BRIDGE_ADMIN_AGENT:-${BRIDGE_ADMIN_AGENT_ID:-}}"
+  if [[ -z "$_post_admin" ]]; then
+    for _roster in "$TARGET_ROOT/agent-roster.local.sh" "$TARGET_ROOT/agent-roster.sh"; do
+      if [[ -r "$_roster" ]]; then
+        _admin_line="$(grep -E '^[[:space:]]*(export[[:space:]]+)?BRIDGE_ADMIN_AGENT_ID=' "$_roster" 2>/dev/null | head -n 1 | sed -E 's/^[[:space:]]*(export[[:space:]]+)?BRIDGE_ADMIN_AGENT_ID=//; s/^"([^"]*)".*/\1/; s/^'"'"'([^'"'"']*)'"'"'.*/\1/; s/[[:space:]]*#.*$//')"
+        if [[ -n "$_admin_line" ]]; then
+          _post_admin="$_admin_line"
+          break
+        fi
+      fi
+    done
+  fi
+  if [[ -n "$_post_admin" && -x "$TARGET_ROOT/agent-bridge" ]]; then
+    _post_body="$(mktemp -t bridge-upgrade-post.XXXXXX)"
+    cat >"$_post_body" <<POST_EOF
+# Agent Bridge upgrade completed
+
+- from_version: ${INSTALLED_VERSION:-unknown}
+- to_version: $SOURCE_VERSION
+- ref: $SOURCE_REF
+- channel: $CHANNEL
+- upgraded_at: $(date -Iseconds 2>/dev/null || date)
+
+## Immediate action
+
+The v0.4.0 wiki-graph pipeline requires a one-time bootstrap on this
+host. The following sequence is idempotent — re-running produces no
+drift if the state is already converged.
+
+1. \`$TARGET_ROOT/bootstrap-memory-system.sh --apply\`
+   Registers all wiki + librarian crons, provisions the dynamic
+   librarian agent, and installs the Phase 1/2 scripts into
+   \`$TARGET_ROOT/scripts/\`.
+
+2. \`$TARGET_ROOT/scripts/wiki-mention-scan.py --full-rebuild\`
+   Builds the initial L1 observation index
+   (\`$TARGET_ROOT/shared/wiki/_index/mentions.db\`) and generates
+   today's distribution report.
+
+3. Review the distribution report at
+   \`$TARGET_ROOT/shared/wiki/_index/distribution-report-<date>.md\`.
+   - §1 cross-agent reach (how entities are connected).
+   - §2 L2 hub candidates (the weekly cron resurfaces these as
+     \`[wiki-hub-candidates]\` tasks; trigger now with the full
+     command below).
+   - §3 unresolved wikilinks (stubs to create or link typos to
+     fix via \`agb wiki repair-links --apply\`).
+   - §4 orphan entity slugs (delete candidates per
+     \`wiki-entity-lifecycle.md\` §3.6).
+
+4. Trigger the first L2 sweep manually (cron will run weekly from now on):
+   \`\`\`
+   $TARGET_ROOT/scripts/wiki-hub-audit.py \\
+     --emit-task --admin-agent "$_post_admin" \\
+     --bridge-bin "$TARGET_ROOT/agent-bridge" \\
+     --out "$TARGET_ROOT/shared/wiki/_audit/hub-candidates-\$(date +%Y-%m-%d).md"
+   \`\`\`
+
+## Full onboarding
+
+- \`docs/agent-runtime/wiki-onboarding.md\` — complete v0.4.0 admin walkthrough
+- \`docs/agent-runtime/admin-protocol.md\` — Wiki Canonical Hub Curation section (weekly ritual)
+- \`docs/agent-runtime/wiki-mention-index.md\` — L1 observation layer spec
+- \`docs/agent-runtime/wiki-entity-lifecycle.md\` — entity schema + dedup rules
+- \`docs/agent-runtime/wiki-graph-rules.md\` — graph edge policy
+
+## What's already automatic
+
+- MEMORY-SCHEMA.md sync to every agent home (just ran via \`bridge-docs.py apply --all\`)
+- Librarian CLAUDE.md template propagation
+- PreCompact hook registration on active claude agents (from bootstrap)
+
+## Done note format
+
+When you finish the three steps above, close this task with:
+\`agb done <task_id> --note "bootstrap OK; first-scan <N> files / <M> entities; distribution report at <path>"\`
+POST_EOF
+    # Persist the task body in state/ so the recovery command the
+    # WARN block prints is actually rerunnable. Tempfiles vanish on
+    # exit and leave the operator with guidance instead of a command
+    # that would copy-paste into "no such file". The persistent copy
+    # is deleted only on successful task create.
+    _post_body_persist_dir="$TARGET_ROOT/state/bridge-upgrade/post-task"
+    mkdir -p "$_post_body_persist_dir"
+    _post_body_persist="$_post_body_persist_dir/upgrade-complete-$(date -u +%Y%m%dT%H%M%SZ).md"
+    cp "$_post_body" "$_post_body_persist"
+    _post_task_log="$(mktemp -t bridge-upgrade-post-task.XXXXXX.log)"
+    if "$TARGET_ROOT/agent-bridge" task create \
+        --to "$_post_admin" --priority normal --from "$_post_admin" \
+        --title "[upgrade-complete] Agent Bridge $SOURCE_VERSION — run bootstrap" \
+        --body-file "$_post_body_persist" >"$_post_task_log" 2>&1; then
+      # Task created successfully — queue kept a durable copy of the
+      # body; the persist file in state/ is redundant.
+      rm -f "$_post_body_persist"
+    else
+      # Surface failure on stderr so the operator sees it on upgrade.
+      # A silent `|| true` here was the R9 reliability gap — the
+      # entire post-upgrade signal chain is anchored on this task
+      # actually being delivered. The rest of the upgrade succeeded;
+      # the notification specifically did not. Re-running agb upgrade
+      # retries the task emission. The persistent body stays on disk
+      # so the printed recovery command is literally rerunnable.
+      {
+        echo "[bridge-upgrade] WARN: could not file [upgrade-complete] task for admin=$_post_admin"
+        echo "[bridge-upgrade] WARN: admin inbox will not be auto-notified. Re-run 'agb upgrade' to retry, or"
+        echo "[bridge-upgrade] WARN: queue manually:"
+        echo "[bridge-upgrade] WARN:   $TARGET_ROOT/agent-bridge task create --to $_post_admin \\"
+        echo "[bridge-upgrade] WARN:     --priority normal --from $_post_admin \\"
+        echo "[bridge-upgrade] WARN:     --title '[upgrade-complete] Agent Bridge $SOURCE_VERSION — run bootstrap' \\"
+        echo "[bridge-upgrade] WARN:     --body-file $_post_body_persist"
+        echo "[bridge-upgrade] WARN: task create stderr follows:"
+        sed 's/^/[bridge-upgrade] WARN:   /' "$_post_task_log"
+      } >&2
+    fi
+    rm -f "$_post_body" "$_post_task_log"
+  fi
 fi
 
 if [[ $RESTART_AGENTS -eq 1 ]]; then
@@ -1034,4 +1114,3 @@ print(f"migrated_files: {payload.get('added_files', 0)}")
 PY
 fi
 bridge_upgrade_print_agent_restart_summary "$AGENT_RESTART_JSON"
-bridge_upgrade_print_post_upgrade_notices "$TARGET_ROOT" "$SOURCE_VERSION"

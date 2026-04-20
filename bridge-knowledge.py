@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -689,6 +690,74 @@ def cmd_operator_show(args: argparse.Namespace) -> int:
     return 0
 
 
+# ---------------------------------------------------------------------------
+# LLM-assisted related-page proposer. Called from cmd_promote when
+# --llm-review is set. Returns a list of {page, rationale} suggestions.
+# ---------------------------------------------------------------------------
+
+def propose_related_pages(
+    shared_root: Path,
+    capture: dict | None,
+    summary: str,
+    model: str = "",
+    limit: int = 15,
+) -> list[dict]:
+    """Ask the local Claude Code CLI which wiki pages are most likely affected.
+
+    Backend: invokes `claude` CLI with `--output-format text` and a strict-JSON
+    prompt. Returns empty list if `claude` is not on PATH, if the CLI fails,
+    or if the response is not valid JSON — existing promote behavior is the
+    fallback, so this never blocks the command.
+    """
+    claude = shutil.which("claude")
+    if not claude:
+        return []
+
+    wiki = wiki_root(shared_root)
+    if not wiki.exists():
+        return []
+
+    pages: list[str] = []
+    budget = 6000
+    for path in iter_wiki_markdown_files(shared_root):
+        title = markdown_title(path)
+        line = f"- {path.relative_to(shared_root)} — {title}"
+        if budget - len(line) < 0:
+            break
+        pages.append(line)
+        budget -= len(line)
+
+    capture_excerpt = ""
+    if capture:
+        capture_excerpt = (capture.get("text") or "")[:1500]
+
+    prompt = (
+        f"Given this new knowledge capture:\n\n"
+        f"Summary: {summary[:800]}\n\n"
+        f"Capture body: {capture_excerpt}\n\n"
+        f"Candidate wiki pages:\n" + "\n".join(pages) + "\n\n"
+        f"List the {limit} most-likely-related pages. Return strict JSON: "
+        f"{{\"suggestions\": [{{\"page\": \"<relative path>\", \"rationale\": \"<1 sentence>\"}}]}}. "
+        f"Return {{\"suggestions\": []}} if nothing applies."
+    )
+    command = [claude, "-p", "--no-session-persistence", "--dangerously-skip-permissions", "--output-format", "text"]
+    if model:
+        command.extend(["--model", model])
+    command.append(prompt)
+
+    try:
+        completed = subprocess.run(command, check=True, capture_output=True, text=True, timeout=60)
+    except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired):
+        return []
+
+    try:
+        data = json.loads(completed.stdout.strip())
+    except json.JSONDecodeError:
+        return []
+    suggestions = data.get("suggestions") if isinstance(data, dict) else []
+    return suggestions[:limit] if isinstance(suggestions, list) else []
+
+
 def cmd_promote(args: argparse.Namespace) -> int:
     shared_root = Path(args.shared_root)
     ensure_layout(shared_root, Path(args.template_root), args.team_name, args.dry_run)
@@ -711,12 +780,35 @@ def cmd_promote(args: argparse.Namespace) -> int:
         f"- {now().isoformat(timespec='seconds')} promoted {kind} -> {target.relative_to(shared_root)}",
         args.dry_run,
     )
+
+    # --llm-review: propose 10-15 related wiki pages; record suggestions
+    # in the promotion log so downstream reviewers can pick them up.
+    related: list[dict] = []
+    if getattr(args, "llm_review", False):
+        related = propose_related_pages(
+            shared_root,
+            capture,
+            summary,
+            model=getattr(args, "llm_model", "") or "",
+            limit=getattr(args, "llm_limit", 15),
+        )
+        if related:
+            related_block = "\n".join(
+                f"  - suggested: {item.get('page')} ({item.get('rationale')})" for item in related
+            )
+            append_log(
+                shared_root,
+                related_block,
+                args.dry_run,
+            )
+
     payload = {
         "kind": kind,
         "target": str(target),
         "relative_path": str(target.relative_to(shared_root)),
         "capture": args.capture or "",
         "promoted_capture_path": promoted_capture_path,
+        "related_pages": related,
         "dry_run": args.dry_run,
     }
     if args.json:
@@ -726,6 +818,10 @@ def cmd_promote(args: argparse.Namespace) -> int:
         print(f"target: {target}")
         if args.capture:
             print(f"capture: {args.capture}")
+        if related:
+            print(f"related ({len(related)}):")
+            for item in related:
+                print(f"- {item.get('page')}: {item.get('rationale')}")
     return 0
 
 
@@ -747,7 +843,264 @@ def line_matches(line: str, query: str, tokens: list[str]) -> bool:
     return bool(tokens) and all(token in lower for token in tokens)
 
 
+# ---------------------------------------------------------------------------
+# Hybrid search wrap: bridge-knowledge search optionally delegates to
+# tools/memory-manager.py's vector+BM25 engine. When a bridge-wiki-hybrid-v2
+# index exists for the resolved agent, hybrid is selected automatically
+# (reported as engine="hybrid-auto"). `--hybrid` forces hybrid explicitly.
+# `--legacy-text` forces legacy regex and beats auto-detection — operators
+# who hardcoded legacy in scripts keep that escape hatch.
+# ---------------------------------------------------------------------------
+
+# Mapping from bridge-knowledge `--scope` to memory-manager `--source` filters.
+# Every value in `SEARCH_SCOPES` must appear here. `_resolve_scope_sources`
+# raises rather than silently returning an empty filter for unknown scopes
+# so a deliberately narrowed search never broadens on a typo.
+_SCOPE_TO_SOURCES: dict[str, list[str]] = {
+    "wiki": ["wiki", "memory-weekly", "memory-monthly"],
+    "raw":  ["capture-ingested"],
+    "all":  [],  # no filter → memory-manager searches every configured source
+}
+
+
+def _resolve_scope_sources(scope: str) -> list[str]:
+    """Return the `--source` filters for a given `--scope`.
+
+    Raises KeyError for unmapped scopes so callers do not silently broaden
+    a deliberately narrowed search into an unfiltered one. The CLI
+    `choices=SEARCH_SCOPES` guard means this only fires when the mapping
+    and the `SEARCH_SCOPES` constant diverge.
+    """
+    assert set(SEARCH_SCOPES).issubset(_SCOPE_TO_SOURCES.keys()), \
+        "every SEARCH_SCOPES value must appear in _SCOPE_TO_SOURCES"
+    return _SCOPE_TO_SOURCES[scope]
+
+
+def _memory_manager_script(shared_root: Path | None = None) -> Path:
+    """Resolve the memory-manager.py path.
+
+    Resolution order:
+    1. `shared_root`'s install root: `<install>/tools/memory-manager.py`
+       where `<install>` is `shared_root.parent` (e.g. `shared_root=~/.agent-bridge/shared`
+       → install=`~/.agent-bridge`).
+    2. `BRIDGE_HOME` env var.
+    3. `~/.agent-bridge` fallback.
+    """
+    if shared_root is not None:
+        try:
+            install_root = shared_root.parent
+            candidate = install_root / "tools" / "memory-manager.py"
+            if candidate.exists():
+                return candidate
+        except (OSError, ValueError):
+            pass
+    env_home = os.environ.get("BRIDGE_HOME")
+    if env_home:
+        candidate = Path(env_home) / "tools" / "memory-manager.py"
+        if candidate.exists():
+            return candidate
+    return Path.home() / ".agent-bridge" / "tools" / "memory-manager.py"
+
+
+def _resolve_hybrid_agent(args: argparse.Namespace) -> str:
+    """Pick the agent id that `tools/memory-manager.py search --agent ...` receives.
+
+    Resolution order:
+    1. Explicit CLI flag `--agent` (added to `search` subparser).
+    2. `BRIDGE_AGENT_ID` environment variable.
+    3. `BRIDGE_AGENT` environment variable (legacy fallback name).
+    4. The last directory component of `args.shared_root` — *only* when that
+       looks like an agent-home layout (`<bridge-home>/agents/<name>`).
+    5. Hard fallback: the string "default" — memory-manager will then
+       surface "unknown agent" rather than silently hitting a random DB.
+    """
+    agent = getattr(args, "agent", "") or ""
+    if agent:
+        return agent
+    for env_var in ("BRIDGE_AGENT_ID", "BRIDGE_AGENT"):
+        value = os.environ.get(env_var, "")
+        if value:
+            return value
+    try:
+        shared_root = Path(args.shared_root).resolve()
+        parts = shared_root.parts
+        if len(parts) >= 2 and parts[-2] == "agents":
+            return parts[-1]
+    except (OSError, ValueError):
+        pass
+    return "default"
+
+
+def _v2_index_available(agent: str) -> bool:
+    """Return True iff a bridge-wiki-hybrid-v2 index exists for `agent`.
+
+    Lookup order for the index DB:
+      1. `$BRIDGE_HOME/runtime/memory/<agent>.sqlite`
+      2. `~/.agent-bridge/runtime/memory/<agent>.sqlite`
+
+    Criteria (all must hold):
+      - File exists and is non-empty.
+      - `meta` table has `index_kind = 'bridge-wiki-hybrid-v2'`.
+      - `chunks` table has at least one row.
+
+    Any exception (missing sqlite3, corrupt DB, permission denied,
+    unexpected schema) falls back to False — auto-hybrid never hijacks a
+    call that the legacy engine could handle.
+    """
+    try:
+        import sqlite3  # local import so bridge-knowledge stays lazy
+    except ImportError:
+        return False
+    candidates: list[Path] = []
+    env_home = os.environ.get("BRIDGE_HOME")
+    if env_home:
+        candidates.append(Path(env_home) / "runtime" / "memory" / f"{agent}.sqlite")
+    candidates.append(Path.home() / ".agent-bridge" / "runtime" / "memory" / f"{agent}.sqlite")
+    seen: set[str] = set()
+    for db_path in candidates:
+        key = str(db_path)
+        if key in seen:
+            continue
+        seen.add(key)
+        try:
+            if not db_path.exists() or db_path.stat().st_size == 0:
+                continue
+            uri = f"file:{db_path}?mode=ro"
+            conn = sqlite3.connect(uri, uri=True, timeout=2)
+        except Exception:
+            continue
+        try:
+            row = conn.execute(
+                "SELECT value FROM meta WHERE key = 'index_kind'"
+            ).fetchone()
+            if not row or row[0] != "bridge-wiki-hybrid-v2":
+                continue
+            chunks = conn.execute("SELECT 1 FROM chunks LIMIT 1").fetchone()
+            if chunks is None:
+                continue
+            return True
+        except Exception:
+            continue
+        finally:
+            try:
+                conn.close()
+            except Exception:
+                pass
+    return False
+
+
+def search_via_memory_manager(args: argparse.Namespace) -> list[dict] | None:
+    """Delegate search to the hybrid engine. Returns None on any failure.
+
+    Honors `args.scope` by mapping to memory-manager's `--source` filter.
+    Resolves `memory-manager.py` from `args.shared_root` so multi-install setups
+    don't accidentally query the wrong index. `--agent` is resolved via
+    `_resolve_hybrid_agent` so callers outside `patch` aren't forced to set
+    `BRIDGE_AGENT_ID`.
+    """
+    shared_root = Path(args.shared_root)
+    script = _memory_manager_script(shared_root)
+    if not script.exists():
+        return None
+    python_bin = sys.executable or "python3"
+    cmd = [
+        python_bin, str(script),
+        "search",
+        "--agent", _resolve_hybrid_agent(args),
+        "--max-results", str(args.limit),
+        "--json",
+    ]
+    try:
+        sources = _resolve_scope_sources(args.scope)
+    except KeyError:
+        # Scope not mapped — refuse to broaden the search silently.
+        return None
+    for src in sources:
+        cmd.extend(["--source", src])
+    # memory-manager takes the query as a trailing positional argument.
+    cmd.append(args.query)
+    try:
+        completed = subprocess.run(cmd, capture_output=True, text=True, timeout=30, check=True)
+    except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired):
+        return None
+    try:
+        payload = json.loads(completed.stdout)
+    except json.JSONDecodeError:
+        return None
+    results = payload.get("results")
+    if not isinstance(results, list):
+        return None
+    normalized: list[dict] = []
+    for item in results:
+        raw_path = item.get("path", "")
+        try:
+            rel = str(Path(raw_path).resolve().relative_to(shared_root.resolve()))
+        except (OSError, ValueError):
+            rel = raw_path  # fallback — path is outside shared_root
+        normalized.append({
+            "path": raw_path,
+            "relative_path": rel,
+            "line": int(item.get("startLine") or 0),
+            "snippet": item.get("snippet", ""),
+            "score": float(item.get("score") or 0.0),
+            "source": "hybrid",
+        })
+    return normalized
+
+
 def cmd_search(args: argparse.Namespace) -> int:
+    # Engine selection precedence:
+    #   1. `--legacy-text` → always legacy (explicit opt-out, beats auto).
+    #   2. `--hybrid`      → explicit opt-in (tagged "hybrid").
+    #   3. Auto-detect: if a v2 index exists for the resolved agent,
+    #      use hybrid (tagged "hybrid-auto"). Else legacy.
+    #
+    # Rationale: operators who hardcoded legacy in scripts keep
+    # `--legacy-text` as an escape hatch. Fresh callers on v2-indexed
+    # agents get hybrid automatically without having to flip `--hybrid`
+    # on every invocation.
+    engine_choice = "legacy-text"
+    engine_reported = "legacy-text"
+    if getattr(args, "legacy_text", False):
+        engine_choice = "legacy-text"
+        engine_reported = "legacy-text"
+    elif getattr(args, "hybrid", False):
+        engine_choice = "hybrid"
+        engine_reported = "hybrid"
+    else:
+        try:
+            agent_id = _resolve_hybrid_agent(args)
+        except Exception:
+            agent_id = ""
+        if agent_id and _v2_index_available(agent_id):
+            engine_choice = "hybrid"
+            engine_reported = "hybrid-auto"
+        else:
+            engine_choice = "legacy-text"
+            engine_reported = "legacy-text"
+
+    if engine_choice == "hybrid":
+        hybrid = search_via_memory_manager(args)
+        if hybrid is not None:
+            payload = {
+                "query": args.query,
+                "scope": args.scope,
+                "engine": engine_reported,
+                "count": len(hybrid),
+                "results": hybrid,
+            }
+            if args.json:
+                print(json.dumps(payload, ensure_ascii=False, indent=2))
+            else:
+                print(f"query: {args.query}")
+                print(f"engine: {engine_reported}")
+                print(f"matches: {len(hybrid)}")
+                for item in hybrid:
+                    print(f"- {item['relative_path']}:{item['line']} (score={item['score']:.3f}) {item['snippet']}")
+            return 0
+        # Hybrid fell through (memory-manager unreachable or errored).
+        # Fall back to legacy so callers always get *some* answer.
+
     shared_root = Path(args.shared_root)
     tokens = [token for token in re.split(r"\s+", args.query.lower().strip()) if token]
     results: list[dict[str, object]] = []
@@ -772,6 +1125,7 @@ def cmd_search(args: argparse.Namespace) -> int:
     payload = {
         "query": args.query,
         "scope": args.scope,
+        "engine": "legacy-text",
         "count": len(results),
         "results": results,
     }
@@ -780,6 +1134,7 @@ def cmd_search(args: argparse.Namespace) -> int:
     else:
         print(f"query: {args.query}")
         print(f"scope: {args.scope}")
+        print(f"engine: legacy-text")
         print(f"matches: {len(results)}")
         for item in results:
             print(f"- {item['relative_path']}:{item['line']} {item['snippet']}")
@@ -869,6 +1224,11 @@ def build_parser() -> argparse.ArgumentParser:
     promote_parser.add_argument("--page", default="")
     promote_parser.add_argument("--title", default="")
     promote_parser.add_argument("--summary", default="")
+    promote_parser.add_argument("--llm-review", action="store_true",
+        help="propose 10-15 related wiki pages via claude CLI")
+    promote_parser.add_argument("--llm-model", default="")
+    promote_parser.add_argument("--llm-limit", type=int, default=15,
+        help="max related-page suggestions (default 15)")
     promote_parser.set_defaults(func=cmd_promote)
 
     operator_set_parser = subparsers.add_parser("operator-set")
@@ -893,6 +1253,16 @@ def build_parser() -> argparse.ArgumentParser:
     search_parser.add_argument("--scope", choices=SEARCH_SCOPES, default="wiki")
     search_parser.add_argument("--limit", type=int, default=10)
     search_parser.add_argument("--json", action="store_true")
+    search_parser.add_argument("--hybrid", action="store_true",
+        help="force hybrid vector+BM25 search via tools/memory-manager.py "
+             "(default: auto-hybrid when a bridge-wiki-hybrid-v2 index exists, "
+             "else legacy regex)")
+    search_parser.add_argument("--agent", default="",
+        help="agent id for hybrid dispatch and v2-index auto-detect "
+             "(defaults to BRIDGE_AGENT_ID env or shared-root tail)")
+    search_parser.add_argument("--legacy-text", action="store_true",
+        help="force legacy regex engine (opt-out of auto-hybrid when v2 index "
+             "is present); highest precedence flag")
     search_parser.set_defaults(func=cmd_search)
 
     lint_parser = subparsers.add_parser("lint")

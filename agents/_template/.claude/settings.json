@@ -1,0 +1,17 @@
+{
+  "autoMemoryEnabled": true,
+  "autoDreamEnabled": true,
+  "hooks": {
+    "PreCompact": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/usr/bin/python3 ~/.agent-bridge/hooks/pre-compact.py",
+            "timeout": 20
+          }
+        ]
+      }
+    ]
+  }
+}

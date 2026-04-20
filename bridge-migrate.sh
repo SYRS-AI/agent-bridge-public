@@ -21,6 +21,10 @@ Usage:
   bash $SCRIPT_DIR/bridge-migrate.sh workspace plan <agent>
   bash $SCRIPT_DIR/bridge-migrate.sh workspace copy <agent> [--dry-run]
   bash $SCRIPT_DIR/bridge-migrate.sh workspace cutover <agent> --dry-run
+  bash $SCRIPT_DIR/bridge-migrate.sh overhead pre-migrate [--output <file>] [--json]
+  bash $SCRIPT_DIR/bridge-migrate.sh overhead dry-run [--agent <name>|--all] [--json]
+  bash $SCRIPT_DIR/bridge-migrate.sh overhead apply [--agent <name>|--all] --yes [--dry-run] [--json]
+  bash $SCRIPT_DIR/bridge-migrate.sh overhead rollback --stamp <YYYYMMDD-HHMMSS-<pid>> [--json]
 EOF
 }
 
@@ -720,6 +724,10 @@ case "$subcommand" in
         bridge_die "지원하지 않는 migrate docs 명령입니다: $action"
         ;;
     esac
+    ;;
+  overhead)
+    bridge_require_python
+    exec python3 "$SCRIPT_DIR/bridge-migrate.py" overhead "$@"
     ;;
   workspace)
     case "${1:-}" in
