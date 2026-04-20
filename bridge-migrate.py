@@ -34,16 +34,37 @@ from datetime import datetime
 from pathlib import Path
 
 
-def _bridge_home() -> Path:
-    env = os.environ.get("BRIDGE_HOME")
-    if env:
-        return Path(env)
+def _script_dir() -> Path:
+    """Directory containing this script — source tree for sibling modules."""
     return Path(__file__).resolve().parent
 
 
+def _bridge_home() -> Path:
+    """Runtime BRIDGE_HOME (where agents/, state/, shared/, logs/ live).
+
+    Falls back to this script's directory only for backwards compatibility
+    with invocations that don't export BRIDGE_HOME and where the source
+    checkout happens to coincide with the runtime root. New code should
+    prefer explicit --bridge-home on the CLI.
+    """
+    env = os.environ.get("BRIDGE_HOME")
+    if env:
+        return Path(env)
+    return _script_dir()
+
+
 def _load_bridge_docs():
-    """Import bridge-docs.py as module `_bridge_docs` (hyphen workaround)."""
-    script = _bridge_home() / "bridge-docs.py"
+    """Import bridge-docs.py as module `_bridge_docs` (hyphen workaround).
+
+    Always load the bridge-docs.py that lives alongside this script, never
+    the one under BRIDGE_HOME — an installed BRIDGE_HOME may hold an older
+    runtime copy that lacks symbols (e.g. read_session_type) this script
+    needs. See codex review of v0.3.8 -> v0.4.0 diff: the old behaviour
+    crashed `AttributeError: module '_bridge_docs' has no attribute
+    'read_session_type'` whenever an operator ran a new source checkout
+    against their existing BRIDGE_HOME.
+    """
+    script = _script_dir() / "bridge-docs.py"
     spec = importlib.util.spec_from_file_location("_bridge_docs", str(script))
     if spec is None or spec.loader is None:
         raise SystemExit(f"cannot load bridge-docs.py from {script}")

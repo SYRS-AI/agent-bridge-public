@@ -108,3 +108,38 @@ Operator guidance:
 
 - treat the channel helpers as backlog / future capability
 - restart Claude sessions after bridge deploys that change idle wake behavior
+
+## 8. `bridge-knowledge search` default auto-switches to hybrid when a v2 index exists
+
+Current behavior:
+
+- with no index present the default path stays legacy regex for backwards compatibility
+- once an operator runs `bridge-memory rebuild-index --index-kind bridge-wiki-hybrid-v2`, `bridge-knowledge search` automatically prefers the hybrid engine for that agent
+- `--legacy-text` is the explicit opt-out flag that forces the regex path regardless
+
+Reason:
+
+- the hybrid engine is higher quality when the index is available; the auto-switch saves operators from having to remember `--hybrid` on every call
+
+Operator guidance:
+
+- treat "did I build a v2 index?" as the effective toggle
+- if result shape changes after an index rebuild, that is expected — rerun with `--legacy-text` to compare
+
+## 9. Teams `/auth/callback` endpoint authenticates by state-token possession alone
+
+Current behavior:
+
+- the Teams plugin exposes `/auth/callback` for the ms365 authorization-code pairing flow
+- incoming requests are validated only by the tight state regex (`^[A-Za-z0-9_-]{8,128}$`) and written atomically under `$BRIDGE_HOME/shared/ms365-callbacks/<state>.json`
+- there is no separate check that a matching `pair_start` is currently pending
+
+Reason:
+
+- the ms365 plugin generates state as a random UUID with a 15-minute expiry, and `pair_poll` consumes and unlinks the callback file on success or error
+- for the hosted/local-only deployment targets this is sufficient in practice, and the atomic file write keeps the endpoint safe against concurrent/partial writes
+
+Operator guidance:
+
+- do not expose the Teams plugin's `/auth/callback` to the public internet without additional ingress-level auth (mTLS, ingress token, IP allowlist)
+- if you operate a multi-tenant hosted Teams plugin, layer your own `state` allowlist or HMAC before this handler

@@ -910,6 +910,111 @@ def cmd_backup_live(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_backup_extend_live(args: argparse.Namespace) -> int:
+    """Record additional files in an existing backup snapshot.
+
+    Rationale: the primary `backup-live` snapshot is built from the tracked-file
+    analysis and the migrate-agents preview. Later upgrade stages such as
+    `bridge-docs.py apply --all` mutate files outside that targeted set (per-agent
+    `MEMORY-SCHEMA.md`, `SKILLS.md`, `CLAUDE.md`, managed-doc symlinks, etc.) and
+    their prior contents are not captured, so `rollback-live` cannot restore
+    those files. This subcommand takes the changed-paths JSON produced by
+    `bridge-docs.py apply --dry-run --json`, copies each still-present target
+    path into `backup_root/live/`, and appends a manifest entry so the rollback
+    path treats them identically to the primary backup set.
+    """
+    target_root = Path(args.target_root).expanduser().resolve()
+    backup_root = Path(args.backup_root).expanduser()
+    payload = {
+        "mode": "backup-extend-live",
+        "target_root": str(target_root),
+        "backup_root": str(backup_root),
+        "dry_run": bool(args.dry_run),
+        "added_entries": 0,
+        "skipped_existing": 0,
+        "skipped_missing": 0,
+        "skipped_outside_target": 0,
+    }
+
+    raw = (args.paths_json or "").strip()
+    if not raw:
+        print(json.dumps(payload, ensure_ascii=False, indent=2))
+        return 0
+
+    try:
+        doc_payload = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise SystemExit(f"--paths-json is not valid JSON: {exc}") from exc
+    changed_paths = doc_payload.get("changed_paths") or []
+    if not isinstance(changed_paths, list):
+        raise SystemExit("--paths-json must contain a list under `changed_paths`")
+
+    manifest_path = backup_root / "manifest.json"
+    manifest = load_json(manifest_path, {})
+    existing_entries = list(manifest.get("entries") or [])
+    existing_relpaths = {str(entry.get("path") or "") for entry in existing_entries}
+
+    added_entries: list[dict[str, str]] = []
+    backup_live = backup_root / "live"
+
+    for raw_path in changed_paths:
+        if not isinstance(raw_path, str) or not raw_path:
+            continue
+        clean = raw_path
+        if clean.startswith("removed:"):
+            clean = clean[len("removed:"):]
+        try:
+            abs_path = Path(clean).expanduser().resolve()
+        except OSError:
+            payload["skipped_missing"] += 1
+            continue
+        try:
+            relpath = abs_path.relative_to(target_root).as_posix()
+        except ValueError:
+            payload["skipped_outside_target"] += 1
+            continue
+        if relpath in existing_relpaths:
+            payload["skipped_existing"] += 1
+            continue
+        existing_relpaths.add(relpath)
+        live_path = target_root / relpath
+        if live_path.exists() or live_path.is_symlink():
+            kind = "dir" if live_path.is_dir() and not live_path.is_symlink() else "file"
+            entry = {"path": relpath, "state": "present", "kind": kind}
+        else:
+            entry = {"path": relpath, "state": "absent", "kind": "file"}
+            payload["skipped_missing"] += 1
+        added_entries.append(entry)
+        if args.dry_run:
+            continue
+        if entry["state"] != "present":
+            continue
+        dst = backup_live / relpath
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        if live_path.is_symlink():
+            link_target = os.readlink(live_path)
+            if dst.exists() or dst.is_symlink():
+                dst.unlink()
+            os.symlink(link_target, dst)
+        elif live_path.is_dir():
+            shutil.copytree(live_path, dst, symlinks=True, dirs_exist_ok=True)
+        else:
+            shutil.copy2(live_path, dst, follow_symlinks=False)
+
+    payload["added_entries"] = len(added_entries)
+
+    if added_entries and not args.dry_run:
+        merged = existing_entries + added_entries
+        merged.sort(key=lambda item: str(item.get("path") or ""))
+        manifest["entries"] = merged
+        # If the snapshot was previously "full" (no entries), a targeted extend
+        # still leaves the full tree intact; leave snapshot_mode alone.
+        save_json(manifest_path, manifest)
+
+    print(json.dumps(payload, ensure_ascii=False, indent=2))
+    return 0
+
+
 def cmd_daily_backup_live(args: argparse.Namespace) -> int:
     target_root = Path(args.target_root).expanduser()
     backup_dir = Path(args.backup_dir).expanduser()
@@ -1001,6 +1106,24 @@ def build_parser() -> argparse.ArgumentParser:
     backup.add_argument("--migration-json", default="")
     backup.add_argument("--dry-run", action="store_true")
     backup.set_defaults(handler=cmd_backup_live)
+
+    extend = subparsers.add_parser(
+        "backup-extend-live",
+        help=(
+            "Extend an existing backup snapshot with files that a later upgrade "
+            "stage (e.g. bridge-docs.py apply) is about to mutate. Accepts the "
+            "`changed_paths` JSON from `bridge-docs.py apply --dry-run --json`."
+        ),
+    )
+    extend.add_argument("--target-root", required=True)
+    extend.add_argument("--backup-root", required=True)
+    extend.add_argument(
+        "--paths-json",
+        default="",
+        help="JSON payload matching bridge-docs.py --json output (expects a `changed_paths` key).",
+    )
+    extend.add_argument("--dry-run", action="store_true")
+    extend.set_defaults(handler=cmd_backup_extend_live)
 
     daily_backup = subparsers.add_parser("daily-backup-live")
     daily_backup.add_argument("--target-root", required=True)
