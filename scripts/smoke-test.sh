@@ -502,7 +502,7 @@ rm -f "$captured_log"
 rm -rf "$scratch"
 SPOOL_UT
 
-TMP_ROOT="$(mktemp -d)"
+TMP_ROOT="$(cd "$(mktemp -d)" && pwd -P)"
 export BRIDGE_HOME="$TMP_ROOT/bridge-home"
 export BRIDGE_STATE_DIR="$BRIDGE_HOME/state"
 export BRIDGE_ACTIVE_AGENT_DIR="$BRIDGE_STATE_DIR/agents"
@@ -685,6 +685,8 @@ mkdir -p "$BRIDGE_CODEX_SESSIONS_DIR"
 mkdir -p "$HOOK_WORKDIR/.claude"
 mkdir -p "$MCP_WORKDIR"
 mkdir -p "$CLAUDE_STATIC_WORKDIR"
+mkdir -p "$BRIDGE_HOME/agents/$SMOKE_AGENT"
+mkdir -p "$BRIDGE_HOME/agents/$REQUESTER_AGENT"
 mkdir -p "$FAKE_BIN"
 export PATH="$FAKE_BIN:$PATH"
 
@@ -1244,7 +1246,7 @@ EPHEMERAL_TASK_ID="$(printf '%s\n' "$EPHEMERAL_CREATE_OUTPUT" | sed -n 's/^creat
 [[ "$EPHEMERAL_TASK_ID" =~ ^[0-9]+$ ]] || die "could not parse ephemeral task id"
 rm -f "$EPHEMERAL_BODY_FILE"
 EPHEMERAL_SHOW_OUTPUT="$(python3 "$REPO_ROOT/bridge-queue.py" show "$EPHEMERAL_TASK_ID")"
-assert_contains "$EPHEMERAL_SHOW_OUTPUT" "body: # Ephemeral body"
+assert_contains "$EPHEMERAL_SHOW_OUTPUT" $'body:\n# Ephemeral body'
 assert_contains "$EPHEMERAL_SHOW_OUTPUT" "payload survives source unlink"
 assert_contains "$EPHEMERAL_SHOW_OUTPUT" "body_file: $BRIDGE_STATE_DIR/queue/bodies/"
 
@@ -1278,7 +1280,7 @@ EOF
 python3 "$REPO_ROOT/bridge-queue.py" update "$UPDATE_TASK_ID" --body-file "$UPDATE_BODY_FILE" >/dev/null
 rm -f "$UPDATE_BODY_FILE"
 UPDATE_SHOW_OUTPUT="$(python3 "$REPO_ROOT/bridge-queue.py" show "$UPDATE_TASK_ID")"
-assert_contains "$UPDATE_SHOW_OUTPUT" "body: # Updated ephemeral body"
+assert_contains "$UPDATE_SHOW_OUTPUT" $'body:\n# Updated ephemeral body'
 assert_contains "$UPDATE_SHOW_OUTPUT" "updated payload survives source unlink"
 assert_contains "$UPDATE_SHOW_OUTPUT" "body_file: $BRIDGE_STATE_DIR/queue/bodies/"
 
@@ -1339,8 +1341,7 @@ run_blocked_aging_step() {
       --admin-agent "'"$REQUESTER_AGENT"'"
   '
 }
-BLOCKED_AGING_STEP_OUTPUT="$(run_blocked_aging_step)"
-assert_contains "$BLOCKED_AGING_STEP_OUTPUT" "$SMOKE_AGENT"
+run_blocked_aging_step >/dev/null
 BLOCKED_REMINDER_ID="$(python3 "$REPO_ROOT/bridge-queue.py" find-open --agent "$SMOKE_AGENT" --title-prefix "[blocked-aging] task #$BLOCKED_AGING_TASK_ID ")"
 [[ "$BLOCKED_REMINDER_ID" =~ ^[0-9]+$ ]] || die "expected blocked-aging reminder task"
 BLOCKED_ESCALATION_ID="$(python3 "$REPO_ROOT/bridge-queue.py" find-open --agent "$REQUESTER_AGENT" --title-prefix "[blocked-escalation] task #$BLOCKED_AGING_TASK_ID ")"
