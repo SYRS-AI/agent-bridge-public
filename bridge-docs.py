@@ -439,6 +439,24 @@ def render_shared_tools_md(bridge_home: Path) -> str:
 - inventory/list/create/update/delete: `{home}/agent-bridge cron ...`
 - 옛 cron helper 예시는 더 이상 기준이 아니다.
 
+## Ops Recipes (intent → command)
+에이전트가 운영 점검 명령을 반복적으로 잘못 추측해서 blocked 된 사례가 있다(issue #163). 이름을 처음부터 찾는 대신 아래 의도→명령 매핑을 먼저 본다.
+
+| intent | command |
+| --- | --- |
+| 상태/헬스 확인 | `{home}/agent-bridge status` |
+| 실시간 프로세스 점검 | `{home}/agent-bridge watchdog scan` |
+| cron 실패/에러 리포트 | `{home}/agent-bridge cron errors report` |
+| cron job 목록 | `{home}/agent-bridge cron list` |
+| queue 요약 (누가 뭘 들고 있나) | `{home}/agent-bridge summary` |
+| 에이전트 인벤토리 | `{home}/agent-bridge list` |
+| 감사 로그 실시간 추적 | `{home}/agent-bridge audit follow` |
+| 메모리 위키 정합성 점검 | `{home}/agent-bridge memory lint --agent <agent>` |
+| 다른 에이전트로 작업 넘기기 | `{home}/agent-bridge task create --to <agent> ...` |
+| 긴급 인터럽트 | `{home}/agent-bridge urgent <agent> "..."` |
+
+CLI가 모르는 이름을 추측하면 `혹시 이 명령이었나요?` 힌트가 함께 뜬다. 자주 빗맞는 케이스(`health`, `diag`, `cron stats`, `cron list --failed`, `ps`, `agents`, `task stats`)는 `lib/bridge-core.sh`의 `bridge_suggest_subcommand` curated alias 테이블에 이미 들어 있다.
+
 ## Queue State
 - live queue는 `{home}/state/tasks.db`에 있다.
 - 하지만 직접 sqlite를 두드리는 대신 `agb inbox/show/claim/done/summary`를 사용한다.

@@ -1,25 +1,7 @@
 # Tools
 
-이 홈에서 일반적으로 사용하는 bridge-native 도구:
+<!-- Seeded from agents/_template/TOOLS.md; overwritten by agent-bridge upgrade. -->
 
-- `~/.agent-bridge/agent-bridge status`
-- `~/.agent-bridge/agb inbox <agent>`
-- `~/.agent-bridge/agb show <task-id>`
-- `~/.agent-bridge/agb claim <task-id> --agent <agent>`
-- `~/.agent-bridge/agb done <task-id> --agent <agent> --note "..."`
-- `~/.agent-bridge/agent-bridge task create --to <agent> ...`
-- `~/.agent-bridge/agent-bridge bundle create --to <agent> ...`
-- `~/.agent-bridge/agent-bridge intake triage --capture <id> --owner <agent> --route`
-- `~/.agent-bridge/agent-bridge urgent <agent> "..."`
-- `~/.agent-bridge/agent-bridge escalate question --agent <agent> --question "..." --context "..."`
-- `~/.agent-bridge/agent-bridge cron ...`
-- `~/.agent-bridge/agent-bridge memory capture --agent <agent> ...`
-- `~/.agent-bridge/agent-bridge memory ingest --agent <agent> --latest`
-- `~/.agent-bridge/agent-bridge memory promote --agent <agent> ...`
-- `~/.agent-bridge/agent-bridge memory remember --agent <agent> --source <source> --text "..." --kind user|shared|project|decision`
-- `~/.agent-bridge/agent-bridge memory search --agent <agent> --query "..."`
-- `~/.agent-bridge/agent-bridge memory rebuild-index --agent <agent>`
-- `~/.agent-bridge/agent-bridge memory query --agent <agent> --query "..."`
+이 파일은 agent 홈이 처음 세팅될 때 임시로 놓인 자리표지이다. 실제 최신 도구 목록과 의도→명령 매핑(Ops Recipes)은 `bridge-docs.py`의 `render_shared_tools_md`가 생성하며, `agent-bridge upgrade` 또는 `agent-bridge setup agent <agent>` 이후 이 파일은 `~/.agent-bridge/shared/TOOLS.md`를 가리키는 심볼릭 링크로 교체된다.
 
-채널 응답은 연결된 Claude/Codex 세션 안에서 처리한다. queue와 roster 상태는 `~/.agent-bridge` live runtime 기준으로 본다.
-메모리 판정 기준은 shared `memory-wiki` skill을 우선 따른다.
+아직 교체 전이라면 바로 `cat ~/.agent-bridge/shared/TOOLS.md`로 최신 목록을 확인하고, 필요하면 `agent-bridge upgrade`를 실행한다.

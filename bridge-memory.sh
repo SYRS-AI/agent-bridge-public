@@ -566,7 +566,12 @@ case "$command" in
     exit 0
     ;;
   *)
-    usage
-    exit 1
+    # Issue #163 Phase 2: surface an intent-recovery hint before dying so
+    # "memory <typo>" is aligned with the other dispatchers instead of
+    # silently printing usage and exiting 1.
+    _hint="$(bridge_suggest_subcommand "$command" \
+      "init capture ingest promote remember lint search rebuild-index query")"
+    [[ -n "$_hint" ]] && bridge_warn "$_hint"
+    bridge_die "지원하지 않는 memory 명령입니다: $command"
     ;;
 esac

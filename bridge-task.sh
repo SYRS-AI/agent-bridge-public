@@ -598,6 +598,15 @@ case "$COMMAND" in
     usage
     ;;
   *)
+    # Issue #163 Phase 2: preserve the dispatcher-specific `task stats`
+    # alias from the curated table, then fall back to fuzzy matching
+    # against the bare task subcommands for ordinary typos.
+    _hint="$(bridge_suggest_subcommand "task $COMMAND" "")"
+    if [[ -z "$_hint" ]]; then
+      _hint="$(bridge_suggest_subcommand "$COMMAND" \
+        "create inbox show claim done cancel handoff update summary")"
+    fi
+    [[ -n "$_hint" ]] && bridge_warn "$_hint"
     bridge_die "지원하지 않는 명령입니다: $COMMAND"
     ;;
 esac
