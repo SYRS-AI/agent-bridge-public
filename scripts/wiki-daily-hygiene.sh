@@ -1,4 +1,5 @@
 #!/bin/bash
+# shellcheck disable=SC2162
 # Wiki daily hygiene check — patch가 cron으로 실행.
 # CRITICAL/HIGH 발견 시 patch inbox에 task.
 

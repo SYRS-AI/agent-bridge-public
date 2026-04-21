@@ -79,9 +79,9 @@ usage: $(basename "$0") [--apply|--dry-run|--check] [--agent <name>] [--stale-da
 Steps:
   1. PreCompact hook per active claude agent.
   2. v2 hybrid index rebuild per active claude agent (skip if fresh).
-  3. Ensure the dynamic `librarian` agent is provisioned.
+  3. Ensure the dynamic 'librarian' agent is provisioned.
   4. Register the wiki-* + librarian-watchdog cron set on the admin
-     agent (default: `patch`; override with BRIDGE_ADMIN_AGENT env).
+     agent (default: 'patch'; override with BRIDGE_ADMIN_AGENT env).
 
 JSON report written to \$BRIDGE_STATE_ROOT/bootstrap-memory/report-<stamp>.json
 EOF
