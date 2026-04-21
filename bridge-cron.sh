@@ -153,6 +153,8 @@ run_list() {
         exit 0
         ;;
       *)
+        _hint="$(bridge_suggest_subcommand "cron list $1" "")"
+        [[ -n "$_hint" ]] && bridge_warn "$_hint"
         bridge_die "지원하지 않는 list 옵션입니다: $1"
         ;;
     esac
@@ -997,6 +999,11 @@ case "$subcommand" in
     usage
     ;;
   *)
+    # Issue #163: attach an intent-recovery suggestion before dying so the
+    # caller sees "혹시 X?" instead of just the bare rejection.
+    _hint="$(bridge_suggest_subcommand "cron $subcommand" \
+      "inventory show import list create update delete rebalance-memory-daily enqueue sync run-subagent finalize-run errors cleanup")"
+    [[ -n "$_hint" ]] && bridge_warn "$_hint"
     bridge_die "지원하지 않는 cron 명령입니다: $subcommand"
     ;;
 esac

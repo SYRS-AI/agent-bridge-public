@@ -143,6 +143,41 @@ run_cp_case "prose 'Context remaining 8%' -> warning via fallback" \
   "warning" "" \
   $'Context remaining 8%. Please compact soon.\n'
 
+log "CLI subcommand suggestion helper (issue #163)"
+run_suggest_case() {
+  local label="$1"
+  local unknown="$2"
+  local valid_list="$3"
+  local expected_substring="$4"
+  local out
+  out="$("$BASH4_BIN" -c '
+    source "'"$REPO_ROOT"'/bridge-lib.sh"
+    bridge_suggest_subcommand "$1" "$2"
+  ' _ "$unknown" "$valid_list")"
+  if [[ -z "$expected_substring" ]]; then
+    [[ -z "$out" ]] || die "expected empty suggestion for $label, got: $out"
+  else
+    assert_contains "$out" "$expected_substring"
+  fi
+  log "  [ok] $label"
+}
+# Curated table — the 3 measured cases from the issue all must recover.
+run_suggest_case "health -> status/watchdog" \
+  "health" "" "agent-bridge status"
+run_suggest_case "cron stats -> cron errors report" \
+  "cron stats" "" "agent-bridge cron errors report"
+run_suggest_case "cron list --failed -> cron errors report" \
+  "cron list --failed" "" "agent-bridge cron errors report"
+# Fuzzy fallback — simple Levenshtein hit.
+run_suggest_case "fuzzy: satus -> status" \
+  "satus" "status summary attach kill" "status"
+# Silent on truly-novel input so we don't hallucinate a command.
+run_suggest_case "unrelated -> silent" \
+  "completely-unrelated" "status summary attach" ""
+# Silent on ambiguous near-ties (margin-of-distance gate).
+run_suggest_case "ambiguous tie -> silent" \
+  "xx" "status attach" ""
+
 log "tmux inject gate: input-buffer-content detection (issue #132)"
 # Self-contained coverage for bridge_tmux_session_has_pending_input_from_text.
 # Placed early so the harness's downstream pre-existing failures do not gate

@@ -647,6 +647,20 @@ PY
       exec "$BRIDGE_BASH_BIN" "$SCRIPT_DIR/bridge-task.sh" "$@"
       ;;
   esac
+
+  # Issue #163: if the first arg survived the top-level case and does not
+  # start with `-` it is overwhelmingly a mistyped subcommand (e.g.
+  # `agent-bridge health`, `agent-bridge diag`). Letting it fall through
+  # into the spawn-flag parser surfaces the misleading "알 수 없는 옵션"
+  # error, which previously redirected agents into option-guessing or the
+  # sqlite3 fallback path. Reject with an intent-recovery suggestion
+  # before the spawn parser sees it.
+  if [[ -n "${1:-}" && "${1:0:1}" != "-" ]]; then
+    _top_valid="admin bootstrap init version upgrade escalate upstream review user guard knowledge bundle intake list status kill attach urgent task profile setup agent cron memory audit usage watchdog discord migrate wiki isolate unisolate worktree inbox show claim done cancel update handoff summary create"
+    _hint="$(bridge_suggest_subcommand "$1" "$_top_valid")"
+    [[ -n "$_hint" ]] && bridge_warn "$_hint"
+    bridge_die "지원하지 않는 명령입니다: $1"
+  fi
 fi
 
 ENGINE=""
