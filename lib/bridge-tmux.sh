@@ -517,7 +517,7 @@ bridge_tmux_paste_and_submit() {
       bridge_audit_log daemon tmux_paste_landing_failed "$session" \
         --detail engine="$engine" \
         --detail signature="$signature"
-      bridge_tmux_type_and_submit "$session" "$text"
+      bridge_tmux_type_and_submit "$session" "$text" "$engine"
       return $?
     fi
   fi
@@ -540,6 +540,14 @@ bridge_tmux_paste_and_submit() {
 bridge_tmux_type_and_submit() {
   local session="$1"
   local text="$2"
+  # Issue #195 review: accept optional engine arg so the verify/retry gate
+  # uses the caller's actual engine. Before this, the submit-retry path was
+  # hardcoded to `claude`, which meant codex callers (e.g., the paste-landed
+  # fallback from bridge_tmux_paste_and_submit) silently skipped verify —
+  # codex's prompt glyph `›` is not matched by the claude detector, so
+  # bridge_tmux_session_has_pending_input returned false, no retry fired,
+  # and an undelivered fallback nudge would still be reported as success.
+  local engine="${3:-claude}"
   local line
   local first_line=1
   local pane_target
@@ -570,7 +578,7 @@ bridge_tmux_type_and_submit() {
   sleep 0.05
   tmux send-keys -t "$pane_target" C-m
   sleep 0.1
-  if bridge_tmux_session_has_pending_input "$session" claude; then
+  if bridge_tmux_session_has_pending_input "$session" "$engine"; then
     sleep 0.15
     tmux send-keys -t "$pane_target" C-m
   fi
@@ -616,7 +624,7 @@ bridge_tmux_send_and_submit() {
 
   case "$engine" in
     claude)
-      bridge_tmux_type_and_submit "$session" "$text"
+      bridge_tmux_type_and_submit "$session" "$text" "$engine"
       ;;
     *)
       bridge_tmux_paste_and_submit "$session" "$text" "$engine"
