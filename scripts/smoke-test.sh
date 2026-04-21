@@ -5,6 +5,31 @@ set -euo pipefail
 SCRIPT_DIR="$(cd -P "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 REPO_ROOT="$(cd -P "$SCRIPT_DIR/.." && pwd -P)"
 
+# Safety: refuse to run against a live BRIDGE_HOME. smoke deliberately stops
+# its own daemon on cleanup, adopts/kills tmux sessions, and wipes state under
+# $TMP_ROOT. If BRIDGE_HOME is inherited from the parent shell and points at a
+# real install (e.g. $HOME/.agent-bridge), we would terminate the running
+# daemon, drop dynamic agent sessions, and trash live state. See issue #207.
+if [[ -n "${BRIDGE_HOME:-}" ]]; then
+  _smoke_allowed_tmp_prefix=""
+  for _smoke_tmp_candidate in "${TMPDIR%/}" "/tmp" "/private/tmp" "/var/folders"; do
+    [[ -n "$_smoke_tmp_candidate" ]] || continue
+    case "$BRIDGE_HOME" in
+      "$_smoke_tmp_candidate"|"$_smoke_tmp_candidate"/*)
+        _smoke_allowed_tmp_prefix="$_smoke_tmp_candidate"
+        break
+        ;;
+    esac
+  done
+  if [[ -z "$_smoke_allowed_tmp_prefix" ]]; then
+    printf '[smoke][error] refusing to run against non-temp BRIDGE_HOME: %s\n' "$BRIDGE_HOME" >&2
+    printf '[smoke][error] smoke-test.sh will stop its own daemon and kill tmux sessions; this would destroy a live install.\n' >&2
+    printf '[smoke][error] unset BRIDGE_HOME or point it under a temp prefix ($TMPDIR, /tmp, /private/tmp, /var/folders) before running smoke.\n' >&2
+    exit 1
+  fi
+  unset _smoke_allowed_tmp_prefix _smoke_tmp_candidate
+fi
+
 log() {
   printf '[smoke] %s\n' "$*"
 }
@@ -716,7 +741,10 @@ fi
 cleanup() {
   local status=$?
   local _cleanup_attempt=""
-  bash "$REPO_ROOT/bridge-daemon.sh" stop >/dev/null 2>&1 || true
+  # Pin BRIDGE_HOME on the subshell explicitly so the stop command can never
+  # target a live install even if some earlier code path unset or rewrote
+  # the exported value. See issue #207.
+  env BRIDGE_HOME="$TMP_ROOT/bridge-home" bash "$REPO_ROOT/bridge-daemon.sh" stop >/dev/null 2>&1 || true
   # Kill every tmux session that did not exist before the smoke test started.
   if [[ -n "${SMOKE_PRE_SESSIONS_FILE:-}" && -f "$SMOKE_PRE_SESSIONS_FILE" ]]; then
     local _new_session=""
@@ -5316,7 +5344,7 @@ assert all("memory-daily busy" not in line for line in output)
 PY
 
 log "stopping background daemon before deterministic cron-dispatch tail"
-bash "$REPO_ROOT/bridge-daemon.sh" stop >/dev/null
+env BRIDGE_HOME="$BRIDGE_HOME" bash "$REPO_ROOT/bridge-daemon.sh" stop >/dev/null
 
 log "processing one queued cron-dispatch task through the daemon"
 RUN_ID="smoke-job-1234--2026-04-05T10-00-00Z"
