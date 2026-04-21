@@ -76,7 +76,15 @@ bridge_build_dynamic_launch_cmd() {
       session_id=""
     fi
     if [[ "$effective_continue" == "1" && -z "$session_id" ]]; then
-      continue_fallback=1
+      if bridge_claude_has_resumable_session_state "$(bridge_agent_workdir "$agent")"; then
+        continue_fallback=1
+      else
+        bridge_warn "Claude agent '$agent' has continue=1 but no resumable session yet (first wake); launching fresh."
+        bridge_audit_log state claude_session_resume_skipped_first_wake "$agent" \
+          --field "continue_mode=$continue_mode" \
+          --field "reason=no_transcript" \
+          2>/dev/null || true
+      fi
     fi
   else
     bridge_normalize_agent_session_id "$agent"
@@ -499,7 +507,15 @@ bridge_build_static_claude_launch_cmd() {
     effective_continue=1
     session_id="$(bridge_claude_resume_session_id_for_agent "$agent" || true)"
     if [[ "$effective_continue" == "1" && -z "$session_id" ]]; then
-      continue_fallback=1
+      if bridge_claude_has_resumable_session_state "$(bridge_agent_workdir "$agent")"; then
+        continue_fallback=1
+      else
+        bridge_warn "Claude agent '$agent' has continue=1 but no resumable session yet (first wake); launching fresh."
+        bridge_audit_log state claude_session_resume_skipped_first_wake "$agent" \
+          --field "continue_mode=$continue_mode" \
+          --field "reason=no_transcript" \
+          2>/dev/null || true
+      fi
     fi
   fi
 
@@ -1464,6 +1480,53 @@ if best is None:
             best = (mtime_ms, stem)
 
 print(best[1] if best else "")
+PY
+}
+
+# Returns 0 (true) if the given workdir has any `~/.claude/projects/<slug>/*.jsonl`
+# transcript on disk. On first-wake (e.g. a freshly provisioned agent that has
+# never run) the directory is missing or empty and `claude --continue` would
+# fail with "No deferred tool marker found in the resumed session". Callers use
+# this to skip the `--continue` fallback until a real transcript exists.
+bridge_claude_has_resumable_session_state() {
+  local workdir="$1"
+  [[ -n "$workdir" ]] || return 1
+
+  python3 - "$workdir" <<'PY'
+import os
+import re
+import sys
+
+workdir = os.path.realpath(sys.argv[1])
+
+
+def workdir_slug_candidates(path):
+    slash_only = path.replace("/", "-")
+    slash_and_dot = re.sub(r"[/.]", "-", path)
+    candidates = [slash_only]
+    if slash_and_dot != slash_only:
+        candidates.append(slash_and_dot)
+    return candidates
+
+
+for slug in workdir_slug_candidates(workdir):
+    base = os.path.expanduser(f"~/.claude/projects/{slug}")
+    if not os.path.isdir(base):
+        continue
+    try:
+        entries = os.listdir(base)
+    except OSError:
+        continue
+    for entry in entries:
+        if not entry.endswith(".jsonl"):
+            continue
+        full = os.path.join(base, entry)
+        try:
+            if os.path.isfile(full) and os.path.getsize(full) > 0:
+                raise SystemExit(0)
+        except OSError:
+            continue
+raise SystemExit(1)
 PY
 }
 
