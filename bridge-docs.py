@@ -323,12 +323,18 @@ def copy_path(src: Path, dst: Path, dry_run: bool) -> None:
     shutil.copy2(src, dst)
 
 
-def ensure_symlink(link_path: Path, target: str, dry_run: bool) -> None:
+def ensure_symlink(link_path: Path, target: str, dry_run: bool) -> bool:
+    """Ensure `link_path` is a symlink pointing at `target`.
+
+    Returns True when the link was (or would be, in dry-run) changed.
+    Callers rely on this so they can record the mutation in
+    `changed_paths` for the upgrade rollback manifest.
+    """
     current = link_path.is_symlink() and os.readlink(link_path) == target
     if current:
-        return
+        return False
     if dry_run:
-        return
+        return True
     link_path.parent.mkdir(parents=True, exist_ok=True)
     if link_path.exists() or link_path.is_symlink():
         if link_path.is_dir() and not link_path.is_symlink():
@@ -336,6 +342,7 @@ def ensure_symlink(link_path: Path, target: str, dry_run: bool) -> None:
         else:
             link_path.unlink()
     link_path.symlink_to(target)
+    return True
 
 
 def backup_file(src: Path, backup_root: Path, dry_run: bool) -> None:
@@ -665,7 +672,9 @@ def sync_shared_docs(bridge_home: Path, source_shared: Path, dry_run: bool, stam
     target_refs = target_shared / "references"
     if not dry_run:
         target_shared.mkdir(parents=True, exist_ok=True)
-    ensure_symlink(bridge_home / "agents" / "shared", "../shared", dry_run)
+    shared_link = bridge_home / "agents" / "shared"
+    if ensure_symlink(shared_link, "../shared", dry_run):
+        changed.append(str(shared_link))
 
     deprecated_backup_root = bridge_home / "state" / "doc-migration" / "backups" / stamp / "_shared"
     for name in DEPRECATED_SHARED_FILES:
