@@ -16,7 +16,7 @@ bridge_session_is_smoke_or_adhoc() {
     context-pressure-bridge-smoke-*|codex-cli-session-*|\
     project-claude-session-bridge-smoke-*|stall-auth-*|stall-rate-*|\
     stall-unknown-*|roster-reload-session-*|smoke-admin-test*|\
-    stall-rate-test-*|memtest*|bootstrap-fail*|memphase4-*)
+    memtest*|bootstrap-fail*|memphase4-*)
       return 0
       ;;
   esac
