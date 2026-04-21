@@ -516,7 +516,7 @@ bootstrap_install_scripts() {
       templ_changed=$((templ_changed + 1))
       record "install" "template:agents/$rel" "installed" ""
     done < <(find "$agents_src" -type f -name '*.md' -print0 2>/dev/null)
-    [[ "$templ_changed" -gt 0 ]] && log "agent templates changed: $templ_changed"
+    if [[ "$templ_changed" -gt 0 ]]; then log "agent templates changed: $templ_changed"; fi
   fi
 }
 
