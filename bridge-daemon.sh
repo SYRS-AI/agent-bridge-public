@@ -26,6 +26,78 @@ daemon_info() {
   printf '[%s] [info] %s\n' "$(date '+%Y-%m-%dT%H:%M:%S%z')" "$message"
 }
 
+# --- Daemon exit observability (issue #193) ----------------------------------
+# These traps guarantee every daemon exit path leaves a trail in both
+# $BRIDGE_LAUNCHAGENT_LOG and the audit log. Without this, silent exits
+# (signals, `set -e` aborts, unhandled errors) block root-cause of crash-
+# restart cycles (see issues #190, #194).
+BRIDGE_LAUNCHAGENT_LOG="${BRIDGE_LAUNCHAGENT_LOG:-$BRIDGE_STATE_DIR/launchagent.log}"
+BRIDGE_LAST_SIGNAL="${BRIDGE_LAST_SIGNAL:-none}"
+BRIDGE_DAEMON_LAST_STEP="${BRIDGE_DAEMON_LAST_STEP:-init}"
+BRIDGE_DAEMON_ERR_LOCATION="${BRIDGE_DAEMON_ERR_LOCATION:-}"
+_BRIDGE_DAEMON_EXIT_LOGGED=0
+_BRIDGE_DAEMON_IN_ERR_TRAP=0
+
+_bridge_daemon_on_signal() {
+  BRIDGE_LAST_SIGNAL="$1"
+}
+
+_bridge_daemon_on_err() {
+  # Recursion guard: trap handlers that themselves fail must not retrigger.
+  if (( _BRIDGE_DAEMON_IN_ERR_TRAP != 0 )); then
+    return 0
+  fi
+  _BRIDGE_DAEMON_IN_ERR_TRAP=1
+  # Record the first failing source:line; keep BRIDGE_DAEMON_LAST_STEP intact
+  # so exit records retain the semantic step (e.g. "nudge_scan") alongside
+  # the err_location.
+  if [[ -z "$BRIDGE_DAEMON_ERR_LOCATION" ]]; then
+    BRIDGE_DAEMON_ERR_LOCATION="${BASH_SOURCE[1]:-unknown}:${BASH_LINENO[0]:-0}"
+  fi
+  _BRIDGE_DAEMON_IN_ERR_TRAP=0
+}
+
+_bridge_daemon_on_exit() {
+  local ec=$?
+  local sig="${BRIDGE_LAST_SIGNAL:-none}"
+  local step="${BRIDGE_DAEMON_LAST_STEP:-unknown}"
+  local err_location="${BRIDGE_DAEMON_ERR_LOCATION:-}"
+  local ts
+
+  # Idempotence: EXIT trap can fire multiple times in edge cases.
+  if (( _BRIDGE_DAEMON_EXIT_LOGGED != 0 )); then
+    return 0
+  fi
+  _BRIDGE_DAEMON_EXIT_LOGGED=1
+
+  ts="$(date '+%Y-%m-%dT%H:%M:%S%z' 2>/dev/null || echo unknown)"
+  mkdir -p "$BRIDGE_STATE_DIR" 2>/dev/null || true
+  printf '[%s] [info] daemon exit pid=%d ec=%d sig=%s last_step=%s err_location=%s\n' \
+    "$ts" "$$" "$ec" "$sig" "$step" "${err_location:-none}" \
+    >>"$BRIDGE_LAUNCHAGENT_LOG" 2>/dev/null || true
+
+  # bridge_audit_log shells out to python; wrap so an audit failure cannot
+  # mask the original exit code.
+  bridge_audit_log daemon daemon_exit daemon \
+    --detail pid="$$" \
+    --detail exit_code="$ec" \
+    --detail signal="$sig" \
+    --detail last_step="$step" \
+    --detail err_location="${err_location:-none}" >/dev/null 2>&1 || true
+
+  rm -f "$BRIDGE_DAEMON_PID_FILE" 2>/dev/null || true
+  if (( ec != 0 )); then
+    # PR #198 review: daemon_log_event internally does mkdir + append write,
+    # either of which can fail (dir unwritable, disk full). Under set -e an
+    # unguarded failure here overwrites the original exit code we're trying
+    # to report. Guard so the observability path cannot mask the signal.
+    daemon_log_event "daemon exiting with status=$ec sig=$sig last_step=$step err_location=${err_location:-none}" 2>/dev/null || true
+  fi
+  # Ensure the trap returns the original exit code even if a later command
+  # (including the guards above) altered $?.
+  return "$ec"
+}
+
 bridge_agent_heartbeat_file() {
   local agent="$1"
   local workdir=""
@@ -3152,22 +3224,32 @@ cmd_sync_cycle() {
 
   # The daemon is long-lived, so dynamic agents created after startup will not
   # exist in memory unless we reload the roster each cycle.
+  BRIDGE_DAEMON_LAST_STEP="load_roster"
   bridge_load_roster
 
   # Discord relay runs FIRST — lowest-latency path for DM wake
+  BRIDGE_DAEMON_LAST_STEP="discord_relay"
   bridge_discord_relay_step || true
 
+  BRIDGE_DAEMON_LAST_STEP="bridge_sync"
   "$BRIDGE_BASH_BIN" "$SCRIPT_DIR/bridge-sync.sh" >/dev/null 2>&1 || true
   bridge_load_roster
+  BRIDGE_DAEMON_LAST_STEP="queue_gateway"
   if process_queue_gateway_requests; then
     changed=0
   fi
+  BRIDGE_DAEMON_LAST_STEP="reconcile_idle_markers"
   bridge_reconcile_idle_markers || true
+  BRIDGE_DAEMON_LAST_STEP="bootstrap_recovery"
   recover_claude_bootstrap_blockers || true
+  BRIDGE_DAEMON_LAST_STEP="attention_flush"
   flush_pending_attention_spools || true
+  BRIDGE_DAEMON_LAST_STEP="channel_health"
   process_channel_health || true
+  BRIDGE_DAEMON_LAST_STEP="plugin_liveness"
   process_plugin_liveness || true
 
+  BRIDGE_DAEMON_LAST_STEP="nudge_scan"
   snapshot_file="$(mktemp)"
   ready_agents_file="$(mktemp)"
   bridge_write_agent_snapshot "$snapshot_file"
@@ -3176,8 +3258,10 @@ cmd_sync_cycle() {
   rm -f "$snapshot_file"
   rm -f "$ready_agents_file"
 
+  BRIDGE_DAEMON_LAST_STEP="cron_dispatch_workers"
   start_cron_dispatch_workers || true
 
+  BRIDGE_DAEMON_LAST_STEP="nudge_agents"
   while IFS=$'\t' read -r agent session queued claimed idle nudge_key; do
     [[ -z "$agent" || -z "$session" ]] && continue
     if ! bridge_tmux_session_exists "$session"; then
@@ -3194,55 +3278,72 @@ cmd_sync_cycle() {
     esac
   done <<<"$nudge_output"
 
+  BRIDGE_DAEMON_LAST_STEP="queue_summary"
   summary_output="$(bridge_queue_cli summary --format tsv 2>/dev/null || true)"
+  BRIDGE_DAEMON_LAST_STEP="memory_refresh"
   if process_memory_daily_refresh_requests; then
     changed=0
   fi
+  BRIDGE_DAEMON_LAST_STEP="stall_reports"
   if [[ -n "$summary_output" ]] && process_stall_reports "$summary_output"; then
     changed=0
   fi
+  BRIDGE_DAEMON_LAST_STEP="permission_timeout_fanout"
   if process_permission_task_timeout_fanout; then
     changed=0
   fi
+  BRIDGE_DAEMON_LAST_STEP="context_pressure_scan"
   if [[ -n "$summary_output" ]] && process_context_pressure_reports "$summary_output"; then
     changed=0
   fi
+  BRIDGE_DAEMON_LAST_STEP="heartbeats"
   if refresh_agent_heartbeats; then
     changed=0
   fi
+  BRIDGE_DAEMON_LAST_STEP="watchdog"
   if process_watchdog_report; then
     changed=0
   fi
+  BRIDGE_DAEMON_LAST_STEP="crash_reports"
   if process_crash_reports; then
     changed=0
   fi
+  BRIDGE_DAEMON_LAST_STEP="usage_monitor"
   if process_usage_monitor; then
     changed=0
   fi
+  BRIDGE_DAEMON_LAST_STEP="daily_backup"
   if process_daily_backup; then
     changed=0
   fi
+  BRIDGE_DAEMON_LAST_STEP="release_monitor"
   if process_release_monitor; then
     changed=0
   fi
+  BRIDGE_DAEMON_LAST_STEP="on_demand_agents"
   if [[ -n "$summary_output" ]] && process_on_demand_agents "$summary_output"; then
     changed=0
   fi
+  BRIDGE_DAEMON_LAST_STEP="reap_dynamic"
   if reap_idle_dynamic_agents; then
     changed=0
   fi
+  BRIDGE_DAEMON_LAST_STEP="reap_orphan_sessions"
   if reap_idle_orphan_sessions; then
     changed=0
   fi
+  BRIDGE_DAEMON_LAST_STEP="mcp_orphan_cleanup"
   if process_mcp_orphan_cleanup; then
     changed=0
   fi
   if [[ "$changed" == "0" ]]; then
+    BRIDGE_DAEMON_LAST_STEP="post_sync"
     "$BRIDGE_BASH_BIN" "$SCRIPT_DIR/bridge-sync.sh" >/dev/null 2>&1 || true
   fi
 
   # Cron sync runs LAST, in the background with a timeout, so it never blocks
   # relay/auto-start above.  Only one sync runs at a time (PID-file guard).
+  BRIDGE_DAEMON_LAST_STEP="cron_sync"
   if [[ "${BRIDGE_CRON_SYNC_ENABLED:-${BRIDGE_LEGACY_CRON_SYNC_ENABLED:-${BRIDGE_OPENCLAW_CRON_SYNC_ENABLED:-0}}}" == "1" ]]; then
     local cron_sync_pid_file="$BRIDGE_STATE_DIR/cron-sync.pid"
     local cron_sync_running=0
@@ -3285,6 +3386,7 @@ cmd_sync_cycle() {
     fi
   fi
 
+  BRIDGE_DAEMON_LAST_STEP="dashboard_post"
   bridge_dashboard_post_if_changed "$summary_output" || true
 }
 
@@ -3322,19 +3424,34 @@ cmd_start() {
 cmd_run() {
   local cycle_status
 
-  trap 'daemon_log_event "received SIGTERM"; exit 0' TERM
-  trap 'daemon_log_event "received SIGINT"; exit 0' INT
-  trap 'daemon_log_event "received SIGHUP"; exit 0' HUP
-  trap 'status=$?; rm -f "$BRIDGE_DAEMON_PID_FILE"; if (( status != 0 )); then daemon_log_event "daemon exiting with status=$status"; fi' EXIT
+  # Signal traps record the received signal name so the EXIT trap can report
+  # *why* we're exiting. We keep the existing `daemon_log_event` calls for
+  # backwards compatibility with the crash-log file.
+  # Signal traps: guard daemon_log_event so an unwritable crash log cannot
+  # keep us from reaching `exit 0` under set -e (PR #198 review).
+  trap '_bridge_daemon_on_signal TERM; daemon_log_event "received SIGTERM" 2>/dev/null || true; exit 0' TERM
+  trap '_bridge_daemon_on_signal INT;  daemon_log_event "received SIGINT"  2>/dev/null || true; exit 0' INT
+  trap '_bridge_daemon_on_signal HUP;  daemon_log_event "received SIGHUP"  2>/dev/null || true; exit 0' HUP
+  # ERR trap captures the failing source:line under `set -E` (inherited by
+  # functions) so we can attribute `set -e` aborts. Guarded against recursion.
+  set -E
+  trap '_bridge_daemon_on_err' ERR
+  # EXIT trap emits the structured exit record (audit + launchagent log) and
+  # tidies the pid file.
+  trap '_bridge_daemon_on_exit' EXIT
+
+  BRIDGE_DAEMON_LAST_STEP="startup"
   echo "$$" >"$BRIDGE_DAEMON_PID_FILE"
 
   while true; do
+    BRIDGE_DAEMON_LAST_STEP="sync_cycle"
     if cmd_sync_cycle; then
       :
     else
       cycle_status=$?
       daemon_log_event "sync cycle failed with exit=$cycle_status"
     fi
+    BRIDGE_DAEMON_LAST_STEP="idle_sleep"
     sleep "$BRIDGE_DAEMON_INTERVAL"
   done
 }
