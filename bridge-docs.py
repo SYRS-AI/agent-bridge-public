@@ -839,6 +839,15 @@ def render_agent_bridge_block(agent_dir: Path, session_type: str | None = None) 
         "- `COMMON-INSTRUCTIONS.md`는 전 에이전트 공통 규칙 SSOT다. 역할별 문서보다 먼저 우회하면 안 된다.",
         "- `CHANGE-POLICY.md`는 기술 변경의 upstream/downstream 분류 계약이다.",
         "- `TOOLS.md`와 `SKILLS.md`는 현재 bridge-native runtime reference다.",
+        # Issue #162 Phase 2: conditional bullet — only rendered when the
+        # agent actually has promoted role-specific preferences. Zero
+        # overhead when absent (file-exists gate, same pattern as Phase 1's
+        # USER.md cross-agent canonical).
+        *(
+            ["- `ACTIVE-PREFERENCES.md`: 이 에이전트 역할 전용 운영 규칙이다. 매 세션 시작 시 읽는다."]
+            if (agent_dir / "ACTIVE-PREFERENCES.md").exists()
+            else []
+        ),
         "",
         "## Queue & Delivery",
         "- inbox / task 상태 확인은 `~/.agent-bridge/agb inbox|show|claim|done`를 사용한다.",

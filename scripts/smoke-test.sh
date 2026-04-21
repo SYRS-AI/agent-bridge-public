@@ -2675,6 +2675,31 @@ assert_contains "$(cat "$SMOKE_USER_PROFILE_CANONICAL")" "답변 없으면 Disco
 # Same canonical means the agent-visible file and the shared file are the same bytes.
 diff -q "$SMOKE_USER_PROFILE_AGENT" "$SMOKE_USER_PROFILE_CANONICAL" >/dev/null \
   || die "user-profile promote wrote to agent-local path instead of shared canonical"
+# Issue #162 Phase 2: agent-pref is scoped to this agent role only and
+# lives at the agent home root. Three invariants: (1) file must NOT exist
+# at scaffold time, (2) first promote creates it with the spec section
+# format, (3) the CLAUDE.md Runtime Canon pointer appears only AFTER the
+# file exists, and disappears when the file is absent.
+SMOKE_AGENT_PREF_PATH="$BRIDGE_AGENT_HOME_ROOT/$CREATED_AGENT/ACTIVE-PREFERENCES.md"
+SMOKE_AGENT_CLAUDE_PATH="$BRIDGE_AGENT_HOME_ROOT/$CREATED_AGENT/CLAUDE.md"
+[[ ! -f "$SMOKE_AGENT_PREF_PATH" ]] || die "ACTIVE-PREFERENCES.md leaked into scaffold (#162 Phase 2)"
+if grep -q "ACTIVE-PREFERENCES.md" "$SMOKE_AGENT_CLAUDE_PATH"; then
+  die "Runtime Canon pointer rendered before any agent-pref promotion (#162 Phase 2)"
+fi
+MEMORY_AGENT_PREF_OUTPUT="$("$REPO_ROOT/agent-bridge" memory promote --agent "$CREATED_AGENT" --kind agent-pref --title "Confirm destructive commands" --summary "삭제/리셋 계열 명령은 실행 전에 반드시 operator 확인을 받는다.")"
+assert_contains "$MEMORY_AGENT_PREF_OUTPUT" "kind: agent-pref"
+[[ -f "$SMOKE_AGENT_PREF_PATH" ]] || die "agent-pref promote did not create ACTIVE-PREFERENCES.md"
+assert_contains "$(cat "$SMOKE_AGENT_PREF_PATH")" "Confirm destructive commands"
+assert_contains "$(cat "$SMOKE_AGENT_PREF_PATH")" "scope: agent"
+assert_contains "$(cat "$SMOKE_AGENT_PREF_PATH")" "**Rule:**"
+# Re-run setup agent so bridge-docs.py re-renders the managed block now
+# that the file exists. Pointer must appear (conditional rendering).
+"$REPO_ROOT/agent-bridge" setup agent "$CREATED_AGENT" --skip-discord >/dev/null
+assert_contains "$(cat "$SMOKE_AGENT_CLAUDE_PATH")" "ACTIVE-PREFERENCES.md"
+# search/index plumbing — rebuild-index then search for the rule body.
+"$REPO_ROOT/agent-bridge" memory rebuild-index --agent "$CREATED_AGENT" >/dev/null
+MEMORY_AGENT_PREF_SEARCH_JSON="$("$REPO_ROOT/agent-bridge" memory search --agent "$CREATED_AGENT" --query "destructive commands" --json)"
+assert_contains "$MEMORY_AGENT_PREF_SEARCH_JSON" "ACTIVE-PREFERENCES.md"
 MEMORY_LINT_JSON="$("$REPO_ROOT/agent-bridge" memory lint --agent "$CREATED_AGENT" --json)"
 assert_contains "$MEMORY_LINT_JSON" "\"ok\": true"
 MEMORY_SEARCH_JSON="$("$REPO_ROOT/agent-bridge" memory search --agent "$CREATED_AGENT" --user owner --query "concise morning updates" --json)"
