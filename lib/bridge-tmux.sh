@@ -173,7 +173,21 @@ bridge_tmux_prompt_line_has_pending_input() {
       return 0
       ;;
     codex)
-      return 1
+      # Issue #175: prior `return 1` meant `bridge_tmux_session_has_pending_input`
+      # was a no-op for codex, so the paste_and_submit retry in issue #175
+      # could never observe the "typed but never submitted" race. Mirror the
+      # claude remainder-detection: `› <text>` (or the fallback `> <text>`)
+      # with non-whitespace remainder counts as pending.
+      if [[ "$trimmed" == ›* ]]; then
+        remainder="${trimmed#›}"
+      elif [[ "$trimmed" == '>'* ]]; then
+        remainder="${trimmed#>}"
+      else
+        return 1
+      fi
+      remainder="${remainder#"${remainder%%[![:space:]]*}"}"
+      [[ -n "$remainder" ]] || return 1
+      return 0
       ;;
     *)
       return 1
@@ -252,6 +266,11 @@ bridge_tmux_session_has_pending_input_from_text() {
   # (quoted text in an agent response, markdown blockquotes). Remember the
   # LAST line that looks like a prompt and evaluate pending-input on that
   # one only, so quoted content above cannot trigger a permanent defer.
+  # Issue #175 (codex review finding): the same applies to codex — a
+  # queued `› old text` in scrollback previously caused the old codex
+  # branch to return 0 on the first match and mark an idle session as
+  # busy. Track last_prompt_line for codex too and evaluate pending-input
+  # after the loop on that final line only.
   while IFS= read -r line; do
     line="${line//$'\r'/}"
     line="${line//$'\u00A0'/ }"
@@ -263,6 +282,11 @@ bridge_tmux_session_has_pending_input_from_text() {
           last_prompt_line="$trimmed"
         fi
         ;;
+      codex)
+        if [[ "$trimmed" == ›* || "$trimmed" == '>'* ]]; then
+          last_prompt_line="$trimmed"
+        fi
+        ;;
       *)
         if bridge_tmux_prompt_line_has_pending_input "$engine" "$trimmed"; then
           return 0
@@ -271,7 +295,7 @@ bridge_tmux_session_has_pending_input_from_text() {
     esac
   done <<<"$recent"
 
-  if [[ "$engine" == "claude" && -n "$last_prompt_line" ]]; then
+  if [[ -n "$last_prompt_line" ]]; then
     bridge_tmux_prompt_line_has_pending_input "$engine" "$last_prompt_line"
     return
   fi
@@ -423,14 +447,27 @@ bridge_tmux_prepare_claude_session() {
 bridge_tmux_paste_and_submit() {
   local session="$1"
   local text="$2"
+  local engine="${3:-codex}"
   local buffer_name
+  local pane_target
+  pane_target="$(bridge_tmux_pane_target "$session")"
 
   buffer_name="bridge-send-$$-$(bridge_nonce)"
   tmux set-buffer -b "$buffer_name" -- "$text"
-  tmux paste-buffer -d -p -b "$buffer_name" -t "$(bridge_tmux_pane_target "$session")"
+  tmux paste-buffer -d -p -b "$buffer_name" -t "$pane_target"
 
+  # Issue #175: symmetric verify/retry mirrors bridge_tmux_type_and_submit
+  # (issue #146). Fresh codex sessions can miss the first C-m when the TUI
+  # hasn't absorbed the paste within the 50ms grace — the submit lands on
+  # an empty input line and the paste stays buffered. Warm sessions land
+  # instantly; the retry branch only fires under the observed race.
   sleep 0.05
-  tmux send-keys -t "$(bridge_tmux_pane_target "$session")" C-m
+  tmux send-keys -t "$pane_target" C-m
+  sleep 0.1
+  if bridge_tmux_session_has_pending_input "$session" "$engine"; then
+    sleep 0.15
+    tmux send-keys -t "$pane_target" C-m
+  fi
 }
 
 bridge_tmux_type_and_submit() {
@@ -515,7 +552,7 @@ bridge_tmux_send_and_submit() {
       bridge_tmux_type_and_submit "$session" "$text"
       ;;
     *)
-      bridge_tmux_paste_and_submit "$session" "$text"
+      bridge_tmux_paste_and_submit "$session" "$text" "$engine"
       ;;
   esac
 }
