@@ -1522,6 +1522,10 @@ case "$subcommand" in
     usage
     ;;
   *)
+    # Issue #163 Phase 2: surface an intent-recovery hint before dying.
+    _hint="$(bridge_suggest_subcommand "$subcommand" \
+      "create list show start safe-mode stop restart ack-crash attach")"
+    [[ -n "$_hint" ]] && bridge_warn "$_hint"
     bridge_die "지원하지 않는 agent 명령입니다: $subcommand"
     ;;
 esac

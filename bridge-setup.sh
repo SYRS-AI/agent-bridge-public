@@ -1028,6 +1028,10 @@ case "$subcommand" in
     usage
     ;;
   *)
+    # Issue #163 Phase 2: surface an intent-recovery hint before dying.
+    _hint="$(bridge_suggest_subcommand "$subcommand" \
+      "discord telegram teams agent admin")"
+    [[ -n "$_hint" ]] && bridge_warn "$_hint"
     bridge_die "지원하지 않는 setup 명령입니다: $subcommand"
     ;;
 esac

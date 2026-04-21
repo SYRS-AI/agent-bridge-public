@@ -177,6 +177,42 @@ run_suggest_case "unrelated -> silent" \
 # Silent on ambiguous near-ties (margin-of-distance gate).
 run_suggest_case "ambiguous tie -> silent" \
   "xx" "status attach" ""
+# Phase 2: exercise additional curated intents used by the new dispatcher
+# wiring (agent list / task summary / top-level diagnose).
+run_suggest_case "ps -> list/status (agent dispatcher intent)" \
+  "ps" "" "agent-bridge list"
+run_suggest_case "task stats -> summary (task dispatcher intent)" \
+  "task stats" "" "agent-bridge summary"
+run_suggest_case "diagnose -> status/watchdog (top-level intent)" \
+  "diagnose" "" "agent-bridge status"
+
+run_dispatch_suggest_case() {
+  local label="$1"
+  local expected_substring="$2"
+  shift 2
+  local home_dir
+  local out
+  home_dir="$(mktemp -d)"
+  out="$(env BRIDGE_HOME="$home_dir" "$BASH4_BIN" "$@" 2>&1 || true)"
+  rm -rf "$home_dir"
+  assert_contains "$out" "$expected_substring"
+  assert_contains "$out" "[오류]"
+  log "  [ok] $label"
+}
+
+log "dispatcher suggestion wiring (issue #163 phase 2)"
+run_dispatch_suggest_case "agent dispatcher: ps -> list" \
+  "agent-bridge list" \
+  "$REPO_ROOT/bridge-agent.sh" ps
+run_dispatch_suggest_case "memory dispatcher: captur -> capture" \
+  "capture" \
+  "$REPO_ROOT/bridge-memory.sh" captur
+run_dispatch_suggest_case "setup dispatcher: telegra -> telegram" \
+  "telegram" \
+  "$REPO_ROOT/bridge-setup.sh" telegra
+run_dispatch_suggest_case "task dispatcher: stats -> summary" \
+  "agent-bridge summary" \
+  "$REPO_ROOT/bridge-task.sh" stats
 
 log "tmux inject gate: input-buffer-content detection (issue #132)"
 # Self-contained coverage for bridge_tmux_session_has_pending_input_from_text.
