@@ -87,8 +87,15 @@ _bridge_daemon_on_exit() {
 
   rm -f "$BRIDGE_DAEMON_PID_FILE" 2>/dev/null || true
   if (( ec != 0 )); then
-    daemon_log_event "daemon exiting with status=$ec sig=$sig last_step=$step err_location=${err_location:-none}"
+    # PR #198 review: daemon_log_event internally does mkdir + append write,
+    # either of which can fail (dir unwritable, disk full). Under set -e an
+    # unguarded failure here overwrites the original exit code we're trying
+    # to report. Guard so the observability path cannot mask the signal.
+    daemon_log_event "daemon exiting with status=$ec sig=$sig last_step=$step err_location=${err_location:-none}" 2>/dev/null || true
   fi
+  # Ensure the trap returns the original exit code even if a later command
+  # (including the guards above) altered $?.
+  return "$ec"
 }
 
 bridge_agent_heartbeat_file() {
@@ -3398,9 +3405,11 @@ cmd_run() {
   # Signal traps record the received signal name so the EXIT trap can report
   # *why* we're exiting. We keep the existing `daemon_log_event` calls for
   # backwards compatibility with the crash-log file.
-  trap '_bridge_daemon_on_signal TERM; daemon_log_event "received SIGTERM"; exit 0' TERM
-  trap '_bridge_daemon_on_signal INT;  daemon_log_event "received SIGINT";  exit 0' INT
-  trap '_bridge_daemon_on_signal HUP;  daemon_log_event "received SIGHUP";  exit 0' HUP
+  # Signal traps: guard daemon_log_event so an unwritable crash log cannot
+  # keep us from reaching `exit 0` under set -e (PR #198 review).
+  trap '_bridge_daemon_on_signal TERM; daemon_log_event "received SIGTERM" 2>/dev/null || true; exit 0' TERM
+  trap '_bridge_daemon_on_signal INT;  daemon_log_event "received SIGINT"  2>/dev/null || true; exit 0' INT
+  trap '_bridge_daemon_on_signal HUP;  daemon_log_event "received SIGHUP"  2>/dev/null || true; exit 0' HUP
   # ERR trap captures the failing source:line under `set -E` (inherited by
   # functions) so we can attribute `set -e` aborts. Guarded against recursion.
   set -E
