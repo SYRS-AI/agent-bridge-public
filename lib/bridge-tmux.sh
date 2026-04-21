@@ -444,6 +444,35 @@ bridge_tmux_prepare_claude_session() {
   done
 }
 
+bridge_tmux_paste_signature() {
+  # Return a short, distinctive substring from the text we're about to paste,
+  # used by bridge_tmux_paste_landed to verify the paste actually reached the
+  # composer. First non-empty line truncated to 40 chars — the nudge payload
+  # begins with "[Agent Bridge] ..." which is unlikely to collide with codex
+  # ghost-text placeholders or scrollback occupying the last visible lines.
+  local text="$1"
+  local first_line
+  first_line="$(printf '%s' "$text" | awk 'NF{gsub(/^[[:space:]]+/, ""); print; exit}' 2>/dev/null || true)"
+  printf '%s' "${first_line:0:40}"
+}
+
+bridge_tmux_paste_landed() {
+  # Landing verification: compare pre- and post-paste captures. The paste
+  # landed iff the signature appears in the post capture more often than in
+  # the pre capture. Plain substring presence is not enough because prior
+  # nudges may have left identical headers in scrollback.
+  local pre="$1"
+  local post="$2"
+  local signature="$3"
+  [[ -n "$signature" ]] || return 1
+  local pre_hits post_hits
+  pre_hits=$(printf '%s' "$pre" | grep -cF -- "$signature" 2>/dev/null || printf '0')
+  post_hits=$(printf '%s' "$post" | grep -cF -- "$signature" 2>/dev/null || printf '0')
+  [[ "$pre_hits" =~ ^[0-9]+$ ]] || pre_hits=0
+  [[ "$post_hits" =~ ^[0-9]+$ ]] || post_hits=0
+  (( post_hits > pre_hits ))
+}
+
 bridge_tmux_paste_and_submit() {
   local session="$1"
   local text="$2"
@@ -453,8 +482,46 @@ bridge_tmux_paste_and_submit() {
   pane_target="$(bridge_tmux_pane_target "$session")"
 
   buffer_name="bridge-send-$$-$(bridge_nonce)"
+
+  # Issue #195: previous implementation called `paste-buffer -d -p` and
+  # trusted that the paste landed in the composer. Codex cold sessions with
+  # ghost-text placeholders ("Explain this codebase", "Summarize recent
+  # commits") silently drop the first bracketed paste — the C-m that follows
+  # lands on a still-empty composer and the daemon logs "nudged" for a
+  # delivery that never happened. Verify the paste actually reached the
+  # composer via before/after capture diff. On miss, retry without
+  # bracketed-paste (-p); if still missing, fall back to per-key input.
+  local signature pre_capture post_capture
+  signature="$(bridge_tmux_paste_signature "$text")"
+  pre_capture="$(bridge_capture_recent "$session" 15 2>/dev/null || true)"
+
   tmux set-buffer -b "$buffer_name" -- "$text"
-  tmux paste-buffer -d -p -b "$buffer_name" -t "$pane_target"
+  tmux paste-buffer -p -b "$buffer_name" -t "$pane_target"
+  sleep 0.1
+
+  post_capture="$(bridge_capture_recent "$session" 15 2>/dev/null || true)"
+  if ! bridge_tmux_paste_landed "$pre_capture" "$post_capture" "$signature"; then
+    # Bracketed paste may have been absorbed by the placeholder lifecycle
+    # instead of the composer. Retry without the -p flag — codex's paste
+    # handler treats raw paste as character input, which reliably clears
+    # the placeholder on first keystroke.
+    tmux paste-buffer -b "$buffer_name" -t "$pane_target"
+    sleep 0.15
+    post_capture="$(bridge_capture_recent "$session" 15 2>/dev/null || true)"
+    if ! bridge_tmux_paste_landed "$pre_capture" "$post_capture" "$signature"; then
+      # Both paste attempts lost; fall back to per-key input. type_and_submit
+      # bypasses paste-buffer entirely and has its own verify/retry around
+      # the submit key (issue #146).
+      tmux delete-buffer -b "$buffer_name" 2>/dev/null || true
+      bridge_warn "paste did not land in '${session}' composer; falling back to type_and_submit"
+      bridge_audit_log daemon tmux_paste_landing_failed "$session" \
+        --detail engine="$engine" \
+        --detail signature="$signature"
+      bridge_tmux_type_and_submit "$session" "$text"
+      return $?
+    fi
+  fi
+  tmux delete-buffer -b "$buffer_name" 2>/dev/null || true
 
   # Issue #175: symmetric verify/retry mirrors bridge_tmux_type_and_submit
   # (issue #146). Fresh codex sessions can miss the first C-m when the TUI
