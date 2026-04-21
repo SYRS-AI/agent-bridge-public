@@ -759,6 +759,144 @@ bridge_restore_dynamic_agents_from_history() {
   shopt -u nullglob
 }
 
+# Last-resort dynamic-agent reconciliation: if a live tmux session looks like
+# a dynamic agent (session name equals agent name by construction) but neither
+# the active .env nor the history .env restored it, rebuild the entry from:
+#   1) a history file prefixed by the session name (preferred — has the real
+#      engine + workdir + session_id), or
+#   2) the tmux pane itself (engine detected from the pane command, workdir
+#      from pane_current_path) when no history exists.
+# Without this, a prune followed by loss of the active .env leaves the agent
+# invisible on the dashboard even though the tmux session is still the source
+# of truth (#190B).
+bridge_reconcile_dynamic_agents_from_tmux() {
+  local session
+  local file
+  local active_file
+  local pane_cmd
+  local pane_path
+  local derived_engine
+
+  command -v tmux >/dev/null 2>&1 || return 0
+
+  while IFS= read -r session; do
+    [[ -n "$session" ]] || continue
+    if bridge_agent_exists "$session"; then
+      continue
+    fi
+    # Skip smoke-test / ad hoc harness sessions using the centralized
+    # matcher shared with scripts/smoke-test.sh.
+    if bridge_session_is_smoke_or_adhoc "$session"; then
+      continue
+    fi
+
+    # Prefer any history file whose filename starts with `<session>--`, which
+    # means it was previously written for this exact agent name. Keep only
+    # the newest match.
+    file=""
+    _bridge_pick_newest_history_for_session file "$session"
+    if [[ -n "$file" ]]; then
+      _bridge_register_dynamic_from_env_file "$session" "$file" && continue
+    fi
+
+    # Fall back to tmux pane inspection: we can only recover agents whose pane
+    # command is a recognizable engine binary, since otherwise we have no
+    # reliable way to set AGENT_ENGINE.
+    pane_cmd="$(tmux display-message -p -t "$(bridge_tmux_pane_target "$session")" '#{pane_current_command}' 2>/dev/null || true)"
+    pane_path="$(tmux display-message -p -t "$(bridge_tmux_pane_target "$session")" '#{pane_current_path}' 2>/dev/null || true)"
+    derived_engine=""
+    case "$pane_cmd" in
+      *claude*) derived_engine="claude" ;;
+      *codex*)  derived_engine="codex" ;;
+    esac
+    [[ -n "$derived_engine" && -d "$pane_path" ]] || continue
+
+    bridge_add_agent_id_if_missing "$session"
+    BRIDGE_AGENT_DESC["$session"]="Recovered ${derived_engine} agent (${pane_path})"
+    BRIDGE_AGENT_ENGINE["$session"]="$derived_engine"
+    BRIDGE_AGENT_SESSION["$session"]="$session"
+    BRIDGE_AGENT_WORKDIR["$session"]="$pane_path"
+    BRIDGE_AGENT_SOURCE["$session"]="dynamic"
+    BRIDGE_AGENT_LOOP["$session"]="1"
+    BRIDGE_AGENT_CONTINUE["$session"]="1"
+    BRIDGE_AGENT_SESSION_ID["$session"]=""
+    BRIDGE_AGENT_HISTORY_KEY["$session"]="$(bridge_history_key_for "$derived_engine" "$session" "$pane_path")"
+    BRIDGE_AGENT_CREATED_AT["$session"]="$(date +%s)"
+    BRIDGE_AGENT_UPDATED_AT["$session"]="$(bridge_now_iso)"
+
+    active_file="$(bridge_dynamic_agent_file_for "$session")"
+    BRIDGE_AGENT_META_FILE["$session"]="$active_file"
+    bridge_write_dynamic_agent_file "$session" "$active_file"
+  done < <(tmux list-sessions -F '#{session_name}' 2>/dev/null || true)
+}
+
+_bridge_pick_newest_history_for_session() {
+  local -n __out_ref="$1"
+  local session="$2"
+  local candidate
+  local -a candidates=()
+
+  shopt -s nullglob
+  candidates=("$BRIDGE_HISTORY_DIR/${session}--"*.env)
+  shopt -u nullglob
+
+  __out_ref=""
+  for candidate in "${candidates[@]}"; do
+    [[ -f "$candidate" ]] || continue
+    if [[ -z "$__out_ref" || "$candidate" -nt "$__out_ref" ]]; then
+      __out_ref="$candidate"
+    fi
+  done
+}
+
+_bridge_register_dynamic_from_env_file() {
+  local session="$1"
+  local file="$2"
+  local active_file
+  local AGENT_ID=""
+  local AGENT_DESC=""
+  local AGENT_ENGINE=""
+  local AGENT_SESSION=""
+  local AGENT_WORKDIR=""
+  local AGENT_LOOP=""
+  local AGENT_CONTINUE=""
+  local AGENT_SESSION_ID=""
+  local AGENT_HISTORY_KEY=""
+  local AGENT_CREATED_AT=""
+  local AGENT_UPDATED_AT=""
+
+  # shellcheck source=/dev/null
+  source "$file"
+
+  if [[ -z "$AGENT_ID" || -z "$AGENT_ENGINE" || -z "$AGENT_SESSION" || -z "$AGENT_WORKDIR" ]]; then
+    return 1
+  fi
+  if [[ "$AGENT_ID" != "$session" || "$AGENT_SESSION" != "$session" ]]; then
+    return 1
+  fi
+
+  bridge_add_agent_id_if_missing "$AGENT_ID"
+  BRIDGE_AGENT_DESC["$AGENT_ID"]="${AGENT_DESC:-$AGENT_ID}"
+  BRIDGE_AGENT_ENGINE["$AGENT_ID"]="$AGENT_ENGINE"
+  BRIDGE_AGENT_SESSION["$AGENT_ID"]="$AGENT_SESSION"
+  BRIDGE_AGENT_WORKDIR["$AGENT_ID"]="$AGENT_WORKDIR"
+  BRIDGE_AGENT_SOURCE["$AGENT_ID"]="dynamic"
+  BRIDGE_AGENT_LOOP["$AGENT_ID"]="${AGENT_LOOP:-1}"
+  BRIDGE_AGENT_CONTINUE["$AGENT_ID"]="${AGENT_CONTINUE:-1}"
+  if [[ -n "$AGENT_SESSION_ID" && "$AGENT_ENGINE" == "claude" ]] && ! bridge_claude_session_id_exists "$AGENT_SESSION_ID" "$AGENT_WORKDIR"; then
+    BRIDGE_AGENT_SESSION_ID["$AGENT_ID"]=""
+  else
+    BRIDGE_AGENT_SESSION_ID["$AGENT_ID"]="${AGENT_SESSION_ID:-}"
+  fi
+  BRIDGE_AGENT_HISTORY_KEY["$AGENT_ID"]="${AGENT_HISTORY_KEY:-}"
+  BRIDGE_AGENT_CREATED_AT["$AGENT_ID"]="${AGENT_CREATED_AT:-}"
+  BRIDGE_AGENT_UPDATED_AT["$AGENT_ID"]="${AGENT_UPDATED_AT:-}"
+
+  active_file="$(bridge_dynamic_agent_file_for "$AGENT_ID")"
+  BRIDGE_AGENT_META_FILE["$AGENT_ID"]="$active_file"
+  bridge_write_dynamic_agent_file "$AGENT_ID" "$active_file"
+}
+
 bridge_load_static_agent_history() {
   local agent="$1"
   local file
@@ -913,6 +1051,7 @@ bridge_load_roster() {
   if [[ "$fast_load" != "1" ]]; then
     bridge_load_static_histories
     bridge_restore_dynamic_agents_from_history
+    bridge_reconcile_dynamic_agents_from_tmux
   fi
 }
 

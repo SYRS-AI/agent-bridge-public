@@ -153,6 +153,7 @@ bridge_source_module() {
   source "$path"
 }
 
+bridge_source_module "bridge-session-patterns.sh"
 bridge_source_module "bridge-core.sh"
 bridge_source_module "bridge-agents.sh"
 bridge_source_module "bridge-guard.sh"
