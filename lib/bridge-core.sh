@@ -6,6 +6,123 @@ bridge_die() {
   exit 1
 }
 
+# bridge_suggest_subcommand — intent-recovery for unknown CLI subcommands.
+#
+# Issue #163: agents repeatedly guessed CLI subcommand names that don't exist
+# (`agent-bridge cron stats`, `cron list --failed`, `agent-bridge health`) and
+# the dispatchers only emitted "지원하지 않는 X 명령입니다: Y" with no hint.
+# Failed attempts often cascaded into blocked fallbacks (direct `sqlite3`).
+#
+# This helper produces a single-line "혹시 X 이었나요?" suggestion from a
+# curated intent alias table (primary) plus a Levenshtein nearest-match
+# fallback (secondary). Callers print the suggestion right before `bridge_die`
+# so the operator / agent sees the recovery hint in the same error frame.
+#
+# Usage:
+#   hint="$(bridge_suggest_subcommand "cron stats" "inventory show list create ... errors cleanup")"
+#   [[ -n "$hint" ]] && bridge_warn "$hint"
+#   bridge_die "지원하지 않는 cron 명령입니다: cron stats"
+#
+# Args:
+#   $1 — the unknown input (may be a multi-token phrase like "cron stats" or
+#        a single token like "health"). Case-sensitive; callers should
+#        normalize to the form the user typed.
+#   $2 — space-separated list of valid subcommand names for the current
+#        dispatcher (may be empty; helper then skips fuzzy match and only
+#        consults the curated alias table).
+#
+# Emits: a Korean suggestion line on stdout, or empty if no suggestion
+# reaches the confidence threshold. Never exits. Never contaminates stderr.
+bridge_suggest_subcommand() {
+  local unknown="$1"
+  local valid_list="$2"
+  local suggestions=""
+
+  [[ -n "$unknown" ]] || return 0
+
+  # Curated intent → command table. Keys are the phrases agents actually
+  # typed in the wild (Issue #163 실측 + future telemetry); values are the
+  # canonical commands. Extend conservatively — one wrong alias is worse
+  # than no alias.
+  case "$unknown" in
+    health|diag|diagnose|diagnostic|diagnostics)
+      suggestions="agent-bridge status  |  agent-bridge watchdog scan"
+      ;;
+    "cron stats"|"cron stat"|"cron status"|"cron metrics")
+      suggestions="agent-bridge cron errors report  |  agent-bridge cron list"
+      ;;
+    "cron list --failed"|"cron failed"|"cron failures"|"cron errors"|"cron error")
+      suggestions="agent-bridge cron errors report"
+      ;;
+    "queue status"|"queue stats"|"task stats")
+      suggestions="agent-bridge summary  |  agent-bridge status"
+      ;;
+    ps|processes|agents)
+      suggestions="agent-bridge list  |  agent-bridge status"
+      ;;
+  esac
+
+  if [[ -n "$suggestions" ]]; then
+    printf '혹시 이 명령이었나요?  %s' "$suggestions"
+    return 0
+  fi
+
+  # Fallback: Levenshtein nearest-match against the caller-supplied valid
+  # list. Only emits when a candidate is strictly closer than the next-best
+  # (prevents "cron" → equidistant ambiguity from false-suggesting). Uses
+  # python for the distance calc since the helper is already python-gated
+  # elsewhere and we need unicode-safe comparison for Korean argument words.
+  [[ -n "$valid_list" ]] || return 0
+
+  bridge_require_python
+  local match
+  match="$(python3 - "$unknown" "$valid_list" <<'PY'
+import sys
+
+def levenshtein(a, b):
+    if a == b:
+        return 0
+    if not a or not b:
+        return max(len(a), len(b))
+    prev = list(range(len(b) + 1))
+    for i, ca in enumerate(a, 1):
+        curr = [i] + [0] * len(b)
+        for j, cb in enumerate(b, 1):
+            cost = 0 if ca == cb else 1
+            curr[j] = min(prev[j] + 1, curr[j - 1] + 1, prev[j - 1] + cost)
+        prev = curr
+    return prev[-1]
+
+unknown = sys.argv[1].strip()
+candidates = [c for c in sys.argv[2].split() if c]
+
+if not candidates:
+    sys.exit(0)
+
+scored = sorted(((levenshtein(unknown.lower(), c.lower()), c) for c in candidates))
+best = scored[0]
+second = scored[1] if len(scored) > 1 else None
+
+# Require: (a) distance <= 2, (b) distance < len(unknown) (reject wild
+# matches where the "closest" valid word shares almost nothing), and
+# (c) a strict margin over second-best to avoid ambiguous ties.
+if best[0] > 2:
+    sys.exit(0)
+if best[0] >= len(unknown):
+    sys.exit(0)
+if second and second[0] <= best[0]:
+    # Tie — suggesting one of several equally-near is noisier than silence.
+    sys.exit(0)
+
+print(best[1])
+PY
+  )"
+
+  if [[ -n "$match" ]]; then
+    printf '혹시 %q 이었나요?' "$match"
+  fi
+}
+
 bridge_warn() {
   echo -e "${YELLOW}[경고] $*${NC}" >&2
 }
