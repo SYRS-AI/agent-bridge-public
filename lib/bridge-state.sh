@@ -784,16 +784,11 @@ bridge_reconcile_dynamic_agents_from_tmux() {
     if bridge_agent_exists "$session"; then
       continue
     fi
-    # Skip obvious non-agent sessions used by smoke tests and ad hoc patterns.
-    case "$session" in
-      bridge-smoke-*|bridge-requester-*|auto-start-session-*|always-on-session-*|\
-      static-session-*|claude-static-bridge-smoke-*|worker-reuse-*|\
-      late-dynamic-agent-*|created-session-*|bootstrap-session-*|\
-      bootstrap-wrapper-session-*|broken-channel-*|codex-cli-session-*|\
-      project-claude-session-bridge-smoke-*|memtest*|bootstrap-fail*|memphase4-*)
-        continue
-        ;;
-    esac
+    # Skip smoke-test / ad hoc harness sessions using the centralized
+    # matcher shared with scripts/smoke-test.sh.
+    if bridge_session_is_smoke_or_adhoc "$session"; then
+      continue
+    fi
 
     # Prefer any history file whose filename starts with `<session>--`, which
     # means it was previously written for this exact agent name. Keep only

@@ -5,6 +5,9 @@ set -euo pipefail
 SCRIPT_DIR="$(cd -P "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 REPO_ROOT="$(cd -P "$SCRIPT_DIR/.." && pwd -P)"
 
+# shellcheck source=../lib/bridge-session-patterns.sh
+source "$REPO_ROOT/lib/bridge-session-patterns.sh"
+
 # Safety: refuse to run against a live BRIDGE_HOME. smoke deliberately stops
 # its own daemon on cleanup, adopts/kills tmux sessions, and wipes state under
 # $TMP_ROOT. If BRIDGE_HOME is inherited from the parent shell and points at a
@@ -98,11 +101,9 @@ kill_stale_smoke_tmux_sessions() {
 
   while IFS= read -r session; do
     [[ -n "$session" ]] || continue
-    case "$session" in
-      bridge-smoke-*|bridge-requester-*|auto-start-session-*|always-on-session-*|static-session-*|claude-static-bridge-smoke-*|worker-reuse-*|late-dynamic-agent-*|created-session-*|bootstrap-session-*|bootstrap-wrapper-session-*|broken-channel-*|context-pressure-bridge-smoke-*|codex-cli-session-*|project-claude-session-bridge-smoke-*|stall-auth-*|stall-rate-*|stall-unknown-*|roster-reload-session-*|smoke-admin-test*|stall-rate-test-*)
-        tmux_kill_session_exact "$session" || true
-        ;;
-    esac
+    if bridge_session_is_smoke_or_adhoc "$session"; then
+      tmux_kill_session_exact "$session" || true
+    fi
   done < <(tmux list-sessions -F '#{session_name}' 2>/dev/null || true)
 }
 
