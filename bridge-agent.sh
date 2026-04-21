@@ -221,6 +221,38 @@ agent = sys.argv[2]
 bridge_home = sys.argv[3]
 
 resolved_home = os.path.realpath(bridge_home)
+
+# Issue #185: reject ephemeral BRIDGE_HOME values before deriving the
+# per-agent auto-memory slug. Claude Code's built-in `fewer-permission-
+# prompts` smoke test ran this path with `BRIDGE_HOME=$(mktemp -d)` and
+# then — because the agent workdir was the live path — wrote a
+# settings.local.json into the live agent home whose autoMemoryDirectory
+# pointed at a tmp slug. The tmp dir disappeared after the smoke, leaving
+# pref-smoke stuck on a dangling auto-memory target. Any caller that
+# invokes bridge-agent from an ephemeral BRIDGE_HOME without also scoping
+# the agent workdir to that same ephemeral root is violating the
+# isolation contract; refuse here so the leak cannot reach live state.
+_EPHEMERAL_PREFIXES = (
+    "/tmp/",
+    "/private/tmp/",
+    "/var/folders/",
+    "/private/var/folders/",
+)
+tmpdir = os.environ.get("TMPDIR")
+if tmpdir:
+    tmpdir_resolved = os.path.realpath(tmpdir)
+    # Normalize with trailing sep so we match directory boundary, not prefix.
+    _EPHEMERAL_PREFIXES = _EPHEMERAL_PREFIXES + (tmpdir_resolved.rstrip("/") + "/",)
+if any(resolved_home.startswith(prefix) for prefix in _EPHEMERAL_PREFIXES):
+    sys.stderr.write(
+        f"[bridge-agent] refusing to seed autoMemoryDirectory for "
+        f"'{agent}' from ephemeral BRIDGE_HOME {resolved_home!r}. "
+        "If a smoke test wants isolation, scope BOTH BRIDGE_HOME and the "
+        "agent workdir to the same tmp root; do not call bridge-agent "
+        "with a live workdir under a tmp BRIDGE_HOME (issue #185).\n"
+    )
+    sys.exit(1)
+
 # Match Anthropic's ~/.claude/projects/ slug convention: replace both
 # os.sep and "." with "-" so two installs never share a directory.
 slug = resolved_home.replace(os.sep, "-").replace(".", "-")
