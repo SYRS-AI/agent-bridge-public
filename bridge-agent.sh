@@ -164,6 +164,122 @@ print(text, end="")
 PY
 }
 
+# bridge_ensure_auto_memory_isolation — seed per-agent autoMemoryDirectory.
+#
+# Claude Code's auto-memory is shared per git repository. Since all Agent
+# Bridge agents live under a single git repo (~/.agent-bridge), every
+# agent writes to the same ~/.claude/projects/<repo-slug>/memory/ dir by
+# default. This leaks one agent's memory to the others.
+#
+# Anthropic exposes an official override — `autoMemoryDirectory` — that
+# is only accepted from user/local/policy settings (NOT from project
+# `settings.json`). We seed `.claude/settings.local.json` inside each
+# agent's home so every agent writes to its own per-agent directory:
+#
+#   ~/.claude/auto-memory/<bridge-home-slug>/<agent>/
+#
+# The slug is derived from the resolved $BRIDGE_HOME path (Claude-style
+# replacement of "/" with "-"), matching the naming Anthropic already uses
+# under ~/.claude/projects/. That keeps two bridge installs on the same
+# machine from colliding even when they share agent ids — and it keeps
+# the slug stable whether bridge-agent.sh is invoked from the live runtime
+# (~/.agent-bridge) or from a source checkout managing that same runtime.
+#
+# Merge policy (fail-closed):
+#   - no file           → create with { autoMemoryDirectory: <path> }
+#   - blank content     → fail (operator must inspect; no silent reset)
+#   - valid JSON, no    → upsert autoMemoryDirectory
+#   - valid JSON, same  → no-op
+#   - valid JSON, diff  → fail (operator must resolve)
+#   - parse failure     → fail (operator must inspect; no silent reset)
+#
+# Safe to call multiple times; fails loudly if another tool left the
+# file in an unexpected state. Only applies to claude engine.
+bridge_ensure_auto_memory_isolation() {
+  local agent="$1"
+  local workdir="$2"
+  local bridge_home="${BRIDGE_HOME:-}"
+  local settings_local="$workdir/.claude/settings.local.json"
+
+  if [[ -z "$agent" || -z "$workdir" || -z "$bridge_home" ]]; then
+    return 0
+  fi
+  if [[ ! -d "$workdir" ]]; then
+    return 0
+  fi
+
+  mkdir -p "$workdir/.claude"
+
+  bridge_agent_manage_python "$settings_local" "$agent" "$bridge_home" <<'PY'
+import json
+import os
+import sys
+from pathlib import Path
+
+settings_path = Path(sys.argv[1])
+agent = sys.argv[2]
+bridge_home = sys.argv[3]
+
+resolved_home = os.path.realpath(bridge_home)
+# Match Anthropic's ~/.claude/projects/ slug convention: replace both
+# os.sep and "." with "-" so two installs never share a directory.
+slug = resolved_home.replace(os.sep, "-").replace(".", "-")
+expected = f"~/.claude/auto-memory/{slug}/{agent}"
+
+if not settings_path.exists():
+    settings_path.write_text(
+        json.dumps({"autoMemoryDirectory": expected}, indent=2, ensure_ascii=False) + "\n",
+        encoding="utf-8",
+    )
+    sys.exit(0)
+
+raw = settings_path.read_text(encoding="utf-8")
+if not raw.strip():
+    sys.stderr.write(
+        f"[bridge-agent] {settings_path} is empty. "
+        "Refusing to overwrite blank content; inspect or remove the file, "
+        "then retry.\n"
+    )
+    sys.exit(1)
+
+try:
+    data = json.loads(raw)
+except json.JSONDecodeError as exc:
+    sys.stderr.write(
+        f"[bridge-agent] {settings_path} is not valid JSON ({exc}). "
+        "Not touching it. Fix or remove the file, then retry.\n"
+    )
+    sys.exit(1)
+
+if not isinstance(data, dict):
+    sys.stderr.write(
+        f"[bridge-agent] {settings_path} is not a JSON object. "
+        "Not touching it. Fix or remove the file, then retry.\n"
+    )
+    sys.exit(1)
+
+current = data.get("autoMemoryDirectory")
+if current == expected:
+    sys.exit(0)
+
+if current not in (None, ""):
+    sys.stderr.write(
+        f"[bridge-agent] {settings_path} already sets autoMemoryDirectory "
+        f"to {current!r}; expected {expected!r}. Refusing to overwrite. "
+        "Resolve manually.\n"
+    )
+    sys.exit(1)
+
+data["autoMemoryDirectory"] = expected
+tmp_path = settings_path.with_suffix(settings_path.suffix + ".tmp")
+tmp_path.write_text(
+    json.dumps(data, indent=2, ensure_ascii=False) + "\n",
+    encoding="utf-8",
+)
+os.replace(tmp_path, settings_path)
+PY
+}
+
 bridge_scaffold_agent_home() {
   local agent="$1"
   local home="$2"
@@ -1112,6 +1228,7 @@ run_create() {
     bridge_scaffold_user_partitions "$workdir" "$users_json"
     if [[ "$engine" == "claude" ]]; then
       bridge_ensure_project_claude_guidance "$workdir" >/dev/null 2>&1 || true
+      bridge_ensure_auto_memory_isolation "$agent" "$workdir"
     fi
     bridge_bootstrap_project_skill "$engine" "$workdir" >/dev/null 2>&1 || true
     if [[ "$engine" == "claude" ]]; then
