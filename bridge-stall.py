@@ -45,9 +45,20 @@ PATTERN_GROUPS: list[tuple[str, list[str]]] = [
         [
             r"econnreset",
             r"econnrefused",
+            r"etimedout",
             r"connection refused",
-            r"timeout",
-            r"timed out",
+            r"\bconnection\s+reset\s+by\s+peer\b",
+            r"\bconnection\s+aborted\b",
+            r"\bname\s+or\s+service\s+not\s+known\b",
+            r"\bcontext\s+deadline\s+exceeded\b",
+            # Issue #161: bare `timeout` / `timed out` matched benign scrollback
+            # like Claude Code's `⎿  (timeout 5m)` tool-budget hint, shell
+            # `timeout 120000ms`, and documentation strings — producing
+            # repeated "retry the transient network error" nudges to idle
+            # agents. Require a network-ish subject word next to the timeout
+            # so only real transport errors classify as network.
+            r"\b(?:connection|request|socket|read|write|fetch|network|upstream|gateway|dns|tcp|tls|ssl|i/o)\s+timed?\s*out\b",
+            r"network\s+timeout",
             r"503 service unavailable",
             r"502 bad gateway",
             r"upstream connect error",
