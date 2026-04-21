@@ -204,6 +204,24 @@ bridge_queue_gateway_root() {
   printf '%s/queue-gateway' "$BRIDGE_STATE_DIR"
 }
 
+# Returns 0 (success) if the cron sync path should run, 1 otherwise.
+# Contract ("any explicit 0 disables"): the helper walks the new name and its
+# two legacy aliases; if ANY of the three is set to "0", sync is disabled;
+# otherwise sync runs. This replaces a bash parameter-expansion chain that
+# implemented precedence (outer wins) and silently let an outer =1 override
+# an inner =0 — which broke #192's legacy-opt-out promise.
+bridge_cron_sync_enabled() {
+  local var val
+  for var in BRIDGE_CRON_SYNC_ENABLED BRIDGE_LEGACY_CRON_SYNC_ENABLED BRIDGE_OPENCLAW_CRON_SYNC_ENABLED; do
+    val="${!var-}"
+    [[ -z "$val" ]] && continue
+    if [[ "$val" == "0" ]]; then
+      return 1
+    fi
+  done
+  return 0
+}
+
 bridge_queue_gateway_agent_dir() {
   local agent="$1"
   printf '%s/%s' "$(bridge_queue_gateway_root)" "$agent"
