@@ -3380,7 +3380,7 @@ cmd_sync_cycle() {
   # Cron sync runs LAST, in the background with a timeout, so it never blocks
   # relay/auto-start above.  Only one sync runs at a time (PID-file guard).
   BRIDGE_DAEMON_LAST_STEP="cron_sync"
-  if [[ "${BRIDGE_CRON_SYNC_ENABLED:-${BRIDGE_LEGACY_CRON_SYNC_ENABLED:-${BRIDGE_OPENCLAW_CRON_SYNC_ENABLED:-0}}}" == "1" ]]; then
+  if [[ "${BRIDGE_CRON_SYNC_ENABLED:-${BRIDGE_LEGACY_CRON_SYNC_ENABLED:-${BRIDGE_OPENCLAW_CRON_SYNC_ENABLED:-1}}}" == "1" ]]; then
     local cron_sync_pid_file="$BRIDGE_STATE_DIR/cron-sync.pid"
     local cron_sync_running=0
     if [[ -f "$cron_sync_pid_file" ]]; then

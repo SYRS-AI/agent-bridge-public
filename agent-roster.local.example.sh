@@ -85,10 +85,10 @@ BRIDGE_AGENT_SESSION["codex-developer"]="codex-developer"
 # BRIDGE_CRON_AGENT_TARGET["legacy-ops"]="developer"
 # BRIDGE_CRON_FALLBACK_AGENT="developer"
 
-# Optional: enable the bridge-owned recurring scheduler on machines
-# that should actively enqueue recurring jobs. Keep this off for fresh installs
-# until `cron import` has populated `~/.agent-bridge/cron/jobs.json`.
-# BRIDGE_CRON_SYNC_ENABLED=1
+# The bridge-owned recurring scheduler is on by default. Uncomment the line
+# below (setting to 0) to opt out on machines that should not actively enqueue
+# recurring jobs.
+# BRIDGE_CRON_SYNC_ENABLED=0
 
 BRIDGE_AGENT_LAUNCH_CMD["tester"]='claude --dangerously-skip-permissions'
 BRIDGE_AGENT_LAUNCH_CMD["developer"]='claude --dangerously-skip-permissions'
