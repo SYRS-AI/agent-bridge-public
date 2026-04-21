@@ -2025,12 +2025,14 @@ def cmd_current_session_id(args: argparse.Namespace) -> int:
     """Best-effort session_id for the agent calling this script.
 
     Returns the UUID of the most recently modified JSONL under the
-    agent's Claude project directory. The project slug is derived from
-    `--home` (the real agent home path) so alternate installs /
-    worktrees resolve correctly — PR 1A / 1B established that pattern
-    and this helper must follow it. Claude Code exposes the session
-    via hook stdin, but there is no documented env var for slash
-    commands, so we read from disk.
+    Claude project directory that matches `--home`. Claude scopes
+    transcripts by the git root of the session cwd, so `--home` here is
+    the **session workdir** (the cwd the agent was spawned in), not the
+    agent's bridge runtime home — those can differ when an agent is
+    pointed at an external project checkout. The wrap-up slash command
+    template passes `BRIDGE_AGENT_WORKDIR` for exactly that reason.
+    Claude Code exposes the session id via hook stdin but has no
+    documented env var for slash commands, so we read from disk.
     """
     import os as _os
     projects_dir = Path(args.claude_projects).expanduser()
