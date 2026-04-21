@@ -1424,7 +1424,11 @@ process_context_pressure_reports() {
   local task_id=""
   local matched_pattern=""
   local scan_interval="${BRIDGE_CONTEXT_PRESSURE_SCAN_INTERVAL_SECONDS:-60}"
-  local report_cooldown="${BRIDGE_CONTEXT_PRESSURE_REPORT_COOLDOWN_SECONDS:-1800}"
+  # Cooldown between fresh report emissions for the same (agent, severity).
+  # BRIDGE_CONTEXT_PRESSURE_COOLDOWN_SEC is the documented knob (issue #184);
+  # BRIDGE_CONTEXT_PRESSURE_REPORT_COOLDOWN_SECONDS is accepted for backward
+  # compatibility with deployments that set the original name.
+  local report_cooldown="${BRIDGE_CONTEXT_PRESSURE_COOLDOWN_SEC:-${BRIDGE_CONTEXT_PRESSURE_REPORT_COOLDOWN_SECONDS:-1800}}"
   local capture=""
   local analysis_shell=""
   local severity=""
@@ -1539,13 +1543,31 @@ process_context_pressure_reports() {
       continue
     fi
 
-    if [[ "$previous_severity" != "$severity" || "$previous_hash" != "$excerpt_hash" ]]; then
+    # Severity change is a real edge: bump first_detected_ts, clear the last
+    # emit timestamp so the cooldown/find-open path can emit an escalated or
+    # freshly-downgraded report, and drop the stale task_id so a stale link
+    # doesn't shadow a new find-open result.
+    #
+    # Excerpt-hash change alone (same severity, captured text shifted by a
+    # cursor blink or HUD percent drift) is NOT an edge: resetting
+    # last_report_ts here used to bypass the cooldown every scan and — when
+    # the admin had since closed the existing task — caused a new
+    # [context-pressure] task to be created on every daemon sync cycle
+    # (issue #184).
+    if [[ "$previous_severity" != "$severity" ]]; then
       first_detected_ts="$now_ts"
       last_report_ts=0
       task_id=""
       bridge_audit_log daemon context_pressure_detected "$agent" \
         --detail severity="$severity" \
-        --detail excerpt_hash="$excerpt_hash"
+        --detail excerpt_hash="$excerpt_hash" \
+        --detail previous_severity="$previous_severity"
+      changed=0
+    elif [[ "$previous_hash" != "$excerpt_hash" ]]; then
+      bridge_audit_log daemon context_pressure_detected "$agent" \
+        --detail severity="$severity" \
+        --detail excerpt_hash="$excerpt_hash" \
+        --detail mode=hash_drift
       changed=0
     fi
     last_detected_ts="$now_ts"
