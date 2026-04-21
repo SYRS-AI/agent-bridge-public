@@ -61,12 +61,15 @@ PATTERN_GROUPS: list[tuple[str, list[str]]] = [
 ]
 
 # Engines with no trustworthy authoritative HUD of their own. When the HUD
-# regex fails for these, we skip the prose fallback rather than emitting a
-# warning, because their scrollback routinely contains literal UI phrases
+# regex fails for these, we skip the WARNING-severity fallback group to
+# avoid false-positives on scrollback containing literal UI phrases
 # ("Context compacted", "compact the conversation") and doc excerpts that
-# false-positive the fallback regex (issue #183). Claude keeps the existing
-# HUD-or-fallback behavior because the fallback is the only signal on
-# pre-HUD builds.
+# hit the warning prose patterns (issue #183). CRITICAL-severity patterns
+# ("context window exceeded", "must compact before continuing", etc.) still
+# fire — those are genuine hard-stop banners and are rare enough in
+# scrollback that the false-positive budget is effectively zero.
+# Claude keeps the existing HUD-or-fallback behavior because the fallback
+# is the only signal on pre-HUD builds.
 ENGINES_WITHOUT_HUD = frozenset({"codex"})
 
 IGNORED_PREFIXES = ("[Agent Bridge]",)
@@ -139,10 +142,12 @@ def classify(normalized: str, full: str | None = None, engine: str = "") -> tupl
 
     If no HUD line is visible (pre-HUD Claude builds, Codex, or very fresh
     sessions), fall back to the existing pattern groups so genuine textual
-    signals still fire — except for engines in ``ENGINES_WITHOUT_HUD`` where
-    the fallback has no authoritative ceiling and reliably false-positives on
-    UI prose (issue #183). For those engines we emit nothing when the HUD is
-    absent rather than raise a noisy warning task.
+    signals still fire. For engines in ``ENGINES_WITHOUT_HUD`` the WARNING-
+    severity group is skipped because it false-positives reliably on UI
+    prose and doc excerpts (issue #183); the CRITICAL-severity group still
+    runs so genuine hard-stop banners like "context window exceeded" or
+    "must compact before continuing" still raise a task (PR #188 review
+    feedback — silencing critical outright would hide real failures).
     """
     scan_target = full if full is not None else normalized
     pct = hud_context_pct(scan_target)
@@ -161,11 +166,12 @@ def classify(normalized: str, full: str | None = None, engine: str = "") -> tupl
         # post-/compact scrollback mimicking a banner while HUD was low.
         return "", f"hud:context_pct={pct}"
 
-    if engine and engine.lower() in ENGINES_WITHOUT_HUD:
-        return "", ""
+    skip_warning_fallback = bool(engine) and engine.lower() in ENGINES_WITHOUT_HUD
 
     lowered = normalized.lower()
     for severity, patterns in PATTERN_GROUPS:
+        if skip_warning_fallback and severity == "warning":
+            continue
         for pattern in patterns:
             if re.search(pattern, lowered, flags=re.IGNORECASE | re.DOTALL):
                 return severity, pattern

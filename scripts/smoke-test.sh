@@ -165,6 +165,17 @@ run_cp_case "claude + 'compact the conversation' prose -> warning" \
   "warning" "" \
   $'Consider whether to compact the conversation before continuing.\n' \
   "claude"
+# PR #188 review: critical banners must still fire on codex even though the
+# warning fallback is suppressed. Silencing critical-severity patterns would
+# hide genuine hard-stop failures on codex agents.
+run_cp_case "codex + 'context window exceeded' banner -> critical" \
+  "critical" "context window exceeded" \
+  $'context window exceeded — model refused to continue\n' \
+  "codex"
+run_cp_case "codex + 'must compact before continuing' banner -> critical" \
+  "critical" "must compact before continuing" \
+  $'must compact before continuing before the next turn\n' \
+  "codex"
 
 log "CLI subcommand suggestion helper (issue #163)"
 run_suggest_case() {
