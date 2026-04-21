@@ -53,10 +53,6 @@ def main(argv: list[str] | None = None) -> int:
             {
                 "decision": "block",
                 "reason": codex_stop_reason(agent, row),
-                "hookSpecificOutput": {
-                    "hookEventName": "Stop",
-                    "additionalContext": f"Queue DB is source of truth for {agent}.",
-                },
             },
             sys.stdout,
             ensure_ascii=False,
