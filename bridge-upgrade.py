@@ -924,6 +924,12 @@ def cmd_backup_extend_live(args: argparse.Namespace) -> int:
     path treats them identically to the primary backup set.
     """
     target_root = Path(args.target_root).expanduser().resolve()
+    # Issue #150: keep a parallel unresolved form of target_root for the
+    # fallback relative-path check. On macOS `/tmp` resolves to `/private/tmp`,
+    # and operator-supplied paths typically use the unresolved form — a
+    # resolve-vs-literal string mismatch would otherwise turn the fallback
+    # into a no-op and leave parent-symlink-outside children dropped.
+    target_root_literal = Path(args.target_root).expanduser().absolute()
     backup_root = Path(args.backup_root).expanduser()
     payload = {
         "mode": "backup-extend-live",
@@ -981,8 +987,25 @@ def cmd_backup_extend_live(args: argparse.Namespace) -> int:
         try:
             relpath = abs_path.relative_to(target_root).as_posix()
         except ValueError:
-            payload["skipped_outside_target"] += 1
-            continue
+            # Issue #150: the parent `.resolve()` above follows intermediate
+            # symlinks. If an operator has retargeted a directory symlink
+            # inside `target_root` to an absolute path outside (e.g.
+            # `agents/shared -> /opt/external-shared`), the resolved parent
+            # lands outside `target_root` and the entry was silently
+            # dropped from the manifest — so rollback later cannot restore
+            # the child file. Retry using the unresolved path against the
+            # unresolved target root: the operator-supplied path is
+            # guaranteed to be under `target_root` at the literal level
+            # (otherwise it would not have been emitted by bridge-docs.py
+            # for this install). Only truly-outside paths — e.g. an
+            # absolute path that does not syntactically start with
+            # `target_root` under either resolution — fall through to the
+            # outside-target bucket now.
+            try:
+                relpath = raw.relative_to(target_root_literal).as_posix()
+            except ValueError:
+                payload["skipped_outside_target"] += 1
+                continue
         if relpath in existing_relpaths:
             payload["skipped_existing"] += 1
             continue

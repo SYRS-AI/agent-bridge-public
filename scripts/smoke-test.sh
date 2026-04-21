@@ -4382,6 +4382,30 @@ ROLLBACK_JSON="$("$REPO_ROOT/agent-bridge" upgrade rollback --target "$ROLLBACK_
 assert_contains "$ROLLBACK_JSON" "\"mode\": \"upgrade-rollback\""
 assert_not_contains "$(cat "$ROLLBACK_ROOT/bridge-task.sh")" "rollback smoke drift"
 
+log "backup-extend-live records child paths under a parent-symlink pointing outside target_root (issue #150)"
+EXT_ROOT="$TMP_ROOT/extend-live-root"
+EXT_BACKUP_ROOT="$TMP_ROOT/extend-live-backup"
+EXT_EXTERNAL="$TMP_ROOT/extend-live-external"
+# Plant a realistic retarget: agents/shared inside target_root is a symlink
+# to an absolute path OUTSIDE target_root. Then report a changed path
+# underneath that symlink and confirm backup-extend-live stops dropping
+# it into skipped_outside_target — previously the parent.resolve() chased
+# the symlink and relative_to() failed silently.
+mkdir -p "$EXT_ROOT/agents" "$EXT_EXTERNAL" "$EXT_BACKUP_ROOT/live"
+ln -s "$EXT_EXTERNAL" "$EXT_ROOT/agents/shared"
+printf 'external shared doc\n' >"$EXT_EXTERNAL/TOOLS.md"
+printf '{"entries": []}\n' >"$EXT_BACKUP_ROOT/manifest.json"
+EXT_PAYLOAD="$(python3 -c 'import json,sys; print(json.dumps({"changed_paths":[sys.argv[1]+"/agents/shared/TOOLS.md"]}))' "$EXT_ROOT")"
+EXT_JSON="$(python3 "$REPO_ROOT/bridge-upgrade.py" backup-extend-live \
+  --target-root "$EXT_ROOT" --backup-root "$EXT_BACKUP_ROOT" --paths-json "$EXT_PAYLOAD")"
+assert_contains "$EXT_JSON" "\"skipped_outside_target\": 0"
+assert_contains "$EXT_JSON" "\"added_entries\": 1"
+# The manifest entry now exists and points at the operator-visible relpath,
+# not the external canonical.
+assert_contains "$(cat "$EXT_BACKUP_ROOT/manifest.json")" "\"path\": \"agents/shared/TOOLS.md\""
+[[ -f "$EXT_BACKUP_ROOT/live/agents/shared/TOOLS.md" ]] || die "backup-extend-live did not copy the symlink-child file"
+assert_contains "$(cat "$EXT_BACKUP_ROOT/live/agents/shared/TOOLS.md")" "external shared doc"
+
 log "smart upgrade clean-merges text drift"
 UPGRADE_SIM_REPO="$TMP_ROOT/upgrade-sim-repo"
 mkdir -p "$UPGRADE_SIM_REPO"
