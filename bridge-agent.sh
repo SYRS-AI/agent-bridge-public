@@ -232,18 +232,26 @@ resolved_home = os.path.realpath(bridge_home)
 # invokes bridge-agent from an ephemeral BRIDGE_HOME without also scoping
 # the agent workdir to that same ephemeral root is violating the
 # isolation contract; refuse here so the leak cannot reach live state.
-_EPHEMERAL_PREFIXES = (
-    "/tmp/",
-    "/private/tmp/",
-    "/var/folders/",
-    "/private/var/folders/",
-)
+_EPHEMERAL_ROOTS = [
+    "/tmp",
+    "/private/tmp",
+    "/var/folders",
+    "/private/var/folders",
+]
 tmpdir = os.environ.get("TMPDIR")
 if tmpdir:
-    tmpdir_resolved = os.path.realpath(tmpdir)
-    # Normalize with trailing sep so we match directory boundary, not prefix.
-    _EPHEMERAL_PREFIXES = _EPHEMERAL_PREFIXES + (tmpdir_resolved.rstrip("/") + "/",)
-if any(resolved_home.startswith(prefix) for prefix in _EPHEMERAL_PREFIXES):
+    _EPHEMERAL_ROOTS.append(os.path.realpath(tmpdir).rstrip("/") or "/")
+
+def _is_ephemeral(path: str) -> bool:
+    # Match the root itself (BRIDGE_HOME=/tmp) AND any descendant
+    # (BRIDGE_HOME=/tmp/xyz). Plain startswith() with a trailing slash
+    # would miss the exact-root case, letting a caller bypass the guard.
+    for root in _EPHEMERAL_ROOTS:
+        if path == root or path.startswith(root + os.sep):
+            return True
+    return False
+
+if _is_ephemeral(resolved_home):
     sys.stderr.write(
         f"[bridge-agent] refusing to seed autoMemoryDirectory for "
         f"'{agent}' from ephemeral BRIDGE_HOME {resolved_home!r}. "
