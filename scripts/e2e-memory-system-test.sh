@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# shellcheck disable=SC2329,SC2317,SC2012,SC2094,SC2162
 # e2e-memory-system-test.sh
 #
 # End-to-end sanity test for the agent-md-redesign memory stack

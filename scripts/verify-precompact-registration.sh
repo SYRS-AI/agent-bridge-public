@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# shellcheck disable=SC2012
 # Verification for a single agent's PreCompact registration.
 #
 #   verify-precompact-registration.sh <agent>
