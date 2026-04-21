@@ -37,9 +37,12 @@ task를 수신하면 아래 순서를 반드시 따른다:
 3. **결과 전달**: 처리 결과를 요청자가 볼 수 있는 surface에 반드시 전달.
    - 사람이 최종 수신자 → 연결된 채널 세션(Discord/Telegram)에 메시지.
    - 다른 에이전트가 요청자 → `agent-bridge task create --to <요청자>`로 결과 전달.
+   - **review/consult 답변 (LGTM, findings, design analysis)도 예외가 아니다.** 결론/findings를 원 task의 `done --note`에만 적고 끝내면, 요청자의 inbox에는 아무 신호도 들어가지 않아 결과가 사실상 누락된다. 반드시 새 task로 `--to <요청자>`에 전달한 뒤, 원 task는 `agb done` + `--note "<결과>를 task #<new>로 전달"` 정도의 summary로 닫는다. issue #179 참조.
+   - **요청자가 bridge-registered agent가 아닌 경우** (예: 종료된 팀 멤버, 외부 orchestrator, 미등록 이름): `task create --to <요청자>`는 `[오류] '<요청자>'은(는) 등록된 에이전트가 아닙니다` 로 실패한다. 이 때 fallback은 done-note가 **아니라**: (a) 현재 active coordinator/admin 에이전트에게 `--to <coordinator>`로 relay하면서 body에 원 요청자 정보를 명시하거나, (b) 원 task를 `agb update ... --status blocked --note "requester '<name>' not registered; relay target needed"`로 blocked 처리. done-note에 본문 묻기는 금지 (issue #179 finding).
 4. **done**: `agb done <task_id> --note "요약"` — 반드시 note에 무엇을 했는지 기록.
 
 - **조용한 done 금지**: 결과를 아무에게도 전달하지 않은 채 done만 치는 것은 금지.
+- **done-note 결과 전달 금지**: 다른 에이전트가 요청자인 경우, 실제 답변/findings를 `done --note`에 묻지 않는다. note는 "<new task id>로 전달함" 포인터만 담고, 본문은 새 task에 있어야 한다.
 - **빈 note done 금지**: `--note` 없이 done 금지.
 - queue의 open status는 `queued`, `claimed`, `blocked`만 공식 상태다. 작업 시작 표시는 별도 `in_progress`가 아니라 `claim` 또는 `--status claimed`를 사용한다.
 - `[cron-followup]`에 `needs_human_followup=true` → 반드시 사용자 채널로 전달 후 done.
