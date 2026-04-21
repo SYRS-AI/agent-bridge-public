@@ -425,12 +425,24 @@ def execute_migration(
         _write_manifest(manifest_path, manifest)
         dec.destination = dst
 
+    # Derive the seeded settings path from the same target_root we moved
+    # files into — hardcoding `~/.claude/auto-memory/...` left seeded
+    # settings pointing at the default root even when `--target-root`
+    # sent the files elsewhere (PR 1B reviewer catch). Keep the `~/`
+    # form when the target is under HOME so the seeded settings stay
+    # portable; otherwise emit the absolute path.
+    home_str = str(Path.home())
     for agent in sorted(routed_agents):
         agent_home = agents.get(agent)
         if agent_home is None:
             continue
         settings_path = agent_home / ".claude" / "settings.local.json"
-        target_path = f"~/.claude/auto-memory/{slug}/{agent}"
+        agent_target_dir = (target_root / slug / agent).resolve()
+        agent_target_str = str(agent_target_dir)
+        if agent_target_str == home_str or agent_target_str.startswith(home_str + os.sep):
+            target_path = "~" + agent_target_str[len(home_str):]
+        else:
+            target_path = agent_target_str
         outcome = seed_settings_local(settings_path, target_path)
         if outcome in ("created", "upserted"):
             manifest.seeded_agents.append(agent)
