@@ -204,6 +204,39 @@ bridge_queue_gateway_root() {
   printf '%s/queue-gateway' "$BRIDGE_STATE_DIR"
 }
 
+# Returns 0 (success) if the cron sync path should run, 1 otherwise.
+# Contract: walk the new name and its two legacy aliases.
+#   - If any variable is a recognized off-form (0, false, no, off), disable.
+#   - If any variable is a recognized on-form (1, true, yes, on), keep checking
+#     the others (so another variable can still explicitly disable).
+#   - If any variable is set to a non-empty, unrecognized value (e.g. "2",
+#     "banana"), fail closed: disable — so an operator's typo does not silently
+#     flip a side-effectful sync on.
+#   - If all three are unset or empty, enable (the #192 default-ON goal).
+# Case-insensitive (relies on bash 4+ ${var,,}).
+# Replaces a bash parameter-expansion chain that implemented precedence and
+# silently let an outer =1 override an inner =0 — which broke the #192
+# legacy-opt-out promise.
+bridge_cron_sync_enabled() {
+  local var val normalized
+  for var in BRIDGE_CRON_SYNC_ENABLED BRIDGE_LEGACY_CRON_SYNC_ENABLED BRIDGE_OPENCLAW_CRON_SYNC_ENABLED; do
+    val="${!var-}"
+    [[ -z "$val" ]] && continue
+    normalized="${val,,}"
+    case "$normalized" in
+      1|true|yes|on)
+        ;;
+      0|false|no|off)
+        return 1
+        ;;
+      *)
+        return 1
+        ;;
+    esac
+  done
+  return 0
+}
+
 bridge_queue_gateway_agent_dir() {
   local agent="$1"
   printf '%s/%s' "$(bridge_queue_gateway_root)" "$agent"

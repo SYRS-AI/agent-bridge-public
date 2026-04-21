@@ -205,12 +205,19 @@ One-shot jobs should be tested with dry-run first:
 agb cron enqueue <job-id> --slot 2026-04-05 --dry-run
 ```
 
-Automatic recurring scheduling is opt-in. Enable it only on machines that
-should actively enqueue scheduled work:
+Automatic recurring scheduling is **on by default** — once the daemon is
+running, every registered job is considered for enqueue on each sync tick.
+To opt out (for example, on a machine that should not actively enqueue
+recurring work), set the flag explicitly to `0`:
 
 ```bash
-BRIDGE_CRON_SYNC_ENABLED=1
+BRIDGE_CRON_SYNC_ENABLED=0
 ```
+
+Legacy variables `BRIDGE_LEGACY_CRON_SYNC_ENABLED` and
+`BRIDGE_OPENCLAW_CRON_SYNC_ENABLED` are still honored for backwards
+compatibility; any of the three explicitly set to `0` disables automatic
+enqueue.
 
 Inspect runtime state directly when needed:
 

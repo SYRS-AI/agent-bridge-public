@@ -130,6 +130,48 @@ else
   log "shellcheck not installed; skipping"
 fi
 
+log "bridge_cron_sync_enabled reducer: any-0-disables semantics (issue #192)"
+# Regression matrix for the `BRIDGE_CRON_SYNC_ENABLED` reducer introduced
+# in #213 after the original precedence chain silently let an outer =1
+# override an inner =0. Lock the "any explicit 0 disables; all-unset enables"
+# contract so a future edit cannot quietly revert the semantics.
+run_cron_case() {
+  local label="$1"
+  local expected="$2"
+  local setup="$3"
+  local out
+  out="$("$BASH4_BIN" -lc '
+    set -u
+    unset BRIDGE_CRON_SYNC_ENABLED BRIDGE_LEGACY_CRON_SYNC_ENABLED BRIDGE_OPENCLAW_CRON_SYNC_ENABLED
+    '"$setup"'
+    # shellcheck disable=SC1090
+    source "'"$REPO_ROOT"'/lib/bridge-core.sh"
+    if bridge_cron_sync_enabled; then echo enabled; else echo disabled; fi
+  ')"
+  if [[ "$out" != "$expected" ]]; then
+    die "cron-sync reducer: [$label] expected=$expected actual=$out"
+  fi
+  log "  [ok] cron-sync reducer: $label → $out"
+}
+run_cron_case "all unset"                          "enabled"  ""
+run_cron_case "new=0"                              "disabled" "export BRIDGE_CRON_SYNC_ENABLED=0"
+run_cron_case "legacy=0 only"                      "disabled" "export BRIDGE_LEGACY_CRON_SYNC_ENABLED=0"
+run_cron_case "openclaw=0 only"                    "disabled" "export BRIDGE_OPENCLAW_CRON_SYNC_ENABLED=0"
+run_cron_case "new=1 legacy=0 (any-0-wins)"        "disabled" "export BRIDGE_CRON_SYNC_ENABLED=1 BRIDGE_LEGACY_CRON_SYNC_ENABLED=0"
+run_cron_case "legacy=1 openclaw=0 (any-0-wins)"   "disabled" "export BRIDGE_LEGACY_CRON_SYNC_ENABLED=1 BRIDGE_OPENCLAW_CRON_SYNC_ENABLED=0"
+run_cron_case "all three =1"                       "enabled"  "export BRIDGE_CRON_SYNC_ENABLED=1 BRIDGE_LEGACY_CRON_SYNC_ENABLED=1 BRIDGE_OPENCLAW_CRON_SYNC_ENABLED=1"
+run_cron_case "empty-string treated as unset"      "enabled"  "export BRIDGE_CRON_SYNC_ENABLED="
+run_cron_case "on-form true"                       "enabled"  "export BRIDGE_CRON_SYNC_ENABLED=true"
+run_cron_case "on-form yes"                        "enabled"  "export BRIDGE_CRON_SYNC_ENABLED=yes"
+run_cron_case "off-form false"                     "disabled" "export BRIDGE_CRON_SYNC_ENABLED=false"
+run_cron_case "off-form no"                        "disabled" "export BRIDGE_CRON_SYNC_ENABLED=no"
+run_cron_case "off-form off"                       "disabled" "export BRIDGE_CRON_SYNC_ENABLED=off"
+run_cron_case "case-insensitive TRUE"              "enabled"  "export BRIDGE_CRON_SYNC_ENABLED=TRUE"
+run_cron_case "case-insensitive NO (off-form)"     "disabled" "export BRIDGE_CRON_SYNC_ENABLED=NO"
+run_cron_case "malformed '2' → fail-closed"        "disabled" "export BRIDGE_CRON_SYNC_ENABLED=2"
+run_cron_case "malformed 'banana' → fail-closed"   "disabled" "export BRIDGE_CRON_SYNC_ENABLED=banana"
+run_cron_case "malformed legacy only"              "disabled" "export BRIDGE_LEGACY_CRON_SYNC_ENABLED=wat"
+
 log "context-pressure detector: HUD-authoritative classification (issue #126)"
 # Self-contained coverage for bridge-context-pressure.py analyze. Placed
 # early so it runs even when the downstream integration block at smoke-test
