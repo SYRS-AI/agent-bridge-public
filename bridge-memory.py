@@ -591,6 +591,20 @@ def cmd_promote(args: argparse.Namespace) -> int:
     if kind == "user":
         target_path = home / "users" / user.user_id / "MEMORY.md"
         append_under_section(target_path, "Promotions", block, args.dry_run)
+    elif kind == "user-profile":
+        # Issue #162 Phase 1: shared user profile is the canonical surface
+        # for persistent user preferences. Writing through the agent's
+        # symlinked `users/<uid>/USER.md` hits the canonical
+        # `shared/users/<uid>/USER.md`, so every other agent linked to the
+        # same user sees the preference at next session start without a
+        # separate promotion chain. The "Stable Preferences" section is
+        # intentionally distinct from the hand-edited "Stable preferences"
+        # bullet in the Identity/Working Notes skeleton so promoted
+        # entries do not fight the operator's manual edits.
+        target_path = home / "users" / user.user_id / "USER.md"
+        append_under_section(
+            target_path, "Stable Preferences", block, args.dry_run
+        )
     else:
         page_slug = slugify(args.page or title)
         if kind == "shared":
@@ -2203,7 +2217,17 @@ def build_parser() -> argparse.ArgumentParser:
     promote_parser.add_argument("--agent", required=True)
     promote_parser.add_argument("--home", required=True)
     promote_parser.add_argument("--template-root", required=True)
-    promote_parser.add_argument("--kind", choices=("user", "shared", "project", "decision"), required=True)
+    promote_parser.add_argument(
+        "--kind",
+        choices=("user", "user-profile", "shared", "project", "decision"),
+        required=True,
+        help=(
+            "user = per-user memory bucket; "
+            "user-profile = Stable Preferences section of shared/users/<uid>/USER.md "
+            "(auto-loaded at every session start, cross-agent via canonical USER.md); "
+            "shared|project|decision = agent-local wiki pages"
+        ),
+    )
     promote_parser.add_argument("--user")
     promote_parser.add_argument("--capture")
     promote_parser.add_argument("--page")
