@@ -175,6 +175,7 @@ Examples:
   $CLI_NAME memory capture --agent assistant --source telegram --user owner --author "Alice" --text "I prefer morning updates."
   $CLI_NAME memory ingest --agent assistant --latest
   $CLI_NAME memory promote --agent assistant --kind user --user owner --summary "User prefers concise morning updates."
+  $CLI_NAME memory promote --agent assistant --kind user-profile --user owner --summary "답변 없으면 Discord로 에스컬레이션."   # appends to shared users/<uid>/USER.md Stable Preferences
   $CLI_NAME memory remember --agent assistant --source chat --user owner --text "User prefers concise morning updates." --kind user
   $CLI_NAME memory lint --agent assistant
   $CLI_NAME memory search --agent assistant --user owner --query "concise morning updates"

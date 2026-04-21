@@ -60,6 +60,17 @@ If a message naturally contains durable preferences, stable context, or importan
 - it improves future interaction quality
 - it is stable enough not to churn every day
 
+### Promote to user-profile (Stable Preferences) when:
+
+- the user stated a durable preference for how the agent should behave
+  ("앞으로 / 항상 / from now on / whenever / always ...")
+- the preference is about this specific user, not every user of the agent
+- applying it crosses sessions and other agents linked to the same user
+
+Use `agent-bridge memory promote --kind user-profile --user <uid> --summary "..."`.
+The entry lands in `shared/users/<uid>/USER.md` "Stable Preferences" and
+propagates to every agent whose `users/<uid>/` is linked to that canonical.
+
 ### Promote to shared memory when:
 
 - the fact applies across users

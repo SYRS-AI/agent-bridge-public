@@ -2660,6 +2660,21 @@ MEMORY_SHARED_PROMOTE_OUTPUT="$("$REPO_ROOT/agent-bridge" memory promote --agent
 assert_contains "$MEMORY_SHARED_PROMOTE_OUTPUT" "kind: shared"
 [[ -f "$BRIDGE_AGENT_HOME_ROOT/$CREATED_AGENT/memory/shared/communication-preferences.md" ]] || die "memory promote did not create shared page"
 assert_contains "$(cat "$BRIDGE_AGENT_HOME_ROOT/$CREATED_AGENT/memory/shared/communication-preferences.md")" "bias toward concise updates"
+# Issue #162 Phase 1: user-profile promotion must write to the canonical
+# shared user profile so every agent symlinked to that user sees it.
+MEMORY_PROFILE_PROMOTE_OUTPUT="$("$REPO_ROOT/agent-bridge" memory promote --agent "$CREATED_AGENT" --kind user-profile --user owner --summary "답변 없으면 Discord로 에스컬레이션해라.")"
+assert_contains "$MEMORY_PROFILE_PROMOTE_OUTPUT" "kind: user-profile"
+# Write target is users/owner/USER.md; when that path is a symlink into
+# $BRIDGE_SHARED_DIR/users/<uid>/ the canonical file is what gets mutated.
+SMOKE_USER_PROFILE_AGENT="$BRIDGE_AGENT_HOME_ROOT/$CREATED_AGENT/users/owner/USER.md"
+SMOKE_USER_PROFILE_CANONICAL="$BRIDGE_SHARED_DIR/users/owner/USER.md"
+assert_contains "$(cat "$SMOKE_USER_PROFILE_AGENT")" "## Stable Preferences"
+assert_contains "$(cat "$SMOKE_USER_PROFILE_AGENT")" "답변 없으면 Discord로 에스컬레이션"
+[[ -f "$SMOKE_USER_PROFILE_CANONICAL" ]] || die "user-profile promote did not reach the canonical shared user profile"
+assert_contains "$(cat "$SMOKE_USER_PROFILE_CANONICAL")" "답변 없으면 Discord로 에스컬레이션"
+# Same canonical means the agent-visible file and the shared file are the same bytes.
+diff -q "$SMOKE_USER_PROFILE_AGENT" "$SMOKE_USER_PROFILE_CANONICAL" >/dev/null \
+  || die "user-profile promote wrote to agent-local path instead of shared canonical"
 MEMORY_LINT_JSON="$("$REPO_ROOT/agent-bridge" memory lint --agent "$CREATED_AGENT" --json)"
 assert_contains "$MEMORY_LINT_JSON" "\"ok\": true"
 MEMORY_SEARCH_JSON="$("$REPO_ROOT/agent-bridge" memory search --agent "$CREATED_AGENT" --user owner --query "concise morning updates" --json)"

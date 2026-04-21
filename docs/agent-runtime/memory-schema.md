@@ -175,7 +175,28 @@ CLI: `agent-bridge memory mode set <agent> shared|isolated` (land with Track 3 P
 
 ## 7. User preference promotion (feedback → overhead)
 
-The admin-curated "ACTIVE-PREFERENCES" layer is the third short-term continuity surface — see [`user-preference-injection.md`](user-preference-injection.md). Summary here: feedback memory tagged as a persistent preference is promoted to `agents/<agent>/ACTIVE-PREFERENCES.md` (agent-local) or `docs/agent-runtime/active-preferences.md` (team-wide, admin approval). The `CLAUDE.md` pointer template includes `ACTIVE-PREFERENCES.md` in the "read order" list.
+Three scopes, in order of implementation effort and blast radius:
+
+### 7.1 User-specific preferences → shared user profile (Issue #162 Phase 1, landed v0.5.x)
+
+The default path for "this user wants the agent(s) working with them to behave this way." Write with:
+
+```
+agent-bridge memory promote --agent <agent> --kind user-profile \
+    --user <uid> --summary "<one-line rule>"
+```
+
+The entry lands in `shared/users/<uid>/USER.md` under the `## Stable Preferences` section. Every agent whose `users/<uid>/` is linked to the canonical picks it up at next session start via the existing `CLAUDE.md` read-order step (`users/<user-id>/USER.md`). No new file, no new pointer chain — reuses the surface the agent already reads early in boot.
+
+The promoted `## Stable Preferences` section is intentionally distinct from the hand-edited `- Stable preferences:` bullet in the Identity/Working Notes skeleton, so promoted rules do not clobber the operator's manual edits.
+
+### 7.2 Agent-role-specific operating rules → ACTIVE-PREFERENCES.md (Phase 2, spec'd, not yet landed)
+
+When a rule applies only to one agent's role (not to every agent working with the user), it belongs in `agents/<agent>/ACTIVE-PREFERENCES.md`. Pointer added to the agent's `CLAUDE.md` read-order list; file is silently skipped when absent. See [`user-preference-injection.md`](user-preference-injection.md) for the full spec.
+
+### 7.3 Team-wide operating rules → `docs/agent-runtime/active-preferences.md` (Phase 3, admin-gated)
+
+For rules every agent in the team must follow (comms protocols, escalation patterns). Admin-only write gate; other agents propose via a queue task to admin. See [`user-preference-injection.md`](user-preference-injection.md).
 
 ## 8. Legacy migration
 

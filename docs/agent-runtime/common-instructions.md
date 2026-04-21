@@ -79,13 +79,20 @@ task를 수신하면 아래 순서를 반드시 따른다:
 
 > **Local override precedence**: 개별 에이전트(예: patch)는 위의 기본 정책 위에 local override를 둘 수 있다. override는 해당 에이전트의 `CLAUDE.md` 내 관리 블록 **바깥**의 별도 섹션에서 선언하고, 충돌 시 override가 우선한다. override의 존재는 `<!-- BEGIN/END AGENT BRIDGE DOC MIGRATION -->` 블록 아래쪽에 한 줄 주석 (`> Upstream Issue Policy — Local Override: see below`)으로 표기한다.
 
-## User Preference Promotion (active-preferences)
+## User Preference Promotion
 
-사용자가 "앞으로 계속 이렇게 해" 식의 **지속 preference**를 말하면, 일회성 이후에도 유지되도록 `active-preferences.md` 계층으로 승격한다. 규칙은 [`user-preference-injection.md`](user-preference-injection.md)를 따른다. 요약:
+사용자가 "앞으로 계속 이렇게 해" 식의 **지속 preference**를 말하면 일회성 세션을 넘어 유지되도록 승격한다. Scope에 따라 자리가 다르다 ([`memory-schema.md`](memory-schema.md) §7 / [`user-preference-injection.md`](user-preference-injection.md) 참조):
 
-- 본문에 `앞으로 / 항상 / 계속 / 매번 / from now on / whenever` 등의 signal이 있거나 사용자가 명시적으로 "앞으로 적용해라"라고 하면 후보로 등록한다.
-- Agent-local feedback → `agents/<agent>/ACTIVE-PREFERENCES.md`. Team-wide feedback → `docs/agent-runtime/active-preferences.md` (admin 승인 필요).
-- 승격 전에 엔트리 포맷(`Rule/Why/How to apply/Source`)으로 정돈하고, 원본 feedback 파일에 `promoted_to: <path>` 헤더를 단다.
+- 본문에 `앞으로 / 항상 / 계속 / 매번 / from now on / whenever` signal이 있거나 사용자가 명시적으로 "앞으로 적용해라"라고 하면 후보로 등록한다.
+- **user-specific** (이 사용자가 일하는 방식. 기본값) → `shared/users/<uid>/USER.md` "Stable Preferences" 섹션.
+  ```
+  agent-bridge memory promote --agent <agent> --kind user-profile \
+    --user <uid> --summary "<한 줄 규칙>"
+  ```
+  이미 `CLAUDE.md` read-order가 `users/<user-id>/USER.md`를 읽으므로 별도 pointer 없이 다음 세션부터 로드된다. 같은 canonical에 링크된 다른 에이전트도 함께 인식한다.
+- **agent-role-specific** (이 에이전트 역할에만 해당) → `agents/<agent>/ACTIVE-PREFERENCES.md` (Phase 2, 아직 미구현).
+- **team-wide** (모든 에이전트가 따라야 함) → `docs/agent-runtime/active-preferences.md` + admin 승인 (Phase 3, 아직 미구현).
+- 승격 전에 한 줄로 정돈하고, 원본 feedback 파일에 `promoted_to: <path>` 헤더를 단다.
 
 ## First Session Onboarding (non-admin)
 
