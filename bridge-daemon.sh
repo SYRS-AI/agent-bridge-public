@@ -1512,7 +1512,7 @@ process_context_pressure_reports() {
     excerpt_b64=""
     excerpt=""
     if [[ -n "$capture" ]]; then
-      analysis_shell="$(printf '%s' "$capture" | python3 "$SCRIPT_DIR/bridge-context-pressure.py" analyze --format shell 2>/dev/null || true)"
+      analysis_shell="$(printf '%s' "$capture" | python3 "$SCRIPT_DIR/bridge-context-pressure.py" analyze --format shell --engine "$engine" 2>/dev/null || true)"
       if [[ -n "$analysis_shell" ]]; then
         CONTEXT_PRESSURE_SEVERITY=""
         CONTEXT_PRESSURE_MATCHED_PATTERN=""

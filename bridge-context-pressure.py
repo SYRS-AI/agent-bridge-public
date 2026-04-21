@@ -60,6 +60,15 @@ PATTERN_GROUPS: list[tuple[str, list[str]]] = [
     ),
 ]
 
+# Engines with no trustworthy authoritative HUD of their own. When the HUD
+# regex fails for these, we skip the prose fallback rather than emitting a
+# warning, because their scrollback routinely contains literal UI phrases
+# ("Context compacted", "compact the conversation") and doc excerpts that
+# false-positive the fallback regex (issue #183). Claude keeps the existing
+# HUD-or-fallback behavior because the fallback is the only signal on
+# pre-HUD builds.
+ENGINES_WITHOUT_HUD = frozenset({"codex"})
+
 IGNORED_PREFIXES = ("[Agent Bridge]",)
 
 
@@ -118,7 +127,7 @@ def hud_context_pct(normalized: str) -> int | None:
     return pct
 
 
-def classify(normalized: str, full: str | None = None) -> tuple[str, str]:
+def classify(normalized: str, full: str | None = None, engine: str = "") -> tuple[str, str]:
     """Classify context pressure.
 
     The Claude HUD ("Context <bar> NN%") is the authoritative live signal: if
@@ -130,7 +139,10 @@ def classify(normalized: str, full: str | None = None) -> tuple[str, str]:
 
     If no HUD line is visible (pre-HUD Claude builds, Codex, or very fresh
     sessions), fall back to the existing pattern groups so genuine textual
-    signals still fire.
+    signals still fire — except for engines in ``ENGINES_WITHOUT_HUD`` where
+    the fallback has no authoritative ceiling and reliably false-positives on
+    UI prose (issue #183). For those engines we emit nothing when the HUD is
+    absent rather than raise a noisy warning task.
     """
     scan_target = full if full is not None else normalized
     pct = hud_context_pct(scan_target)
@@ -149,6 +161,9 @@ def classify(normalized: str, full: str | None = None) -> tuple[str, str]:
         # post-/compact scrollback mimicking a banner while HUD was low.
         return "", f"hud:context_pct={pct}"
 
+    if engine and engine.lower() in ENGINES_WITHOUT_HUD:
+        return "", ""
+
     lowered = normalized.lower()
     for severity, patterns in PATTERN_GROUPS:
         for pattern in patterns:
@@ -164,12 +179,20 @@ def main() -> int:
     parser.add_argument("--max-bytes", type=int, default=4096)
     parser.add_argument("--format", choices=("json", "shell"), default="json")
     parser.add_argument("--json", action="store_true")
+    parser.add_argument(
+        "--engine",
+        default="",
+        help=(
+            "Owning agent's engine name (e.g. 'claude', 'codex'). Engines in "
+            "ENGINES_WITHOUT_HUD skip the fallback regex when no HUD is visible."
+        ),
+    )
     args = parser.parse_args()
 
     raw_capture = read_capture(args.capture_file)
     full = normalize_full(raw_capture)
     normalized = normalize_excerpt(raw_capture, max(args.max_bytes, 256))
-    severity, matched = classify(normalized, full=full)
+    severity, matched = classify(normalized, full=full, engine=args.engine)
     payload = {
         "severity": severity,
         "matched_pattern": matched,
