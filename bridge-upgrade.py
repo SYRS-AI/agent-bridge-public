@@ -963,11 +963,21 @@ def cmd_backup_extend_live(args: argparse.Namespace) -> int:
         clean = raw_path
         if clean.startswith("removed:"):
             clean = clean[len("removed:"):]
+        # Canonicalize the ancestor dirs but preserve the final component
+        # unchanged. If we used `Path.resolve()` on the whole path, a symlink
+        # at the tail (e.g. `agents/demo/TOOLS.md -> ../shared/TOOLS.md`)
+        # would be followed and the manifest entry would record the target
+        # instead of the link path — breaking rollback for exactly the
+        # symlink paths bridge-docs.py rewrites. Resolve the parent only.
+        raw = Path(clean).expanduser()
+        if not raw.is_absolute():
+            raw = Path.cwd() / raw
         try:
-            abs_path = Path(clean).expanduser().resolve()
+            parent_resolved = raw.parent.resolve()
         except OSError:
             payload["skipped_missing"] += 1
             continue
+        abs_path = parent_resolved / raw.name
         try:
             relpath = abs_path.relative_to(target_root).as_posix()
         except ValueError:
