@@ -60,8 +60,16 @@ bridge_attach_tmux_session() {
 
 bridge_tmux_bootstrap_session_options() {
   local session="$1"
-  tmux set-option -t "$(bridge_tmux_session_target "$session")" mouse on >/dev/null 2>&1 || true
-  tmux set-option -t "$(bridge_tmux_session_target "$session")" history-limit 10000 >/dev/null 2>&1 || true
+  # tmux's set-option requires the `=<session>:` exact-match form (with
+  # trailing colon). The bare `=<session>` form returned by
+  # bridge_tmux_session_target fails with "no such session" and the
+  # silent `|| true` swallowed it, leaving session-level `mouse` off
+  # and wheel events dead (issue #139). Reuse pane target which already
+  # appends the colon.
+  local target
+  target="$(bridge_tmux_pane_target "$session")"
+  tmux set-option -t "$target" mouse on >/dev/null 2>&1 || true
+  tmux set-option -t "$target" history-limit 10000 >/dev/null 2>&1 || true
 }
 
 bridge_tmux_engine_requires_prompt() {
