@@ -34,22 +34,30 @@ The tool reads the summary from stdin and routes it into
 by this session's id. Run:
 
 ```bash
-# Prefer BRIDGE_AGENT_WORKDIR (exported by bridge-run.sh for this exact
-# agent). Fall back to BRIDGE_AGENT_HOME_ROOT + BRIDGE_AGENT_ID, then
-# finally the conventional default for manual off-runtime use.
-if [[ -n "${BRIDGE_AGENT_WORKDIR:-}" ]]; then
-  HOME_DIR="$BRIDGE_AGENT_WORKDIR"
-elif [[ -n "${BRIDGE_AGENT_HOME_ROOT:-}" ]]; then
-  HOME_DIR="$BRIDGE_AGENT_HOME_ROOT/$BRIDGE_AGENT_ID"
+# The daily note lives under the agent's bridge runtime home, which is
+# not always the same as the session's working directory. Resolve them
+# separately.
+#
+#   AGENT_HOME  — where `memory/<today>.md` gets written. Always the
+#                 bridge-managed home; matches `bridge-agent.sh`
+#                 scaffolding and PR 1A's autoMemoryDirectory seed.
+#   WORKDIR     — the session's cwd, used by current-session-id to
+#                 derive the `~/.claude/projects/<slug>/` lookup key.
+#                 Claude scopes transcripts by the git root of the
+#                 session cwd, so conflating this with AGENT_HOME sends
+#                 the scan to a directory that has no jsonl files.
+if [[ -n "${BRIDGE_AGENT_HOME_ROOT:-}" ]]; then
+  AGENT_HOME="$BRIDGE_AGENT_HOME_ROOT/$BRIDGE_AGENT_ID"
 else
-  HOME_DIR="$HOME/.agent-bridge/agents/$BRIDGE_AGENT_ID"
+  AGENT_HOME="$HOME/.agent-bridge/agents/$BRIDGE_AGENT_ID"
 fi
+WORKDIR="${BRIDGE_AGENT_WORKDIR:-$AGENT_HOME}"
 
 SESSION_ID="$(python3 ~/.agent-bridge/bridge-memory.py current-session-id \
-    --agent "$BRIDGE_AGENT_ID" --home "$HOME_DIR")"
+    --agent "$BRIDGE_AGENT_ID" --home "$WORKDIR")"
 python3 ~/.agent-bridge/bridge-memory.py daily-append \
     --agent "$BRIDGE_AGENT_ID" \
-    --home "$HOME_DIR" \
+    --home "$AGENT_HOME" \
     --session-id "$SESSION_ID" \
     --writer session \
     --content-from-stdin <<'MD'
