@@ -178,10 +178,12 @@ PY
 #
 #   ~/.claude/auto-memory/<bridge-home-slug>/<agent>/
 #
-# The slug is derived from the resolved $SCRIPT_DIR path (Claude-style
+# The slug is derived from the resolved $BRIDGE_HOME path (Claude-style
 # replacement of "/" with "-"), matching the naming Anthropic already uses
 # under ~/.claude/projects/. That keeps two bridge installs on the same
-# machine from colliding even when they share agent ids.
+# machine from colliding even when they share agent ids — and it keeps
+# the slug stable whether bridge-agent.sh is invoked from the live runtime
+# (~/.agent-bridge) or from a source checkout managing that same runtime.
 #
 # Merge policy (fail-closed):
 #   - no file           → create with { autoMemoryDirectory: <path> }
@@ -196,7 +198,7 @@ PY
 bridge_ensure_auto_memory_isolation() {
   local agent="$1"
   local workdir="$2"
-  local bridge_home="${SCRIPT_DIR:-}"
+  local bridge_home="${BRIDGE_HOME:-}"
   local settings_local="$workdir/.claude/settings.local.json"
 
   if [[ -z "$agent" || -z "$workdir" || -z "$bridge_home" ]]; then
