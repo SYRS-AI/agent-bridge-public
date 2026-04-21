@@ -161,6 +161,16 @@ run_cron_case "new=1 legacy=0 (any-0-wins)"        "disabled" "export BRIDGE_CRO
 run_cron_case "legacy=1 openclaw=0 (any-0-wins)"   "disabled" "export BRIDGE_LEGACY_CRON_SYNC_ENABLED=1 BRIDGE_OPENCLAW_CRON_SYNC_ENABLED=0"
 run_cron_case "all three =1"                       "enabled"  "export BRIDGE_CRON_SYNC_ENABLED=1 BRIDGE_LEGACY_CRON_SYNC_ENABLED=1 BRIDGE_OPENCLAW_CRON_SYNC_ENABLED=1"
 run_cron_case "empty-string treated as unset"      "enabled"  "export BRIDGE_CRON_SYNC_ENABLED="
+run_cron_case "on-form true"                       "enabled"  "export BRIDGE_CRON_SYNC_ENABLED=true"
+run_cron_case "on-form yes"                        "enabled"  "export BRIDGE_CRON_SYNC_ENABLED=yes"
+run_cron_case "off-form false"                     "disabled" "export BRIDGE_CRON_SYNC_ENABLED=false"
+run_cron_case "off-form no"                        "disabled" "export BRIDGE_CRON_SYNC_ENABLED=no"
+run_cron_case "off-form off"                       "disabled" "export BRIDGE_CRON_SYNC_ENABLED=off"
+run_cron_case "case-insensitive TRUE"              "enabled"  "export BRIDGE_CRON_SYNC_ENABLED=TRUE"
+run_cron_case "case-insensitive NO (off-form)"     "disabled" "export BRIDGE_CRON_SYNC_ENABLED=NO"
+run_cron_case "malformed '2' → fail-closed"        "disabled" "export BRIDGE_CRON_SYNC_ENABLED=2"
+run_cron_case "malformed 'banana' → fail-closed"   "disabled" "export BRIDGE_CRON_SYNC_ENABLED=banana"
+run_cron_case "malformed legacy only"              "disabled" "export BRIDGE_LEGACY_CRON_SYNC_ENABLED=wat"
 
 log "context-pressure detector: HUD-authoritative classification (issue #126)"
 # Self-contained coverage for bridge-context-pressure.py analyze. Placed
