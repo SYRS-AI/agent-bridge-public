@@ -1972,15 +1972,29 @@ process_crash_reports() {
         body_file="$(bridge_agent_crash_report_body_file "$agent")"
         bridge_write_crash_report_body "$agent" "$body_file" "$fail_count" "$exit_code" "$engine" "$stderr_file" "$tail_file" "$launch_cmd"
         if [[ "$existing_id" =~ ^[0-9]+$ ]]; then
-          bridge_queue_cli update "$existing_id" --actor daemon --title "$title" --priority urgent --body-file "$body_file" >/dev/null 2>&1 || true
-          bridge_audit_log daemon crash_loop_report "$admin_agent" \
-            --detail agent="$agent" \
-            --detail mode=refresh \
-            --detail fail_count="$fail_count" \
-            --detail exit_code="$exit_code" \
-            --detail error_hash="$error_hash" \
-            --detail body_file="$body_file"
-          reported=1
+          # Issue #204: refresh-mode used to fire every scan cycle regardless
+          # of whether anything changed since the last refresh. If the admin
+          # left the existing [crash-loop] task queued (the normal case until
+          # they investigate), the daemon updated the same task body and
+          # emitted a `crash_loop_report mode=refresh` audit every ~10 s with
+          # an identical error_hash — inbox / audit.jsonl / notify transports
+          # all saw duplicate noise on the same signal. Apply the same
+          # `error_hash != last_hash || cooldown elapsed` guard the create
+          # branch already uses, so a stable signal refreshes at most once
+          # per cooldown window (default 1800 s).
+          if [[ "$error_hash" == "$last_hash" && $(( now_ts - last_report_ts )) -lt "$cooldown" ]]; then
+            :
+          else
+            bridge_queue_cli update "$existing_id" --actor daemon --title "$title" --priority urgent --body-file "$body_file" >/dev/null 2>&1 || true
+            bridge_audit_log daemon crash_loop_report "$admin_agent" \
+              --detail agent="$agent" \
+              --detail mode=refresh \
+              --detail fail_count="$fail_count" \
+              --detail exit_code="$exit_code" \
+              --detail error_hash="$error_hash" \
+              --detail body_file="$body_file"
+            reported=1
+          fi
         elif [[ "$error_hash" != "$last_hash" || $(( now_ts - last_report_ts )) -ge "$cooldown" ]]; then
           create_output="$(bridge_queue_cli create --to "$admin_agent" --from daemon --priority urgent --title "$title" --body-file "$body_file" 2>/dev/null || true)"
           if [[ "$create_output" =~ created\ task\ \#([0-9]+) ]]; then
