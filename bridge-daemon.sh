@@ -2888,6 +2888,8 @@ process_on_demand_agents() {
   local live_queued=0
   local live_claimed=0
   local live_blocked=0
+  local configured_session=""
+  local attached_count=0
 
   while IFS=$'\t' read -r agent queued claimed blocked active idle _last_seen _last_nudge session _engine _workdir; do
     [[ -z "$agent" ]] && continue
@@ -2907,6 +2909,26 @@ process_on_demand_agents() {
     if [[ "$active" == "0" ]]; then
       if ! bridge_daemon_autostart_allowed "$agent"; then
         continue
+      fi
+      # Defensive guard (issue #190 symptom D): even when the summary reports
+      # active=0 (e.g. fresh daemon, state drift, or roster/tmux name mismatch),
+      # never auto-start on top of a tmux session that currently has a human
+      # client attached. bridge-start.sh without --replace is idempotent today,
+      # but skipping early avoids spurious "ensured always-on" log spam that
+      # masks real restarts and guards the attached path from future refactors.
+      configured_session="$(bridge_agent_session "$agent")"
+      if [[ -n "$configured_session" ]] && bridge_tmux_session_exists "$configured_session"; then
+        attached_count="$(bridge_tmux_session_attached_count "$configured_session" 2>/dev/null || printf '0')"
+        [[ "$attached_count" =~ ^[0-9]+$ ]] || attached_count=0
+        if (( attached_count > 0 )); then
+          bridge_daemon_clear_autostart_failure "$agent"
+          bridge_audit_log daemon autostart_skipped_attached "$agent" \
+            --detail session="$configured_session" \
+            --detail attached="$attached_count" \
+            --detail always_on="$always_on"
+          daemon_info "skipped-attached ${agent} (session=${configured_session} attached=${attached_count})"
+          continue
+        fi
       fi
       if ((( always_on == 1 ))) && ! bridge_agent_is_active "$agent"; then
         if "$BRIDGE_BASH_BIN" "$SCRIPT_DIR/bridge-start.sh" "$agent" >/dev/null 2>&1; then
