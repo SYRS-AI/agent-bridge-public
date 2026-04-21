@@ -3478,9 +3478,12 @@ CLAUDE_LAUNCH_RESTART_CONTINUE="$("$BASH4_BIN" -c '
   BRIDGE_AGENT_CONTINUE["claude-static"]="1"
   BRIDGE_AGENT_LOOP_RESTART_COUNT=1
   unset BRIDGE_AGENT_SESSION_ID["claude-static"]
-  bridge_agent_launch_cmd "claude-static"
+  bridge_agent_launch_cmd "claude-static" 2>&1
 ')"
-assert_contains "$CLAUDE_LAUNCH_RESTART_CONTINUE" "claude --continue --dangerously-skip-permissions --name claude-static --channels plugin:discord@claude-plugins-official"
+# Issue #189: without a resumable transcript in ~/.claude/projects/<slug>/,
+# emitting `--continue` would crash the claude CLI. Skip it and warn instead.
+assert_not_contains "$CLAUDE_LAUNCH_RESTART_CONTINUE" "claude --continue"
+assert_contains "$CLAUDE_LAUNCH_RESTART_CONTINUE" "no resumable session yet (first wake)"
 
 cat >"$CLAUDE_STATIC_WORKDIR/NEXT-SESSION.md" <<'EOF'
 # NEXT SESSION
@@ -3565,10 +3568,14 @@ CLAUDE_LAUNCH_STALE_DETECTED_SESSION="$(HOME="$FAKE_CLAUDE_STALE_HOME" "$BASH4_B
   BRIDGE_AGENT_CONTINUE["claude-static"]="1"
   BRIDGE_AGENT_LOOP_RESTART_COUNT=1
   unset BRIDGE_AGENT_SESSION_ID["claude-static"]
-  bridge_agent_launch_cmd "claude-static"
+  bridge_agent_launch_cmd "claude-static" 2>&1
 ')"
-assert_contains "$CLAUDE_LAUNCH_STALE_DETECTED_SESSION" "claude --continue --dangerously-skip-permissions --name claude-static --channels plugin:discord@claude-plugins-official"
+# Issue #189: when sessions/*.json references a session whose transcript is
+# missing AND the projects cache for this workdir is empty, `--continue` would
+# crash with "No deferred tool marker found". Skip the flag instead and warn.
+assert_not_contains "$CLAUDE_LAUNCH_STALE_DETECTED_SESSION" "claude --continue"
 assert_not_contains "$CLAUDE_LAUNCH_STALE_DETECTED_SESSION" "--resume stale-detected-session-id"
+assert_contains "$CLAUDE_LAUNCH_STALE_DETECTED_SESSION" "no resumable session yet (first wake)"
 cat >"$CLAUDE_STATIC_WORKDIR/NEXT-SESSION.md" <<'EOF'
 # SAFE MODE NEXT SESSION
 
