@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import fcntl
 import hashlib
+import importlib.util
 import json
 import os
 import re
@@ -614,6 +615,21 @@ def append_agent_pref_block(path: Path, block: str, dry_run: bool) -> None:
     write_text(path, existing + block, dry_run)
 
 
+def _load_bridge_docs_module():
+    # Hyphenated filename workaround mirroring bridge-migrate.py. Always
+    # load the bridge-docs.py that lives alongside this script so we get
+    # the current render_agent_bridge_block behaviour, not whatever old
+    # copy might sit under BRIDGE_HOME.
+    script = Path(__file__).resolve().parent / "bridge-docs.py"
+    spec = importlib.util.spec_from_file_location("_bridge_docs_memory", str(script))
+    if spec is None or spec.loader is None:
+        raise RuntimeError(f"cannot load bridge-docs.py from {script}")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules["_bridge_docs_memory"] = module
+    spec.loader.exec_module(module)
+    return module
+
+
 def cmd_promote(args: argparse.Namespace) -> int:
     home = Path(args.home)
     template_root = Path(args.template_root)
@@ -624,7 +640,12 @@ def cmd_promote(args: argparse.Namespace) -> int:
         capture = json.loads(read_text(resolve_any_capture_path(home, args.capture)))
     user_id = args.user or (capture.get("user") if capture else "default") or "default"
     user = UserSpec(user_id=user_id, display_name=user_id)
-    ensure_user_partition(home, template_root, user, args.dry_run, [])
+    if args.kind != "agent-pref":
+        # Issue #162 Phase 2 (codex review finding): agent-pref is
+        # user-agnostic and lives only in ACTIVE-PREFERENCES.md. Scaffolding
+        # a users/<uid>/ partition for this kind produces unrelated state
+        # churn — skip the partition ensure for that kind specifically.
+        ensure_user_partition(home, template_root, user, args.dry_run, [])
 
     summary = args.summary or (capture.get("text") if capture else "")
     if not summary:
@@ -673,6 +694,17 @@ def cmd_promote(args: argparse.Namespace) -> int:
             build_agent_pref_block(created_at, title, summary, capture),
             args.dry_run,
         )
+        # Issue #162 Phase 2 (codex review finding): the Runtime Canon
+        # pointer in CLAUDE.md is keyed on file existence, so the first
+        # promote MUST trigger a managed-block re-render — otherwise the
+        # rule does not auto-load until the next `agent-bridge upgrade`
+        # or `setup agent` run, breaking the Phase 2 "auto-loaded once
+        # promoted" contract.
+        if not args.dry_run:
+            bridge_docs = _load_bridge_docs_module()
+            backup_root = home / "state" / "promote-backups"
+            backup_root.mkdir(parents=True, exist_ok=True)
+            bridge_docs.normalize_claude(home, args.dry_run, backup_root)
     else:
         page_slug = slugify(args.page or title)
         if kind == "shared":
@@ -1454,7 +1486,13 @@ def cmd_query(args: argparse.Namespace) -> int:
         clauses = ["chunks_fts MATCH ?"]
         params: list[object] = [fts_query]
         if args.user:
-            clauses.append("chunks.user_id = ?")
+            # Issue #162 Phase 2 (codex review finding): agent-pref rows
+            # are indexed with empty user_id (kind is user-agnostic), so a
+            # naive `user_id = ?` filter drops them for any --user query.
+            # cmd_search does not apply this clause and correctly returns
+            # agent-pref; mirror that behaviour here by letting agent-pref
+            # rows through regardless of the user filter.
+            clauses.append("(chunks.user_id = ? OR chunks.kind = 'agent-pref')")
             params.append(args.user)
         if args.scope != "all":
             if args.scope == "wiki":
