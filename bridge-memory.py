@@ -1890,6 +1890,274 @@ def cmd_reconcile(args: argparse.Namespace) -> int:
     return 0 if not conflicts else 2
 
 
+
+DAILY_META_MARKER = "<!-- bridge-daily-meta: "
+DAILY_META_END = " -->"
+DAILY_META_RE = re.compile(
+    r"^<!-- bridge-daily-meta: (?P<json>\{.*\}) -->\s*$",
+    re.MULTILINE,
+)
+DAILY_SECTION_HEADER_RE = re.compile(
+    r"^## Session (?P<session>[A-Za-z0-9_-]+)(?P<tail>.*)$",
+    re.MULTILINE,
+)
+
+
+def _kst_now() -> datetime:
+    """Current time in the Asia/Seoul zone, independent of host tz."""
+    from datetime import timezone, timedelta
+    try:
+        from zoneinfo import ZoneInfo  # Python 3.9+
+        return datetime.now(ZoneInfo("Asia/Seoul"))
+    except Exception:
+        # Fallback for interpreters without tzdata: KST is fixed +09:00,
+        # no DST, so a hard offset is safe.
+        return datetime.now(timezone(timedelta(hours=9)))
+
+
+def _now_iso_kst() -> str:
+    """ISO8601 timestamp in Asia/Seoul (+09:00), regardless of host tz."""
+    return _kst_now().strftime("%Y-%m-%dT%H:%M:%S+09:00")
+
+
+def _today_kst() -> str:
+    return _kst_now().strftime("%Y-%m-%d")
+
+
+def _daily_note_path(home: Path, date: str) -> Path:
+    return Path(home) / "memory" / f"{date}.md"
+
+
+def _read_meta_block(text: str) -> tuple[dict, str]:
+    """Return (meta_dict, remainder_after_meta_line). Empty dict if no meta."""
+    match = DAILY_META_RE.search(text)
+    if not match:
+        return {}, text
+    try:
+        meta = json.loads(match.group("json"))
+    except json.JSONDecodeError:
+        return {}, text
+    if not isinstance(meta, dict):
+        return {}, text
+    start, end = match.span(0)
+    # strip the meta line + trailing newline if any
+    remainder = text[:start] + text[end:].lstrip("\n")
+    return meta, remainder
+
+
+def _render_meta_block(meta: dict) -> str:
+    return DAILY_META_MARKER + json.dumps(meta, ensure_ascii=False, sort_keys=False) + DAILY_META_END
+
+
+def _split_sections(body: str) -> list[tuple[str | None, str]]:
+    """Return [(session_id or None, section_text)]. Preamble comes first as (None, text)."""
+    parts: list[tuple[str | None, str]] = []
+    last_idx = 0
+    last_session: str | None = None
+    for match in DAILY_SECTION_HEADER_RE.finditer(body):
+        if match.start() > last_idx:
+            parts.append((last_session, body[last_idx:match.start()]))
+        last_session = match.group("session")
+        last_idx = match.start()
+    parts.append((last_session, body[last_idx:]))
+    return parts
+
+
+def _assemble_daily_note(title: str, meta: dict, sections: list[tuple[str | None, str]]) -> str:
+    chunks: list[str] = [_render_meta_block(meta), "", title.rstrip(), ""]
+    rendered_preamble = False
+    for session_id, text in sections:
+        text = text.rstrip("\n")
+        if not text.strip():
+            continue
+        if session_id is None and not rendered_preamble:
+            chunks.append(text)
+            chunks.append("")
+            rendered_preamble = True
+        elif session_id is not None:
+            chunks.append(text)
+            chunks.append("")
+    return "\n".join(chunks).rstrip() + "\n"
+
+
+def _ensure_daily_note_skeleton(path: Path, date: str, agent: str) -> None:
+    if path.exists():
+        return
+    path.parent.mkdir(parents=True, exist_ok=True)
+    meta = {
+        "schema_version": 1,
+        "session_ids": [],
+        "writer_mix": {},
+        "last_reconciled_at": _now_iso_kst(),
+    }
+    text = (
+        _render_meta_block(meta) + "\n"
+        f"\n# {date} — {agent}\n\n"
+    )
+    path.write_text(text, encoding="utf-8")
+
+
+def _parse_daily_note(text: str, date: str, agent: str) -> tuple[dict, str, list[tuple[str | None, str]]]:
+    meta, body = _read_meta_block(text)
+    # Extract title (first H1) if present.
+    title_match = re.match(r"^\s*(#\s[^\n]+)\n?", body)
+    if title_match:
+        title = title_match.group(1)
+        body = body[title_match.end():]
+    else:
+        title = f"# {date} — {agent}"
+    if not meta:
+        meta = {
+            "schema_version": 1,
+            "session_ids": [],
+            "writer_mix": {},
+            "last_reconciled_at": _now_iso_kst(),
+        }
+    sections = _split_sections(body.lstrip("\n"))
+    return meta, title, sections
+
+
+def _session_section_header(session_id: str, writer: str) -> str:
+    return f"## Session {session_id} — {writer}"
+
+
+def cmd_current_session_id(args: argparse.Namespace) -> int:
+    """Best-effort session_id for the agent calling this script.
+
+    Returns the UUID of the most recently modified JSONL under the
+    Claude project directory that matches `--home`. Claude scopes
+    transcripts by the git root of the session cwd, so `--home` here is
+    the **session workdir** (the cwd the agent was spawned in), not the
+    agent's bridge runtime home — those can differ when an agent is
+    pointed at an external project checkout. The wrap-up slash command
+    template passes `BRIDGE_AGENT_WORKDIR` for exactly that reason.
+    Claude Code exposes the session id via hook stdin but has no
+    documented env var for slash commands, so we read from disk.
+    """
+    import os as _os
+    projects_dir = Path(args.claude_projects).expanduser()
+    home = Path(args.home).expanduser().resolve()
+    # Match Anthropic's ~/.claude/projects/ slug convention (see
+    # bridge-agent.sh:bridge_ensure_auto_memory_isolation).
+    project_slug = str(home).replace(_os.sep, "-").replace(".", "-")
+    project_dir = projects_dir / project_slug
+    if not project_dir.is_dir():
+        sys.stderr.write(
+            f"[bridge-memory] no Claude project dir at {project_dir}. "
+            f"Is BRIDGE_AGENT_ID={args.agent} and --home={args.home} correct?\n"
+        )
+        return 1
+    candidates: list[tuple[float, str]] = []
+    for jsonl in project_dir.glob("*.jsonl"):
+        try:
+            candidates.append((jsonl.stat().st_mtime, jsonl.stem))
+        except OSError:
+            continue
+    if not candidates:
+        sys.stderr.write(
+            f"[bridge-memory] no transcripts found in {project_dir}. "
+            "Has any session run from this home yet?\n"
+        )
+        return 1
+    candidates.sort(reverse=True)
+    print(candidates[0][1])
+    return 0
+
+
+def cmd_daily_append(args: argparse.Namespace) -> int:
+    """Append or replace a session section inside the agent's daily note.
+
+    writer=session sections may replace an earlier section with the same
+    session_id (re-runs). writer=cron sections never overwrite anything
+    a session has already written.
+    """
+    home = Path(args.home).expanduser()
+    date = args.date or _today_kst()
+    note_path = _daily_note_path(home, date)
+
+    if args.content_from_stdin:
+        content = sys.stdin.read()
+    elif args.content_file:
+        content = Path(args.content_file).expanduser().read_text(encoding="utf-8")
+    else:
+        sys.stderr.write("daily-append requires --content-from-stdin or --content-file\n")
+        return 2
+
+    content = content.rstrip() + "\n"
+
+    _ensure_daily_note_skeleton(note_path, date, args.agent)
+    raw = note_path.read_text(encoding="utf-8")
+    meta, title, sections = _parse_daily_note(raw, date, args.agent)
+
+    header = _session_section_header(args.session_id, args.writer)
+    section_text = f"{header}\n\n{content}"
+
+    session_ids = list(meta.get("session_ids") or [])
+    writer_mix = dict(meta.get("writer_mix") or {})
+
+    existing_index: int | None = None
+    existing_writer: str | None = None
+    for idx, (sid, text) in enumerate(sections):
+        if sid == args.session_id:
+            existing_index = idx
+            header_match = re.match(r"^## Session \S+\s+—\s+(\S+)", text)
+            existing_writer = header_match.group(1) if header_match else None
+            break
+
+    # writer_mix counts *sections* per writer, so increments happen only
+    # when a new section is materialised, not on re-runs that just
+    # rewrite the body. A replace that also changes writer decrements
+    # the previous writer before incrementing the new one; a same-writer
+    # replace is a net no-op.
+    applied = "appended"
+    materialised_new_section = False
+    if existing_index is not None:
+        if args.writer == "cron" and existing_writer == "session":
+            applied = "skipped (session writer already present)"
+        else:
+            old_session, _ = sections[existing_index]
+            sections[existing_index] = (old_session, section_text)
+            applied = "replaced"
+            if existing_writer and existing_writer != args.writer:
+                writer_mix[existing_writer] = max(0, writer_mix.get(existing_writer, 0) - 1)
+                writer_mix[args.writer] = writer_mix.get(args.writer, 0) + 1
+    else:
+        sections.append((args.session_id, section_text))
+        materialised_new_section = True
+
+    if materialised_new_section:
+        if args.session_id not in session_ids:
+            session_ids.append(args.session_id)
+        writer_mix[args.writer] = writer_mix.get(args.writer, 0) + 1
+
+    meta["session_ids"] = session_ids
+    meta["writer_mix"] = writer_mix
+    meta["last_reconciled_at"] = _now_iso_kst()
+    meta.setdefault("schema_version", 1)
+
+    assembled = _assemble_daily_note(title, meta, sections)
+    tmp = note_path.with_suffix(note_path.suffix + ".tmp")
+    tmp.write_text(assembled, encoding="utf-8")
+    import os as _os
+    _os.replace(tmp, note_path)
+
+    report = {
+        "agent": args.agent,
+        "date": date,
+        "note_path": str(note_path),
+        "session_id": args.session_id,
+        "writer": args.writer,
+        "applied": applied,
+        "session_count": len(session_ids),
+        "writer_mix": writer_mix,
+    }
+    if args.json:
+        print(json.dumps(report, ensure_ascii=False))
+    else:
+        print(f"{applied} session {args.session_id[:12]} writer={args.writer} in {note_path}")
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser()
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -2045,6 +2313,37 @@ def build_parser() -> argparse.ArgumentParser:
     reconcile_parser.add_argument("--dry-run", action="store_true")
     reconcile_parser.add_argument("--json", action="store_true")
     reconcile_parser.set_defaults(func=cmd_reconcile)
+
+    csi_parser = subparsers.add_parser(
+        "current-session-id",
+        help="print the most recently active session id for the given agent",
+    )
+    csi_parser.add_argument("--agent", required=True)
+    csi_parser.add_argument(
+        "--home",
+        required=True,
+        help="real agent home path; the Claude project slug is derived from this",
+    )
+    csi_parser.add_argument(
+        "--claude-projects",
+        default=str(Path.home() / ".claude" / "projects"),
+    )
+    csi_parser.set_defaults(func=cmd_current_session_id)
+
+    da_parser = subparsers.add_parser(
+        "daily-append",
+        help="append or replace a session section in today's daily note",
+    )
+    da_parser.add_argument("--agent", required=True)
+    da_parser.add_argument("--home", required=True, help="agent home root, e.g. ~/.agent-bridge/agents/<agent>")
+    da_parser.add_argument("--session-id", required=True)
+    da_parser.add_argument("--writer", choices=("session", "cron"), default="session")
+    da_parser.add_argument("--date", help="YYYY-MM-DD override; defaults to today (Asia/Seoul)")
+    src = da_parser.add_mutually_exclusive_group()
+    src.add_argument("--content-from-stdin", action="store_true")
+    src.add_argument("--content-file")
+    da_parser.add_argument("--json", action="store_true")
+    da_parser.set_defaults(func=cmd_daily_append)
 
     return parser
 
