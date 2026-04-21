@@ -2348,6 +2348,52 @@ bridge_tmux_wait_for_claude_channel_banner() {
   done
 }
 
+# bridge_tmux_wait_for_claude_plugin_mcp_alive — descendant-based readiness
+# verifier for required Claude plugin MCP channels. Issue #143.
+#
+# The banner-based verifier (bridge_tmux_wait_for_claude_channel_banner)
+# scans the last 80 tmux lines for a startup-only banner; busy sessions
+# scroll the banner off-window in seconds, so restart verify keeps
+# failing even when every plugin bun process is healthy. The daemon's
+# steady-state liveness already uses a descendant process probe
+# (bridge_agent_missing_plugin_mcp_channels_csv → *_alive_for_item →
+# bridge_plugin_mcp_descendant_ready_for_item); route restart verify
+# through the same signal for consistency.
+#
+# Polls until every required plugin MCP is alive under the pane PID or
+# timeout elapses. Returns 0 when no channels are required, when
+# liveness is already clean, or when the loop observes it cleanly.
+# Returns 1 if timeout expires with at least one channel still missing.
+bridge_tmux_wait_for_claude_plugin_mcp_alive() {
+  local agent="$1"
+  local timeout="${2:-12}"
+  local required=""
+  local missing=""
+  local start_ts=0
+  local elapsed=0
+
+  [[ -n "$agent" ]] || return 0
+  [[ "$(bridge_agent_engine "$agent")" == "claude" ]] || return 0
+  required="$(bridge_agent_effective_launch_plugin_channels_csv "$agent")"
+  [[ -n "$required" ]] || return 0
+  [[ "$timeout" =~ ^[0-9]+$ ]] || timeout=12
+  (( timeout > 0 )) || timeout=12
+
+  missing="$(bridge_agent_missing_plugin_mcp_channels_csv "$agent")"
+  [[ -z "$missing" ]] && return 0
+
+  start_ts="$(date +%s)"
+  while true; do
+    sleep 0.5
+    missing="$(bridge_agent_missing_plugin_mcp_channels_csv "$agent")"
+    [[ -z "$missing" ]] && return 0
+    elapsed=$(( $(date +%s) - start_ts ))
+    if (( elapsed >= timeout )); then
+      return 1
+    fi
+  done
+}
+
 bridge_agent_launch_channel_status_reason() {
   local agent="$1"
   local required=""

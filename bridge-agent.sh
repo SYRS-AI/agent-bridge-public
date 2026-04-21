@@ -1310,20 +1310,26 @@ run_restart() {
   (( verify_max_attempts >= 1 )) || verify_max_attempts=1
 
   verify_attempts=1
-  if bridge_tmux_wait_for_claude_channel_banner "$session" "$launch_channels" "$verify_timeout"; then
+  # Verify via descendant process probe (issue #143). The banner-based
+  # verifier read only the last 80 tmux lines, so busy sessions (`--resume`
+  # + `/compact` + first task dispatch) scrolled the startup banner off
+  # within seconds and restart verify kept returning failure even when
+  # every plugin bun was alive. Align with the daemon's steady-state
+  # liveness check so the two signals no longer disagree.
+  if bridge_tmux_wait_for_claude_plugin_mcp_alive "$agent" "$verify_timeout"; then
     return 0
   fi
 
   # Retry with fresh sessions up to verify_max_attempts total. Keep going
   # only while the session restarts cleanly. If we exhaust attempts without
-  # seeing the banner, leave the session running and return non-zero so
-  # the daemon's next cooldown cycle can take another look. Previously we
-  # killed the session after 2 attempts, which — combined with the too-short
-  # 12s default timeout and reparented bun holding the port — produced the
-  # observed permanent death loop (issue #69 Defect C).
+  # the plugin MCP coming alive, leave the session running and return
+  # non-zero so the daemon's next cooldown cycle can take another look.
+  # Previously we killed the session after 2 attempts, which — combined
+  # with the too-short 12s default timeout and reparented bun holding the
+  # port — produced the observed permanent death loop (issue #69 Defect C).
   while (( verify_attempts < verify_max_attempts )); do
     verify_attempts=$(( verify_attempts + 1 ))
-    bridge_warn "Claude channel runtime banner missing after restart for '$agent' (attempt ${verify_attempts}/${verify_max_attempts}). Retrying with a fresh session."
+    bridge_warn "Claude plugin MCP liveness missing after restart for '$agent' (attempt ${verify_attempts}/${verify_max_attempts}). Retrying with a fresh session."
     if bridge_tmux_session_exists "$session"; then
       bridge_kill_agent_session "$agent" >/dev/null 2>&1 || true
       bridge_refresh_runtime_state
@@ -1331,12 +1337,12 @@ run_restart() {
     if ! restart_once; then
       return 1
     fi
-    if bridge_tmux_wait_for_claude_channel_banner "$session" "$launch_channels" "$verify_timeout"; then
+    if bridge_tmux_wait_for_claude_plugin_mcp_alive "$agent" "$verify_timeout"; then
       return 0
     fi
   done
 
-  bridge_warn "Claude channel runtime banner still missing after ${verify_max_attempts} attempts for '$agent'. Leaving the session alive so the daemon's next cycle can re-check (avoids the plugin-port death loop from issue #69)."
+  bridge_warn "Claude plugin MCP liveness still missing after ${verify_max_attempts} attempts for '$agent'. Leaving the session alive so the daemon's next cycle can re-check (avoids the plugin-port death loop from issue #69)."
   return 1
 }
 
