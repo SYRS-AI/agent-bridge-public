@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import fcntl
 import hashlib
+import importlib.util
 import json
 import os
 import re
@@ -559,6 +560,76 @@ def build_page_promotion_block(
     return "\n".join(lines).rstrip() + "\n"
 
 
+def build_agent_pref_block(
+    created_at: str,
+    title: str,
+    summary: str,
+    capture: dict | None,
+) -> str:
+    # Issue #162 Phase 2: agent-role rule format per
+    # docs/agent-runtime/user-preference-injection.md §2. Each promotion is
+    # a self-contained `## <title> (YYYY-MM-DD, scope: agent)` section.
+    # Why / How-to-apply fall back to `(see source)` when the capture body
+    # does not carry explicit keys — Phase 2 deliberately avoids new CLI
+    # flags and keeps the Source attribution at the real capture id so it
+    # traces back to the canonical raw/captures/* payload.
+    date_str = created_at[:10]
+    rule_body = summary.strip() or "(see source)"
+    source_ref = "(inline)"
+    if capture:
+        source_ref = f"capture `{capture['capture_id']}`"
+        if capture.get("source"):
+            source_ref += f" ({capture['source']})"
+    lines = [
+        "",
+        f"## {title} ({date_str}, scope: agent)",
+        "",
+        f"**Rule:** {rule_body}",
+        "**Why:** (see source)",
+        "**How to apply:** (see source)",
+        f"**Source:** {source_ref}",
+        "",
+    ]
+    return "\n".join(lines)
+
+
+def ensure_active_preferences_page(path: Path, dry_run: bool) -> None:
+    # Issue #162 Phase 2: file is created lazily on first promote only —
+    # NOT at scaffold time. bridge-docs.py's Runtime Canon renderer keys
+    # the CLAUDE pointer on file existence, so agents without promoted
+    # role-specific preferences pay zero startup overhead.
+    if path.exists():
+        return
+    intro = (
+        "# Active Preferences\n\n"
+        "이 파일은 이 에이전트 역할에만 적용되는 운영 규칙을 담는다.\n"
+        "새 규칙은 `agent-bridge memory promote --kind agent-pref ...` 로 추가한다 — 직접 편집하지 말 것.\n"
+    )
+    write_text(path, intro, dry_run)
+
+
+def append_agent_pref_block(path: Path, block: str, dry_run: bool) -> None:
+    existing = read_text(path) if path.exists() else ""
+    if existing and not existing.endswith("\n"):
+        existing += "\n"
+    write_text(path, existing + block, dry_run)
+
+
+def _load_bridge_docs_module():
+    # Hyphenated filename workaround mirroring bridge-migrate.py. Always
+    # load the bridge-docs.py that lives alongside this script so we get
+    # the current render_agent_bridge_block behaviour, not whatever old
+    # copy might sit under BRIDGE_HOME.
+    script = Path(__file__).resolve().parent / "bridge-docs.py"
+    spec = importlib.util.spec_from_file_location("_bridge_docs_memory", str(script))
+    if spec is None or spec.loader is None:
+        raise RuntimeError(f"cannot load bridge-docs.py from {script}")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules["_bridge_docs_memory"] = module
+    spec.loader.exec_module(module)
+    return module
+
+
 def cmd_promote(args: argparse.Namespace) -> int:
     home = Path(args.home)
     template_root = Path(args.template_root)
@@ -569,7 +640,12 @@ def cmd_promote(args: argparse.Namespace) -> int:
         capture = json.loads(read_text(resolve_any_capture_path(home, args.capture)))
     user_id = args.user or (capture.get("user") if capture else "default") or "default"
     user = UserSpec(user_id=user_id, display_name=user_id)
-    ensure_user_partition(home, template_root, user, args.dry_run, [])
+    if args.kind != "agent-pref":
+        # Issue #162 Phase 2 (codex review finding): agent-pref is
+        # user-agnostic and lives only in ACTIVE-PREFERENCES.md. Scaffolding
+        # a users/<uid>/ partition for this kind produces unrelated state
+        # churn — skip the partition ensure for that kind specifically.
+        ensure_user_partition(home, template_root, user, args.dry_run, [])
 
     summary = args.summary or (capture.get("text") if capture else "")
     if not summary:
@@ -605,6 +681,30 @@ def cmd_promote(args: argparse.Namespace) -> int:
         append_under_section(
             target_path, "Stable Preferences", block, args.dry_run
         )
+    elif kind == "agent-pref":
+        # Issue #162 Phase 2: agent-role-specific operating rules. Unlike
+        # user-profile (cross-agent for a given user via shared symlink),
+        # these stay scoped to this single agent's home. File is created
+        # lazily on first promote and lives at the agent home root so
+        # bridge-docs.py's Runtime Canon bullet is keyed on presence.
+        target_path = home / "ACTIVE-PREFERENCES.md"
+        ensure_active_preferences_page(target_path, args.dry_run)
+        append_agent_pref_block(
+            target_path,
+            build_agent_pref_block(created_at, title, summary, capture),
+            args.dry_run,
+        )
+        # Issue #162 Phase 2 (codex review finding): the Runtime Canon
+        # pointer in CLAUDE.md is keyed on file existence, so the first
+        # promote MUST trigger a managed-block re-render — otherwise the
+        # rule does not auto-load until the next `agent-bridge upgrade`
+        # or `setup agent` run, breaking the Phase 2 "auto-loaded once
+        # promoted" contract.
+        if not args.dry_run:
+            bridge_docs = _load_bridge_docs_module()
+            backup_root = home / "state" / "promote-backups"
+            backup_root.mkdir(parents=True, exist_ok=True)
+            bridge_docs.normalize_claude(home, args.dry_run, backup_root)
     else:
         page_slug = slugify(args.page or title)
         if kind == "shared":
@@ -873,6 +973,10 @@ def iter_search_candidates(home: Path, scope: str, user_id: str | None) -> list[
     if include_wiki:
         candidates.extend(
             [
+                # Issue #162 Phase 2: agent-role rules (if any) are high-signal
+                # for "what are my operating constraints" searches. File is
+                # optional — iter loop below filters non-existent paths.
+                ("agent-pref", home / "ACTIVE-PREFERENCES.md"),
                 ("agent-memory", home / "MEMORY.md"),
                 ("wiki-index", home / "memory" / "index.md"),
                 ("wiki-log", home / "memory" / "log.md"),
@@ -931,6 +1035,7 @@ def search_score(kind: str, path: Path, text: str, tokens: list[str]) -> tuple[i
             score += 10
     base_scores = {
         "user-profile": 80,
+        "agent-pref": 75,
         "user-memory": 70,
         "daily": 60,
         "agent-memory": 55,
@@ -1022,6 +1127,10 @@ def collect_index_documents(home: Path, shared_root: Path | None = None, include
     add_markdown(home / "CLAUDE.md", "agent-contract")
     add_markdown(home / "MEMORY-SCHEMA.md", "memory-schema")
     add_markdown(home / "MEMORY.md", "agent-memory")
+    # Issue #162 Phase 2: add_markdown is a no-op when the file is absent,
+    # so unused agents do not pollute the index and indexed agents surface
+    # role-specific rules under `memory search` without further wiring.
+    add_markdown(home / "ACTIVE-PREFERENCES.md", "agent-pref")
     add_markdown(home / "memory" / "index.md", "wiki-index")
     add_markdown(home / "memory" / "log.md", "wiki-log")
 
@@ -1377,7 +1486,13 @@ def cmd_query(args: argparse.Namespace) -> int:
         clauses = ["chunks_fts MATCH ?"]
         params: list[object] = [fts_query]
         if args.user:
-            clauses.append("chunks.user_id = ?")
+            # Issue #162 Phase 2 (codex review finding): agent-pref rows
+            # are indexed with empty user_id (kind is user-agnostic), so a
+            # naive `user_id = ?` filter drops them for any --user query.
+            # cmd_search does not apply this clause and correctly returns
+            # agent-pref; mirror that behaviour here by letting agent-pref
+            # rows through regardless of the user filter.
+            clauses.append("(chunks.user_id = ? OR chunks.kind = 'agent-pref')")
             params.append(args.user)
         if args.scope != "all":
             if args.scope == "wiki":
@@ -2219,12 +2334,14 @@ def build_parser() -> argparse.ArgumentParser:
     promote_parser.add_argument("--template-root", required=True)
     promote_parser.add_argument(
         "--kind",
-        choices=("user", "user-profile", "shared", "project", "decision"),
+        choices=("user", "user-profile", "agent-pref", "shared", "project", "decision"),
         required=True,
         help=(
             "user = per-user memory bucket; "
             "user-profile = Stable Preferences section of shared/users/<uid>/USER.md "
             "(auto-loaded at every session start, cross-agent via canonical USER.md); "
+            "agent-pref = agent-role rules in this agent's ACTIVE-PREFERENCES.md "
+            "(file-exists-only load, zero overhead when unused); "
             "shared|project|decision = agent-local wiki pages"
         ),
     )

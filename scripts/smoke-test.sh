@@ -2711,6 +2711,47 @@ assert_contains "$(cat "$SMOKE_USER_PROFILE_CANONICAL")" "답변 없으면 Disco
 # Same canonical means the agent-visible file and the shared file are the same bytes.
 diff -q "$SMOKE_USER_PROFILE_AGENT" "$SMOKE_USER_PROFILE_CANONICAL" >/dev/null \
   || die "user-profile promote wrote to agent-local path instead of shared canonical"
+# Issue #162 Phase 2: agent-pref is scoped to this agent role only and
+# lives at the agent home root. Three invariants: (1) file must NOT exist
+# at scaffold time, (2) first promote creates it with the spec section
+# format, (3) the CLAUDE.md Runtime Canon pointer appears only AFTER the
+# file exists, and disappears when the file is absent.
+SMOKE_AGENT_PREF_PATH="$BRIDGE_AGENT_HOME_ROOT/$CREATED_AGENT/ACTIVE-PREFERENCES.md"
+SMOKE_AGENT_CLAUDE_PATH="$BRIDGE_AGENT_HOME_ROOT/$CREATED_AGENT/CLAUDE.md"
+[[ ! -f "$SMOKE_AGENT_PREF_PATH" ]] || die "ACTIVE-PREFERENCES.md leaked into scaffold (#162 Phase 2)"
+if grep -q "ACTIVE-PREFERENCES.md" "$SMOKE_AGENT_CLAUDE_PATH"; then
+  die "Runtime Canon pointer rendered before any agent-pref promotion (#162 Phase 2)"
+fi
+# Capture the users/ partition snapshot before promote so we can assert the
+# codex review finding: agent-pref must not provision a users/default/
+# partition (it is user-agnostic, owner already exists from Phase 1).
+# shellcheck disable=SC2012 # user dir names are alphanumeric, ls is fine
+SMOKE_USERS_BEFORE="$(cd "$BRIDGE_AGENT_HOME_ROOT/$CREATED_AGENT/users/" 2>/dev/null && ls -1 | sort)"
+MEMORY_AGENT_PREF_OUTPUT="$("$REPO_ROOT/agent-bridge" memory promote --agent "$CREATED_AGENT" --kind agent-pref --title "Confirm destructive commands" --summary "삭제/리셋 계열 명령은 실행 전에 반드시 operator 확인을 받는다.")"
+assert_contains "$MEMORY_AGENT_PREF_OUTPUT" "kind: agent-pref"
+[[ -f "$SMOKE_AGENT_PREF_PATH" ]] || die "agent-pref promote did not create ACTIVE-PREFERENCES.md"
+assert_contains "$(cat "$SMOKE_AGENT_PREF_PATH")" "Confirm destructive commands"
+assert_contains "$(cat "$SMOKE_AGENT_PREF_PATH")" "scope: agent"
+assert_contains "$(cat "$SMOKE_AGENT_PREF_PATH")" "**Rule:**"
+# codex review finding #1: agent-pref promote MUST trigger CLAUDE.md
+# re-render in-band, not "on next upgrade". No setup agent call should
+# be required — the pointer is expected to appear immediately.
+assert_contains "$(cat "$SMOKE_AGENT_CLAUDE_PATH")" "ACTIVE-PREFERENCES.md"
+# codex review finding #2: agent-pref must not scaffold users/default/
+# (or any user partition not already present). Snapshot diff.
+# shellcheck disable=SC2012 # user dir names are alphanumeric, ls is fine
+SMOKE_USERS_AFTER="$(cd "$BRIDGE_AGENT_HOME_ROOT/$CREATED_AGENT/users/" 2>/dev/null && ls -1 | sort)"
+[[ "$SMOKE_USERS_BEFORE" == "$SMOKE_USERS_AFTER" ]] \
+  || die "agent-pref promote leaked users/ partition: before='$SMOKE_USERS_BEFORE' after='$SMOKE_USERS_AFTER'"
+# search/index plumbing — rebuild-index then search + query for the rule body.
+"$REPO_ROOT/agent-bridge" memory rebuild-index --agent "$CREATED_AGENT" >/dev/null
+MEMORY_AGENT_PREF_SEARCH_JSON="$("$REPO_ROOT/agent-bridge" memory search --agent "$CREATED_AGENT" --query "destructive commands" --json)"
+assert_contains "$MEMORY_AGENT_PREF_SEARCH_JSON" "ACTIVE-PREFERENCES.md"
+# codex review finding #3: cmd_query --user must not drop agent-pref rows
+# (they index with empty user_id). Search already worked; query with
+# --user set previously returned zero matches before the fix.
+MEMORY_AGENT_PREF_QUERY_JSON="$("$REPO_ROOT/agent-bridge" memory query --agent "$CREATED_AGENT" --user owner --query "destructive commands" --json)"
+assert_contains "$MEMORY_AGENT_PREF_QUERY_JSON" "ACTIVE-PREFERENCES.md"
 MEMORY_LINT_JSON="$("$REPO_ROOT/agent-bridge" memory lint --agent "$CREATED_AGENT" --json)"
 assert_contains "$MEMORY_LINT_JSON" "\"ok\": true"
 MEMORY_SEARCH_JSON="$("$REPO_ROOT/agent-bridge" memory search --agent "$CREATED_AGENT" --user owner --query "concise morning updates" --json)"
