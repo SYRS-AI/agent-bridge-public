@@ -423,14 +423,27 @@ bridge_tmux_prepare_claude_session() {
 bridge_tmux_paste_and_submit() {
   local session="$1"
   local text="$2"
+  local engine="${3:-codex}"
   local buffer_name
+  local pane_target
+  pane_target="$(bridge_tmux_pane_target "$session")"
 
   buffer_name="bridge-send-$$-$(bridge_nonce)"
   tmux set-buffer -b "$buffer_name" -- "$text"
-  tmux paste-buffer -d -p -b "$buffer_name" -t "$(bridge_tmux_pane_target "$session")"
+  tmux paste-buffer -d -p -b "$buffer_name" -t "$pane_target"
 
+  # Issue #175: symmetric verify/retry mirrors bridge_tmux_type_and_submit
+  # (issue #146). Fresh codex sessions can miss the first C-m when the TUI
+  # hasn't absorbed the paste within the 50ms grace — the submit lands on
+  # an empty input line and the paste stays buffered. Warm sessions land
+  # instantly; the retry branch only fires under the observed race.
   sleep 0.05
-  tmux send-keys -t "$(bridge_tmux_pane_target "$session")" C-m
+  tmux send-keys -t "$pane_target" C-m
+  sleep 0.1
+  if bridge_tmux_session_has_pending_input "$session" "$engine"; then
+    sleep 0.15
+    tmux send-keys -t "$pane_target" C-m
+  fi
 }
 
 bridge_tmux_type_and_submit() {
@@ -515,7 +528,7 @@ bridge_tmux_send_and_submit() {
       bridge_tmux_type_and_submit "$session" "$text"
       ;;
     *)
-      bridge_tmux_paste_and_submit "$session" "$text"
+      bridge_tmux_paste_and_submit "$session" "$text" "$engine"
       ;;
   esac
 }
