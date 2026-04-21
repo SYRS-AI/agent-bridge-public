@@ -108,6 +108,45 @@ Close the original `[upgrade-complete]` task with:
 agb done <task_id> --note "bootstrap OK; first scan <N> files / <E> entities; <C> hub candidates queued"
 ```
 
+## Post-Upgrade Issue Triage
+
+업그레이드·bootstrap 과정에서 발견된 문제는 로컬에서 조용히 우회하지 않고 upstream issue로 기록한다. "Upstream Issue Policy"(common-instructions.md §Upstream Issue Policy) 경로를 그대로 따르되, 트리거는 업그레이드 세션이다.
+
+1. 업그레이드 콘솔 출력(경고, `set -e` abort 흔적, 누락된 artifact 메시지)을 훑는다.
+2. 가장 최근 bootstrap report를 읽는다:
+   `ls -t $BRIDGE_HOME/state/bootstrap-memory/report-*.json | head -n 1`
+3. 이상 징후가 있으면 `upstream draft` → 사용자 승인 → `upstream propose --yes` 순서로 기록:
+   ```
+   agb upstream draft --title "<증상>" --symptom "..." --why "..." \
+     --reproduction-file <log-or-report> --output /tmp/upgrade-issue.md
+   # 사용자 승인 후
+   agb upstream propose --title "<증상>" --body-file /tmp/upgrade-issue.md --yes
+   ```
+4. 업그레이드를 완주시키려고 임시 workaround를 적용했다면, 그 내용을 issue body에 같이 기록한다. 후속 PR이 회귀 테스트를 쓸 수 있도록 "어떤 우회를 썼는지"를 남긴다.
+
+판단 기준은 "로컬 구성 문제인가, 코어 제품 문제인가". 구성 문제로 보이면 issue를 만들지 말고 해당 설정을 수정한다. 확신이 서지 않으면 기본값은 issue를 드래프트해 사용자에게 묻는다.
+
+## Workaround Reconciliation
+
+업그레이드가 끝나면 과거 upstream 이슈 회피 목적으로 로컬에 둔 workaround가 이번 릴리스로 불필요해졌는지 점검한다. 불필요해진 것만 원복하고, 사용자가 의도적으로 유지하는 로컬 정책은 건드리지 않는다.
+
+점검 대상:
+
+- `~/.tmux.conf` — bridge 관련 override.
+- 사용자 shell rc (`~/.zshrc`, `~/.bashrc`) — bridge 관련 `export` 라인 중 "과거 버그 우회" 주석이 붙은 것.
+- `~/.claude/settings.json` — 로컬 override 중 upgrade가 기본으로 올바르게 제공하게 된 항목.
+- `$BRIDGE_HOME/agent-roster.local.sh` — 임시로 박아둔 env (의도된 로컬 roster 정책은 유지).
+- source-checkout의 `git stash` 중 "upstream fix 기다림" 주석이 붙은 stash.
+
+각 항목 판단 기준:
+
+1. 해당 workaround가 회피하던 upstream issue 번호를 찾는다 (주석, 관련 PR, 변경 이력 확인).
+2. 그 upstream issue가 CLOSED이고 이번 업그레이드에 포함됐다면 workaround를 제거하고 사유를 기록한다 (`"upstream fix in v<X.Y.Z>, issue #NNN"`).
+3. upstream issue가 아직 open이거나, 해당 surface가 의도된 로컬 정책(커스텀 keybinding, 개인 팀 설정 등)이면 그대로 둔다.
+4. 이유를 판단할 수 없으면 삭제하지 않고 사용자에게 묻거나 upstream issue를 드래프트해 물어본다.
+
+핵심: 판단 기준은 "upstream 이슈를 우회할 목적이었는가". 사용자가 의도적으로 유지하고 있는 것은 절대 건드리지 않는다.
+
 ## Wiki Canonical Hub Curation
 
 이 섹션은 admin 에이전트의 **주간 위키 큐레이션 책임**을 정의한다. L1 mention-scan(관측)과 L2 hub-audit(후보 도출)은 자동으로 돌지만, **canonical 허브 실제 생성은 admin 판단**이 필요하다. 자동 생성하지 않는다.
@@ -146,3 +185,4 @@ agb done <task_id> --note "bootstrap OK; first scan <N> files / <E> entities; <C
 
 - 2026-04-19: initial ratified version. `patch/CLAUDE.md`의 admin-only 섹션 2개(`Admin First-Run Onboarding Defaults`, `Channel Setup Protocol`)를 canonical로 승격. SHA-256 `3476e00ffbd9652383c9a079b3d0abbf4c74c9ec85393367dbd21b3aeaf1401f` (patch/CLAUDE.md lines 66–98) 기반. people.md single-file anchor → per-person 파일 분리 반영. Bootstrap 섹션 추가.
 - 2026-04-19 (evening): Wiki Canonical Hub Curation 섹션 추가. L2 candidacy 자동화(`wiki-hub-audit` 크론 + `[wiki-hub-candidates]` task)의 admin-facing 처리 계약을 문서화. 허브 생성은 admin 판단 게이트 유지.
+- 2026-04-21: Post-Upgrade Issue Triage와 Workaround Reconciliation 섹션 추가 (issue #186). 업그레이드 완료 후 관리자 판단 작업 두 개(발견된 이상을 upstream으로 기록, 불필요해진 로컬 workaround 원복)를 기본 경로로 문서화. `[upgrade-complete]` post-task body가 이 섹션들을 참조한다.

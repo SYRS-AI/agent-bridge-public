@@ -957,6 +957,67 @@ drift if the state is already converged.
      --out "$TARGET_ROOT/shared/wiki/_audit/hub-candidates-\$(date +%Y-%m-%d).md"
    \`\`\`
 
+## Upstream issue triage
+
+After bootstrap completes, skim the upgrade log and the most recent
+bootstrap report for anomalies. Any failed step, unexpected warning,
+\`set -e\` abort, or missing artifact should become an upstream issue
+rather than a silent local workaround.
+
+- Read the latest report:
+  \`ls -t $TARGET_ROOT/state/bootstrap-memory/report-*.json | head -n 1\`
+- If the upgrade console output contained warnings or the report shows
+  failed steps, draft an issue and ask the user before filing:
+  \`\`\`
+  $TARGET_ROOT/agent-bridge upstream draft \\
+    --title "<one-line symptom>" \\
+    --symptom "<what the user sees>" \\
+    --why "<why this looks like an upstream bug, not local config>" \\
+    --reproduction-file <log-or-report-path> \\
+    --output /tmp/upgrade-issue.md
+  \`\`\`
+- On user approval, file it:
+  \`$TARGET_ROOT/agent-bridge upstream propose --title "<title>" --body-file /tmp/upgrade-issue.md --yes\`
+- If a local workaround was applied to get the upgrade through,
+  record the workaround in the issue body so a future regression test
+  can cover it.
+
+Reference: \`docs/agent-runtime/admin-protocol.md\` — "Post-Upgrade
+Issue Triage" section, and \`docs/agent-runtime/common-instructions.md\`
+— "Upstream Issue Policy" for the approval flow.
+
+## Workaround reconciliation
+
+Inspect known local-workaround surfaces and, for any workaround that
+was in place purely to avoid a now-CLOSED upstream issue, revert it so
+this host follows upstream again. Leave intentional local policy
+alone.
+
+Surfaces to check:
+
+- \`~/.tmux.conf\` — bridge-related overrides.
+- Shell rc (\`~/.zshrc\`, \`~/.bashrc\`, etc.) — bridge-related
+  \`export\` lines added to paper over a past bug.
+- \`~/.claude/settings.json\` — local overrides of Claude Code
+  settings that the upgrade may now ship correctly.
+- \`$TARGET_ROOT/agent-roster.local.sh\` — temporary env entries
+  added as a workaround (intentional local roster policy stays).
+
+Decision rule for each item:
+
+1. Identify the upstream issue the workaround was avoiding (check the
+   workaround's inline comment or the PR/issue it referenced).
+2. If that upstream issue is now CLOSED and shipped in this upgrade,
+   remove the workaround and record the reason in a note or commit
+   message (\`"upstream fix in v$SOURCE_VERSION, issue #NNN"\`).
+3. If the upstream issue is still open, or the surface reflects
+   intentional local policy (custom keybindings, private team
+   settings, etc.), leave it in place.
+
+Do not touch a workaround when the reason for it is unclear — open an
+issue asking about it instead of deleting behavior the user depends
+on.
+
 ## Full onboarding
 
 - \`docs/agent-runtime/wiki-onboarding.md\` — complete v0.4.0 admin walkthrough
