@@ -27,7 +27,10 @@ agents/*/.claude/
 !agents/_template/session-type-files/
 !agents/_template/session-type-files/**
 !agents/_template/.claude/
+!agents/_template/.claude/**
 !agents/_template/.claude/settings.json
+# But never ship a per-install local settings file
+agents/_template/.claude/settings.local.json
 agents/.claude/settings.local.json
 agents/.claude/settings.effective.json
 
