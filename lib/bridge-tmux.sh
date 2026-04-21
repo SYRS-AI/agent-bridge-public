@@ -438,19 +438,38 @@ bridge_tmux_type_and_submit() {
   local text="$2"
   local line
   local first_line=1
+  local pane_target
+  pane_target="$(bridge_tmux_pane_target "$session")"
 
   while IFS= read -r line || [[ -n "$line" ]]; do
     if [[ $first_line -eq 0 ]]; then
-      tmux send-keys -t "$(bridge_tmux_pane_target "$session")" C-j
+      tmux send-keys -t "$pane_target" C-j
     fi
     if [[ -n "$line" ]]; then
-      tmux send-keys -t "$(bridge_tmux_pane_target "$session")" -l -- "$line"
+      tmux send-keys -t "$pane_target" -l -- "$line"
     fi
     first_line=0
   done <<<"$text"
 
+  # Issue #146: the previous implementation used a fixed 50ms grace
+  # before C-m. Under load, Claude's TUI occasionally took longer to
+  # absorb the typed keystrokes, so the submit arrived on an empty
+  # input line and the handoff was silently dropped. The input stayed
+  # populated with the typed text — operators saw "typed but never
+  # submitted." Keep the fast-path latency unchanged (one 50ms grace
+  # + one C-m) and add a verify/retry: if the input line still reports
+  # pending content after the submit, resend C-m once with a wider
+  # grace. Doing this unconditionally for every send would block the
+  # helper on slow captures; the verify step only reads the last 20
+  # lines of scrollback and the retry only fires when we actually
+  # observe the race symptom.
   sleep 0.05
-  tmux send-keys -t "$(bridge_tmux_pane_target "$session")" C-m
+  tmux send-keys -t "$pane_target" C-m
+  sleep 0.1
+  if bridge_tmux_session_has_pending_input "$session" claude; then
+    sleep 0.15
+    tmux send-keys -t "$pane_target" C-m
+  fi
 }
 
 bridge_tmux_send_and_submit() {
