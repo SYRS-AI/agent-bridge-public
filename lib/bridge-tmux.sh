@@ -248,6 +248,10 @@ bridge_tmux_session_has_prompt_from_text() {
 bridge_tmux_session_has_pending_input_from_text() {
   local engine="$1"
   local recent="$2"
+  # Issue #195 follow-up: optional 3rd arg carries an ANSI-preserving
+  # capture of the same pane. Used for codex placeholder detection — see
+  # bridge_tmux_codex_last_prompt_is_placeholder.
+  local ansi_recent="${3:-}"
   local line=""
   local trimmed=""
   local last_prompt_line=""
@@ -257,6 +261,17 @@ bridge_tmux_session_has_pending_input_from_text() {
 
   if [[ "$engine" == "claude" ]]; then
     if [[ "$(bridge_tmux_claude_blocker_state_from_text "$recent")" != "none" ]]; then
+      return 1
+    fi
+  fi
+
+  # Issue #195 follow-up: if the last `›` line in the codex pane is the
+  # placeholder ghost text (SGR 2 / dim), treat the composer as empty so
+  # nudges are delivered rather than spooled. Placeholder text is the
+  # codex cold-session default; it disappears on any real keystroke, and
+  # real typed input is not rendered dim — false-positive risk is low.
+  if [[ "$engine" == "codex" && -n "$ansi_recent" ]]; then
+    if bridge_tmux_codex_last_prompt_is_placeholder "$ansi_recent"; then
       return 1
     fi
   fi
@@ -307,6 +322,7 @@ bridge_tmux_session_has_pending_input() {
   local session="$1"
   local engine="$2"
   local recent=""
+  local ansi_recent=""
 
   bridge_tmux_engine_requires_prompt "$engine" || return 1
   # Issue #132: use tmux -J so a wrapped prompt line (long mid-compose input
@@ -316,7 +332,15 @@ bridge_tmux_session_has_pending_input() {
   # of view between daemon passes.
   recent="$(bridge_capture_recent "$session" 40 join 2>/dev/null || true)"
   [[ -n "$recent" ]] || return 1
-  bridge_tmux_session_has_pending_input_from_text "$engine" "$recent"
+  # Issue #195 follow-up: codex placeholder ghost text is visually
+  # indistinguishable from real typed input once ANSI escapes are stripped.
+  # Grab an ANSI-preserving capture too so the detector can reject lines
+  # rendered with SGR 2 (dim) as non-pending — otherwise inject_busy flips
+  # true and daemon nudges get silently spooled instead of delivered.
+  if [[ "$engine" == "codex" ]]; then
+    ansi_recent="$(bridge_capture_recent_ansi "$session" 40 2>/dev/null || true)"
+  fi
+  bridge_tmux_session_has_pending_input_from_text "$engine" "$recent" "$ansi_recent"
 }
 
 bridge_tmux_session_recent_keypress() {
@@ -901,6 +925,47 @@ bridge_capture_recent() {
   else
     tmux capture-pane -t "$(bridge_tmux_pane_target "$session")" -p -S "-$lines"
   fi
+}
+
+bridge_capture_recent_ansi() {
+  # ANSI-preserving capture. Needed to distinguish codex's placeholder
+  # ghost text — rendered as SGR 2 (dim) — from real typed input that
+  # looks textually identical once ANSI escapes are stripped (issue #195
+  # follow-up). Kept as a separate helper so existing callers keep their
+  # plain-text behavior verbatim.
+  local session="$1"
+  local lines="${2:-30}"
+  tmux capture-pane -t "$(bridge_tmux_pane_target "$session")" -p -e -J -S "-$lines"
+}
+
+bridge_tmux_codex_last_prompt_is_placeholder() {
+  # Scan an ANSI-preserving capture for the last line containing the codex
+  # prompt glyph (›) and return 0 (true) if that line carries SGR 2 (dim).
+  # Codex renders composer placeholder ghost text ("› Summarize recent
+  # commits", "› Explain this codebase") with the dim attribute; real
+  # typed user input is rendered without it. Before this check,
+  # bridge_tmux_session_has_pending_input treated the placeholder as
+  # pending input, so the daemon's inject_busy gate spooled nudges into
+  # pending-attention.env instead of delivering them (#195 follow-up).
+  local ansi_text="$1"
+  [[ -n "$ansi_text" ]] || return 1
+  local last_line=""
+  local line=""
+  while IFS= read -r line; do
+    if [[ "$line" == *›* ]]; then
+      last_line="$line"
+    fi
+  done <<<"$ansi_text"
+  [[ -n "$last_line" ]] || return 1
+  # Match the SGR 2 (dim) forms codex is known to emit. Narrow patterns
+  # avoid false positives against 24-bit color sequences like `38;2;r;g;b`
+  # which coincidentally contain ";2;" but do not enable dim.
+  case "$last_line" in
+    *$'\x1b[2m'*|*$'\x1b[0;2m'*|*$'\x1b[22;2m'*|*$'\x1b[2;'*)
+      return 0
+      ;;
+  esac
+  return 1
 }
 
 bridge_sanitize_text() {
