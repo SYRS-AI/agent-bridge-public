@@ -173,7 +173,21 @@ bridge_tmux_prompt_line_has_pending_input() {
       return 0
       ;;
     codex)
-      return 1
+      # Issue #175: prior `return 1` meant `bridge_tmux_session_has_pending_input`
+      # was a no-op for codex, so the paste_and_submit retry in issue #175
+      # could never observe the "typed but never submitted" race. Mirror the
+      # claude remainder-detection: `› <text>` (or the fallback `> <text>`)
+      # with non-whitespace remainder counts as pending.
+      if [[ "$trimmed" == ›* ]]; then
+        remainder="${trimmed#›}"
+      elif [[ "$trimmed" == '>'* ]]; then
+        remainder="${trimmed#>}"
+      else
+        return 1
+      fi
+      remainder="${remainder#"${remainder%%[![:space:]]*}"}"
+      [[ -n "$remainder" ]] || return 1
+      return 0
       ;;
     *)
       return 1
