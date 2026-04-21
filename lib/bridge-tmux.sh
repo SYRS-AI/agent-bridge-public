@@ -266,6 +266,11 @@ bridge_tmux_session_has_pending_input_from_text() {
   # (quoted text in an agent response, markdown blockquotes). Remember the
   # LAST line that looks like a prompt and evaluate pending-input on that
   # one only, so quoted content above cannot trigger a permanent defer.
+  # Issue #175 (codex review finding): the same applies to codex — a
+  # queued `› old text` in scrollback previously caused the old codex
+  # branch to return 0 on the first match and mark an idle session as
+  # busy. Track last_prompt_line for codex too and evaluate pending-input
+  # after the loop on that final line only.
   while IFS= read -r line; do
     line="${line//$'\r'/}"
     line="${line//$'\u00A0'/ }"
@@ -277,6 +282,11 @@ bridge_tmux_session_has_pending_input_from_text() {
           last_prompt_line="$trimmed"
         fi
         ;;
+      codex)
+        if [[ "$trimmed" == ›* || "$trimmed" == '>'* ]]; then
+          last_prompt_line="$trimmed"
+        fi
+        ;;
       *)
         if bridge_tmux_prompt_line_has_pending_input "$engine" "$trimmed"; then
           return 0
@@ -285,7 +295,7 @@ bridge_tmux_session_has_pending_input_from_text() {
     esac
   done <<<"$recent"
 
-  if [[ "$engine" == "claude" && -n "$last_prompt_line" ]]; then
+  if [[ -n "$last_prompt_line" ]]; then
     bridge_tmux_prompt_line_has_pending_input "$engine" "$last_prompt_line"
     return
   fi
