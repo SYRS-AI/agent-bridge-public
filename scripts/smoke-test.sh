@@ -5835,6 +5835,42 @@ else:
 PY
 }
 
+assert_claude_5h_health() {
+  local label="$1"
+  local expected_health="$2"
+  local percent="$3"
+  local status_json
+  status_json="$(python3 "$REPO_ROOT/bridge-usage.py" status \
+    --claude-usage-cache "$FAKE_USAGE_LADDER_CLAUDE" \
+    --codex-sessions-dir "$FAKE_USAGE_LADDER_CODEX" \
+    --json)"
+  python3 - "$label" "$expected_health" "$percent" "$status_json" <<'PY'
+import json, sys
+label, expected_health, percent, payload = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]
+snapshots = json.loads(payload)["snapshots"]
+claude_5h = [s for s in snapshots if s.get("provider") == "claude" and s.get("window") == "5h"]
+if len(claude_5h) != 1:
+    raise SystemExit(f"[{label}] expected 1 claude 5h snapshot at {percent}%, got {claude_5h}")
+actual = claude_5h[0].get("health")
+if actual != expected_health:
+    raise SystemExit(
+        f"[{label}] expected health={expected_health} for {percent}% sample, got health={actual}"
+    )
+PY
+}
+
+# status endpoint must agree with monitor bucket — regression for codex's #217
+# FIX-FIRST finding that snapshot.health and alert.bucket contradicted each
+# other once used_percent crossed the elevated threshold.
+write_claude_ladder_snapshot 91 "2026-04-23T19:00:00+00:00"
+assert_claude_5h_health "ladder: status health=warn at 91%" "warn" "91"
+write_claude_ladder_snapshot 96 "2026-04-23T19:00:00+00:00"
+assert_claude_5h_health "ladder: status health=elevated at 96%" "elevated" "96"
+write_claude_ladder_snapshot 101 "2026-04-23T19:00:00+00:00"
+assert_claude_5h_health "ladder: status health=crit at 101%" "crit" "101"
+write_claude_ladder_snapshot 50 "2026-04-23T19:00:00+00:00"
+assert_claude_5h_health "ladder: status health=ok at 50%" "ok" "50"
+
 # Cycle 1 — reset_at = 2026-04-23T19:00
 write_claude_ladder_snapshot 91 "2026-04-23T19:00:00+00:00"
 assert_claude_5h_alert "ladder: first 91% fires warn" "warn" "$(run_usage_ladder)"

@@ -123,7 +123,12 @@ def normalize_window(name: str, minutes: Any) -> str:
     return f"{value}m"
 
 
-def claude_snapshots(path: Path, warn: float, critical: float) -> list[dict[str, Any]]:
+def claude_snapshots(
+    path: Path,
+    warn: float,
+    critical: float,
+    elevated: float | None = None,
+) -> list[dict[str, Any]]:
     if not path.is_file():
         return []
     try:
@@ -154,7 +159,7 @@ def claude_snapshots(path: Path, warn: float, critical: float) -> list[dict[str,
                 "window": window,
                 "used_percent": percent,
                 "reset_at": reset_at,
-                "health": classify_health(percent, warn, critical),
+                "health": classify_health(percent, warn, critical, elevated=elevated),
                 "source": str(path),
             }
         )
@@ -187,7 +192,12 @@ def iter_codex_rate_limits(path: Path) -> list[dict[str, Any]]:
     return records
 
 
-def codex_snapshots(root: Path, warn: float, critical: float) -> list[dict[str, Any]]:
+def codex_snapshots(
+    root: Path,
+    warn: float,
+    critical: float,
+    elevated: float | None = None,
+) -> list[dict[str, Any]]:
     if not root.is_dir():
         return []
 
@@ -223,7 +233,7 @@ def codex_snapshots(root: Path, warn: float, critical: float) -> list[dict[str, 
                     "window": window_name,
                     "used_percent": used_percent,
                     "reset_at": iso_from_epoch(window_payload.get("resets_at")),
-                    "health": classify_health(used_percent, warn, critical),
+                    "health": classify_health(used_percent, warn, critical, elevated=elevated),
                     "source": record.get("_source_file"),
                 }
             )
@@ -233,9 +243,14 @@ def codex_snapshots(root: Path, warn: float, critical: float) -> list[dict[str, 
 def collect_snapshots(args: argparse.Namespace) -> list[dict[str, Any]]:
     warn = float(args.warn_threshold)
     critical = float(args.critical_threshold)
+    elevated = _parse_elevated(args, warn, critical)
     snapshots = []
-    snapshots.extend(claude_snapshots(Path(args.claude_usage_cache).expanduser(), warn, critical))
-    snapshots.extend(codex_snapshots(Path(args.codex_sessions_dir).expanduser(), warn, critical))
+    snapshots.extend(
+        claude_snapshots(Path(args.claude_usage_cache).expanduser(), warn, critical, elevated=elevated)
+    )
+    snapshots.extend(
+        codex_snapshots(Path(args.codex_sessions_dir).expanduser(), warn, critical, elevated=elevated)
+    )
     return snapshots
 
 
