@@ -5782,6 +5782,94 @@ import json, sys
 payload = json.loads(sys.argv[1])
 assert payload["alerts"] == [], payload["alerts"]
 PY
+
+log "usage-alert latched 90/95/100 ladder + reset_at wobble suppression (#215)"
+# Dedicated state file so this block does not interact with the earlier dedupe
+# state (which already latched warn for the baseline snapshots).
+FAKE_USAGE_LADDER_STATE="$FAKE_USAGE_ROOT/usage-ladder-state.json"
+FAKE_USAGE_LADDER_CLAUDE="$FAKE_USAGE_ROOT/claude-usage-ladder.json"
+FAKE_USAGE_LADDER_CODEX="$FAKE_USAGE_ROOT/codex-sessions-ladder"
+mkdir -p "$FAKE_USAGE_LADDER_CODEX"
+
+write_claude_ladder_snapshot() {
+  local five_hour_percent="$1"
+  local reset_at="$2"
+  cat >"$FAKE_USAGE_LADDER_CLAUDE" <<CLAUDE_EOF
+{
+  "data": {
+    "planName": "Max",
+    "fiveHour": ${five_hour_percent},
+    "sevenDay": 20,
+    "fiveHourResetAt": "${reset_at}",
+    "sevenDayResetAt": "2026-05-01T17:00:00+00:00"
+  }
+}
+CLAUDE_EOF
+}
+
+run_usage_ladder() {
+  python3 "$REPO_ROOT/bridge-usage.py" monitor \
+    --claude-usage-cache "$FAKE_USAGE_LADDER_CLAUDE" \
+    --codex-sessions-dir "$FAKE_USAGE_LADDER_CODEX" \
+    --state-file "$FAKE_USAGE_LADDER_STATE" \
+    --json
+}
+
+assert_claude_5h_alert() {
+  local label="$1"
+  local expected_bucket="$2"
+  local payload="$3"
+  python3 - "$label" "$expected_bucket" "$payload" <<'PY'
+import json, sys
+label, expected_bucket, payload = sys.argv[1], sys.argv[2], sys.argv[3]
+alerts = json.loads(payload)["alerts"]
+claude_5h = [a for a in alerts if a.get("provider") == "claude" and a.get("window") == "5h"]
+if expected_bucket == "none":
+    if claude_5h:
+        raise SystemExit(f"[{label}] expected no claude 5h alert, got {claude_5h}")
+else:
+    if len(claude_5h) != 1 or claude_5h[0].get("bucket") != expected_bucket:
+        raise SystemExit(
+            f"[{label}] expected 1 claude 5h alert in bucket={expected_bucket}, got {claude_5h}"
+        )
+PY
+}
+
+# Cycle 1 — reset_at = 2026-04-23T19:00
+write_claude_ladder_snapshot 91 "2026-04-23T19:00:00+00:00"
+assert_claude_5h_alert "ladder: first 91% fires warn" "warn" "$(run_usage_ladder)"
+
+write_claude_ladder_snapshot 93 "2026-04-23T19:00:00+00:00"
+assert_claude_5h_alert "ladder: warn re-entry stays silent" "none" "$(run_usage_ladder)"
+
+write_claude_ladder_snapshot 96 "2026-04-23T19:00:00+00:00"
+assert_claude_5h_alert "ladder: crossing 95% fires elevated" "elevated" "$(run_usage_ladder)"
+
+write_claude_ladder_snapshot 98 "2026-04-23T19:00:00+00:00"
+assert_claude_5h_alert "ladder: elevated re-entry stays silent" "none" "$(run_usage_ladder)"
+
+# reset_at wobble (milliseconds-level drift) must not re-fire the elevated alert.
+write_claude_ladder_snapshot 98 "2026-04-23T19:00:00.161Z"
+assert_claude_5h_alert "ladder: reset_at wobble stays silent" "none" "$(run_usage_ladder)"
+
+write_claude_ladder_snapshot 101 "2026-04-23T19:00:00+00:00"
+assert_claude_5h_alert "ladder: crossing 100% fires crit" "crit" "$(run_usage_ladder)"
+
+write_claude_ladder_snapshot 102 "2026-04-23T19:00:00+00:00"
+assert_claude_5h_alert "ladder: crit re-entry stays silent" "none" "$(run_usage_ladder)"
+
+# Drop into ok — latch clears so the next climb to warn is a fresh notification.
+write_claude_ladder_snapshot 50 "2026-04-23T19:00:00+00:00"
+assert_claude_5h_alert "ladder: drop to ok stays silent" "none" "$(run_usage_ladder)"
+
+write_claude_ladder_snapshot 91 "2026-04-23T19:00:00+00:00"
+assert_claude_5h_alert "ladder: climb back to 91 after ok fires warn again" "warn" "$(run_usage_ladder)"
+
+# Cycle 2 — reset_at moves forward > grace; latch resets, new warn fires.
+write_claude_ladder_snapshot 100 "2026-04-23T19:00:00+00:00"
+assert_claude_5h_alert "ladder: climb to 100 in same cycle fires crit" "crit" "$(run_usage_ladder)"
+write_claude_ladder_snapshot 91 "2026-04-30T19:00:00+00:00"
+assert_claude_5h_alert "ladder: forward reset_at rolls over cycle and re-fires warn" "warn" "$(run_usage_ladder)"
 BRIDGE_USAGE_MONITOR_INTERVAL_SECONDS=0 \
 BRIDGE_DAEMON_NOTIFY_DRY_RUN=1 \
 BRIDGE_AUDIT_LOG="$FAKE_USAGE_DAEMON_AUDIT" \

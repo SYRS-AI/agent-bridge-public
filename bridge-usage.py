@@ -37,14 +37,59 @@ def load_json(path: Path) -> Any:
     return json.loads(path.read_text(encoding="utf-8"))
 
 
-def classify_health(used_percent: float | None, warn: float, critical: float) -> str:
+def classify_health(
+    used_percent: float | None,
+    warn: float,
+    critical: float,
+    elevated: float | None = None,
+) -> str:
     if used_percent is None:
         return "unknown"
     if used_percent >= critical:
         return "crit"
+    if elevated is not None and used_percent >= elevated:
+        return "elevated"
     if used_percent >= warn:
         return "warn"
     return "ok"
+
+
+# Numeric ordering of alert buckets for latching. Higher rank = more severe.
+# "unknown" is intentionally absent: unknown snapshots never fire alerts and
+# never advance the high-water mark.
+_BUCKET_RANK = {"ok": 0, "warn": 1, "elevated": 2, "crit": 3}
+
+
+def bucket_rank(bucket: str | None) -> int:
+    if not isinstance(bucket, str):
+        return 0
+    return _BUCKET_RANK.get(bucket, 0)
+
+
+# Seconds of forward motion required before we treat a `reset_at` change as a
+# genuine cycle rollover. Protects against upstream `resets_at` wobble that
+# previously re-fired the same bucket's alert on every poll (see issue #215).
+RESET_FORWARD_GRACE_SECONDS = 60
+
+
+def reset_cycle_advanced(
+    previous_reset: Any,
+    current_reset: Any,
+    grace_seconds: int = RESET_FORWARD_GRACE_SECONDS,
+) -> bool:
+    """Return True only when the reset window has moved forward by more than
+    `grace_seconds`. Any other change — equal timestamps, backward drift,
+    unparseable values — is treated as noise and does NOT clear the latch."""
+    if previous_reset in (None, "") or current_reset in (None, ""):
+        return False
+    try:
+        prev_dt = parse_iso(str(previous_reset))
+        curr_dt = parse_iso(str(current_reset))
+    except Exception:
+        return False
+    if prev_dt is None or curr_dt is None:
+        return False
+    return (curr_dt - prev_dt).total_seconds() > grace_seconds
 
 
 def format_reset(reset_at: str | None) -> str:
@@ -194,12 +239,36 @@ def collect_snapshots(args: argparse.Namespace) -> list[dict[str, Any]]:
     return snapshots
 
 
-def bucket_for_snapshot(snapshot: dict[str, Any], warn: float, critical: float) -> str:
+def _parse_elevated(args: argparse.Namespace, warn: float, critical: float) -> float:
+    """Resolve the elevated threshold, defaulting to the midpoint of warn/critical
+    if the caller did not supply one. Clamped to `warn < elevated < critical`
+    so the three-tier ladder stays monotonic."""
+    raw = getattr(args, "elevated_threshold", None)
+    elevated = float(raw) if raw is not None else (warn + critical) / 2.0
+    if elevated <= warn:
+        elevated = warn + 1.0
+    if elevated >= critical:
+        elevated = critical - 1.0
+    if elevated <= warn:
+        # warn and critical collapsed (e.g. warn=99, critical=100); fall back to
+        # disabling the middle tier by setting elevated > critical so it never fires.
+        elevated = critical + 1.0
+    return elevated
+
+
+def bucket_for_snapshot(
+    snapshot: dict[str, Any],
+    warn: float,
+    critical: float,
+    elevated: float | None = None,
+) -> str:
     used_percent = snapshot.get("used_percent")
     if not isinstance(used_percent, (int, float)):
         return "unknown"
     if used_percent >= critical:
         return "crit"
+    if elevated is not None and used_percent >= elevated:
+        return "elevated"
     if used_percent >= warn:
         return "warn"
     return "ok"
@@ -214,7 +283,11 @@ def alert_message(snapshot: dict[str, Any], bucket: str) -> str:
         percent_text = f"{used_percent:.0f}%"
     else:
         percent_text = "unknown"
-    level = "critical" if bucket == "crit" else "warning"
+    level = {
+        "crit": "critical",
+        "elevated": "elevated",
+        "warn": "warning",
+    }.get(bucket, "warning")
     return (
         f"{provider} usage {level}: {window} window at {percent_text}, "
         f"resets {format_reset(reset_at)}. Consider switching the active subscription account."
@@ -272,6 +345,7 @@ def cmd_monitor(args: argparse.Namespace) -> int:
     alerts: list[dict[str, Any]] = []
     warn = float(args.warn_threshold)
     critical = float(args.critical_threshold)
+    elevated = _parse_elevated(args, warn, critical)
 
     for snapshot in snapshots:
         key = "::".join(
@@ -281,40 +355,49 @@ def cmd_monitor(args: argparse.Namespace) -> int:
                 str(snapshot.get("window", "")),
             ]
         )
-        bucket = bucket_for_snapshot(snapshot, warn, critical)
+        bucket = bucket_for_snapshot(snapshot, warn, critical, elevated=elevated)
         reset_at = snapshot.get("reset_at")
         used_percent = snapshot.get("used_percent")
         previous = entries.get(key, {}) if isinstance(entries.get(key), dict) else {}
         previous_reset = previous.get("reset_at")
-        previous_bucket = previous.get("last_alert_bucket")
+        previous_latch = previous.get("last_alert_bucket")
 
-        if bucket in {"warn", "crit"} and (previous_bucket != bucket or previous_reset != reset_at):
+        # Cycle rollover: if reset_at has moved forward by more than the grace
+        # window, this is a new cycle — clear the latch so alerts can fire again.
+        # Equal or wobbling reset_at values are intentionally treated as noise
+        # (see RESET_FORWARD_GRACE_SECONDS). This was the #215 noise source.
+        if reset_cycle_advanced(previous_reset, reset_at):
+            previous_latch = None
+
+        next_latch = previous_latch
+        alerted_at = previous.get("alerted_at")
+
+        if bucket == "ok":
+            # Operator has room again; clear the latch so a future climb to warn
+            # re-alerts once, per issue #215 "ok transition resets the latch".
+            next_latch = None
+        elif bucket == "unknown":
+            # Don't alert on unparseable snapshots; don't touch the latch either.
+            pass
+        elif bucket_rank(bucket) > bucket_rank(previous_latch):
+            # Strict ascent only — same-bucket re-entries stay silent, which is
+            # the "latched one-shot per cycle" contract. Three alerts per cycle
+            # maximum: warn → elevated → crit.
             alert = {
                 **snapshot,
                 "bucket": bucket,
                 "message": alert_message(snapshot, bucket),
             }
             alerts.append(alert)
-            entries[key] = {
-                "last_alert_bucket": bucket,
-                "reset_at": reset_at,
-                "used_percent": used_percent,
-                "alerted_at": now_iso(),
-            }
-        elif bucket == "ok":
-            entries[key] = {
-                "last_alert_bucket": None,
-                "reset_at": reset_at,
-                "used_percent": used_percent,
-                "alerted_at": previous.get("alerted_at"),
-            }
-        else:
-            entries[key] = {
-                "last_alert_bucket": previous_bucket,
-                "reset_at": reset_at,
-                "used_percent": used_percent,
-                "alerted_at": previous.get("alerted_at"),
-            }
+            next_latch = bucket
+            alerted_at = now_iso()
+
+        entries[key] = {
+            "last_alert_bucket": next_latch,
+            "reset_at": reset_at,
+            "used_percent": used_percent,
+            "alerted_at": alerted_at,
+        }
 
     state["updated_at"] = now_iso()
     save_monitor_state(state_path, state)
@@ -367,6 +450,7 @@ def build_parser() -> argparse.ArgumentParser:
         cmd.add_argument("--claude-usage-cache", required=True, **common_kwargs)
         cmd.add_argument("--codex-sessions-dir", required=True, **common_kwargs)
         cmd.add_argument("--warn-threshold", type=float, default=90.0, **common_kwargs)
+        cmd.add_argument("--elevated-threshold", type=float, default=95.0, **common_kwargs)
         cmd.add_argument("--critical-threshold", type=float, default=100.0, **common_kwargs)
 
     status_parser = sub.add_parser("status")
