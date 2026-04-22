@@ -752,6 +752,35 @@ Path(status_file).write_text(json.dumps(payload, ensure_ascii=True, indent=2) + 
 PY
 }
 
+bridge_cron_actions_taken_contains() {
+  local result_file="$1"
+  local action="$2"
+
+  [[ -n "$result_file" && -f "$result_file" ]] || return 1
+  [[ -n "$action" ]] || return 1
+
+  bridge_require_python
+  python3 - "$result_file" "$action" <<'PY'
+import json
+import sys
+
+result_file = sys.argv[1]
+action = sys.argv[2]
+
+try:
+    with open(result_file, "r", encoding="utf-8") as fh:
+        data = json.load(fh)
+except Exception:
+    sys.exit(1)
+
+actions = data.get("actions_taken") or []
+if not isinstance(actions, list):
+    sys.exit(1)
+
+sys.exit(0 if action in actions else 1)
+PY
+}
+
 bridge_cron_job_always_followup() {
   local job_id="$1"
 
