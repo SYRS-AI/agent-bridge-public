@@ -634,6 +634,21 @@ bootstrap_install_scripts() {
       continue
     fi
     if [[ -f "$dst" ]] && cmp -s "$src" "$dst"; then
+      # Content matches, but a prior upgrade may have dropped the exec
+      # bit on the copy (umask-governed write path). step_cron_one gates
+      # on `test -x`, so a mode-only drift here causes skip-script-missing
+      # downstream. Repair it in apply mode without bumping the file.
+      if [[ ! -x "$dst" ]]; then
+        if [[ "$MODE" == "check" ]]; then
+          note_drift
+          record "install" "script:$f" "drift-mode" "$dst"
+        elif [[ "$MODE" == "dry-run" ]]; then
+          record "install" "script:$f" "would-chmod" "$dst"
+        else
+          chmod 0755 "$dst"
+          record "install" "script:$f" "chmod-repaired" "$dst"
+        fi
+      fi
       continue
     fi
     if [[ "$MODE" == "check" ]]; then

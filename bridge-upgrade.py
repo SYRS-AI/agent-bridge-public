@@ -45,9 +45,21 @@ def save_json(path: Path, payload: Any) -> None:
     os.chmod(path, 0o600)
 
 
-def write_bytes(path: Path, data: bytes) -> None:
+def write_bytes(path: Path, data: bytes, mode: int | None = None) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_bytes(data)
+    if mode is not None:
+        os.chmod(path, mode)
+
+
+def source_exec_bits(source_path: Path) -> int:
+    # Preserve only the executable bits from the checked-out source. Falls
+    # back to 0 when the source file is unavailable (e.g. symlink to a
+    # missing target) so callers can `| 0o644` the result safely.
+    try:
+        return source_path.stat().st_mode & 0o111
+    except OSError:
+        return 0
 
 
 def remove_path(path: Path) -> None:
@@ -858,7 +870,18 @@ def apply_live(source_root: Path, target_root: Path, base_ref: str, dry_run: boo
         live_path = target_root / action["path"]
         if kind == "merge_conflict":
             write_bytes(Path(action["conflict_backup_path"]), action["conflict_bytes"])
-        write_bytes(live_path, action["bytes"])
+        # Preserve the source tree's executable bit: Path.write_bytes uses
+        # the umask when creating a new file, so a .sh deployed for the
+        # first time would lose +x and every `test -x` downstream (bootstrap
+        # cron registration, shell callers) would skip it with
+        # skip-script-missing. Read the source mode each time so renames
+        # and mode flips travel with the file.
+        target_mode: int | None = None
+        source_path = source_root / action["path"]
+        exec_bits = source_exec_bits(source_path)
+        if exec_bits:
+            target_mode = 0o644 | exec_bits
+        write_bytes(live_path, action["bytes"], target_mode)
 
     payload["applied"] = True
     return payload
