@@ -752,6 +752,106 @@ Path(status_file).write_text(json.dumps(payload, ensure_ascii=True, indent=2) + 
 PY
 }
 
+bridge_cron_run_dir_grant_isolation() {
+  # Grant the target agent's isolated OS user rwX on a freshly-created cron
+  # per-run dir. Return contract (issue #219):
+  #   - 0 when the target is not linux-user isolated (no-op by design).
+  #   - 0 when every grant succeeds for an isolated target.
+  #   - 1 when setfacl/helper is missing or any grant fails for an isolated
+  #     target. The caller decides how strict to be.
+  # Under v1.3 the memory-daily harvester runs as the controller UID and
+  # does NOT require the isolated UID to own the per-run dir. The default
+  # caller (`dispatch_cron_run`) therefore treats failure as best-effort
+  # (`|| true`) so dispatch cannot be blocked by a host without passwordless
+  # root sudo. Other callers that do need the grant can branch on the
+  # return code.
+  local run_dir="$1"
+  local target="$2"
+
+  [[ -n "$run_dir" && -d "$run_dir" ]] || return 0
+  [[ -n "$target" ]] || return 0
+  command -v bridge_agent_linux_user_isolation_effective >/dev/null 2>&1 || return 0
+  bridge_agent_linux_user_isolation_effective "$target" || return 0
+  command -v bridge_agent_os_user >/dev/null 2>&1 || return 1
+
+  local os_user
+  os_user="$(bridge_agent_os_user "$target")"
+  [[ -n "$os_user" ]] || return 1
+
+  command -v bridge_linux_acl_add_recursive >/dev/null 2>&1 || return 1
+  # setfacl availability: needed for linux-user isolation. bridge_linux_*
+  # helpers already sudo-wrap; failures are structured below.
+  local rc=0
+  if ! bridge_linux_acl_add_recursive "u:${os_user}:rwX" "$run_dir" 2>/dev/null; then
+    rc=1
+  fi
+  if ! bridge_linux_acl_add_default_dirs_recursive "u:${os_user}:rwX" "$run_dir" 2>/dev/null; then
+    rc=1
+  fi
+  bridge_linux_grant_traverse_chain "$os_user" "$run_dir" >/dev/null 2>&1 || true
+  return "$rc"
+}
+
+bridge_cron_update_request_task_id() {
+  # Atomic rewrite of request.json with the real queue task id after the
+  # queue task is created (dispatch ordering defers queue create to the end
+  # so the worker cannot claim before request/status/manifest/ACL are ready).
+  local request_file="$1"
+  local task_id="$2"
+
+  [[ -n "$request_file" && -f "$request_file" ]] || return 0
+  [[ -n "$task_id" ]] || return 0
+
+  bridge_require_python
+  python3 - "$request_file" "$task_id" <<'PY'
+import json
+import os
+import sys
+
+path = sys.argv[1]
+task_id = int(sys.argv[2])
+
+with open(path, "r", encoding="utf-8") as fh:
+    data = json.load(fh)
+data["dispatch_task_id"] = task_id
+
+tmp = path + ".tmp." + str(os.getpid())
+with open(tmp, "w", encoding="utf-8") as fh:
+    json.dump(data, fh, ensure_ascii=True, indent=2)
+    fh.write("\n")
+os.replace(tmp, path)
+PY
+}
+
+bridge_cron_update_manifest_task_id() {
+  # Manifest uses the top-level "task_id" field (not "dispatch_task_id").
+  local manifest_file="$1"
+  local task_id="$2"
+
+  [[ -n "$manifest_file" && -f "$manifest_file" ]] || return 0
+  [[ -n "$task_id" ]] || return 0
+
+  bridge_require_python
+  python3 - "$manifest_file" "$task_id" <<'PY'
+import json
+import os
+import sys
+
+path = sys.argv[1]
+task_id = int(sys.argv[2])
+
+with open(path, "r", encoding="utf-8") as fh:
+    data = json.load(fh)
+data["task_id"] = task_id
+
+tmp = path + ".tmp." + str(os.getpid())
+with open(tmp, "w", encoding="utf-8") as fh:
+    json.dump(data, fh, ensure_ascii=True, indent=2)
+    fh.write("\n")
+os.replace(tmp, path)
+PY
+}
+
 bridge_cron_actions_taken_contains() {
   local result_file="$1"
   local action="$2"

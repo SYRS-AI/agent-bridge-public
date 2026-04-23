@@ -506,14 +506,37 @@ run_enqueue() {
   manifest_rel="${manifest_file#$BRIDGE_HOME/}"
 
   if [[ -f "$manifest_file" || -f "$request_file" ]]; then
-    printf 'status: already_enqueued\n'
-    printf 'job: %s\n' "$CRON_JOB_NAME"
-    printf 'slot: %s\n' "$slot"
-    printf 'target: %s\n' "$target"
-    printf 'run_id: %s\n' "$run_id"
-    printf 'request_file: %s\n' "$request_rel"
-    printf 'manifest: %s\n' "$manifest_rel"
-    return 0
+    # Issue #219: pre-queue ordering writes request/manifest with
+    # dispatch_task_id=0 before creating the queue task. If queue create (or
+    # the subsequent task-id patch) failed on the previous pass, the run_dir
+    # is stranded — there is no queue task to claim it. Validate that the
+    # existing artifacts carry a positive task_id; if not, treat the run as
+    # recoverable and fall through to re-enqueue (artifacts will be
+    # overwritten by the same run_id).
+    existing_task_id=""
+    if [[ -f "$request_file" ]]; then
+      existing_task_id="$("${BRIDGE_PYTHON:-python3}" -c 'import json,sys;
+try:
+  d=json.load(open(sys.argv[1]))
+  v=d.get("dispatch_task_id")
+  print(int(v) if v is not None else 0)
+except Exception:
+  print(0)' "$request_file" 2>/dev/null || echo 0)"
+    fi
+    if [[ -n "$existing_task_id" && "$existing_task_id" != "0" ]]; then
+      printf 'status: already_enqueued\n'
+      printf 'job: %s\n' "$CRON_JOB_NAME"
+      printf 'slot: %s\n' "$slot"
+      printf 'target: %s\n' "$target"
+      printf 'run_id: %s\n' "$run_id"
+      printf 'request_file: %s\n' "$request_rel"
+      printf 'manifest: %s\n' "$manifest_rel"
+      return 0
+    fi
+    # Stranded run from a prior failed dispatch. Clean the partial artifacts
+    # so the new pass can produce a coherent run_dir.
+    printf 'notice: clearing stranded pre-queue artifacts for run_id=%s (dispatch_task_id=0)\n' "$run_id" >&2
+    rm -f "$request_file" "$status_file" "$manifest_file"
   fi
 
   if [[ $dry_run -eq 1 ]]; then
@@ -539,6 +562,24 @@ run_enqueue() {
 
   write_materialized_payload "$payload_file" "$slot" "$jobs_file" "$target" "$delivery_mode" "$job_delivery_mode" "$job_delivery_channel" "$job_delivery_target" "$allow_channel_delivery"
   write_dispatch_body "$body_file" "$slot" "$run_id" "$payload_file" "$request_file" "$result_file" "$status_file" "$target" "$target_engine" "$delivery_mode" "$job_delivery_mode" "$job_delivery_channel" "$job_delivery_target" "$allow_channel_delivery"
+
+  # Ordering (issue #219): write run_dir artifacts + grant ACLs BEFORE queue
+  # task creation so that a daemon worker which immediately claims cannot
+  # race ahead of missing request/status/manifest or missing per-run ACLs.
+  # task_id=0 is a sentinel placeholder; real queue id is patched in below
+  # via bridge_cron_update_*_task_id once the queue record exists.
+  created_at="$(bridge_now_iso)"
+  bridge_cron_write_request "$request_file" "$run_id" "$CRON_JOB_ID" "$CRON_JOB_NAME" "$CRON_JOB_FAMILY" "$CRON_JOB_AGENT" "$target" "$slot" "0" "$created_at" "$body_file" "$payload_file" "$result_file" "$status_file" "$stdout_log" "$stderr_log" "$jobs_file" "$CRON_JOB_PAYLOAD_KIND" "$target_engine" "$target_workdir" "$target_channels" "$target_discord_state_dir" "$target_telegram_state_dir" "$job_delivery_mode" "$job_delivery_channel" "$job_delivery_target" "$allow_channel_delivery" "$delivery_mode" "$disposable_needs_channels"
+  bridge_cron_write_status "$status_file" "$run_id" "queued" "$target_engine" "$request_file" "$result_file" "$created_at"
+  bridge_cron_write_manifest "$manifest_file" "$CRON_JOB_ID" "$CRON_JOB_NAME" "$CRON_JOB_FAMILY" "$CRON_JOB_AGENT" "$target" "$slot" "0" "$created_at" "$body_file" "$jobs_file" "$run_id" "$request_file" "$payload_file" "$result_file" "$status_file" "$stdout_log" "$stderr_log" "$job_delivery_mode" "$job_delivery_channel" "$job_delivery_target" "$allow_channel_delivery" "$delivery_mode" "$disposable_needs_channels"
+  # Per-run ACL grant is best-effort under v1.3 (#219): the memory-daily
+  # harvester now runs as the controller UID, so it does not need the
+  # isolated os_user to own/rwX the per-run dir. Other families that do
+  # spawn isolated subprocesses can still rely on the grant when sudo/acl
+  # infrastructure is available; failure here is non-fatal and does NOT
+  # remove the pre-queue artifacts.
+  bridge_cron_run_dir_grant_isolation "$(bridge_cron_run_dir_by_id "$run_id")" "$target" >/dev/null 2>&1 || true
+
   create_output="$(bridge_queue_cli create --to "$target" --title "$title" --from "$actor" --priority "$priority" --body-file "$body_file")"
   printf '%s\n' "$create_output"
 
@@ -548,10 +589,9 @@ run_enqueue() {
     bridge_die "생성된 task id를 파싱하지 못했습니다."
   fi
 
-  created_at="$(bridge_now_iso)"
-  bridge_cron_write_request "$request_file" "$run_id" "$CRON_JOB_ID" "$CRON_JOB_NAME" "$CRON_JOB_FAMILY" "$CRON_JOB_AGENT" "$target" "$slot" "$task_id" "$created_at" "$body_file" "$payload_file" "$result_file" "$status_file" "$stdout_log" "$stderr_log" "$jobs_file" "$CRON_JOB_PAYLOAD_KIND" "$target_engine" "$target_workdir" "$target_channels" "$target_discord_state_dir" "$target_telegram_state_dir" "$job_delivery_mode" "$job_delivery_channel" "$job_delivery_target" "$allow_channel_delivery" "$delivery_mode" "$disposable_needs_channels"
-  bridge_cron_write_status "$status_file" "$run_id" "queued" "$target_engine" "$request_file" "$result_file" "$created_at"
-  bridge_cron_write_manifest "$manifest_file" "$CRON_JOB_ID" "$CRON_JOB_NAME" "$CRON_JOB_FAMILY" "$CRON_JOB_AGENT" "$target" "$slot" "$task_id" "$created_at" "$body_file" "$jobs_file" "$run_id" "$request_file" "$payload_file" "$result_file" "$status_file" "$stdout_log" "$stderr_log" "$job_delivery_mode" "$job_delivery_channel" "$job_delivery_target" "$allow_channel_delivery" "$delivery_mode" "$disposable_needs_channels"
+  bridge_cron_update_request_task_id "$request_file" "$task_id"
+  bridge_cron_update_manifest_task_id "$manifest_file" "$task_id"
+
   printf 'run_id: %s\n' "$run_id"
   printf 'request_file: %s\n' "$request_rel"
   printf 'result_file: %s\n' "$result_rel"

@@ -105,6 +105,7 @@ bridge_migration_isolate() {
   local agent="$1"
   local dry_run="$2"
   local install_sudoers="${3:-0}"
+  local reapply="${4:-0}"
   local os_user current_mode workdir user_home runtime_state_dir log_dir
 
   bridge_migration_require_linux
@@ -118,7 +119,26 @@ bridge_migration_isolate() {
   os_user="$(bridge_agent_os_user "$agent")"
 
   if [[ "$current_mode" == "linux-user" && -n "$os_user" ]]; then
-    printf '[info] %s is already linux-user isolated (os_user=%s); nothing to do.\n' "$agent" "$os_user"
+    if [[ "$reapply" != "1" ]]; then
+      printf '[info] %s is already linux-user isolated (os_user=%s); nothing to do.\n' "$agent" "$os_user"
+      printf '[hint] use --reapply to re-install ACLs without re-migrating ownership (picks up ACL-contract changes).\n'
+      return 0
+    fi
+    # Reapply branch: skip ownership migration + useradd + sudoers, only
+    # re-run the ACL / queue-gateway plumbing via bridge_linux_prepare_agent_isolation.
+    # Resolve workdir BEFORE the prepare call — the original first-time flow
+    # assigns it below the early-return, so we must hoist that here.
+    bridge_migration_block_if_active "$agent"
+    workdir="$(bridge_agent_workdir "$agent")"
+    printf '[plan] re-applying ACLs for %s (os_user=%s workdir=%s)\n' "$agent" "$os_user" "$workdir"
+    if [[ "$dry_run" == "1" ]]; then
+      printf '  [plan] bridge_linux_prepare_agent_isolation %s %s %s <controller>\n' "$agent" "$os_user" "$workdir"
+      printf '[done] isolation plan (reapply) printed for %s\n' "$agent"
+      return 0
+    fi
+    bridge_linux_prepare_agent_isolation "$agent" "$os_user" "$workdir" "$(bridge_current_user)" || \
+      bridge_warn "bridge_linux_prepare_agent_isolation returned non-zero for $agent; re-run isolate or check acceptance runbook §2"
+    printf '[done] ACL reapply complete for %s\n' "$agent"
     return 0
   fi
 
@@ -338,6 +358,7 @@ bridge_migration_parse_args() {
   BRIDGE_MIGRATION_DRY_RUN=0
   BRIDGE_MIGRATION_SHOW_HELP=0
   BRIDGE_MIGRATION_INSTALL_SUDOERS=0
+  BRIDGE_MIGRATION_REAPPLY=0
 
   while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -347,6 +368,10 @@ bridge_migration_parse_args() {
         ;;
       --install-sudoers)
         BRIDGE_MIGRATION_INSTALL_SUDOERS=1
+        shift
+        ;;
+      --reapply)
+        BRIDGE_MIGRATION_REAPPLY=1
         shift
         ;;
       -h|--help)
@@ -378,7 +403,11 @@ bridge_migration_sudoers_entry() {
   local tmux_bin bash_bin
   tmux_bin="$(command -v tmux 2>/dev/null || printf '/usr/bin/tmux')"
   bash_bin="$(command -v bash 2>/dev/null || printf '/bin/bash')"
-  printf '%s ALL=(%s) NOPASSWD: %s, %s\n' "$operator" "$os_user" "$tmux_bin" "$bash_bin"
+  # SETENV: required so --preserve-env=... can forward BRIDGE_STATE_DIR /
+  # BRIDGE_TASK_DB / CRON_REQUEST_DIR etc. to the isolated child (issue #219
+  # memory-daily harvester sudo re-exec). tmux + bash are the only binaries
+  # sudo ever invokes directly; Python is spawned as a child of bash -c.
+  printf '%s ALL=(%s) NOPASSWD: SETENV: %s, %s\n' "$operator" "$os_user" "$tmux_bin" "$bash_bin"
 }
 
 bridge_migration_install_sudoers() {
@@ -431,7 +460,7 @@ bridge_migration_isolate_cli() {
   bridge_migration_parse_args "$@"
   if [[ "${BRIDGE_MIGRATION_SHOW_HELP:-0}" == "1" ]]; then
     cat <<'EOF'
-Usage: agent-bridge isolate <agent> [--dry-run] [--install-sudoers]
+Usage: agent-bridge isolate <agent> [--dry-run] [--install-sudoers] [--reapply]
 
 Migrate a static agent from shared isolation to linux-user isolation.
 On macOS this command refuses with a pointer to #89 for scope.
@@ -453,12 +482,17 @@ Options:
                      operator can install it manually (see
                      docs/linux-host-acceptance.md).
 
-Re-running on an already-isolated agent is a no-op.
+  --reapply          Skip the ownership migration and only re-install the
+                     per-agent ACLs (idempotent). Required to pick up
+                     ACL-contract changes on already-isolated agents without
+                     going through unisolate→isolate. Works with --dry-run.
+
+Re-running without --reapply on an already-isolated agent is a no-op.
 EOF
     return 0
   fi
-  [[ -n "$BRIDGE_MIGRATION_AGENT" ]] || bridge_die "Usage: agent-bridge isolate <agent> [--dry-run] [--install-sudoers]"
-  bridge_migration_isolate "$BRIDGE_MIGRATION_AGENT" "$BRIDGE_MIGRATION_DRY_RUN" "$BRIDGE_MIGRATION_INSTALL_SUDOERS"
+  [[ -n "$BRIDGE_MIGRATION_AGENT" ]] || bridge_die "Usage: agent-bridge isolate <agent> [--dry-run] [--install-sudoers] [--reapply]"
+  bridge_migration_isolate "$BRIDGE_MIGRATION_AGENT" "$BRIDGE_MIGRATION_DRY_RUN" "$BRIDGE_MIGRATION_INSTALL_SUDOERS" "${BRIDGE_MIGRATION_REAPPLY:-0}"
 }
 
 bridge_migration_unisolate_cli() {

@@ -2916,7 +2916,11 @@ def _render_aggregate_body(schema_label: str, state: dict) -> str:
 
 
 def _update_permission_aggregate(state_dir: Path, agent: str, date: str, now_iso: str, db_path: Path, dry_run: bool) -> int | None:
-    agg_path = state_dir / "admin-aggregate-skip.json"
+    # Shared aggregate lives under shared/aggregate/ so linux-user isolation
+    # can grant write there without opening up the per-agent manifest tree
+    # (issue #219). Legacy root-level files are migrated in controller
+    # context by bridge_linux_prepare_agent_isolation and bootstrap-memory-system.sh.
+    agg_path = state_dir / "shared" / "aggregate" / "admin-aggregate-skip.json"
     title_prefix = "[memory-daily-skip-admin]"
 
     def merger(current: dict) -> dict:
@@ -2956,7 +2960,8 @@ def _update_permission_aggregate(state_dir: Path, agent: str, date: str, now_iso
 
 
 def _update_escalation_aggregate(state_dir: Path, agent: str, date: str, now_iso: str, db_path: Path, dry_run: bool) -> int | None:
-    agg_path = state_dir / "admin-aggregate-escalated.json"
+    # See _update_permission_aggregate for the shared/aggregate rationale.
+    agg_path = state_dir / "shared" / "aggregate" / "admin-aggregate-escalated.json"
     title_prefix = "[memory-daily-escalated]"
 
     def merger(current: dict) -> dict:

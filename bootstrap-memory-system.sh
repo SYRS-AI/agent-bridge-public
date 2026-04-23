@@ -720,9 +720,45 @@ step_librarian_provision() {
 }
 
 # -----------------------------------------------------------------------------
+# memory-daily aggregate migration (issue #219): move legacy root-level
+# admin-aggregate JSON files into shared/aggregate/ so the new ACL contract
+# (linux-user isolation) can grant write on the shared subdir without opening
+# up the per-agent manifest tree. Runs in controller context, idempotent.
+# -----------------------------------------------------------------------------
+bootstrap_migrate_memory_daily_aggregate() {
+  local mdr="$BRIDGE_STATE_DIR/memory-daily"
+  local shared_agg="$mdr/shared/aggregate"
+  [[ -d "$mdr" ]] || return 0
+  local agg
+  for agg in admin-aggregate-skip.json admin-aggregate-escalated.json; do
+    local legacy="$mdr/$agg"
+    local target="$shared_agg/$agg"
+    if [[ -f "$legacy" && ! -f "$target" ]]; then
+      if [[ "$MODE" == "apply" ]]; then
+        mkdir -p "$shared_agg"
+        mv "$legacy" "$target"
+        record "$BRIDGE_ADMIN_AGENT" "memory-daily:$agg" "migrated" "shared/aggregate/"
+      elif [[ "$MODE" == "dry-run" ]]; then
+        record "$BRIDGE_ADMIN_AGENT" "memory-daily:$agg" "would-migrate" "shared/aggregate/"
+      else
+        note_drift
+        record "$BRIDGE_ADMIN_AGENT" "memory-daily:$agg" "drift-legacy-present" "shared/aggregate/"
+      fi
+    fi
+    local legacy_lock="$mdr/$agg.lock"
+    local target_lock="$shared_agg/$agg.lock"
+    if [[ -f "$legacy_lock" && ! -f "$target_lock" && "$MODE" == "apply" ]]; then
+      mkdir -p "$shared_agg"
+      mv "$legacy_lock" "$target_lock"
+    fi
+  done
+}
+
+# -----------------------------------------------------------------------------
 # run all steps
 # -----------------------------------------------------------------------------
 bootstrap_install_scripts
+bootstrap_migrate_memory_daily_aggregate
 step_librarian_provision
 
 while IFS=$'\t' read -r agent home; do
