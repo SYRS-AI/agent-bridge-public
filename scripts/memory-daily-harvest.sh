@@ -67,29 +67,42 @@ fi
 current_user="$(id -un 2>/dev/null || echo '')"
 current_uid="$(id -u 2>/dev/null || echo '')"
 
-# linux-user isolation: if the target os_user differs from the invoker, emit
-# skipped-permission. We deliberately do NOT sudo re-exec python as the target
-# user: `bridge_linux_prepare_agent_isolation` strips ACLs on the global
-# BRIDGE_STATE_DIR / BRIDGE_CRON_STATE_DIR trees and only grants per-agent
-# runtime/log/request/response dirs, so the isolated UID cannot persist the
-# manifest (`state/memory-daily/...`) or the sidecar (under
-# `state/cron/runs/.../authoritative-memory-daily.json`). Until the isolation
-# ACL contract is extended to cover those paths (tracked as a separate issue),
-# the right behaviour per v0.5 §10.1 is to record a structured skip so the
+# linux-user isolation (issue #219 v1.3 design): Python harvester always runs
+# as the controller UID so queue DB reads (task_events), dedupe lookups
+# (_task_status), and backfill writes (bridge-task.sh create) remain in the
+# controller context. When the target agent is isolated and the os_user
+# differs, we instead grant the controller r-X on the target's transcripts
+# tree (ACL added by bridge_linux_prepare_agent_isolation) and pass
+# --transcripts-home so _scan_transcripts reads the correct store. If the
+# transcripts dir is unreadable (ACL not yet re-applied, or operator has not
+# ensured the target home exists), fall back to --skipped-permission so the
 # admin aggregate surfaces the gap.
 if [[ "$isolation_mode" == "linux-user" \
       && -n "$os_user" \
       && -n "$current_user" \
       && "$os_user" != "$current_user" \
       && "$current_uid" != "0" ]]; then
-  exec "$BRIDGE_PYTHON" "$BRIDGE_HOME/bridge-memory.py" harvest-daily \
-    --agent "$AGENT" \
-    --home "$home" \
-    --workdir "$workdir" \
-    --os-user "$os_user" \
-    --skipped-permission \
-    --sidecar-out "$sidecar_out" \
-    --json
+  target_home="${BRIDGE_LINUX_ISOLATED_USER_HOME_ROOT:-/home}/$os_user"
+  transcripts_dir="$target_home/.claude/projects"
+  if [[ -r "$transcripts_dir" && -x "$transcripts_dir" ]]; then
+    exec "$BRIDGE_PYTHON" "$BRIDGE_HOME/bridge-memory.py" harvest-daily \
+      --agent "$AGENT" \
+      --home "$home" \
+      --workdir "$workdir" \
+      --os-user "$os_user" \
+      --transcripts-home "$target_home" \
+      --sidecar-out "$sidecar_out" \
+      --json
+  else
+    exec "$BRIDGE_PYTHON" "$BRIDGE_HOME/bridge-memory.py" harvest-daily \
+      --agent "$AGENT" \
+      --home "$home" \
+      --workdir "$workdir" \
+      --os-user "$os_user" \
+      --skipped-permission \
+      --sidecar-out "$sidecar_out" \
+      --json
+  fi
 fi
 
 exec "$BRIDGE_PYTHON" "$BRIDGE_HOME/bridge-memory.py" harvest-daily \

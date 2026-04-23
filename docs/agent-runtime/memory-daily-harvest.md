@@ -63,12 +63,20 @@ native cron scheduler
                         + isolation.mode + isolation.os_user (each via its own
                         python3 parse — whitespace-safe)
                      └─ linux-user isolation + user mismatch:
-                          · exec python --skipped-permission --os-user …
-                            (isolation ACLs deny the isolated UID write
-                             access to the controller-owned cron/state trees,
-                             so the right behaviour per v0.5 §10.1 is to
-                             record a structured skip. Expanding the ACL
-                             contract is tracked separately.)
+                          · resolve target_home = $BRIDGE_LINUX_ISOLATED_USER_HOME_ROOT/<os_user>
+                          · test -r $target_home/.claude/projects
+                              readable → exec python
+                                         --transcripts-home=<target_home>
+                                         (controller UID; queue DB + manifest
+                                          + sidecar stay in controller
+                                          context; ONLY transcripts scan
+                                          reads the target's directory via
+                                          the controller r-X ACL added by
+                                          bridge_linux_prepare_agent_isolation)
+                              unreadable → exec python --skipped-permission
+                                           --os-user … (admin aggregate
+                                           surfaces the missing ACL /
+                                           missing target home)
                      └─ exec bridge-memory.py harvest-daily \
                           --agent … --home … --workdir … \
                           --sidecar-out "$CRON_REQUEST_DIR/authoritative-memory-daily.json"
@@ -280,35 +288,99 @@ Daemon audit events:
 - `session_refresh_pending_cleared` — gate-off cleanup of a stale pending
   refresh. Detail `reason=gate_off`.
 
-## 10. Linux-user isolation
+## 10. Linux-user isolation (#219)
+
+The harvester stays in **controller UID** so its queue-DB reads
+(`task_events`), dedupe lookups (`_task_status`), and backfill writes
+(`bridge-task.sh create`) continue to work against the controller-owned
+tasks.db. Cross-UID access is limited to a single strict read lens: the
+controller is granted r-X on the isolated user's `~/.claude/projects/` so
+`_scan_transcripts` can see the target's transcript store without any sudo
+re-exec.
+
+### Dispatch paths
 
 When `agent show --json` reports `isolation.mode=linux-user` and
-`isolation.os_user != $(id -un)`, the stub forwards `--skipped-permission
---os-user <os_user>` to the Python harvester, which writes a minimal manifest
-with `state=skipped-permission`, merges `(agent, date)` into
-`admin-aggregate-skip.json`, and exits 0 so the cron run records a structured
-skip rather than an engine error.
+`isolation.os_user != $(id -un)`, the stub resolves
+`target_home=$BRIDGE_LINUX_ISOLATED_USER_HOME_ROOT/<os_user>` and probes
+read access to `$target_home/.claude/projects`:
 
-The harvester does **not** `sudo -u <os_user>` re-exec itself under
-isolation. `bridge_linux_prepare_agent_isolation()`
-(`lib/bridge-agents.sh:952~1003`) strips ACLs on the controller-owned global
-state / cron trees (`BRIDGE_STATE_DIR`, `BRIDGE_LOG_DIR`) and only re-grants
-per-agent runtime / log / request / response dirs. Re-executing the harvester
-as the isolated UID would therefore fail to persist either
-`state/memory-daily/<agent>/<date>.json` or the sidecar under
-`state/cron/runs/.../authoritative-memory-daily.json`. Until that ACL
-contract is expanded to cover memory-daily state + the cron per-run dir
-(tracked as a separate issue), isolation-mismatch runs are
-structurally-skipped.
+- **readable** — exec the harvester with `--transcripts-home=<target_home>`
+  in controller context. `_scan_transcripts` reads the target's store via
+  the r-X ACL. Queue/manifest/aggregate operations are unchanged.
 
-The `--transcripts-home <path>` override on `bridge-memory.py harvest-daily`
-is kept for smoke tests and manual invocation; production cron invocations do
-not use it.
+- **unreadable** (ACL not applied, `.claude/projects` not yet created, or
+  any other `access(2)` failure) — exec the harvester with
+  `--skipped-permission --os-user <os_user>`. Python writes
+  `state=skipped-permission`, merges `(agent, date)` into
+  `admin-aggregate-skip.json`, and exits 0. Per v0.5 §10.1 this is a
+  structured skip; the admin aggregate task surfaces the gap.
 
-When sudoers configuration changes unblock isolated operation, follow-up work
-is expected to (a) expand `bridge_linux_prepare_agent_isolation` ACLs to the
-memory-daily manifest dir and per-run cron dirs, and (b) re-introduce a sudo
-re-exec in the stub. See [`docs/linux-host-acceptance.md`](../linux-host-acceptance.md).
+The stub does **not** invoke `sudo`. All UID switching happens via filesystem
+ACLs set at isolation prep time.
+
+### ACL contract
+
+`bridge_linux_prepare_agent_isolation()` (`lib/bridge-agents.sh`) creates and
+grants the following during isolation prep (static or `--reapply`):
+
+| Path | Grant | Rationale |
+|---|---|---|
+| `state/memory-daily/` | `u:<os_user>:r-x` | Traverse only — peer `<agent>/` dirs stay out of reach. |
+| `state/memory-daily/<agent>/` | `u:<os_user>:rwX` + default | Per-agent manifest writes (if a future pipeline re-introduces isolated writes). |
+| `state/memory-daily/shared/aggregate/` | `u:<os_user>:rwX` + default | Multi-agent `fcntl.flock`-guarded aggregate files. |
+| `state/cron/runs/<run_id>/` | `u:<os_user>:rwX` + default | Granted per-dispatch in `bridge_cron_run_dir_grant_isolation`. |
+| `<user_home>/.claude/projects/` | `u:<controller>:r-X` + default | Read lens so the controller-UID harvester can scan the target's transcripts without sudo re-exec. |
+
+Legacy `state/memory-daily/admin-aggregate-{skip,escalated}.json` files are
+migrated into `shared/aggregate/` in **controller context** — either by
+`bridge_linux_prepare_agent_isolation` (sudo-root `mv`) or by
+`bootstrap-memory-system.sh --apply` (controller-user `mv`). The harvester
+never migrates during its hot path.
+
+### Sudoers note
+
+`bridge_migration_sudoers_entry` still installs `NOPASSWD: SETENV: tmux, bash`
+for the isolated `os_user`. The harvester does not consume this entry in the
+v1.3 design, but tmux/bash launch paths (`bridge-start.sh`) still rely on it.
+`bridge_linux_can_sudo_to` probes `sudo -n -u <os_user> -- bash -c 'exit 0'`
+so the probe matches the installed entry.
+
+### Re-applying ACLs to an already-isolated agent
+
+```bash
+agent-bridge isolate <agent> --reapply
+# --dry-run prints the plan without executing
+```
+
+`--reapply` skips `useradd` / ownership migration / sudoers steps and only
+re-runs `bridge_linux_prepare_agent_isolation`, which is idempotent. Required
+to pick up ACL-contract changes on existing installs (this PR).
+
+### Dispatch ordering under isolation
+
+`bridge-cron.sh::dispatch_cron_run` writes run_dir artifacts **before**
+creating the queue task (issue #219) so a daemon worker cannot claim a
+task ahead of the request / status / manifest files. The request and
+manifest are seeded with `dispatch_task_id=0` / `task_id=0` placeholders
+and atomically rewritten to the real queue id once it's known. The
+`already_enqueued` short-circuit only takes effect for positive task
+ids, so a run stranded by a prior failed create is re-dispatched on the
+next pass (stale artifacts are cleared first).
+
+`bridge_cron_run_dir_grant_isolation` is called best-effort between the
+artifact writes and the queue-create step. Under v1.3 the memory-daily
+harvester runs as the controller UID, so the grant is not load-bearing
+for memory-daily dispatch — failure is ignored (`|| true`) and the queue
+task is still created. The helper remains useful for future cron
+families that do spawn isolated subprocesses, but memory-daily does not
+depend on the isolated os_user owning `state/cron/runs/<run_id>/`.
+
+### Testing flexibility
+
+`bridge-memory.py harvest-daily --transcripts-home <path>` overrides the
+base for `~/.claude/projects` scanning; used by smoke tests and manual
+invocation.
 
 ## 11. Known limits
 

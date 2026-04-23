@@ -482,7 +482,12 @@ bridge_linux_can_sudo_to() {
     return 0
   fi
   command -v sudo >/dev/null 2>&1 || return 1
-  sudo -n -u "$os_user" true 2>/dev/null
+  # Probe via `bash -c 'exit 0'` — matches the sudoers entry installed by
+  # bridge_migration_sudoers_entry (which whitelists tmux + bash only, not
+  # /usr/bin/true). Using the canonical BRIDGE_BASH_BIN when available so
+  # the path also matches the entry's `command -v bash`.
+  local bash_bin="${BRIDGE_BASH_BIN:-$(command -v bash 2>/dev/null || printf '/bin/bash')}"
+  sudo -n -u "$os_user" -- "$bash_bin" -c 'exit 0' 2>/dev/null
 }
 
 bridge_agent_preserved_env_vars() {
@@ -952,7 +957,32 @@ bridge_linux_prepare_agent_isolation() {
   bridge_linux_acl_remove_recursive "u:${os_user}" "$BRIDGE_STATE_DIR" "$BRIDGE_LOG_DIR"
   bridge_linux_sudo_root mkdir -p "$runtime_state_dir" "$log_dir" "$request_dir" "$response_dir" "$(dirname "$history_file")"
   bridge_linux_sudo_root touch "$audit_file" "$history_file"
-  recursive_write_paths+=("$workdir" "$runtime_state_dir" "$log_dir" "$request_dir" "$response_dir")
+
+  # memory-daily state trees for the harvester (issue #219):
+  #   <state>/memory-daily/                         — traverse only (r-x)
+  #   <state>/memory-daily/<agent>/                 — per-agent rwX
+  #   <state>/memory-daily/shared/aggregate/        — shared rwX (all isolated
+  #     agents write to the fcntl.flock-guarded aggregate files; no cross-agent
+  #     directory-entry tampering because peer <agent>/ dirs remain un-ACL'd)
+  local memory_daily_root="$BRIDGE_STATE_DIR/memory-daily"
+  local memory_daily_agent_dir="$memory_daily_root/$agent"
+  local memory_daily_shared_aggregate_dir="$memory_daily_root/shared/aggregate"
+  bridge_linux_sudo_root mkdir -p "$memory_daily_agent_dir" "$memory_daily_shared_aggregate_dir"
+
+  # One-shot legacy aggregate migration — runs as sudo-root here so it has
+  # write access on the memory-daily root even though the new ACL contract
+  # only grants isolated UIDs r-x on the root. Idempotent + safe to re-run.
+  local _agg_name
+  for _agg_name in admin-aggregate-skip.json admin-aggregate-escalated.json; do
+    if [[ -f "$memory_daily_root/$_agg_name" && ! -f "$memory_daily_shared_aggregate_dir/$_agg_name" ]]; then
+      bridge_linux_sudo_root mv "$memory_daily_root/$_agg_name" "$memory_daily_shared_aggregate_dir/$_agg_name"
+    fi
+    if [[ -f "$memory_daily_root/$_agg_name.lock" && ! -f "$memory_daily_shared_aggregate_dir/$_agg_name.lock" ]]; then
+      bridge_linux_sudo_root mv "$memory_daily_root/$_agg_name.lock" "$memory_daily_shared_aggregate_dir/$_agg_name.lock"
+    fi
+  done
+
+  recursive_write_paths+=("$workdir" "$runtime_state_dir" "$log_dir" "$request_dir" "$response_dir" "$memory_daily_agent_dir" "$memory_daily_shared_aggregate_dir")
   hidden_paths+=("$BRIDGE_ROSTER_FILE" "$BRIDGE_ROSTER_LOCAL_FILE" "$BRIDGE_RUNTIME_CREDENTIALS_DIR" "$BRIDGE_RUNTIME_SECRETS_DIR" "$BRIDGE_RUNTIME_CONFIG_FILE" "$BRIDGE_TASK_DB" "${BRIDGE_LOG_DIR}/audit.jsonl")
 
   bridge_linux_grant_traverse_chain "$os_user" "$BRIDGE_HOME"
@@ -963,6 +993,9 @@ bridge_linux_prepare_agent_isolation() {
   bridge_linux_grant_traverse_chain "$os_user" "$history_file"
   bridge_linux_grant_traverse_chain "$os_user" "$request_dir"
   bridge_linux_grant_traverse_chain "$os_user" "$response_dir"
+  bridge_linux_grant_traverse_chain "$os_user" "$memory_daily_agent_dir"
+  bridge_linux_grant_traverse_chain "$os_user" "$memory_daily_shared_aggregate_dir"
+  bridge_linux_acl_add "u:${os_user}:r-x" "$memory_daily_root" "$memory_daily_root/shared" >/dev/null 2>&1 || true
 
   bridge_linux_acl_add "u:${os_user}:r-x" "$BRIDGE_HOME" "$BRIDGE_AGENT_HOME_ROOT"
   bridge_linux_acl_add "u:${os_user}:r-x" "$BRIDGE_HOME/agent-bridge" "$BRIDGE_HOME/agb" "$BRIDGE_HOME/VERSION" >/dev/null 2>&1 || true
@@ -981,7 +1014,7 @@ bridge_linux_prepare_agent_isolation() {
   bridge_linux_grant_claude_credentials_access "$os_user" "$user_home" "$controller_user" "$(bridge_agent_engine "$agent")"
   bridge_linux_acl_add_recursive "u:${os_user}:r-X" "${recursive_read_paths[@]}"
   bridge_linux_acl_add_recursive "u:${os_user}:rwX" "${recursive_write_paths[@]}"
-  bridge_linux_acl_add_default_dirs_recursive "u:${os_user}:rwX" "$runtime_state_dir" "$log_dir" "$request_dir" "$response_dir"
+  bridge_linux_acl_add_default_dirs_recursive "u:${os_user}:rwX" "$runtime_state_dir" "$log_dir" "$request_dir" "$response_dir" "$memory_daily_agent_dir" "$memory_daily_shared_aggregate_dir"
   bridge_linux_acl_add "u:${os_user}:rw-" "$history_file"
 
   for other in "${BRIDGE_AGENT_IDS[@]}"; do
@@ -1004,7 +1037,32 @@ bridge_linux_prepare_agent_isolation() {
   bridge_linux_sudo_root chown "$os_user" "$audit_file" "$history_file"
   bridge_linux_acl_add_recursive "u:${controller_user}:rwX" "$workdir"
   bridge_linux_acl_add_default_dirs_recursive "u:${controller_user}:rwX" "$workdir"
-  bridge_linux_acl_add_recursive "u:${controller_user}:rwX" "$runtime_state_dir" "$log_dir" "$request_dir" "$response_dir"
+  bridge_linux_acl_add_recursive "u:${controller_user}:rwX" "$runtime_state_dir" "$log_dir" "$request_dir" "$response_dir" "$memory_daily_agent_dir" "$memory_daily_shared_aggregate_dir"
+
+  # memory-daily transcripts read-access (issue #219 v1.3): grant the
+  # controller user r-X on the isolated user's ~/.claude/projects/ so the
+  # (controller-UID) harvester can _scan_transcripts under the target.
+  # We intentionally do NOT grant write — this is a strict read lens.
+  #
+  # We pre-create $user_home/.claude (owned by the isolated UID, 0700) so
+  # the default ACL lands before the first Claude session runs. Otherwise a
+  # fresh agent's first `.claude/projects/` directory would be created
+  # without the controller r-X inheritance, and the next harvester run
+  # would fall back to --skipped-permission until the next reapply.
+  local isolated_claude_dir="$user_home/.claude"
+  local isolated_projects_dir="$isolated_claude_dir/projects"
+  bridge_linux_sudo_root mkdir -p "$isolated_claude_dir"
+  bridge_linux_sudo_root chown "$os_user" "$isolated_claude_dir" >/dev/null 2>&1 || true
+  bridge_linux_sudo_root chmod 0700 "$isolated_claude_dir" >/dev/null 2>&1 || true
+  bridge_linux_grant_traverse_chain "$controller_user" "$isolated_claude_dir" >/dev/null 2>&1 || true
+  bridge_linux_acl_add "u:${controller_user}:r-x" "$isolated_claude_dir" >/dev/null 2>&1 || true
+  # Default ACL on .claude/ so any subdirectory (projects/, sessions/, ...)
+  # created later by the isolated UID inherits controller read access.
+  bridge_linux_sudo_root setfacl -d -m "u:${controller_user}:r-X" "$isolated_claude_dir" >/dev/null 2>&1 || true
+  if [[ -d "$isolated_projects_dir" ]]; then
+    bridge_linux_acl_add_recursive "u:${controller_user}:r-X" "$isolated_projects_dir" >/dev/null 2>&1 || true
+    bridge_linux_acl_add_default_dirs_recursive "u:${controller_user}:r-X" "$isolated_projects_dir" >/dev/null 2>&1 || true
+  fi
   bridge_linux_acl_add "u:${controller_user}:rw-" "$history_file" "$audit_file"
   bridge_write_linux_agent_env_file "$agent" "$env_file"
   # Leave env_file owned by the controller so subsequent starts can chmod it.

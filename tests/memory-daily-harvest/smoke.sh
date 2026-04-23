@@ -7,15 +7,17 @@
 #   4  weak-only (git commits)          → action=no-op, reason=weak_only_activity
 #   8  gate off                         → state=disabled, actions_taken=[]
 #   9  --skipped-permission             → state=skipped-permission + aggregate
+#                                         (shared/aggregate/ path, #219)
 #   10 daemon gating helper             → bridge_cron_actions_taken_contains
 #   11 residual risk: sidecar recovery  → exception path recovers final_state
-#   12 stub isolation dispatch          → linux-user mismatch dispatches
-#                                         --skipped-permission --os-user
-#   13 stub default dispatch            → non-isolation path omits --skipped-permission
+#   12 stub isolation (no target home) → --skipped-permission --os-user
+#   13 stub default dispatch            → non-isolation path omits --skipped
+#   14 stub isolation + readable target → --transcripts-home + --os-user (no sudo)
+#   15 stub isolation + unreadable     → --skipped-permission (v1.3 fallback)
 #
-# Not all 10 §14 scenarios need deep fixtures — 2/4/8 + 9 + 10 + 11 + 12 + 13
-# exercise the load-bearing decision branches. Skeletons for 1/3/5/6/7 are
-# left in the file for clarity but not asserted.
+# Not all 10 §14 scenarios need deep fixtures — 2/4/8 + 9-15 exercise the
+# load-bearing decision branches. Skeletons for 1/3/5/6/7 are left in the
+# file for clarity but not asserted.
 #
 # Usage:   ./tests/memory-daily-harvest/smoke.sh
 # Exit 0 if all asserted scenarios PASS; exit 1 otherwise.
@@ -390,6 +392,148 @@ else
 fi
 
 # =============================================================================
+# scenario 14 — stub isolation + readable transcripts → --transcripts-home
+# =============================================================================
+banner "14 — stub isolation + readable .claude/projects dispatches --transcripts-home"
+
+s14_dir="$SMOKE_ROOT/s14"
+mkdir -p "$s14_dir/home" "$s14_dir/workdir"
+# Simulate target user's isolated home with a readable .claude/projects tree.
+s14_target_home="$s14_dir/target-home"
+mkdir -p "$s14_target_home/.claude/projects"
+cat >"$s14_dir/agb-mock" <<MOCK
+#!/usr/bin/env bash
+cat <<'JSON'
+{
+  "agent": "s14-agent",
+  "workdir": "$s14_dir/workdir",
+  "profile": {"home": "$s14_dir/home"},
+  "isolation": {"mode": "linux-user", "os_user": "ghost-smoke-sudo"}
+}
+JSON
+MOCK
+chmod +x "$s14_dir/agb-mock"
+
+cat >"$s14_dir/python-mock" <<MOCK
+#!/usr/bin/env bash
+# Record harvest-daily dispatches so the smoke can inspect the argv the stub
+# assembled. JSON parse invocations passthrough to real python3.
+for arg in "\$@"; do
+  case "\$arg" in
+    harvest-daily)
+      args_out="\${S14_MOCK_ARGS_OUT:-/tmp/s14-mock.args}"
+      printf '%s\n' "\$@" >"\$args_out"
+      exit 0
+      ;;
+  esac
+done
+exec "$PYTHON" "\$@"
+MOCK
+chmod +x "$s14_dir/python-mock"
+
+S14_ARGS_OUT="$s14_dir/argv.log"
+BRIDGE_AGB="$s14_dir/agb-mock" \
+BRIDGE_PYTHON="$s14_dir/python-mock" \
+BRIDGE_HOME="$s14_dir/bridge-home" \
+BRIDGE_LINUX_ISOLATED_USER_HOME_ROOT="$s14_dir" \
+S14_MOCK_ARGS_OUT="$S14_ARGS_OUT" \
+env -u CRON_REQUEST_DIR \
+  "$REPO_ROOT/scripts/memory-daily-harvest.sh" --agent s14-agent \
+  >"$s14_dir/stdout" 2>"$s14_dir/stderr"
+# Rename target-home to match the os_user name expected by the stub
+rc=$?
+
+# Note: BRIDGE_LINUX_ISOLATED_USER_HOME_ROOT + os_user resolves to
+# $s14_dir/ghost-smoke-sudo/.claude/projects, not $s14_dir/target-home/.
+# Set up the proper layout instead.
+rm -rf "$s14_dir/ghost-smoke-sudo"
+mkdir -p "$s14_dir/ghost-smoke-sudo/.claude/projects"
+: >"$S14_ARGS_OUT"
+BRIDGE_AGB="$s14_dir/agb-mock" \
+BRIDGE_PYTHON="$s14_dir/python-mock" \
+BRIDGE_HOME="$s14_dir/bridge-home" \
+BRIDGE_LINUX_ISOLATED_USER_HOME_ROOT="$s14_dir" \
+S14_MOCK_ARGS_OUT="$S14_ARGS_OUT" \
+env -u CRON_REQUEST_DIR \
+  "$REPO_ROOT/scripts/memory-daily-harvest.sh" --agent s14-agent \
+  >"$s14_dir/stdout" 2>"$s14_dir/stderr"
+rc=$?
+
+argv_dump="$(tr '\n' ' ' <"$S14_ARGS_OUT" 2>/dev/null || echo '')"
+case " $argv_dump " in
+  *" --transcripts-home "*) has_transcripts_home="yes" ;;
+  *) has_transcripts_home="no" ;;
+esac
+case " $argv_dump " in
+  *" --skipped-permission "*) leaked_skip="yes" ;;
+  *) leaked_skip="no" ;;
+esac
+case " $argv_dump " in
+  *" --os-user ghost-smoke-sudo "*) has_os_user="yes" ;;
+  *) has_os_user="no" ;;
+esac
+
+if [[ $rc -eq 0 \
+      && "$has_transcripts_home" == "yes" \
+      && "$leaked_skip" == "no" \
+      && "$has_os_user" == "yes" ]]; then
+  pass "14"
+else
+  fail "14" "rc=$rc transcripts_home=$has_transcripts_home skipped=$leaked_skip os_user=$has_os_user"
+fi
+
+# =============================================================================
+# scenario 15 — stub isolation + unreadable .claude/projects → --skipped-permission
+# =============================================================================
+banner "15 — stub isolation + unreadable .claude/projects dispatches --skipped-permission"
+
+s15_dir="$SMOKE_ROOT/s15"
+mkdir -p "$s15_dir/home" "$s15_dir/workdir"
+# Intentionally do NOT create $s15_dir/ghost-smoke-miss/.claude/projects
+cat >"$s15_dir/agb-mock" <<MOCK
+#!/usr/bin/env bash
+cat <<'JSON'
+{
+  "agent": "s15-agent",
+  "workdir": "$s15_dir/workdir",
+  "profile": {"home": "$s15_dir/home"},
+  "isolation": {"mode": "linux-user", "os_user": "ghost-smoke-miss"}
+}
+JSON
+MOCK
+chmod +x "$s15_dir/agb-mock"
+cp "$s14_dir/python-mock" "$s15_dir/python-mock"
+
+S15_ARGS_OUT="$s15_dir/argv.log"
+BRIDGE_AGB="$s15_dir/agb-mock" \
+BRIDGE_PYTHON="$s15_dir/python-mock" \
+BRIDGE_HOME="$s15_dir/bridge-home" \
+BRIDGE_LINUX_ISOLATED_USER_HOME_ROOT="$s15_dir" \
+S14_MOCK_ARGS_OUT="$S15_ARGS_OUT" \
+env -u CRON_REQUEST_DIR \
+  "$REPO_ROOT/scripts/memory-daily-harvest.sh" --agent s15-agent \
+  >"$s15_dir/stdout" 2>"$s15_dir/stderr"
+rc=$?
+
+argv_dump_s15="$(tr '\n' ' ' <"$S15_ARGS_OUT" 2>/dev/null || echo '')"
+case " $argv_dump_s15 " in
+  *" --skipped-permission "*) has_skip_s15="yes" ;;
+  *) has_skip_s15="no" ;;
+esac
+case " $argv_dump_s15 " in
+  *" --transcripts-home "*) leaked_transcripts_s15="yes" ;;
+  *) leaked_transcripts_s15="no" ;;
+esac
+
+if [[ $rc -eq 0 \
+      && "$has_skip_s15" == "yes" \
+      && "$leaked_transcripts_s15" == "no" ]]; then
+  pass "15"
+else
+  fail "15" "rc=$rc skipped=$has_skip_s15 transcripts_home=$leaked_transcripts_s15"
+fi
+
+# =============================================================================
 # scenario 13 — stub non-isolation path omits --skipped-permission
 # =============================================================================
 banner "13 — stub default path does NOT force --skipped-permission"
@@ -455,7 +599,7 @@ mkdir -p "$s9_home/memory" "$s9_workdir"
   --json >"$SMOKE_ROOT/s9.stdout" 2>"$SMOKE_ROOT/s9.stderr"
 rc=$?
 manifest_s9="$s9_state/s9-agent/2026-04-22.json"
-agg_s9="$s9_state/admin-aggregate-skip.json"
+agg_s9="$s9_state/shared/aggregate/admin-aggregate-skip.json"
 s9_state_val="$("$PYTHON" -c 'import json,sys; print(json.load(open(sys.argv[1])).get("state",""))' "$manifest_s9" 2>/dev/null || echo "")"
 s9_reason="$("$PYTHON" -c 'import json,sys; print(json.load(open(sys.argv[1])).get("decision",{}).get("reason_code",""))' "$manifest_s9" 2>/dev/null || echo "")"
 s9_actions="$("$PYTHON" -c 'import json,sys; print(",".join(json.load(open(sys.argv[1])).get("actions_taken") or []))' "$s9_sidecar" 2>/dev/null || echo "")"
