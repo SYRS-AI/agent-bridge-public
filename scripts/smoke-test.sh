@@ -2077,6 +2077,69 @@ assert_contains "$IDLE_REAP_OUTPUT" "DYNAMIC_ALIVE=no"
 assert_contains "$IDLE_REAP_OUTPUT" "ORPHAN_ALIVE=no"
 assert_contains "$IDLE_REAP_OUTPUT" "DYNAMIC_META=no"
 
+log "bun plugin root + child match the orphan patterns (issue #223)"
+python3 - "$REPO_ROOT" <<'PY'
+import importlib.util
+import pathlib
+import sys
+
+repo_root = pathlib.Path(sys.argv[1])
+spec = importlib.util.spec_from_file_location(
+    "bridge_mcp_cleanup", repo_root / "bridge-mcp-cleanup.py"
+)
+mod = importlib.util.module_from_spec(spec)
+# dataclass annotation resolution needs the module present in sys.modules
+# before exec_module runs (Python 3.9 requirement).
+sys.modules[spec.name] = mod
+spec.loader.exec_module(mod)
+
+patterns = mod.compile_patterns(mod.DEFAULT_PATTERNS)
+
+def proc(pid, command, ppid=1):
+    return mod.Proc(pid=pid, ppid=ppid, age_seconds=999, rss_kb=0, command=command)
+
+cases_should_match = [
+    "bun run --cwd /home/ec2-user/.agent-bridge/plugins/teams --shell=bun --silent start",
+    "bun run --cwd /Users/x/.agent-bridge/plugins/telegram --silent start",
+    "bun run --cwd /home/ec2-user/.bun/install/claude-plugins-official/telegram/0.0.6 start",
+    # ps stitches argv with single spaces, so a cwd containing a space
+    # (macOS user dir like "Space User") shows up verbatim. Match must
+    # still see the plugin-root fragment.
+    "bun run --cwd /Users/Space User/.agent-bridge/plugins/teams --silent start",
+    "bun run --cwd /Users/Space User/.bun/install/claude-plugins-official/telegram/0.0.6 start",
+    "/home/ec2-user/.bun/bin/bun server.ts",
+]
+for cmd in cases_should_match:
+    matched = mod.matched_pattern(proc(10, cmd), patterns)
+    assert matched, f"expected match for: {cmd}"
+
+cases_should_not_match = [
+    # Generic user `bun run` against a project dir must never match — we
+    # restrict to .agent-bridge/plugins or claude-plugins-official roots.
+    "bun run --cwd /home/user/myproject build",
+    "bun run --cwd /tmp/foo test",
+    "bun run dev",
+    "node server.ts",  # without the bun word-boundary the server.ts-only rule must not false-positive
+]
+for cmd in cases_should_not_match:
+    matched = mod.matched_pattern(proc(20, cmd), patterns)
+    assert not matched, f"unexpected match for: {cmd} (matched={matched})"
+
+# Orphan chain: plugin root PPID=1 matches; bun server.ts child with
+# parent=plugin-root must also be classified as an orphan (the old bug
+# rejected it because the parent's command did not match anything).
+procs = {
+    100: proc(100, "bun run --cwd /home/u/.agent-bridge/plugins/teams --silent start", ppid=1),
+    101: proc(101, "/home/u/.bun/bin/bun server.ts", ppid=100),
+}
+matches = {pid: mod.matched_pattern(p, patterns) for pid, p in procs.items()}
+assert matches[100], "plugin root must match"
+assert matches[101], "server.ts child must match"
+assert mod.is_orphan_candidate(procs[100], procs, matches, 0), "plugin root ppid=1 must be orphan"
+assert mod.is_orphan_candidate(procs[101], procs, matches, 0), "server.ts child must chain through matched orphan parent"
+print("[ok] bun plugin orphan patterns + chain")
+PY
+
 log "cleaning orphan MCP processes conservatively"
 MCP_ORPHAN_PATTERN="agent-bridge-smoke-orphan-mcp-$SESSION_NAME"
 MCP_ATTACHED_PATTERN="agent-bridge-smoke-attached-mcp-$SESSION_NAME"
