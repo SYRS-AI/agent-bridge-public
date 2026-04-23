@@ -448,6 +448,170 @@ step_cron_one() {
 }
 
 # -----------------------------------------------------------------------------
+# step 3b: per-agent memory-daily-<agent> cron
+# -----------------------------------------------------------------------------
+# Gate mirror of lib/bridge-agents.sh::bridge_agent_memory_daily_refresh_enabled.
+# Bootstrap cannot source bridge-lib safely without pulling in the roster, so we
+# approximate: the default is ON (matching the bash helper). An install that
+# disables the refresh sets BRIDGE_AGENT_MEMORY_DAILY_REFRESH_<agent>=0 in the
+# bootstrap env, or writes BRIDGE_AGENT_MEMORY_DAILY_REFRESH[<agent>]=0 into the
+# roster (which the daemon enforces at dispatch time regardless).
+memory_daily_gate_on() {
+  local agent="$1"
+  local key="BRIDGE_AGENT_MEMORY_DAILY_REFRESH_${agent}"
+  local val
+  val="${!key:-}"
+  val="${val,,}"
+  case "$val" in
+    0|false|no|off) return 1 ;;
+  esac
+  return 0
+}
+
+# Per-agent cron cache: populate on demand inside step_memory_daily_cron_one.
+# Key = agent id; value = JSON blob (list or {jobs: []}) from
+#   `$BRIDGE_AGB cron list --agent <agent> --json`.
+declare -A MEMORY_DAILY_EXISTING_JSON
+
+memory_daily_cron_lookup() {
+  # memory_daily_cron_lookup <agent> <title> — prints "id<TAB>schedule<TAB>tz" or empty.
+  local agent="$1"
+  local title="$2"
+  local blob="${MEMORY_DAILY_EXISTING_JSON[$agent]-}"
+  local blob_file="$REPORT_DIR/.cron-list-$agent.json"
+  if [[ -z "$blob" ]]; then
+    blob="$("$BRIDGE_AGB" cron list --agent "$agent" --json 2>/dev/null || echo '[]')"
+    MEMORY_DAILY_EXISTING_JSON[$agent]="$blob"
+    printf '%s' "$blob" >"$blob_file"
+  elif [[ ! -f "$blob_file" ]]; then
+    printf '%s' "$blob" >"$blob_file"
+  fi
+  "$BRIDGE_PYTHON" - "$blob_file" "$title" <<'PY'
+import json, re, sys
+try:
+    data = json.load(open(sys.argv[1], encoding="utf-8"))
+except Exception:
+    sys.exit(0)
+title = sys.argv[2]
+if isinstance(data, dict):
+    jobs = data.get("jobs") or []
+elif isinstance(data, list):
+    jobs = data
+else:
+    jobs = []
+for j in jobs:
+    if not isinstance(j, dict):
+        continue
+    name = j.get("title") or j.get("name") or ""
+    stem = re.sub(r"-[0-9a-f]{8,}$", "", name)
+    if name == title or stem == title:
+        sched = j.get("schedule") or j.get("schedule_text") or ""
+        tz = j.get("tz") or j.get("timezone") or j.get("schedule_tz") or ""
+        jid = j.get("id") or j.get("job_id") or ""
+        print(f"{jid}\t{sched}\t{tz}")
+        break
+PY
+}
+
+step_memory_daily_cron_one() {
+  local agent="$1"
+  local title="memory-daily-$agent"
+  local sched="0 3 * * *"
+  local tz="Asia/Seoul"
+  local installed_script="$BRIDGE_HOME/scripts/memory-daily-harvest.sh"
+
+  # Cron payload — cron runner forwards this text to a claude subagent as the
+  # prompt body. The inline instruction below is load-bearing (v0.7 §3.3): the
+  # Python harvester writes the authoritative RESULT_SCHEMA JSON to
+  # $CRON_REQUEST_DIR/authoritative-memory-daily.json and the runner reads that
+  # file directly. The subagent's structured_output is a secondary relay and
+  # MUST NOT re-interpret status / summary / actions_taken.
+  local payload
+  payload="bash \"\$BRIDGE_HOME/scripts/memory-daily-harvest.sh\" --agent $agent
+
+# The harvester writes the authoritative RESULT_SCHEMA JSON to
+# \$CRON_REQUEST_DIR/authoritative-memory-daily.json. The runner reads that
+# file directly. Your structured_output is a secondary relay.
+# Do NOT re-interpret status / summary / actions_taken — the harvester is authoritative."
+
+  local found existing_sched existing_tz existing_id
+  found="$(memory_daily_cron_lookup "$agent" "$title" || true)"
+  if [[ -n "$found" ]]; then
+    existing_id="$(printf '%s' "$found" | awk -F'\t' '{print $1}')"
+    existing_sched="$(printf '%s' "$found" | awk -F'\t' '{print $2}')"
+    existing_tz="$(printf '%s' "$found" | awk -F'\t' '{print $3}')"
+  fi
+
+  if ! memory_daily_gate_on "$agent"; then
+    # Gate off. If a cron exists, schedule a cleanup in apply mode; else skip.
+    if [[ -n "$found" ]]; then
+      if [[ "$MODE" == "check" ]]; then
+        record "$agent" "cron:$title" "drift-disabled-but-present" "id=$existing_id"
+        note_drift
+      elif [[ "$MODE" == "dry-run" ]]; then
+        record "$agent" "cron:$title" "would-delete" "id=$existing_id reason=gate-off"
+      else
+        if "$BRIDGE_AGB" cron delete "$existing_id" >/dev/null 2>&1; then
+          record "$agent" "cron:$title" "deleted-gate-off" "id=$existing_id"
+        else
+          record "$agent" "cron:$title" "delete-failed" "id=$existing_id"
+          note_drift
+        fi
+      fi
+    else
+      record "$agent" "cron:$title" "skip-gate-off" ""
+    fi
+    return 0
+  fi
+
+  if [[ -n "$found" ]]; then
+    # Normalize schedule vs tz — same approach as step_cron_one above.
+    local norm_existing norm_expected trailing_tz effective_existing_tz
+    norm_existing="${existing_sched#cron }"
+    trailing_tz="$("$BRIDGE_PYTHON" -c 'import sys; parts = sys.argv[1].split(); print(" ".join(parts[5:]))' "$norm_existing")"
+    norm_existing="$("$BRIDGE_PYTHON" -c 'import sys; parts = sys.argv[1].split(); print(" ".join(parts[:5]))' "$norm_existing")"
+    effective_existing_tz="${existing_tz:-$trailing_tz}"
+    norm_expected="$sched"
+    if [[ "$norm_existing" == "$norm_expected" && "$effective_existing_tz" == "$tz" ]]; then
+      record "$agent" "cron:$title" "already-registered" "$existing_sched tz=$effective_existing_tz"
+      return 0
+    fi
+    record "$agent" "cron:$title" "conflict" \
+      "existing=$existing_sched tz=$effective_existing_tz want=$sched tz=$tz — refusing"
+    note_drift
+    return 0
+  fi
+
+  if [[ "$MODE" == "check" ]]; then
+    record "$agent" "cron:$title" "drift-missing" ""
+    note_drift
+    return 0
+  fi
+  if [[ "$MODE" == "dry-run" ]]; then
+    record "$agent" "cron:$title" "would-register" "schedule=$sched tz=$tz"
+    return 0
+  fi
+
+  if [[ ! -x "$installed_script" ]]; then
+    record "$agent" "cron:$title" "skip-script-missing" "$installed_script"
+    note_drift
+    return 0
+  fi
+
+  if "$BRIDGE_AGB" cron create --agent "$agent" \
+        --schedule "$sched" \
+        --tz "$tz" \
+        --title "$title" \
+        --payload "$payload" \
+        >/dev/null 2>&1; then
+    record "$agent" "cron:$title" "registered" "$sched $tz"
+  else
+    record "$agent" "cron:$title" "register-failed" ""
+    note_drift
+  fi
+}
+
+# -----------------------------------------------------------------------------
 # scripts installation (apply only)
 # -----------------------------------------------------------------------------
 bootstrap_install_scripts() {
@@ -461,7 +625,8 @@ bootstrap_install_scripts() {
            wiki-hub-audit.py wiki-hub-audit.sh \
            sync-memory-schema.py \
            librarian-provision.sh librarian-watchdog.sh librarian-idle-exit.sh \
-           librarian-process-ingest.py; do
+           librarian-process-ingest.py \
+           memory-daily-harvest.sh; do
     local src="$SCRIPT_DIR/scripts/$f"
     local dst="$target/$f"
     if [[ ! -f "$src" ]]; then
@@ -564,6 +729,7 @@ while IFS=$'\t' read -r agent home; do
   [[ -z "$agent" || -z "$home" ]] && continue
   step_hook_one "$agent" "$home"
   step_rebuild_one "$agent" "$home"
+  step_memory_daily_cron_one "$agent"
 done < "$AGENT_LIST_TMP"
 
 for spec in "${CRON_SPECS[@]}"; do

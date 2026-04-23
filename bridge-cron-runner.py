@@ -328,7 +328,7 @@ def resolve_binary(name: str, override_env: str) -> str:
     raise FileNotFoundError(f"{name} binary not found; searched PATH and common dirs: {', '.join(searched)}")
 
 
-def run_codex(request: dict[str, Any], prompt: str, schema_path: Path, timeout: int) -> tuple[list[str], subprocess.CompletedProcess[str]]:
+def run_codex(request: dict[str, Any], prompt: str, schema_path: Path, timeout: int, request_file: Path | None = None) -> tuple[list[str], subprocess.CompletedProcess[str]]:
     workdir = request["target_workdir"]
     codex_bin = resolve_binary("codex", "BRIDGE_CODEX_BIN")
     command = [
@@ -344,10 +344,13 @@ def run_codex(request: dict[str, Any], prompt: str, schema_path: Path, timeout: 
         "--dangerously-bypass-approvals-and-sandbox",
         prompt,
     ]
+    env = runner_env()
+    if request_file is not None:
+        env["CRON_REQUEST_DIR"] = str(request_file.parent)
     completed = subprocess.run(
         command,
         cwd=workdir,
-        env=runner_env(),
+        env=env,
         capture_output=True,
         text=True,
         timeout=timeout,
@@ -356,7 +359,7 @@ def run_codex(request: dict[str, Any], prompt: str, schema_path: Path, timeout: 
     return command, completed
 
 
-def run_claude(request: dict[str, Any], prompt: str, timeout: int) -> tuple[list[str], subprocess.CompletedProcess[str]]:
+def run_claude(request: dict[str, Any], prompt: str, timeout: int, request_file: Path | None = None) -> tuple[list[str], subprocess.CompletedProcess[str]]:
     workdir = request["target_workdir"]
     claude_bin = resolve_binary("claude", "BRIDGE_CLAUDE_BIN")
     channels = csv_items(request.get("target_channels", ""))
@@ -375,6 +378,8 @@ def run_claude(request: dict[str, Any], prompt: str, timeout: int) -> tuple[list
     if channels and disposable_needs_channels(request):
         command[2:2] = ["--channels", ",".join(channels)]
     env = apply_channel_runtime_env(request, runner_env())
+    if request_file is not None:
+        env["CRON_REQUEST_DIR"] = str(request_file.parent)
     completed = subprocess.run(
         command,
         cwd=workdir,
@@ -546,26 +551,49 @@ def cmd_run(args: argparse.Namespace) -> int:
     final_state = "error"
     child_result: dict[str, Any] | None = None
     error_message: str | None = None
+    # Default audit values; overridden per-engine and on sidecar recovery.
+    child_result_source = "child"
+    sidecar_error_note: str | None = None
+    family = request.get("family", "")
+    sidecar_path = run_dir / "authoritative-memory-daily.json"
 
     try:
         if engine == "codex":
-            command, completed = run_codex(request, prompt, schema_file, timeout)
+            command, completed = run_codex(request, prompt, schema_file, timeout, request_file=request_file)
             write_text(stdout_log, completed.stdout)
             write_text(stderr_log, completed.stderr)
             if completed.returncode != 0:
                 raise RuntimeError(f"codex exec failed with exit code {completed.returncode}")
             child_result = parse_codex_output(completed.stdout)
+            final_state = "success" if child_result.get("status") != "error" else "error"
         elif engine == "claude":
-            command, completed = run_claude(request, prompt, timeout)
+            command, completed = run_claude(request, prompt, timeout, request_file=request_file)
             write_text(stdout_log, completed.stdout)
             write_text(stderr_log, completed.stderr)
             if completed.returncode != 0:
                 raise RuntimeError(f"claude -p failed with exit code {completed.returncode}")
-            child_result = parse_claude_output(completed.stdout)
+
+            # memory-daily: authoritative sidecar written by the harvester is
+            # preferred source. Attempt it BEFORE parse_claude_output so a child
+            # relay that drops/rewrites structured_output cannot override the
+            # harvester's authoritative actions_taken.
+            if family == "memory-daily" and sidecar_path.is_file():
+                try:
+                    authoritative = json.loads(sidecar_path.read_text(encoding="utf-8"))
+                    child_result = validate_result(authoritative)
+                    child_result_source = "authoritative-sidecar"
+                except (OSError, json.JSONDecodeError, ValueError) as exc:
+                    sidecar_error_note = f"sidecar invalid: {exc!r}"
+                    child_result = None
+
+            if child_result is None:
+                child_result = parse_claude_output(completed.stdout)
+                if family == "memory-daily":
+                    child_result_source = "child-fallback"
+
+            final_state = "success" if child_result.get("status") != "error" else "error"
         else:
             raise RuntimeError(f"unsupported engine for cron subagent: {engine}")
-
-        final_state = "success" if child_result.get("status") != "error" else "error"
     except subprocess.TimeoutExpired as exc:
         command = exc.cmd if isinstance(exc.cmd, list) else [str(exc.cmd)]
         write_text(stdout_log, exc.stdout or "")
@@ -579,6 +607,19 @@ def cmd_run(args: argparse.Namespace) -> int:
             completed = subprocess.CompletedProcess([], 1, "", "")
         if "command" not in locals():
             command = []
+        # memory-daily: if the parse path threw but harvester wrote a valid
+        # sidecar, recover so a structured harvester result is preserved even
+        # when the child relay JSON was malformed / missing.
+        if engine == "claude" and family == "memory-daily" and sidecar_path.is_file():
+            try:
+                authoritative = json.loads(sidecar_path.read_text(encoding="utf-8"))
+                child_result = validate_result(authoritative)
+                child_result_source = "authoritative-sidecar-after-parse-error"
+                final_state = "success" if child_result.get("status") != "error" else "error"
+                error_message = None
+            except (OSError, json.JSONDecodeError, ValueError) as sidecar_exc:
+                sidecar_error_note = f"sidecar recovery failed: {sidecar_exc!r}"
+                child_result = None
 
     completed_at = now_iso()
     duration_ms = int((time.monotonic() - start_monotonic) * 1000)
@@ -606,6 +647,7 @@ def cmd_run(args: argparse.Namespace) -> int:
         "recommended_next_steps": child_result["recommended_next_steps"],
         "artifacts": child_result["artifacts"],
         "confidence": child_result["confidence"],
+        "child_result_source": child_result_source,
         "started_at": started_at,
         "completed_at": completed_at,
         "duration_ms": duration_ms,
@@ -618,6 +660,8 @@ def cmd_run(args: argparse.Namespace) -> int:
         "command_pretty": " ".join(shlex.quote(part) for part in command),
         "child_exit_code": completed.returncode,
     }
+    if sidecar_error_note:
+        result_payload["sidecar_error_note"] = sidecar_error_note
     if error_message:
         result_payload["runner_error"] = error_message
 

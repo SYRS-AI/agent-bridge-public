@@ -2539,7 +2539,20 @@ process_memory_daily_refresh_requests() {
   local changed=1
 
   for agent in "${BRIDGE_AGENT_IDS[@]}"; do
-    bridge_agent_memory_daily_refresh_enabled "$agent" || continue
+    # Clear any stuck pending state ahead of the gate check; leaving stale
+    # pending refreshes around for gate-off agents was causing phantom
+    # refreshes if the gate was later re-enabled.
+    if ! bridge_agent_memory_daily_refresh_enabled "$agent"; then
+      if bridge_agent_memory_daily_refresh_pending "$agent"; then
+        bridge_agent_clear_memory_daily_refresh "$agent"
+        bridge_audit_log daemon session_refresh_pending_cleared "$agent" \
+          --detail reason=gate_off \
+          --detail source=memory-daily
+        daemon_info "cleared stale pending memory-daily refresh for gate-off ${agent}"
+        changed=0
+      fi
+      continue
+    fi
     bridge_agent_memory_daily_refresh_pending "$agent" || continue
 
     if ! bridge_agent_is_active "$agent"; then
@@ -2859,12 +2872,22 @@ cmd_run_cron_worker() {
 
   if [[ "${CRON_FAMILY:-}" == "memory-daily" && "${CRON_RUN_STATE:-}" == "success" && "${CRON_RESULT_STATUS:-}" != "error" ]]; then
     if bridge_agent_memory_daily_refresh_enabled "$TASK_ASSIGNED_TO"; then
-      bridge_agent_note_memory_daily_refresh "$TASK_ASSIGNED_TO" "$run_id" "${CRON_SLOT:-}"
-      bridge_audit_log daemon session_refresh_queued "$TASK_ASSIGNED_TO" \
-        --detail run_id="$run_id" \
-        --detail slot="${CRON_SLOT:-}" \
-        --detail source=memory-daily
-      daemon_info "queued memory-daily session refresh for ${TASK_ASSIGNED_TO} run_id=${run_id}"
+      # Only queue a session refresh when the harvester actually backfilled
+      # the queue. no-op / ok / skip results would churn sessions otherwise.
+      if bridge_cron_actions_taken_contains "${CRON_RESULT_FILE:-}" "queue-backfill"; then
+        bridge_agent_note_memory_daily_refresh "$TASK_ASSIGNED_TO" "$run_id" "${CRON_SLOT:-}"
+        bridge_audit_log daemon session_refresh_queued "$TASK_ASSIGNED_TO" \
+          --detail run_id="$run_id" \
+          --detail slot="${CRON_SLOT:-}" \
+          --detail source=memory-daily
+        daemon_info "queued memory-daily session refresh for ${TASK_ASSIGNED_TO} run_id=${run_id}"
+      else
+        bridge_audit_log daemon session_refresh_skipped "$TASK_ASSIGNED_TO" \
+          --detail run_id="$run_id" \
+          --detail slot="${CRON_SLOT:-}" \
+          --detail source=memory-daily \
+          --detail reason=no_queue_backfill_action
+      fi
     fi
   fi
 

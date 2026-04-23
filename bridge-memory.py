@@ -2287,6 +2287,1099 @@ def cmd_daily_append(args: argparse.Namespace) -> int:
     return 0
 
 
+# ---------------------------------------------------------------------------
+# harvest-daily (issue #216) — detection-only per-agent daily note harvester.
+# Pure observation: no LLM, no daily-note mutation, no downstream compat.
+# ---------------------------------------------------------------------------
+
+
+DAILY_TAG_LINE_RE = re.compile(r"(^tags:\s+.+$)|(^#\S+(\s+#\S+)*\s*$)", re.MULTILINE)
+DAILY_BULLET_RE = re.compile(r"^\s*([-*+]|\d+\.)\s+\S", re.MULTILINE)
+
+
+def _harvest_now_iso(tz_name: str) -> str:
+    from datetime import timezone as _tz, timedelta as _td
+    try:
+        from zoneinfo import ZoneInfo
+        return datetime.now(ZoneInfo(tz_name)).isoformat(timespec="seconds")
+    except Exception:
+        return datetime.now(_tz(_td(hours=9))).isoformat(timespec="seconds")
+
+
+def _harvest_tz_zone(tz_name: str):
+    from datetime import timezone as _tz, timedelta as _td
+    try:
+        from zoneinfo import ZoneInfo
+        return ZoneInfo(tz_name)
+    except Exception:
+        return _tz(_td(hours=9))
+
+
+def _harvest_default_date(tz_name: str) -> str:
+    zone = _harvest_tz_zone(tz_name)
+    return (datetime.now(zone) - timedelta(days=1)).date().isoformat()
+
+
+def _harvest_date_window(date_str: str, tz_name: str) -> tuple[datetime, datetime]:
+    zone = _harvest_tz_zone(tz_name)
+    y, m, d = (int(x) for x in date_str.split("-"))
+    start = datetime(y, m, d, 0, 0, 0, tzinfo=zone)
+    end = start + timedelta(days=1) - timedelta(microseconds=1)
+    return start, end
+
+
+def _workdir_slug_candidates(workdir_path: str) -> list[str]:
+    # Replicates lib/bridge-state.sh::workdir_slug_candidates. Claude projects
+    # encode slashes (always) and sometimes dots into dashes.
+    slash_only = workdir_path.replace("/", "-")
+    slash_and_dot = re.sub(r"[/.]", "-", workdir_path)
+    out = [slash_only]
+    if slash_and_dot != slash_only:
+        out.append(slash_and_dot)
+    return out
+
+
+def _harvest_state_dir(args: argparse.Namespace) -> Path:
+    if args.state_dir:
+        return Path(args.state_dir).expanduser()
+    env = os.environ.get("BRIDGE_STATE_DIR")
+    if env:
+        return Path(env).expanduser() / "memory-daily"
+    bridge_home = os.environ.get("BRIDGE_HOME") or str(Path.home() / ".agent-bridge")
+    return Path(bridge_home).expanduser() / "state" / "memory-daily"
+
+
+def _harvest_task_db(args: argparse.Namespace) -> Path:
+    env = os.environ.get("BRIDGE_TASK_DB")
+    if env:
+        return Path(env).expanduser()
+    bridge_home = os.environ.get("BRIDGE_HOME") or str(Path.home() / ".agent-bridge")
+    return Path(bridge_home).expanduser() / "state" / "tasks.db"
+
+
+def _atomic_write_json(path: Path, payload: dict) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(path.suffix + f".tmp.{os.getpid()}")
+    data = json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=False) + "\n"
+    with tmp.open("w", encoding="utf-8") as fh:
+        fh.write(data)
+        fh.flush()
+        os.fsync(fh.fileno())
+    os.replace(tmp, path)
+
+
+def _merge_aggregate_state(path: Path, merger) -> None:
+    # Shared aggregate files are read-modify-write from per-agent cron runs;
+    # fcntl.flock on a sibling .lock keeps concurrent merges serialized.
+    path.parent.mkdir(parents=True, exist_ok=True)
+    lock_path = path.with_name(path.name + ".lock")
+    with lock_path.open("a") as lock_handle:
+        try:
+            fcntl.flock(lock_handle.fileno(), fcntl.LOCK_EX)
+            current: dict = {}
+            if path.exists():
+                try:
+                    current = json.loads(path.read_text(encoding="utf-8"))
+                    if not isinstance(current, dict):
+                        current = {}
+                except (OSError, json.JSONDecodeError):
+                    current = {}
+            merged = merger(current)
+            tmp = path.with_suffix(path.suffix + f".tmp.{os.getpid()}")
+            data = json.dumps(merged, ensure_ascii=False, indent=2, sort_keys=False) + "\n"
+            with tmp.open("w", encoding="utf-8") as fh:
+                fh.write(data)
+                fh.flush()
+                os.fsync(fh.fileno())
+            os.replace(tmp, path)
+        finally:
+            try:
+                fcntl.flock(lock_handle.fileno(), fcntl.LOCK_UN)
+            except OSError:
+                pass
+
+
+def _manifest_path(state_dir: Path, agent: str, date: str) -> Path:
+    return state_dir / agent / f"{date}.json"
+
+
+def _load_manifest(state_dir: Path, agent: str, date: str) -> dict | None:
+    path = _manifest_path(state_dir, agent, date)
+    if not path.exists():
+        return None
+    try:
+        raw = path.read_text(encoding="utf-8")
+        data = json.loads(raw)
+        if isinstance(data, dict):
+            return data
+    except (OSError, json.JSONDecodeError):
+        pass
+    # Corrupt — rotate aside and start fresh.
+    try:
+        stamp = datetime.now().strftime("%Y%m%dT%H%M%S")
+        path.rename(path.with_name(path.name + f".corrupt.{stamp}"))
+    except OSError:
+        pass
+    return None
+
+
+def _write_manifest(state_dir: Path, agent: str, date: str, data: dict) -> Path:
+    path = _manifest_path(state_dir, agent, date)
+    _atomic_write_json(path, data)
+    return path
+
+
+def _parse_daily_meta(text: str) -> dict:
+    match = DAILY_META_RE.search(text)
+    if not match:
+        return {}
+    try:
+        meta = json.loads(match.group("json"))
+    except json.JSONDecodeError:
+        return {}
+    return meta if isinstance(meta, dict) else {}
+
+
+def _strip_frontmatter(text: str) -> str:
+    if not text.startswith("---\n"):
+        return text
+    end = text.find("\n---", 4)
+    if end == -1:
+        return text
+    tail = text[end + 4:]
+    return tail.lstrip("\n")
+
+
+def _semantic_nonempty(path: Path) -> tuple[bool, int]:
+    try:
+        stat = path.stat()
+    except OSError:
+        return False, 0
+    size = stat.st_size
+    try:
+        raw = path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return False, size
+
+    body = _strip_frontmatter(raw)
+    # Drop meta marker line.
+    body = DAILY_META_RE.sub("", body)
+    # Drop H1 title line.
+    body = re.sub(r"^\s*#\s[^\n]*\n?", "", body, count=1)
+    # Drop session headers (`## Session ...`).
+    body = DAILY_SECTION_HEADER_RE.sub("", body)
+    # Drop Related/auto block (best-effort).
+    body = re.sub(r"^##\s+Related.*?(?=^##\s|\Z)", "", body, flags=re.MULTILINE | re.DOTALL)
+
+    has_bullet = bool(DAILY_BULLET_RE.search(body))
+    content_line = False
+    for line in body.splitlines():
+        stripped = line.strip()
+        if not stripped:
+            continue
+        if stripped.startswith("#") or stripped.startswith("<!--"):
+            continue
+        if len(stripped) >= 12:
+            content_line = True
+            break
+
+    nonempty = has_bullet or content_line
+    if size < 128 and not nonempty:
+        return False, size
+    return nonempty, size
+
+
+def _probe_daily_note(home: Path, date: str) -> dict:
+    path = _daily_note_path(home, date)
+    if not path.exists():
+        return {
+            "path": str(path),
+            "status": "missing",
+            "size_bytes": 0,
+            "has_meta_marker": False,
+            "meta_schema_version": 0,
+            "session_count": 0,
+            "writer_mix": {},
+            "has_tag_line": False,
+            "semantic_nonempty": False,
+        }
+    try:
+        raw = path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        raw = ""
+    meta = _parse_daily_meta(raw)
+    nonempty, size = _semantic_nonempty(path)
+    session_count = len(DAILY_SECTION_HEADER_RE.findall(raw))
+    writer_mix = meta.get("writer_mix") if isinstance(meta.get("writer_mix"), dict) else {}
+    return {
+        "path": str(path),
+        "status": "present" if nonempty else ("semantic-empty" if size > 0 else "missing"),
+        "size_bytes": size,
+        "has_meta_marker": bool(DAILY_META_RE.search(raw)),
+        "meta_schema_version": int(meta.get("schema_version") or 0),
+        "session_count": session_count,
+        "writer_mix": writer_mix,
+        "has_tag_line": bool(DAILY_TAG_LINE_RE.search(raw)),
+        "semantic_nonempty": nonempty,
+    }
+
+
+def _probe_legacy(home: Path, date: str) -> tuple[bool, list[dict]]:
+    candidate = home / "users" / "default" / "memory" / f"{date}.md"
+    checked: list[dict] = []
+    present = False
+    non_empty = False
+    if candidate.exists():
+        present = True
+        try:
+            text = candidate.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            text = ""
+        non_empty = len(text.strip()) > 0
+    checked.append({"path": str(candidate), "present": present, "non_empty": non_empty})
+    return (present and non_empty), checked
+
+
+def _scan_transcripts(
+    workdir: str,
+    start: datetime,
+    end: datetime,
+    transcripts_home: Path | None = None,
+) -> list[dict]:
+    if not workdir:
+        return []
+    results: list[dict] = []
+    seen: set[str] = set()
+    # Under linux-user isolation the target agent's transcripts live under
+    # its OS-user home, not the controller's. Callers resolve the right base.
+    base_home = transcripts_home if transcripts_home is not None else Path.home()
+    projects_root = base_home / ".claude" / "projects"
+    if not projects_root.is_dir():
+        return results
+    start_ts = start.timestamp()
+    end_ts = end.timestamp()
+    for slug in _workdir_slug_candidates(workdir):
+        project_dir = projects_root / slug
+        if not project_dir.is_dir():
+            continue
+        for jsonl in sorted(project_dir.glob("*.jsonl")):
+            key = str(jsonl)
+            if key in seen:
+                continue
+            seen.add(key)
+            try:
+                stat = jsonl.stat()
+            except OSError:
+                continue
+            first_ts: float | None = None
+            last_ts: float | None = None
+            counts = {"user": 0, "assistant": 0, "tool_use": 0, "tool_result": 0, "thinking": 0}
+            try:
+                with jsonl.open("r", encoding="utf-8", errors="replace") as fh:
+                    for line in fh:
+                        line = line.strip()
+                        if not line:
+                            continue
+                        try:
+                            event = json.loads(line)
+                        except json.JSONDecodeError:
+                            continue
+                        if not isinstance(event, dict):
+                            continue
+                        etype = event.get("type") or event.get("role") or ""
+                        if etype in counts:
+                            counts[etype] += 1
+                        else:
+                            # tool_use / tool_result sometimes nested under `message.content[*].type`.
+                            content = event.get("message", {}).get("content") if isinstance(event.get("message"), dict) else None
+                            if isinstance(content, list):
+                                for chunk in content:
+                                    if isinstance(chunk, dict):
+                                        ctype = chunk.get("type")
+                                        if ctype in counts:
+                                            counts[ctype] += 1
+                        ts_raw = event.get("timestamp") or event.get("ts") or event.get("time")
+                        ts_val: float | None = None
+                        if isinstance(ts_raw, (int, float)):
+                            ts_val = float(ts_raw)
+                            if ts_val > 1e12:
+                                ts_val = ts_val / 1000.0
+                        elif isinstance(ts_raw, str):
+                            try:
+                                ts_val = datetime.fromisoformat(ts_raw.replace("Z", "+00:00")).timestamp()
+                            except ValueError:
+                                ts_val = None
+                        if ts_val is not None:
+                            if first_ts is None or ts_val < first_ts:
+                                first_ts = ts_val
+                            if last_ts is None or ts_val > last_ts:
+                                last_ts = ts_val
+            except OSError:
+                continue
+            if first_ts is None:
+                first_ts = stat.st_mtime
+            if last_ts is None:
+                last_ts = stat.st_mtime
+            # Window overlap: session overlaps [start, end] if first_ts <= end and last_ts >= start.
+            if first_ts <= end_ts and last_ts >= start_ts:
+                results.append({
+                    "path": str(jsonl),
+                    "size_bytes": stat.st_size,
+                    "mtime": datetime.fromtimestamp(stat.st_mtime).isoformat(timespec="seconds"),
+                    "first_ts": datetime.fromtimestamp(first_ts).isoformat(timespec="seconds"),
+                    "last_ts": datetime.fromtimestamp(last_ts).isoformat(timespec="seconds"),
+                    "event_counts": counts,
+                })
+    return results
+
+
+def _scan_queue_events(db_path: Path, agent: str, start: datetime, end: datetime) -> list[int]:
+    if not db_path.exists():
+        return []
+    start_s = int(start.timestamp())
+    end_s = int(end.timestamp())
+    try:
+        conn = sqlite3.connect(str(db_path))
+        try:
+            cur = conn.execute(
+                """
+                SELECT DISTINCT task_id FROM task_events
+                WHERE event_type IN ('claimed','done')
+                  AND actor = ?
+                  AND created_ts BETWEEN ? AND ?
+                ORDER BY task_id
+                """,
+                (agent, start_s, end_s),
+            )
+            return [int(row[0]) for row in cur.fetchall()]
+        finally:
+            conn.close()
+    except sqlite3.Error:
+        return []
+
+
+def _task_status(db_path: Path, task_id: int) -> tuple[str | None, int | None]:
+    if not db_path.exists() or task_id <= 0:
+        return None, None
+    try:
+        conn = sqlite3.connect(str(db_path))
+        try:
+            cur = conn.execute(
+                "SELECT status, closed_ts FROM tasks WHERE id = ?", (task_id,),
+            )
+            row = cur.fetchone()
+            if not row:
+                return None, None
+            return row[0], (int(row[1]) if row[1] is not None else None)
+        finally:
+            conn.close()
+    except sqlite3.Error:
+        return None, None
+
+
+def _scan_ingested_captures(home: Path, start: datetime, end: datetime) -> tuple[list[str], list[str]]:
+    ingested = home / "raw" / "captures" / "ingested"
+    medium: list[str] = []
+    weak: list[str] = []
+    if not ingested.exists():
+        return medium, weak
+    start_naive = start.replace(tzinfo=None)
+    end_naive = end.replace(tzinfo=None)
+    for path in sorted(ingested.glob("*.json")):
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        if not isinstance(payload, dict):
+            continue
+        created_raw = payload.get("created_at") or ""
+        try:
+            ts = datetime.fromisoformat(str(created_raw))
+        except ValueError:
+            continue
+        ts_naive = ts.replace(tzinfo=None) if ts.tzinfo else ts
+        if not (start_naive <= ts_naive <= end_naive):
+            continue
+        source = str(payload.get("source") or "")
+        if source == "pre-compact-hook":
+            weak.append(str(path))
+        else:
+            medium.append(str(path))
+    return medium, weak
+
+
+def _scan_git(workdir: Path, start: datetime, end: datetime) -> list[str]:
+    if not workdir.exists() or not (workdir / ".git").exists():
+        return []
+    try:
+        result = subprocess.run(
+            [
+                "git", "-C", str(workdir), "log",
+                f"--since={start.isoformat()}",
+                f"--until={end.isoformat()}",
+                "--format=%H",
+            ],
+            capture_output=True, text=True, timeout=10, check=False,
+        )
+        if result.returncode != 0:
+            return []
+        return [line.strip() for line in result.stdout.splitlines() if line.strip()]
+    except (OSError, subprocess.TimeoutExpired):
+        return []
+
+
+def _classify_source_confidence(
+    strong: list, medium_tasks: list, medium_captures: list, weak_captures: list, git_commits: list,
+) -> str:
+    if strong:
+        return "strong"
+    if medium_tasks or medium_captures:
+        return "medium"
+    if weak_captures or git_commits:
+        return "weak"
+    return "none"
+
+
+def _gate_disabled(agent: str) -> bool:
+    # Mirror lib/bridge-agents.sh::bridge_agent_memory_daily_refresh_enabled via
+    # an env-var probe. The authoritative gate check runs in the stub when
+    # bash lib is sourced; Python is a fallback for direct invocation.
+    env_key = f"BRIDGE_AGENT_MEMORY_DAILY_REFRESH_{agent}"
+    val = os.environ.get(env_key, "").strip().lower()
+    if val in ("0", "false", "no", "off"):
+        return True
+    return False
+
+
+def _render_backfill_body(agent: str, date: str, activity: dict, daily_note: dict) -> str:
+    lines = [
+        f"# memory-daily backfill — {agent} / {date}",
+        "",
+        "Harvester detected activity for this date but canonical daily note is missing or semantic-empty.",
+        "",
+        f"- canonical path: `{daily_note.get('path')}`",
+        f"- canonical status: `{daily_note.get('status')}`",
+        f"- size_bytes: {daily_note.get('size_bytes')}",
+        "",
+        "## Activity snapshot",
+        "",
+    ]
+    strong = activity.get("strong", {}).get("transcript_sessions", [])
+    if strong:
+        lines.append(f"- strong: {len(strong)} transcript session(s)")
+    medium = activity.get("medium", {})
+    if medium.get("queue_task_ids"):
+        lines.append(f"- medium: queue tasks {medium['queue_task_ids']}")
+    if medium.get("ingested_captures_non_precompact"):
+        lines.append(f"- medium: {len(medium['ingested_captures_non_precompact'])} ingested capture(s)")
+    weak = activity.get("weak", {})
+    if weak.get("precompact_captures"):
+        lines.append(f"- weak: {len(weak['precompact_captures'])} precompact capture(s)")
+    if weak.get("git_commits"):
+        lines.append(f"- weak: {len(weak['git_commits'])} git commit(s)")
+    lines.append("")
+    lines.append("Please reconstruct the daily note from transcript / captures / commits above.")
+    return "\n".join(lines) + "\n"
+
+
+def _queue_backfill(agent: str, date: str, home: Path, workdir: str, activity: dict, daily_note: dict, dry_run: bool) -> int | None:
+    bridge_home = os.environ.get("BRIDGE_HOME") or str(Path.home() / ".agent-bridge")
+    task_cli = Path(bridge_home).expanduser() / "bridge-task.sh"
+    if not task_cli.exists() or dry_run:
+        return None
+    title = f"[memory-daily] backfill {agent} / {date}"
+    body = _render_backfill_body(agent, date, activity, daily_note)
+    tmp = tempfile.NamedTemporaryFile(
+        mode="w", encoding="utf-8", prefix="memory-daily-backfill-", suffix=".md", delete=False,
+    )
+    try:
+        tmp.write(body)
+        tmp.flush()
+        tmp.close()
+        try:
+            result = subprocess.run(
+                [
+                    "bash", str(task_cli), "create",
+                    "--to", agent,
+                    "--from", agent,
+                    "--title", title,
+                    "--body-file", tmp.name,
+                    "--priority", "normal",
+                ],
+                capture_output=True, text=True, timeout=30, check=False,
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            return None
+        if result.returncode != 0:
+            return None
+        # Parse task id from stdout. bridge-task.sh create typically emits `task #<id> ...`.
+        match = re.search(r"#(\d+)", result.stdout + " " + result.stderr)
+        if match:
+            return int(match.group(1))
+        return None
+    finally:
+        try:
+            os.unlink(tmp.name)
+        except OSError:
+            pass
+
+
+def _find_open_aggregate_task(db_path: Path, title_prefix: str) -> int | None:
+    if not db_path.exists():
+        return None
+    try:
+        conn = sqlite3.connect(str(db_path))
+        try:
+            cur = conn.execute(
+                """
+                SELECT id FROM tasks
+                WHERE title LIKE ?
+                  AND status IN ('queued','claimed','blocked')
+                ORDER BY id DESC LIMIT 1
+                """,
+                (title_prefix + "%",),
+            )
+            row = cur.fetchone()
+            return int(row[0]) if row else None
+        finally:
+            conn.close()
+    except sqlite3.Error:
+        return None
+
+
+def _aggregate_upsert_task(title: str, body: str, existing_id: int | None, dry_run: bool) -> int | None:
+    bridge_home = os.environ.get("BRIDGE_HOME") or str(Path.home() / ".agent-bridge")
+    task_cli = Path(bridge_home).expanduser() / "bridge-task.sh"
+    if not task_cli.exists() or dry_run:
+        return existing_id
+    tmp = tempfile.NamedTemporaryFile(
+        mode="w", encoding="utf-8", prefix="memory-daily-agg-", suffix=".md", delete=False,
+    )
+    try:
+        tmp.write(body)
+        tmp.flush()
+        tmp.close()
+        if existing_id is not None:
+            try:
+                subprocess.run(
+                    [
+                        "bash", str(task_cli), "update", str(existing_id),
+                        "--body-file", tmp.name,
+                    ],
+                    capture_output=True, text=True, timeout=30, check=False,
+                )
+            except (OSError, subprocess.TimeoutExpired):
+                pass
+            return existing_id
+        try:
+            result = subprocess.run(
+                [
+                    "bash", str(task_cli), "create",
+                    "--to", "patch",
+                    "--from", "memory-daily",
+                    "--title", title,
+                    "--body-file", tmp.name,
+                    "--priority", "normal",
+                ],
+                capture_output=True, text=True, timeout=30, check=False,
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            return None
+        if result.returncode != 0:
+            return None
+        match = re.search(r"#(\d+)", result.stdout + " " + result.stderr)
+        return int(match.group(1)) if match else None
+    finally:
+        try:
+            os.unlink(tmp.name)
+        except OSError:
+            pass
+
+
+def _render_aggregate_body(schema_label: str, state: dict) -> str:
+    lines = [
+        f"# memory-daily aggregate — {schema_label}",
+        "",
+        f"last_notified_at: `{state.get('last_notified_at') or ''}`",
+        f"window_start: `{state.get('window_start') or ''}`",
+        "",
+        "## By day",
+        "",
+    ]
+    by_day = state.get("by_day") or {}
+    for date in sorted(by_day.keys()):
+        day = by_day[date]
+        agents = day.get("agents") or []
+        lines.append(f"- {date}: {', '.join(agents) if agents else '(none)'}")
+    lines.append("")
+    return "\n".join(lines) + "\n"
+
+
+def _update_permission_aggregate(state_dir: Path, agent: str, date: str, now_iso: str, db_path: Path, dry_run: bool) -> int | None:
+    agg_path = state_dir / "admin-aggregate-skip.json"
+    title_prefix = "[memory-daily-skip-admin]"
+
+    def merger(current: dict) -> dict:
+        merged = dict(current) if isinstance(current, dict) else {}
+        merged.setdefault("schema", "memory-daily-admin-aggregate-v1")
+        merged.setdefault("window_start", now_iso)
+        by_day = merged.get("by_day") or {}
+        day_entry = by_day.get(date) or {"agents": [], "first_seen_at": now_iso, "last_seen_at": now_iso}
+        if agent not in day_entry.get("agents", []):
+            day_entry.setdefault("agents", []).append(agent)
+        day_entry["last_seen_at"] = now_iso
+        by_day[date] = day_entry
+        merged["by_day"] = by_day
+        merged["last_notified_at"] = now_iso
+        return merged
+
+    _merge_aggregate_state(agg_path, merger)
+    # Post-merge: decide whether to upsert the aggregate task.
+    try:
+        state = json.loads(agg_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        state = {}
+    existing_id = state.get("open_task_id")
+    if not existing_id:
+        existing_id = _find_open_aggregate_task(db_path, title_prefix)
+    body = _render_aggregate_body("permission-skip", state)
+    by_day = state.get("by_day") or {}
+    title = f"{title_prefix} {len(by_day)} agent-day(s) skipped (sudo missing)"
+    new_id = _aggregate_upsert_task(title, body, existing_id, dry_run)
+    if new_id is not None:
+        def merger2(current: dict) -> dict:
+            merged = dict(current) if isinstance(current, dict) else {}
+            merged["open_task_id"] = new_id
+            return merged
+        _merge_aggregate_state(agg_path, merger2)
+    return new_id
+
+
+def _update_escalation_aggregate(state_dir: Path, agent: str, date: str, now_iso: str, db_path: Path, dry_run: bool) -> int | None:
+    agg_path = state_dir / "admin-aggregate-escalated.json"
+    title_prefix = "[memory-daily-escalated]"
+
+    def merger(current: dict) -> dict:
+        merged = dict(current) if isinstance(current, dict) else {}
+        merged.setdefault("schema", "memory-daily-admin-aggregate-v1")
+        merged.setdefault("window_start", now_iso)
+        by_day = merged.get("by_day") or {}
+        day_entry = by_day.get(date) or {"agents": [], "first_seen_at": now_iso, "last_seen_at": now_iso}
+        if agent not in day_entry.get("agents", []):
+            day_entry.setdefault("agents", []).append(agent)
+        day_entry["last_seen_at"] = now_iso
+        by_day[date] = day_entry
+        merged["by_day"] = by_day
+        merged["last_notified_at"] = now_iso
+        return merged
+
+    _merge_aggregate_state(agg_path, merger)
+    try:
+        state = json.loads(agg_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        state = {}
+    existing_id = state.get("open_task_id")
+    if not existing_id:
+        existing_id = _find_open_aggregate_task(db_path, title_prefix)
+    body = _render_aggregate_body("escalated", state)
+    by_day = state.get("by_day") or {}
+    title = f"{title_prefix} {len(by_day)} agent-day chain(s) >3 attempts"
+    new_id = _aggregate_upsert_task(title, body, existing_id, dry_run)
+    if new_id is not None:
+        def merger2(current: dict) -> dict:
+            merged = dict(current) if isinstance(current, dict) else {}
+            merged["open_task_id"] = new_id
+            return merged
+        _merge_aggregate_state(agg_path, merger2)
+    return new_id
+
+
+def _build_result_payload(
+    status: str,
+    summary: str,
+    findings: list[str],
+    actions_taken: list[str],
+    artifacts: list[str],
+    needs_human_followup: bool,
+    recommended_next_steps: list[str],
+    confidence: str,
+) -> dict:
+    return {
+        "status": status,
+        "summary": summary,
+        "findings": findings,
+        "actions_taken": actions_taken,
+        "needs_human_followup": needs_human_followup,
+        "recommended_next_steps": recommended_next_steps,
+        "artifacts": artifacts,
+        "confidence": confidence,
+    }
+
+
+def cmd_harvest_daily(args: argparse.Namespace) -> int:
+    """Detection-only daily note harvester (issue #216)."""
+    agent = args.agent
+    home = Path(args.home).expanduser()
+    workdir = args.workdir
+    tz_name = args.tz or "Asia/Seoul"
+    date = args.date or _harvest_default_date(tz_name)
+    state_dir = _harvest_state_dir(args)
+    db_path = _harvest_task_db(args)
+    now_iso = _harvest_now_iso(tz_name)
+    run_id = os.environ.get("CRON_RUN_ID", "")
+
+    if not workdir:
+        sys.stderr.write("harvest-daily: --workdir is required (no fallback)\n")
+        return 2
+
+    # --- Skipped-permission branch -----------------------------------------
+    # Stub detected linux-user isolation but could not assume the target OS
+    # user (e.g. passwordless sudo missing). Record state=skipped-permission,
+    # merge (agent,date) into admin-aggregate-skip, and exit success so the
+    # cron run surfaces a structured skip rather than an engine error.
+    if args.skipped_permission:
+        prev = _load_manifest(state_dir, agent, date) or {}
+        prev_task = prev.get("task") or {}
+        manifest = {
+            "schema": "memory-daily-manifest-v1",
+            "agent": agent,
+            "date": date,
+            "timezone": tz_name,
+            "state": "skipped-permission",
+            "first_detected_at": prev.get("first_detected_at") or now_iso,
+            "last_checked_at": now_iso,
+            "resolved_at": prev.get("resolved_at"),
+            "attempts": int(prev.get("attempts") or 0),
+            "aggregate_notified_at": now_iso,
+            "run_id": run_id,
+            "daily_note": {
+                "path": str(_daily_note_path(home, date)),
+                "status": "missing",
+                "size_bytes": 0,
+                "has_meta_marker": False,
+                "meta_schema_version": 0,
+                "session_count": 0,
+                "writer_mix": {},
+                "has_tag_line": False,
+                "semantic_nonempty": False,
+            },
+            "legacy_paths_checked": [],
+            "legacy_note_present": False,
+            "activity": {
+                "strong": {"transcript_sessions": []},
+                "medium": {"queue_task_ids": [], "ingested_captures_non_precompact": []},
+                "weak": {"precompact_captures": [], "git_commits": []},
+            },
+            "decision": {
+                "source_confidence": "none",
+                "action": "skip",
+                "reason_code": "permission",
+            },
+            "task": {
+                "current_task_id": prev_task.get("current_task_id"),
+                "current_task_status": prev_task.get("current_task_status"),
+                "last_task_id": prev_task.get("last_task_id"),
+                "last_task_closed_at": prev_task.get("last_task_closed_at"),
+                "requeue_after": None,
+            },
+        }
+        manifest_path = state_dir / agent / f"{date}.json"
+        if not args.dry_run:
+            manifest_path = _write_manifest(state_dir, agent, date, manifest)
+            _update_permission_aggregate(
+                state_dir, agent, date, now_iso, db_path, args.dry_run,
+            )
+        summary = f"memory-daily sudo wrap unavailable for {agent}/{date}"
+        if args.os_user:
+            summary += f" (os_user={args.os_user})"
+        findings = [
+            f"skipped-permission for agent={agent}"
+            + (f" os_user={args.os_user}" if args.os_user else "")
+        ]
+        payload = _build_result_payload(
+            status="skipped",
+            summary=summary,
+            findings=findings,
+            actions_taken=["skip-permission"],
+            artifacts=[str(manifest_path)],
+            needs_human_followup=True,
+            recommended_next_steps=[
+                "configure passwordless sudo for target os_user",
+                "re-run bootstrap-memory-system.sh --apply",
+            ],
+            confidence="high",
+        )
+        return _emit_result(args, payload)
+
+    # --- Gate check ---------------------------------------------------------
+    if args.disabled_gate or _gate_disabled(agent):
+        prev = _load_manifest(state_dir, agent, date) or {}
+        manifest = {
+            "schema": "memory-daily-manifest-v1",
+            "agent": agent,
+            "date": date,
+            "timezone": tz_name,
+            "state": "disabled",
+            "first_detected_at": prev.get("first_detected_at") or now_iso,
+            "last_checked_at": now_iso,
+            "resolved_at": prev.get("resolved_at"),
+            "attempts": prev.get("attempts") or 0,
+            "aggregate_notified_at": prev.get("aggregate_notified_at"),
+            "run_id": run_id,
+            "daily_note": {
+                "path": str(_daily_note_path(home, date)),
+                "status": "missing",
+                "size_bytes": 0,
+                "has_meta_marker": False,
+                "meta_schema_version": 0,
+                "session_count": 0,
+                "writer_mix": {},
+                "has_tag_line": False,
+                "semantic_nonempty": False,
+            },
+            "legacy_paths_checked": [],
+            "legacy_note_present": False,
+            "activity": {"strong": {"transcript_sessions": []}, "medium": {"queue_task_ids": [], "ingested_captures_non_precompact": []}, "weak": {"precompact_captures": [], "git_commits": []}},
+            "decision": {"source_confidence": "none", "action": "skip", "reason_code": "disabled"},
+            "task": {"current_task_id": None, "current_task_status": None, "last_task_id": prev.get("task", {}).get("last_task_id"), "last_task_closed_at": prev.get("task", {}).get("last_task_closed_at"), "requeue_after": None},
+        }
+        manifest_path = state_dir / agent / f"{date}.json"
+        if not args.dry_run:
+            manifest_path = _write_manifest(state_dir, agent, date, manifest)
+        payload = _build_result_payload(
+            status="disabled",
+            summary=f"memory-daily gate off for {agent}/{date}",
+            findings=[f"gate disabled for agent={agent}"],
+            actions_taken=[],
+            artifacts=[str(manifest_path)],
+            needs_human_followup=False,
+            recommended_next_steps=[],
+            confidence="high",
+        )
+        return _emit_result(args, payload)
+
+    # --- Probe canonical + legacy ------------------------------------------
+    daily_note = _probe_daily_note(home, date)
+    legacy_present, legacy_checked = _probe_legacy(home, date)
+
+    # --- Activity scan ------------------------------------------------------
+    start_dt, end_dt = _harvest_date_window(date, tz_name)
+    transcripts_home = (
+        Path(args.transcripts_home).expanduser() if args.transcripts_home else None
+    )
+    transcripts = _scan_transcripts(workdir, start_dt, end_dt, transcripts_home=transcripts_home)
+    queue_tasks = _scan_queue_events(db_path, agent, start_dt, end_dt)
+    medium_caps, weak_caps = _scan_ingested_captures(home, start_dt, end_dt)
+    git_commits = _scan_git(Path(workdir).expanduser(), start_dt, end_dt)
+
+    source_confidence = _classify_source_confidence(
+        transcripts, queue_tasks, medium_caps, weak_caps, git_commits,
+    )
+
+    # --- Load previous manifest for carry-over / dedupe ---------------------
+    prev = _load_manifest(state_dir, agent, date) or {}
+    prev_task = prev.get("task") or {}
+    prev_state = prev.get("state")
+    attempts = int(prev.get("attempts") or 0)
+    first_detected_at = prev.get("first_detected_at") or now_iso
+
+    # --- Resolution / dedupe -----------------------------------------------
+    new_state: str | None = None
+    action: str = "no-op"
+    reason_code: str | None = None
+    actions_taken: list[str] = []
+    current_task_id = prev_task.get("current_task_id")
+    current_task_status: str | None = None
+    resolved_at = prev.get("resolved_at")
+    should_requeue = False
+    cooldown_block = False
+
+    if prev_state == "queued" and daily_note["semantic_nonempty"]:
+        new_state = "resolved"
+        action = "ok"
+        resolved_at = now_iso
+    elif prev_state == "queued" and current_task_id:
+        status, closed_ts = _task_status(db_path, int(current_task_id))
+        current_task_status = status
+        if status in ("queued", "claimed", "blocked"):
+            cooldown_block = True
+        elif status in ("done", "cancelled"):
+            if closed_ts is not None:
+                age_s = int(datetime.now(_harvest_tz_zone(tz_name)).timestamp()) - closed_ts
+                if age_s < 24 * 3600:
+                    cooldown_block = True
+                else:
+                    if not daily_note["semantic_nonempty"]:
+                        should_requeue = True
+
+    # --- Decision -----------------------------------------------------------
+    if new_state is None:
+        if daily_note["semantic_nonempty"]:
+            new_state = "checked"
+            action = "ok"
+        elif legacy_present:
+            new_state = "checked"
+            action = "no-op"
+            reason_code = "legacy_note_present"
+        elif source_confidence in ("strong", "medium"):
+            if cooldown_block:
+                new_state = "queued"
+                action = "no-op"
+                reason_code = "dedupe_cooldown"
+            else:
+                new_state = "queued"
+                action = "queue-backfill"
+                actions_taken = ["queue-backfill"]
+        elif source_confidence == "weak":
+            new_state = "checked"
+            action = "no-op"
+            reason_code = "weak_only_activity"
+        else:
+            new_state = "checked"
+            action = "no-op"
+            reason_code = "no_activity"
+
+    # Attempts tracking + escalation
+    if action == "queue-backfill":
+        if prev_state != "queued":
+            attempts = 1
+        elif should_requeue:
+            attempts += 1
+        else:
+            attempts = max(1, attempts)
+        if attempts > 3:
+            new_state = "escalated"
+
+    # --- Actions ------------------------------------------------------------
+    new_task_id: int | None = None
+    if action == "queue-backfill" and (prev_state != "queued" or should_requeue):
+        activity_dict = {
+            "strong": {"transcript_sessions": transcripts},
+            "medium": {"queue_task_ids": queue_tasks, "ingested_captures_non_precompact": medium_caps},
+            "weak": {"precompact_captures": weak_caps, "git_commits": git_commits},
+        }
+        new_task_id = _queue_backfill(agent, date, home, workdir, activity_dict, daily_note, args.dry_run)
+
+    last_task_id = prev_task.get("last_task_id")
+    last_task_closed_at = prev_task.get("last_task_closed_at")
+    if should_requeue and current_task_id:
+        last_task_id = current_task_id
+        last_task_closed_at = prev_task.get("last_task_closed_at")
+    if new_task_id:
+        current_task_id = new_task_id
+        current_task_status = "queued"
+
+    # --- Escalation aggregate ----------------------------------------------
+    aggregate_notified_at = prev.get("aggregate_notified_at")
+    if new_state == "escalated":
+        _update_escalation_aggregate(state_dir, agent, date, now_iso, db_path, args.dry_run)
+        aggregate_notified_at = now_iso
+
+    # --- Build manifest -----------------------------------------------------
+    manifest = {
+        "schema": "memory-daily-manifest-v1",
+        "agent": agent,
+        "date": date,
+        "timezone": tz_name,
+        "state": new_state,
+        "first_detected_at": first_detected_at,
+        "last_checked_at": now_iso,
+        "resolved_at": resolved_at,
+        "attempts": attempts,
+        "aggregate_notified_at": aggregate_notified_at,
+        "run_id": run_id,
+        "daily_note": daily_note,
+        "legacy_paths_checked": legacy_checked,
+        "legacy_note_present": legacy_present,
+        "activity": {
+            "strong": {"transcript_sessions": transcripts},
+            "medium": {
+                "queue_task_ids": queue_tasks,
+                "ingested_captures_non_precompact": medium_caps,
+            },
+            "weak": {
+                "precompact_captures": weak_caps,
+                "git_commits": git_commits,
+            },
+        },
+        "decision": {
+            "source_confidence": source_confidence,
+            "action": action,
+            "reason_code": reason_code,
+        },
+        "task": {
+            "current_task_id": current_task_id,
+            "current_task_status": current_task_status,
+            "last_task_id": last_task_id,
+            "last_task_closed_at": last_task_closed_at,
+            "requeue_after": None,
+        },
+    }
+
+    manifest_path = state_dir / agent / f"{date}.json"
+    if not args.dry_run:
+        manifest_path = _write_manifest(state_dir, agent, date, manifest)
+
+    # --- Build result payload ----------------------------------------------
+    status_map = {
+        ("checked", "ok"): "ok",
+        ("checked", "no-op"): "noop",
+        ("queued", "queue-backfill"): "queued",
+        ("queued", "no-op"): "queued",
+        ("resolved", "ok"): "ok",
+        ("escalated", "queue-backfill"): "queued",
+        ("escalated", "no-op"): "queued",
+    }
+    status = status_map.get((new_state, action), "noop")
+    summary_bits = [f"{agent}/{date}", new_state, action]
+    if reason_code:
+        summary_bits.append(f"reason={reason_code}")
+    summary = " ".join(summary_bits)
+    findings = [
+        f"canonical={daily_note['status']} size={daily_note['size_bytes']}",
+        f"source_confidence={source_confidence}",
+        f"transcripts={len(transcripts)} queue_tasks={len(queue_tasks)} medium_caps={len(medium_caps)} weak_caps={len(weak_caps)} git_commits={len(git_commits)}",
+    ]
+    if legacy_present:
+        findings.append("legacy_note_present=true")
+    if cooldown_block:
+        findings.append("dedupe_cooldown=true")
+    artifacts = [str(manifest_path)]
+    confidence = "high" if source_confidence in ("strong", "none") else "medium"
+
+    payload = _build_result_payload(
+        status=status,
+        summary=summary,
+        findings=findings,
+        actions_taken=actions_taken,
+        artifacts=artifacts,
+        needs_human_followup=(new_state == "escalated"),
+        recommended_next_steps=(
+            ["investigate escalation chain"] if new_state == "escalated" else []
+        ),
+        confidence=confidence,
+    )
+    return _emit_result(args, payload)
+
+
+def _emit_result(args: argparse.Namespace, payload: dict) -> int:
+    sidecar_out = getattr(args, "sidecar_out", None)
+    if sidecar_out:
+        try:
+            _atomic_write_json(Path(sidecar_out).expanduser(), payload)
+        except OSError as exc:
+            sys.stderr.write(f"harvest-daily: sidecar write failed: {exc}\n")
+            return 2
+    try:
+        if args.json:
+            print(json.dumps(payload, ensure_ascii=True))
+        else:
+            print(f"{payload['status']} {payload['summary']} actions={payload['actions_taken']}")
+    except OSError:
+        pass
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser()
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -2485,6 +3578,37 @@ def build_parser() -> argparse.ArgumentParser:
     src.add_argument("--content-file")
     da_parser.add_argument("--json", action="store_true")
     da_parser.set_defaults(func=cmd_daily_append)
+
+    hd_parser = subparsers.add_parser(
+        "harvest-daily",
+        help="Detection-only daily note harvester (issue #216)",
+    )
+    hd_parser.add_argument("--agent", required=True)
+    hd_parser.add_argument("--home", required=True, help="agent profile home root")
+    hd_parser.add_argument("--workdir", required=True, help="agent workdir (no fallback)")
+    hd_parser.add_argument("--date", help="YYYY-MM-DD; defaults to yesterday in --tz")
+    hd_parser.add_argument("--tz", default="Asia/Seoul")
+    hd_parser.add_argument("--state-dir", help="override $BRIDGE_STATE_DIR/memory-daily")
+    hd_parser.add_argument("--sidecar-out", help="authoritative RESULT_SCHEMA JSON path")
+    hd_parser.add_argument("--dry-run", action="store_true")
+    hd_parser.add_argument("--json", action="store_true")
+    hd_parser.add_argument(
+        "--disabled-gate", action="store_true",
+        help="force disabled branch (stub detected gate off)",
+    )
+    hd_parser.add_argument(
+        "--skipped-permission", action="store_true",
+        help="stub could not assume target OS user; record skipped-permission + update aggregate",
+    )
+    hd_parser.add_argument(
+        "--os-user",
+        help="target OS user for linux-user isolation (audit / aggregate note)",
+    )
+    hd_parser.add_argument(
+        "--transcripts-home",
+        help="override base for ~/.claude/projects scan (resolved by stub for linux-user isolation)",
+    )
+    hd_parser.set_defaults(func=cmd_harvest_daily)
 
     return parser
 
