@@ -4632,6 +4632,86 @@ assert_contains "$(cat "$CONFLICT_ROOT/sample.txt")" "alpha-upstream"
 [[ -f "$CONFLICT_ROOT/sample.txt.upgrade-conflict" ]] || die "upgrade did not write conflict backup file"
 assert_contains "$(cat "$CONFLICT_ROOT/sample.txt.upgrade-conflict")" "<<<<<<<"
 
+log "smart upgrade repairs executable bit when content already matches"
+MODE_ROOT="$TMP_ROOT/upgrade-mode-root"
+MODE_REPO="$TMP_ROOT/upgrade-mode-repo"
+mkdir -p "$MODE_ROOT" "$MODE_REPO"
+git -C "$MODE_REPO" init -q
+git -C "$MODE_REPO" config user.email smoke-test
+git -C "$MODE_REPO" config user.name "Bridge Smoke"
+cat >"$MODE_REPO/tool.sh" <<'EOF'
+#!/usr/bin/env bash
+echo "hello"
+EOF
+chmod 0755 "$MODE_REPO/tool.sh"
+git -C "$MODE_REPO" add tool.sh
+git -C "$MODE_REPO" update-index --chmod=+x tool.sh
+git -C "$MODE_REPO" commit -qm "tool script with exec bit"
+MODE_BASE="$(git -C "$MODE_REPO" rev-parse HEAD)"
+# Plant the live file byte-for-byte identical but with exec bit stripped.
+cp "$MODE_REPO/tool.sh" "$MODE_ROOT/tool.sh"
+chmod 0644 "$MODE_ROOT/tool.sh"
+ANALYZE_JSON="$(python3 "$REPO_ROOT/bridge-upgrade.py" analyze-live --source-root "$MODE_REPO" --target-root "$MODE_ROOT" --base-ref "$MODE_BASE")"
+assert_contains "$ANALYZE_JSON" "\"mode_drift\": 1"
+assert_contains "$ANALYZE_JSON" "\"classification\": \"mode_drift\""
+APPLY_JSON="$(python3 "$REPO_ROOT/bridge-upgrade.py" apply-live --source-root "$MODE_REPO" --target-root "$MODE_ROOT" --base-ref "$MODE_BASE")"
+assert_contains "$APPLY_JSON" "\"files_mode_synced\": 1"
+assert_contains "$APPLY_JSON" "\"applied\": true"
+# apply-live stamps the source's exec bits onto the live file.
+mode_after="$(stat -f '%Lp' "$MODE_ROOT/tool.sh" 2>/dev/null || stat -c '%a' "$MODE_ROOT/tool.sh")"
+[[ "$mode_after" == "755" ]] || die "expected tool.sh to be 755 after mode sync, got $mode_after"
+# A second pass is idempotent (no drift, no rewrites).
+SECOND_JSON="$(python3 "$REPO_ROOT/bridge-upgrade.py" apply-live --source-root "$MODE_REPO" --target-root "$MODE_ROOT" --base-ref "$MODE_BASE")"
+assert_contains "$SECOND_JSON" "\"files_mode_synced\": 0"
+assert_contains "$SECOND_JSON" "\"files_skipped_noop\": 1"
+
+log "smart upgrade trusts git index mode over working-tree stat"
+MISMATCH_REPO="$TMP_ROOT/upgrade-mode-mismatch-repo"
+MISMATCH_ROOT="$TMP_ROOT/upgrade-mode-mismatch-root"
+mkdir -p "$MISMATCH_REPO" "$MISMATCH_ROOT"
+git -C "$MISMATCH_REPO" init -q
+git -C "$MISMATCH_REPO" config user.email smoke-test
+git -C "$MISMATCH_REPO" config user.name "Bridge Smoke"
+printf '#!/usr/bin/env bash\necho mismatch\n' >"$MISMATCH_REPO/tool.sh"
+chmod 0755 "$MISMATCH_REPO/tool.sh"
+git -C "$MISMATCH_REPO" add tool.sh
+git -C "$MISMATCH_REPO" update-index --chmod=+x tool.sh
+git -C "$MISMATCH_REPO" commit -qm "tool.sh tracked 100755"
+MISMATCH_BASE="$(git -C "$MISMATCH_REPO" rev-parse HEAD)"
+# Reproduce the developer-checkout bug: git index still says 100755 but
+# the working-tree file loses its exec bit (this happened on the actual
+# checkout used to author this PR — stat returned 0744 / 0700 for the two
+# promoted scripts). apply-live must trust the index, not stat.
+chmod 0644 "$MISMATCH_REPO/tool.sh"
+cp "$MISMATCH_REPO/tool.sh" "$MISMATCH_ROOT/tool.sh"
+chmod 0644 "$MISMATCH_ROOT/tool.sh"
+MISMATCH_JSON="$(python3 "$REPO_ROOT/bridge-upgrade.py" apply-live --source-root "$MISMATCH_REPO" --target-root "$MISMATCH_ROOT" --base-ref "$MISMATCH_BASE")"
+assert_contains "$MISMATCH_JSON" "\"files_mode_synced\": 1"
+mode_mismatch="$(stat -f '%Lp' "$MISMATCH_ROOT/tool.sh" 2>/dev/null || stat -c '%a' "$MISMATCH_ROOT/tool.sh")"
+[[ "$mode_mismatch" == "755" ]] || die "expected tool.sh to be 755 from git index (100755), got $mode_mismatch (worktree drift must not leak)"
+
+log "smart upgrade propagates exec-bit removal from source"
+REMOVE_ROOT="$TMP_ROOT/upgrade-mode-remove-root"
+mkdir -p "$REMOVE_ROOT"
+# Source says 0644 (we re-flip the tool.sh in MODE_REPO), live is 0755.
+cp "$MODE_REPO/tool.sh" "$REMOVE_ROOT/tool.sh"
+chmod 0755 "$REMOVE_ROOT/tool.sh"
+# Create a fresh source tree where the same file is tracked as 100644.
+REMOVE_REPO="$TMP_ROOT/upgrade-mode-remove-repo"
+mkdir -p "$REMOVE_REPO"
+git -C "$REMOVE_REPO" init -q
+git -C "$REMOVE_REPO" config user.email smoke-test
+git -C "$REMOVE_REPO" config user.name "Bridge Smoke"
+cp "$MODE_REPO/tool.sh" "$REMOVE_REPO/tool.sh"
+chmod 0644 "$REMOVE_REPO/tool.sh"
+git -C "$REMOVE_REPO" add tool.sh
+git -C "$REMOVE_REPO" commit -qm "tool script without exec bit"
+REMOVE_BASE="$(git -C "$REMOVE_REPO" rev-parse HEAD)"
+REMOVE_JSON="$(python3 "$REPO_ROOT/bridge-upgrade.py" apply-live --source-root "$REMOVE_REPO" --target-root "$REMOVE_ROOT" --base-ref "$REMOVE_BASE")"
+assert_contains "$REMOVE_JSON" "\"files_mode_synced\": 1"
+mode_removed="$(stat -f '%Lp' "$REMOVE_ROOT/tool.sh" 2>/dev/null || stat -c '%a' "$REMOVE_ROOT/tool.sh")"
+[[ "$mode_removed" == "644" ]] || die "expected tool.sh to be 644 after exec-bit removal, got $mode_removed"
+
 log "strict merge aborts on conflict without touching live file"
 STRICT_ROOT="$TMP_ROOT/upgrade-strict-root"
 mkdir -p "$STRICT_ROOT"

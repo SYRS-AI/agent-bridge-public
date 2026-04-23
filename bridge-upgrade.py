@@ -45,9 +45,63 @@ def save_json(path: Path, payload: Any) -> None:
     os.chmod(path, 0o600)
 
 
-def write_bytes(path: Path, data: bytes) -> None:
+def write_bytes(path: Path, data: bytes, mode: int | None = None) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_bytes(data)
+    if mode is not None:
+        os.chmod(path, mode)
+
+
+def tracked_files_modes(source_root: Path) -> dict[str, int]:
+    # {relpath: git_mode_in_octal_int} from `git ls-files -s -z`. Using
+    # the git index (not the working tree) is required because a dev's
+    # checkout can have drifted filesystem permissions (e.g. 0744 / 0700
+    # inherited from umask or editor rewrites) even when git tracks the
+    # file as 100755. Anything that decides "should this be executable
+    # downstream" must consult the index, not `stat`.
+    proc = subprocess.run(
+        ["git", "-C", str(source_root), "ls-files", "-z", "-s"],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+        check=False,
+    )
+    modes: dict[str, int] = {}
+    if proc.returncode != 0:
+        return modes
+    # Record format: "<mode> <hash> <stage>\t<relpath>\0"
+    for record in proc.stdout.split(b"\x00"):
+        if not record:
+            continue
+        try:
+            header, relpath_bytes = record.split(b"\t", 1)
+        except ValueError:
+            continue
+        parts = header.split(b" ")
+        if not parts:
+            continue
+        try:
+            mode_octal = int(parts[0].decode("ascii"), 8)
+            relpath = relpath_bytes.decode("utf-8")
+        except (UnicodeDecodeError, ValueError):
+            continue
+        modes[relpath] = mode_octal
+    return modes
+
+
+_tracked_modes_cache: dict[str, dict[str, int]] = {}
+
+
+def git_tracked_exec_bits(source_root: Path, relpath: str) -> int:
+    # 100755 is the only tracked-executable regular-file mode in git.
+    # 100644 (regular) and 120000 (symlink) carry no exec bit downstream.
+    # Cache per source_root so a single analyze/apply cycle does not
+    # fork `git ls-files` per path.
+    key = str(source_root)
+    modes = _tracked_modes_cache.get(key)
+    if modes is None:
+        modes = tracked_files_modes(source_root)
+        _tracked_modes_cache[key] = modes
+    return 0o111 if modes.get(relpath) == 0o100755 else 0
 
 
 def remove_path(path: Path) -> None:
@@ -653,6 +707,7 @@ def analyze_live(source_root: Path, target_root: Path, base_ref: str) -> dict[st
         "live_only": 0,
         "merge_required": 0,
         "unknown_base_live_diff": 0,
+        "mode_drift": 0,
     }
 
     for relpath in tracked_files(source_root):
@@ -668,8 +723,29 @@ def analyze_live(source_root: Path, target_root: Path, base_ref: str) -> dict[st
             classification = "missing_live"
             strategy = "deploy_upstream"
         elif upstream == live:
-            classification = "unchanged"
-            strategy = "noop"
+            # Content matches. Check whether the exec bit also matches
+            # source — a mode-only drift (live 0644 vs upstream 0755 or
+            # vice versa) is still a drift worth repairing, even though
+            # the bytes agree. Without this the previous content-only
+            # classifier skipped the file entirely, leaving the live
+            # install with the wrong permission. Source-of-truth is the
+            # git index, not source_path.stat() — a dev checkout may
+            # have drifted filesystem perms (0744 / 0700) while git
+            # still tracks 100755, and using stat would propagate the
+            # bad worktree mode to every downstream install.
+            source_exec = git_tracked_exec_bits(source_root, relpath)
+            live_exec = 0
+            if not live_path.is_symlink():
+                try:
+                    live_exec = live_path.stat().st_mode & 0o111
+                except OSError:
+                    live_exec = 0
+            if source_exec != live_exec:
+                classification = "mode_drift"
+                strategy = "sync_mode"
+            else:
+                classification = "unchanged"
+                strategy = "noop"
         elif not base_ref or base is None:
             classification = "unknown_base_live_diff"
             strategy = "keep_live"
@@ -744,6 +820,7 @@ def apply_live(source_root: Path, target_root: Path, base_ref: str, dry_run: boo
         "files_merged_conflict": 0,
         "files_preserved_live": 0,
         "files_skipped_noop": analysis["counts"].get("unchanged", 0),
+        "files_mode_synced": 0,
     }
     conflicts: list[str] = []
     conflict_backups: list[str] = []
@@ -755,6 +832,11 @@ def apply_live(source_root: Path, target_root: Path, base_ref: str, dry_run: boo
         upstream = (source_root / relpath).read_bytes()
         live = live_path.read_bytes() if live_path.exists() else None
         base = git_file_bytes(source_root, base_ref, relpath) if base_ref else None
+
+        if classification == "mode_drift":
+            counts["files_mode_synced"] += 1
+            actions.append({"path": relpath, "action": "sync_mode"})
+            continue
 
         if classification in {"missing_live", "upstream_only"}:
             counts["files_copied"] += 1
@@ -856,9 +938,22 @@ def apply_live(source_root: Path, target_root: Path, base_ref: str, dry_run: boo
         if kind in {"noop", "keep_live"}:
             continue
         live_path = target_root / action["path"]
+        # Authoritatively mirror the git-tracked exec bit. `0o644 | 0`
+        # for non-executable tracked files also propagates exec-bit
+        # *removals* (100755 → 100644 upstream), which the earlier
+        # "only chmod when exec_bits" variant silently ignored.
+        target_mode = 0o644 | git_tracked_exec_bits(source_root, action["path"])
+        if kind == "sync_mode":
+            try:
+                os.chmod(live_path, target_mode)
+            except FileNotFoundError:
+                # Live file was removed between analyze and apply.
+                # Treat as a no-op — the next upgrade pass will redeploy.
+                pass
+            continue
         if kind == "merge_conflict":
             write_bytes(Path(action["conflict_backup_path"]), action["conflict_bytes"])
-        write_bytes(live_path, action["bytes"])
+        write_bytes(live_path, action["bytes"], target_mode)
 
     payload["applied"] = True
     return payload
