@@ -52,14 +52,56 @@ def write_bytes(path: Path, data: bytes, mode: int | None = None) -> None:
         os.chmod(path, mode)
 
 
-def source_exec_bits(source_path: Path) -> int:
-    # Preserve only the executable bits from the checked-out source. Falls
-    # back to 0 when the source file is unavailable (e.g. symlink to a
-    # missing target) so callers can `| 0o644` the result safely.
-    try:
-        return source_path.stat().st_mode & 0o111
-    except OSError:
-        return 0
+def tracked_files_modes(source_root: Path) -> dict[str, int]:
+    # {relpath: git_mode_in_octal_int} from `git ls-files -s -z`. Using
+    # the git index (not the working tree) is required because a dev's
+    # checkout can have drifted filesystem permissions (e.g. 0744 / 0700
+    # inherited from umask or editor rewrites) even when git tracks the
+    # file as 100755. Anything that decides "should this be executable
+    # downstream" must consult the index, not `stat`.
+    proc = subprocess.run(
+        ["git", "-C", str(source_root), "ls-files", "-z", "-s"],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+        check=False,
+    )
+    modes: dict[str, int] = {}
+    if proc.returncode != 0:
+        return modes
+    # Record format: "<mode> <hash> <stage>\t<relpath>\0"
+    for record in proc.stdout.split(b"\x00"):
+        if not record:
+            continue
+        try:
+            header, relpath_bytes = record.split(b"\t", 1)
+        except ValueError:
+            continue
+        parts = header.split(b" ")
+        if not parts:
+            continue
+        try:
+            mode_octal = int(parts[0].decode("ascii"), 8)
+            relpath = relpath_bytes.decode("utf-8")
+        except (UnicodeDecodeError, ValueError):
+            continue
+        modes[relpath] = mode_octal
+    return modes
+
+
+_tracked_modes_cache: dict[str, dict[str, int]] = {}
+
+
+def git_tracked_exec_bits(source_root: Path, relpath: str) -> int:
+    # 100755 is the only tracked-executable regular-file mode in git.
+    # 100644 (regular) and 120000 (symlink) carry no exec bit downstream.
+    # Cache per source_root so a single analyze/apply cycle does not
+    # fork `git ls-files` per path.
+    key = str(source_root)
+    modes = _tracked_modes_cache.get(key)
+    if modes is None:
+        modes = tracked_files_modes(source_root)
+        _tracked_modes_cache[key] = modes
+    return 0o111 if modes.get(relpath) == 0o100755 else 0
 
 
 def remove_path(path: Path) -> None:
@@ -686,8 +728,12 @@ def analyze_live(source_root: Path, target_root: Path, base_ref: str) -> dict[st
             # vice versa) is still a drift worth repairing, even though
             # the bytes agree. Without this the previous content-only
             # classifier skipped the file entirely, leaving the live
-            # install with the wrong permission.
-            source_exec = source_exec_bits(source_path)
+            # install with the wrong permission. Source-of-truth is the
+            # git index, not source_path.stat() — a dev checkout may
+            # have drifted filesystem perms (0744 / 0700) while git
+            # still tracks 100755, and using stat would propagate the
+            # bad worktree mode to every downstream install.
+            source_exec = git_tracked_exec_bits(source_root, relpath)
             live_exec = 0
             if not live_path.is_symlink():
                 try:
@@ -892,12 +938,11 @@ def apply_live(source_root: Path, target_root: Path, base_ref: str, dry_run: boo
         if kind in {"noop", "keep_live"}:
             continue
         live_path = target_root / action["path"]
-        source_path = source_root / action["path"]
-        # Authoritatively mirror the source tree's exec bit. `0o644 | 0`
+        # Authoritatively mirror the git-tracked exec bit. `0o644 | 0`
         # for non-executable tracked files also propagates exec-bit
         # *removals* (100755 → 100644 upstream), which the earlier
         # "only chmod when exec_bits" variant silently ignored.
-        target_mode = 0o644 | source_exec_bits(source_path)
+        target_mode = 0o644 | git_tracked_exec_bits(source_root, action["path"])
         if kind == "sync_mode":
             try:
                 os.chmod(live_path, target_mode)

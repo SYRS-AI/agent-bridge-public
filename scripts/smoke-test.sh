@@ -4665,6 +4665,31 @@ SECOND_JSON="$(python3 "$REPO_ROOT/bridge-upgrade.py" apply-live --source-root "
 assert_contains "$SECOND_JSON" "\"files_mode_synced\": 0"
 assert_contains "$SECOND_JSON" "\"files_skipped_noop\": 1"
 
+log "smart upgrade trusts git index mode over working-tree stat"
+MISMATCH_REPO="$TMP_ROOT/upgrade-mode-mismatch-repo"
+MISMATCH_ROOT="$TMP_ROOT/upgrade-mode-mismatch-root"
+mkdir -p "$MISMATCH_REPO" "$MISMATCH_ROOT"
+git -C "$MISMATCH_REPO" init -q
+git -C "$MISMATCH_REPO" config user.email smoke-test
+git -C "$MISMATCH_REPO" config user.name "Bridge Smoke"
+printf '#!/usr/bin/env bash\necho mismatch\n' >"$MISMATCH_REPO/tool.sh"
+chmod 0755 "$MISMATCH_REPO/tool.sh"
+git -C "$MISMATCH_REPO" add tool.sh
+git -C "$MISMATCH_REPO" update-index --chmod=+x tool.sh
+git -C "$MISMATCH_REPO" commit -qm "tool.sh tracked 100755"
+MISMATCH_BASE="$(git -C "$MISMATCH_REPO" rev-parse HEAD)"
+# Reproduce the developer-checkout bug: git index still says 100755 but
+# the working-tree file loses its exec bit (this happened on the actual
+# checkout used to author this PR — stat returned 0744 / 0700 for the two
+# promoted scripts). apply-live must trust the index, not stat.
+chmod 0644 "$MISMATCH_REPO/tool.sh"
+cp "$MISMATCH_REPO/tool.sh" "$MISMATCH_ROOT/tool.sh"
+chmod 0644 "$MISMATCH_ROOT/tool.sh"
+MISMATCH_JSON="$(python3 "$REPO_ROOT/bridge-upgrade.py" apply-live --source-root "$MISMATCH_REPO" --target-root "$MISMATCH_ROOT" --base-ref "$MISMATCH_BASE")"
+assert_contains "$MISMATCH_JSON" "\"files_mode_synced\": 1"
+mode_mismatch="$(stat -f '%Lp' "$MISMATCH_ROOT/tool.sh" 2>/dev/null || stat -c '%a' "$MISMATCH_ROOT/tool.sh")"
+[[ "$mode_mismatch" == "755" ]] || die "expected tool.sh to be 755 from git index (100755), got $mode_mismatch (worktree drift must not leak)"
+
 log "smart upgrade propagates exec-bit removal from source"
 REMOVE_ROOT="$TMP_ROOT/upgrade-mode-remove-root"
 mkdir -p "$REMOVE_ROOT"
