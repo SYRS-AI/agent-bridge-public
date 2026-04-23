@@ -28,6 +28,16 @@ DEFAULT_PATTERNS = [
     r"\bnode\b.*context7.*mcp",
     r"\bnode\b.*playwright.*mcp",
     r"\bnode\b.*firebase.*mcp",
+    # Issue #223: bun plugin roots accumulate as PID-1 orphans across
+    # agent restarts (shared-mode + tmux-kill-session + daemon reconcile
+    # all leave them reparented). Matching only `bun server.ts` was not
+    # enough — its parent `bun run --cwd .../plugins/<kind>` is
+    # unmatched, so the chain check in is_orphan_candidate() refused the
+    # server.ts child too. Restrict the patterns to Agent Bridge plugin
+    # paths so a developer's own `bun run --cwd ./myapp build` never
+    # matches.
+    r"\bbun\s+run\s+--cwd\s+\S*\.agent-bridge/plugins/",
+    r"\bbun\s+run\s+--cwd\s+\S*/claude-plugins-official/",
 ]
 
 
