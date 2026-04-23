@@ -2102,6 +2102,11 @@ cases_should_match = [
     "bun run --cwd /home/ec2-user/.agent-bridge/plugins/teams --shell=bun --silent start",
     "bun run --cwd /Users/x/.agent-bridge/plugins/telegram --silent start",
     "bun run --cwd /home/ec2-user/.bun/install/claude-plugins-official/telegram/0.0.6 start",
+    # ps stitches argv with single spaces, so a cwd containing a space
+    # (macOS user dir like "Space User") shows up verbatim. Match must
+    # still see the plugin-root fragment.
+    "bun run --cwd /Users/Space User/.agent-bridge/plugins/teams --silent start",
+    "bun run --cwd /Users/Space User/.bun/install/claude-plugins-official/telegram/0.0.6 start",
     "/home/ec2-user/.bun/bin/bun server.ts",
 ]
 for cmd in cases_should_match:

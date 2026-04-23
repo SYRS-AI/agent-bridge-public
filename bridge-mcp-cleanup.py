@@ -36,8 +36,8 @@ DEFAULT_PATTERNS = [
     # server.ts child too. Restrict the patterns to Agent Bridge plugin
     # paths so a developer's own `bun run --cwd ./myapp build` never
     # matches.
-    r"\bbun\s+run\s+--cwd\s+\S*\.agent-bridge/plugins/",
-    r"\bbun\s+run\s+--cwd\s+\S*/claude-plugins-official/",
+    r"\bbun\s+run\s+--cwd\s+.+?\.agent-bridge/plugins/",
+    r"\bbun\s+run\s+--cwd\s+.+?/claude-plugins-official/",
 ]
 
 
