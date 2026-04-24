@@ -1346,6 +1346,40 @@ ROSTER_POLICY_OVERLAY="$CHANNEL_POLICY_ROSTER_HOME/agents/admin_from_roster/.cla
 [[ -f "$ROSTER_POLICY_OVERLAY" ]] || die "apply-channel-policy.sh did not pick admin id up from the roster"
 assert_contains "$(cat "$ROSTER_POLICY_OVERLAY")" "\"telegram@claude-plugins-official\": true"
 
+log "bootstrap-memory-system.sh memory_daily_gate_on handles hyphenated agent ids (task #886 regression)"
+GATE_FN="$(awk '/^memory_daily_gate_on\(\) \{$/,/^\}$/' "$REPO_ROOT/bootstrap-memory-system.sh")"
+[[ -n "$GATE_FN" ]] || die "could not extract memory_daily_gate_on from bootstrap-memory-system.sh"
+# Default must be ON for a hyphenated agent id (no env override) — exit 0.
+if ! env -u BRIDGE_AGENT_MEMORY_DAILY_REFRESH_agb_dev_claude \
+       "$BASH4_BIN" -c "$GATE_FN"$'\n''memory_daily_gate_on agb-dev-claude'; then
+  die "memory_daily_gate_on defaulted off for hyphenated agent id (should be on)"
+fi
+# Explicit off via the underscore-normalised env key — exit 1.
+if BRIDGE_AGENT_MEMORY_DAILY_REFRESH_agb_dev_claude=0 \
+     "$BASH4_BIN" -c "$GATE_FN"$'\n''memory_daily_gate_on agb-dev-claude'; then
+  die "BRIDGE_AGENT_MEMORY_DAILY_REFRESH_agb_dev_claude=0 did not gate off hyphenated agent"
+fi
+# Regression guard: stderr must not mention the pre-fix "invalid variable name"
+# abort (English or Korean locale) for a hyphenated agent.
+GATE_ERR="$(env -u BRIDGE_AGENT_MEMORY_DAILY_REFRESH_agb_dev_claude \
+              "$BASH4_BIN" -c "$GATE_FN"$'\n''memory_daily_gate_on agb-dev-claude' 2>&1 >/dev/null || true)"
+assert_not_contains "$GATE_ERR" "invalid variable name"
+assert_not_contains "$GATE_ERR" "부적절한 변수 이름"
+# Dot-named agent ids are also valid per `bridge_validate_agent_name` and must
+# take the same underscore-normalised path (task #886 round-2).
+if ! env -u BRIDGE_AGENT_MEMORY_DAILY_REFRESH_foo_bar \
+       "$BASH4_BIN" -c "$GATE_FN"$'\n''memory_daily_gate_on foo.bar'; then
+  die "memory_daily_gate_on defaulted off for dotted agent id (should be on)"
+fi
+if BRIDGE_AGENT_MEMORY_DAILY_REFRESH_foo_bar=0 \
+     "$BASH4_BIN" -c "$GATE_FN"$'\n''memory_daily_gate_on foo.bar'; then
+  die "BRIDGE_AGENT_MEMORY_DAILY_REFRESH_foo_bar=0 did not gate off dotted agent"
+fi
+GATE_ERR_DOT="$(env -u BRIDGE_AGENT_MEMORY_DAILY_REFRESH_foo_bar \
+                  "$BASH4_BIN" -c "$GATE_FN"$'\n''memory_daily_gate_on foo.bar' 2>&1 >/dev/null || true)"
+assert_not_contains "$GATE_ERR_DOT" "invalid variable name"
+assert_not_contains "$GATE_ERR_DOT" "부적절한 변수 이름"
+
 log "starting isolated daemon"
 bash "$REPO_ROOT/bridge-daemon.sh" ensure >/dev/null
 DAEMON_STATUS=""
