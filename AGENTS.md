@@ -28,3 +28,40 @@ This snapshot does not include a full unit test suite, so rely on linting plus m
 
 ## Commit & Pull Request Guidelines
 This working copy does not include `.git`, so there is no local history to infer conventions from. Use short imperative commit subjects such as `bridge: add task queue heartbeat`. Keep pull requests narrow, list the scripts touched, include the exact manual verification commands you ran, and call out any changes to queue semantics, roster behavior, `tmux` session handling, or generated `state/` file formats.
+
+## Multi-Agent Collaboration (Claude ↔ Codex)
+
+Agent Bridge is routinely operated by multiple agents at once — typically a planner/author (`agb-dev-claude`) and one or more reviewers (`agb-dev-codex-1`, `agb-dev-codex-2`, etc.). These rules keep those agents from stepping on each other's branches and worktrees. **They are mandatory from the new-session mark — older sessions that were already running may have ignored them, and the PR review history reflects that.**
+
+### 1. Worktree isolation is the default for every Codex agent
+
+Codex agents MUST work inside their own git worktree, not the operator's primary checkout. The reason is operational, not stylistic: when two agents share a worktree, `git checkout`, `git commit --amend`, and even idle `fetch`/`pull` from one will silently move `HEAD` out from under the other (observed on 2026-04-24 during the v0.6.9 release cut, where a Codex agent's merge-helper amended a commit on top of another agent's uncommitted work).
+
+- Spawn Codex agents with `bridge-run.sh --prefer new` (or the equivalent `agent-bridge --codex --name <id> --prefer new`). The bridge creates a dedicated worktree under `${BRIDGE_WORKTREE_ROOT:-~/.agent-bridge/worktrees}/<repo>/<agent>` automatically.
+- Inspect the registry with `agent-bridge worktree list`. Stale worktrees should be cleaned up with the same CLI, not `rm -rf`.
+- Never run `git checkout <branch>` or `git commit --amend` inside the operator's primary checkout from a Codex agent's session. Those operations belong in the agent's own worktree or in a short-lived temp clone.
+
+### 2. Pair-review workflow
+
+Claude authors the change; Codex reviews; Claude merges only after Codex signs off.
+
+1. Author agent creates a feature branch off `main`, commits, pushes, and opens a PR.
+2. Author agent drops a review brief under `/tmp/agb-<pr-number>-codex-review.md` — background, focus checklist, expected outputs (`implement-ok` / `needs-more: …`).
+3. Author agent enqueues a review task with `bridge-task.sh create --from <author> --to <reviewer> --title "[PR #<N> review] …" --body-file /tmp/agb-<pr-number>-codex-review.md`.
+4. Reviewer agent verifies the diff, writes its finding into the bridge-task completion note, and returns via `agb done`.
+5. Author agent applies feedback; each round bumps the title (`[PR #N re-review]`, `[PR #N re-review r3]`, …) and gets its own brief file. Every round is a fresh `bridge-task create`, not an edit of the prior task.
+6. Merge only after the reviewer's final note starts with `implement-ok`. Reviewer agents may squash-merge themselves if the operator has granted that permission; otherwise the author agent performs the merge.
+
+### 3. Release mechanics
+
+A release PR updates only `VERSION` and `CHANGELOG.md`. Keep it in a branch named `release/vX.Y.Z`. Codex reviews the CHANGELOG entries and verifies the version-bump convention before `git tag -a vX.Y.Z <merge-sha>` and `git push origin vX.Y.Z`. Do not tag on a non-merge commit or on the feature branch.
+
+### 4. Forbidden operations under shared worktree
+
+Even when a Codex agent is attached to a shared worktree for legacy reasons, the following are forbidden on the operator's primary checkout:
+
+- `git checkout`, `git reset`, `git clean`, or `git worktree prune` affecting `main`.
+- `git commit --amend` against a commit you did not author in that same session.
+- `git push --force` or `--force-with-lease` against another agent's branch.
+
+Violations have blocked real operator work at least once (see the v0.6.9 release cut note above) and must be treated as P1 process breakage, not a style issue.
