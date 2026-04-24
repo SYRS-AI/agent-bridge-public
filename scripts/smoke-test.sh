@@ -1286,7 +1286,7 @@ log "apply-channel-policy.sh writes overlay disabling singleton channel plugins 
 CHANNEL_POLICY_HOME="$TMP_ROOT/channel-policy-home"
 mkdir -p "$CHANNEL_POLICY_HOME/agents/.claude"
 printf '{}' > "$CHANNEL_POLICY_HOME/agents/.claude/settings.json"
-env -u BRIDGE_AGENT_HOME_ROOT BRIDGE_HOME="$CHANNEL_POLICY_HOME" \
+env -u BRIDGE_AGENT_HOME_ROOT -u BRIDGE_ADMIN_AGENT_ID BRIDGE_HOME="$CHANNEL_POLICY_HOME" \
   bash "$REPO_ROOT/scripts/apply-channel-policy.sh" >/dev/null
 CHANNEL_POLICY_OVERLAY="$CHANNEL_POLICY_HOME/agents/.claude/settings.local.json"
 [[ -f "$CHANNEL_POLICY_OVERLAY" ]] || die "apply-channel-policy.sh did not write overlay"
@@ -1298,10 +1298,53 @@ CHANNEL_POLICY_EFFECTIVE="$CHANNEL_POLICY_HOME/agents/.claude/settings.effective
 assert_contains "$(cat "$CHANNEL_POLICY_EFFECTIVE")" "\"telegram@claude-plugins-official\": false"
 # Idempotency: second run must be a no-op (overlay byte-identical).
 CHANNEL_POLICY_OVERLAY_FIRST="$(cat "$CHANNEL_POLICY_OVERLAY")"
-env -u BRIDGE_AGENT_HOME_ROOT BRIDGE_HOME="$CHANNEL_POLICY_HOME" \
+env -u BRIDGE_AGENT_HOME_ROOT -u BRIDGE_ADMIN_AGENT_ID BRIDGE_HOME="$CHANNEL_POLICY_HOME" \
   bash "$REPO_ROOT/scripts/apply-channel-policy.sh" >/dev/null
 CHANNEL_POLICY_OVERLAY_SECOND="$(cat "$CHANNEL_POLICY_OVERLAY")"
 [[ "$CHANNEL_POLICY_OVERLAY_FIRST" == "$CHANNEL_POLICY_OVERLAY_SECOND" ]] || die "apply-channel-policy.sh was not idempotent"
+# Admin was not declared in this fixture — script must not create any
+# per-agent overlay. (`_common.sh` defaults `BRIDGE_ADMIN_AGENT` to `patch`
+# for cron helpers, so we specifically assert that path is NOT touched.)
+[[ ! -e "$CHANNEL_POLICY_HOME/agents/patch/.claude/settings.local.json" ]] \
+  || die "apply-channel-policy.sh wrote admin overlay without an explicit BRIDGE_ADMIN_AGENT_ID"
+
+log "apply-channel-policy.sh re-enables singleton plugins for configured admin (PR #246 admin bypass)"
+CHANNEL_POLICY_ADMIN_HOME="$TMP_ROOT/channel-policy-admin-home"
+mkdir -p "$CHANNEL_POLICY_ADMIN_HOME/agents/.claude" "$CHANNEL_POLICY_ADMIN_HOME/agents/admin_smoke/.claude"
+printf '{}' > "$CHANNEL_POLICY_ADMIN_HOME/agents/.claude/settings.json"
+env -u BRIDGE_AGENT_HOME_ROOT BRIDGE_HOME="$CHANNEL_POLICY_ADMIN_HOME" \
+  BRIDGE_ADMIN_AGENT_ID="admin_smoke" \
+  bash "$REPO_ROOT/scripts/apply-channel-policy.sh" >/dev/null
+ADMIN_POLICY_OVERLAY="$CHANNEL_POLICY_ADMIN_HOME/agents/admin_smoke/.claude/settings.local.json"
+[[ -f "$ADMIN_POLICY_OVERLAY" ]] || die "apply-channel-policy.sh did not write admin bypass overlay"
+ADMIN_POLICY_OVERLAY_PAYLOAD="$(cat "$ADMIN_POLICY_OVERLAY")"
+assert_contains "$ADMIN_POLICY_OVERLAY_PAYLOAD" "\"telegram@claude-plugins-official\": true"
+assert_contains "$ADMIN_POLICY_OVERLAY_PAYLOAD" "\"discord@claude-plugins-official\": true"
+# Shared overlay must still disable the plugins — the fix is two layers,
+# not a replacement for the shared enforcement.
+ADMIN_SHARED_OVERLAY="$CHANNEL_POLICY_ADMIN_HOME/agents/.claude/settings.local.json"
+[[ -f "$ADMIN_SHARED_OVERLAY" ]] || die "shared overlay missing under admin fixture"
+assert_contains "$(cat "$ADMIN_SHARED_OVERLAY")" "\"telegram@claude-plugins-official\": false"
+# Idempotency for the admin path too.
+ADMIN_POLICY_OVERLAY_FIRST="$(cat "$ADMIN_POLICY_OVERLAY")"
+env -u BRIDGE_AGENT_HOME_ROOT BRIDGE_HOME="$CHANNEL_POLICY_ADMIN_HOME" \
+  BRIDGE_ADMIN_AGENT_ID="admin_smoke" \
+  bash "$REPO_ROOT/scripts/apply-channel-policy.sh" >/dev/null
+ADMIN_POLICY_OVERLAY_SECOND="$(cat "$ADMIN_POLICY_OVERLAY")"
+[[ "$ADMIN_POLICY_OVERLAY_FIRST" == "$ADMIN_POLICY_OVERLAY_SECOND" ]] || die "apply-channel-policy.sh admin bypass was not idempotent"
+# Roster-file fallback: admin id picked up from agent-roster.local.sh when
+# env is unset.
+CHANNEL_POLICY_ROSTER_HOME="$TMP_ROOT/channel-policy-roster-home"
+mkdir -p "$CHANNEL_POLICY_ROSTER_HOME/agents/.claude" "$CHANNEL_POLICY_ROSTER_HOME/agents/admin_from_roster/.claude"
+printf '{}' > "$CHANNEL_POLICY_ROSTER_HOME/agents/.claude/settings.json"
+printf 'BRIDGE_ADMIN_AGENT_ID="admin_from_roster"\n' \
+  > "$CHANNEL_POLICY_ROSTER_HOME/agent-roster.local.sh"
+env -u BRIDGE_AGENT_HOME_ROOT -u BRIDGE_ADMIN_AGENT_ID \
+  BRIDGE_HOME="$CHANNEL_POLICY_ROSTER_HOME" \
+  bash "$REPO_ROOT/scripts/apply-channel-policy.sh" >/dev/null
+ROSTER_POLICY_OVERLAY="$CHANNEL_POLICY_ROSTER_HOME/agents/admin_from_roster/.claude/settings.local.json"
+[[ -f "$ROSTER_POLICY_OVERLAY" ]] || die "apply-channel-policy.sh did not pick admin id up from the roster"
+assert_contains "$(cat "$ROSTER_POLICY_OVERLAY")" "\"telegram@claude-plugins-official\": true"
 
 log "starting isolated daemon"
 bash "$REPO_ROOT/bridge-daemon.sh" ensure >/dev/null

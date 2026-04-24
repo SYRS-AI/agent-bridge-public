@@ -153,11 +153,12 @@ Current behavior:
 
 Fix (applied by default from #244):
 
-- `scripts/apply-channel-policy.sh` writes the shared overlay at `agents/.claude/settings.local.json` so every non-admin agent's `.claude/settings.json` symlink resolves to an effective settings that explicitly disables `telegram@claude-plugins-official` and `discord@claude-plugins-official`.
-- The admin agent keeps its own non-shared `settings.json` and acts as the sole router for those channels.
+- `scripts/apply-channel-policy.sh` writes the shared overlay at `agents/.claude/settings.local.json` so every agent whose `.claude/settings.json` resolves to the shared effective settings gets `telegram@claude-plugins-official` and `discord@claude-plugins-official` explicitly disabled.
+- When an admin agent is configured (`BRIDGE_ADMIN_AGENT_ID` in env or roster), the same script writes a per-agent local overlay at `agents/<admin>/.claude/settings.local.json` re-enabling those singleton plugins for the router. Claude Code's settings merge order prefers the project `.claude/settings.local.json` over the project `.claude/settings.json` (the shared-effective symlink), so the admin keeps the channels while every other agent stops contending.
 - `bridge-upgrade.sh` re-runs the policy on every upgrade (idempotent).
 
 Operator guidance:
 
 - Run `bash scripts/apply-channel-policy.sh` manually after adding or removing agents if the policy has drifted.
+- If you change the admin agent (`BRIDGE_ADMIN_AGENT_ID`), re-run `apply-channel-policy.sh` and then remove `agents/<previous-admin>/.claude/settings.local.json` — the script only writes the new admin's overlay, it does not clean up prior admins.
 - If a non-admin agent needs its own DM endpoint, provision a dedicated bot token per agent and add the plugin id to that agent's `.claude/settings.json` explicitly, rather than relying on the shared token.
