@@ -3442,6 +3442,40 @@ assert_contains "$WATCHDOG_JSON" "\"agent\": \"$CREATED_AGENT\""
 assert_contains "$WATCHDOG_JSON" "\"onboarding_state\": \"complete\""
 assert_contains "$WATCHDOG_JSON" "\"problem_count\": 0"
 
+log "watchdog status=ok for a dynamic agent with pending onboarding (#241)"
+DYN_AGENT="dyn-smoke-$$"
+DYN_AGENT_DIR="$BRIDGE_AGENT_HOME_ROOT/$DYN_AGENT"
+mkdir -p "$DYN_AGENT_DIR"
+# Clone the known-valid managed block + required files from the existing
+# $CREATED_AGENT so the scan only has onboarding_state / session_type to react to.
+for f in CLAUDE.md SOUL.md MEMORY.md MEMORY-SCHEMA.md SKILLS.md TOOLS.md HEARTBEAT.md; do
+  if [[ -f "$BRIDGE_AGENT_HOME_ROOT/$CREATED_AGENT/$f" ]]; then
+    cp "$BRIDGE_AGENT_HOME_ROOT/$CREATED_AGENT/$f" "$DYN_AGENT_DIR/$f"
+  fi
+done
+cat > "$DYN_AGENT_DIR/SESSION-TYPE.md" <<'EOF'
+# Session Type
+
+- Session Type: dynamic
+- Onboarding State: pending
+EOF
+WATCHDOG_DYN_JSON="$("$REPO_ROOT/agent-bridge" watchdog scan "$DYN_AGENT" --json)"
+assert_contains "$WATCHDOG_DYN_JSON" "\"agent\": \"$DYN_AGENT\""
+assert_contains "$WATCHDOG_DYN_JSON" "\"session_type\": \"dynamic\""
+assert_contains "$WATCHDOG_DYN_JSON" "\"onboarding_state\": \"pending\""
+# Key assertion: dynamic agents with pending onboarding no longer escalate to warn.
+assert_contains "$WATCHDOG_DYN_JSON" "\"status\": \"ok\""
+# Sanity: static-claude with pending onboarding still warns. Flip session type
+# on the test agent and verify warn is restored.
+python3 - "$DYN_AGENT_DIR/SESSION-TYPE.md" <<'PY'
+import pathlib, sys
+p = pathlib.Path(sys.argv[1])
+p.write_text(p.read_text().replace("Session Type: dynamic", "Session Type: static-claude"))
+PY
+WATCHDOG_STATIC_PENDING_JSON="$("$REPO_ROOT/agent-bridge" watchdog scan "$DYN_AGENT" --json)"
+assert_contains "$WATCHDOG_STATIC_PENDING_JSON" "\"status\": \"warn\""
+rm -rf "$DYN_AGENT_DIR"
+
 log "bootstrapping a manager role with init"
 INIT_DRY_RUN_JSON="$("$REPO_ROOT/agent-bridge" init --admin "$INIT_AGENT" --engine claude --session "$INIT_SESSION" --channels plugin:telegram --dry-run --json 2>&1)" || die "init dry-run failed: $INIT_DRY_RUN_JSON"
 python3 - "$INIT_DRY_RUN_JSON" "$INIT_AGENT" "$INIT_SESSION" <<'PY'
