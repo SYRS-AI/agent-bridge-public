@@ -118,6 +118,17 @@ bridge_upgrade_collect_agent_restart_report() {
   local target_root="$1"
   local dry_run="${2:-0}"
 
+  # Tuple format (tab-separated, 7 columns — grew from 5 to capture
+  # restart-failure diagnostics per issue #256 Gap 1):
+  #   <agent>\t<status>\t<reason>\t<attached>\t<session>\t<exit_code>\t<log_tail_b64>
+  #
+  # - exit_code is the return of `bridge-agent.sh restart <agent>` and is
+  #   only meaningful when status == "failed"; empty otherwise.
+  # - log_tail_b64 is the base64-encoded last ~5 lines of the agent's
+  #   most recently modified `.err.log`, or the `.log` when `.err.log`
+  #   is empty (the silent-exit common case). Base64 keeps newlines from
+  #   breaking the tab framing. Empty when status != "failed" or the
+  #   agent has no log directory yet. See `bridge_agent_log_dir`.
   "$BRIDGE_BASH_BIN" -lc '
     set -euo pipefail
     target_root="$1"
@@ -131,6 +142,8 @@ bridge_upgrade_collect_agent_restart_report() {
     attached=0
     status=""
     reason=""
+    exit_code=""
+    log_tail_b64=""
 
     for agent in "${BRIDGE_AGENT_IDS[@]}"; do
       [[ "$(bridge_agent_source "$agent")" == "static" ]] || continue
@@ -139,6 +152,8 @@ bridge_upgrade_collect_agent_restart_report() {
       attached=0
       status="skipped"
       reason="inactive"
+      exit_code=""
+      log_tail_b64=""
 
       if [[ "$(bridge_agent_loop "$agent")" != "1" ]]; then
         reason="not-loop"
@@ -159,13 +174,37 @@ bridge_upgrade_collect_agent_restart_report() {
         elif "$BRIDGE_BASH_BIN" "$target_root/bridge-agent.sh" restart "$agent" >/dev/null 2>&1; then
           status="restarted"
           reason="eligible"
+          exit_code=0
         else
+          exit_code=$?
           status="failed"
           reason="restart-failed"
+          # Capture last ~5 log lines for the summary. Prefer .err.log;
+          # fall back to .log when .err.log is empty (silent-exit case).
+          # All subshell errors are tolerated so a missing log dir does
+          # not mask the original restart failure.
+          log_dir="$(bridge_agent_log_dir "$agent" 2>/dev/null || true)"
+          log_tail=""
+          if [[ -n "${log_dir:-}" && -d "$log_dir" ]]; then
+            err_latest="$(ls -t "$log_dir"/*.err.log 2>/dev/null | head -n 1 || true)"
+            if [[ -n "${err_latest:-}" && -s "$err_latest" ]]; then
+              log_tail="$(tail -n 5 "$err_latest" 2>/dev/null || true)"
+            else
+              log_latest="$(ls -t "$log_dir"/*.log 2>/dev/null | head -n 1 || true)"
+              if [[ -n "${log_latest:-}" ]]; then
+                log_tail="$(tail -n 5 "$log_latest" 2>/dev/null || true)"
+              fi
+            fi
+          fi
+          if [[ -n "$log_tail" ]]; then
+            log_tail_b64="$(printf "%s" "$log_tail" | base64 | tr -d "\n")"
+          fi
         fi
       fi
 
-      printf "%s\t%s\t%s\t%s\t%s\n" "$agent" "$status" "$reason" "$attached" "$session"
+      printf "%s\t%s\t%s\t%s\t%s\t%s\t%s\n" \
+        "$agent" "$status" "$reason" "$attached" "$session" \
+        "${exit_code:-}" "${log_tail_b64:-}"
     done
   ' -- "$target_root" "$dry_run"
 }
@@ -188,6 +227,7 @@ bridge_upgrade_agent_restart_json() {
   # The prior keys `would_restart`/`restarted` over-promised at both layers
   # and caused the #253→#254 misdiagnosis. Renamed here per issue #257.
   python3 - "$enabled" "$dry_run" "$report" <<'PY'
+import base64
 import json
 import sys
 
@@ -206,14 +246,37 @@ payload = {
     "restart_attempted_ok_agents": [],
     "restart_eligible_agents": [],
     "failed_agents": [],
+    "failed_details": [],
     "skipped_reasons": {},
 }
+
+
+def _decode_log_tail(raw_b64):
+    """Return the decoded log-tail string or None when absent/corrupt.
+
+    Deliberately plain-Python (no PEP 604 annotation) because the
+    reference install's system python is 3.9.6 — `str | None` would
+    raise `TypeError` at function-definition time before the summary
+    ever ran. See PR #261 round-1 review.
+    """
+    if not raw_b64:
+        return None
+    try:
+        decoded = base64.b64decode(raw_b64, validate=False)
+    except Exception:  # noqa: BLE001 — b64 is operator-captured log; failing open with None is fine
+        return None
+    return decoded.decode("utf-8", errors="replace")
+
 
 for raw in report.splitlines():
     raw = raw.rstrip("\n")
     if not raw:
         continue
-    agent, status, reason, _attached, _session = (raw.split("\t", 4) + ["", "", "", "", ""])[:5]
+    # Tuple format (see bridge_upgrade_collect_agent_restart_report): 7 cols.
+    # Older builds may emit 5 cols (pre-#256); tolerate that shape so a
+    # half-upgraded host doesn't crash the aggregator.
+    parts = (raw.split("\t", 6) + ["", "", "", "", "", "", ""])[:7]
+    agent, status, reason, _attached, _session, exit_code, log_tail_b64 = parts
     payload["considered"] += 1
     if reason == "eligible":
         payload["eligible"] += 1
@@ -226,6 +289,13 @@ for raw in report.splitlines():
     elif status == "failed":
         payload["failed"] += 1
         payload["failed_agents"].append(agent)
+        detail = {"agent": agent}
+        try:
+            detail["exit_code"] = int(exit_code) if exit_code else None
+        except ValueError:
+            detail["exit_code"] = None
+        detail["last_log_tail"] = _decode_log_tail(log_tail_b64)
+        payload["failed_details"].append(detail)
     else:
         payload["skipped"] += 1
         payload["skipped_reasons"][reason] = payload["skipped_reasons"].get(reason, 0) + 1
@@ -262,6 +332,22 @@ if payload.get("restart_eligible_agents"):
     print(f"agent_restart_eligible_agents: {','.join(payload['restart_eligible_agents'])}")
 if payload.get("failed_agents"):
     print(f"agent_restart_failed_agents: {','.join(payload['failed_agents'])}")
+# #256 Gap 1: surface per-agent exit code + last log tail when a restart
+# failed, so the operator can triage without hand-grepping log dirs.
+for detail in payload.get("failed_details", []) or []:
+    agent_id = detail.get("agent") or "unknown"
+    exit_code = detail.get("exit_code")
+    exit_label = str(exit_code) if isinstance(exit_code, int) else "n/a"
+    tail = detail.get("last_log_tail") or ""
+    # Flatten newlines + cap to keep the summary one line per agent;
+    # the full decoded tail is always available in the JSON payload.
+    tail_flat = " ".join(tail.split())
+    if len(tail_flat) > 240:
+        tail_flat = tail_flat[:237] + "..."
+    if tail_flat:
+        print(f"agent_restart_failed_detail_{agent_id}: exit={exit_label} tail={tail_flat}")
+    else:
+        print(f"agent_restart_failed_detail_{agent_id}: exit={exit_label} tail=<no log tail captured>")
 for reason in sorted(payload.get("skipped_reasons", {})):
     print(f"agent_restart_skipped_{reason}: {payload['skipped_reasons'][reason]}")
 if payload.get("dry_run") and payload.get("restart_eligible"):

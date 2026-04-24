@@ -5174,7 +5174,66 @@ assert "restarted" not in restart, "legacy key restarted must be gone after #257
 assert "restarted_agents" not in restart, "legacy key restarted_agents must be gone after #257"
 assert "would_restart" not in restart, "legacy key would_restart must be gone after #257"
 assert "would_restart_agents" not in restart, "legacy key would_restart_agents must be gone after #257"
+# #256 Gap 1: failed_details structure must exist on every apply payload,
+# even when no agent failed (empty list). Aggregator logic is validated
+# in the dedicated stand-alone block below so downstream consumers can
+# rely on the key always being present.
+assert "failed_details" in restart, "failed_details must be present on apply payload"
+assert isinstance(restart["failed_details"], list), restart["failed_details"]
+assert restart["failed_details"] == [], \
+    f"no failed agents expected in smoke fixture; got {restart['failed_details']!r}"
 PY
+
+log "upgrade restart report aggregator surfaces failed_details with decoded log tail (#256 Gap 1)"
+# Exercise the live aggregator body extracted from `bridge-upgrade.sh` so a
+# Python-version regression in the real file (e.g. a PEP 604 `str | None`
+# annotation under a python3.9 host, see PR #261 r1) reproduces in smoke
+# rather than passing a divergent copy. The extractor pulls the heredoc
+# between `<<'PY'` and the matching `PY` line on the aggregator's `python3
+# -` invocation, then feeds it a synthetic 7-column report.
+GAP1_TAIL_B64="$("$BASH4_BIN" -c 'printf "%s" "plugin telegram@claude-plugins-official failed to load\nprocess exited with code 1" | base64 | tr -d "\n"')"
+GAP1_SYNTH_REPORT=$(printf 'a1\twould-restart\teligible\t0\ts1\t\t\na2\trestarted\teligible\t0\ts2\t0\t\na3\tfailed\trestart-failed\t0\ts3\t7\t%s\n' "$GAP1_TAIL_B64")
+GAP1_AGG_BODY_FILE="$TMP_ROOT/gap1_aggregator_body.py"
+python3 - "$REPO_ROOT/bridge-upgrade.sh" "$GAP1_AGG_BODY_FILE" <<'EXTRACT'
+import pathlib, re, sys
+
+src = pathlib.Path(sys.argv[1]).read_text()
+# Match the exact aggregator invocation and capture everything between
+# `<<'PY'` and the matching closing `PY` line. Anchored on the function
+# name so we do not accidentally pick up the summary helper below.
+pattern = re.compile(
+    r"bridge_upgrade_agent_restart_json\(\) \{.*?"
+    r"python3 - \"\$enabled\" \"\$dry_run\" \"\$report\" <<'PY'\n"
+    r"(?P<body>.*?)\nPY\n",
+    re.DOTALL,
+)
+match = pattern.search(src)
+if not match:
+    raise SystemExit("aggregator heredoc not located in bridge-upgrade.sh")
+pathlib.Path(sys.argv[2]).write_text(match.group("body"))
+EXTRACT
+[[ -s "$GAP1_AGG_BODY_FILE" ]] || die "aggregator body extraction produced an empty file"
+GAP1_AGG_OUTPUT="$(python3 "$GAP1_AGG_BODY_FILE" 1 0 "$GAP1_SYNTH_REPORT")"
+python3 - "$GAP1_AGG_OUTPUT" <<'PY'
+import json
+import sys
+
+payload = json.loads(sys.argv[1])
+assert payload["failed"] == 1, payload
+assert payload["failed_agents"] == ["a3"], payload
+details = payload.get("failed_details")
+assert isinstance(details, list) and len(details) == 1, payload
+detail = details[0]
+assert detail["agent"] == "a3", detail
+assert detail["exit_code"] == 7, detail
+tail = detail.get("last_log_tail") or ""
+assert "plugin telegram" in tail, detail
+assert "code 1" in tail, detail
+# Non-failed agents must NOT get entries.
+assert payload["restart_attempted_ok"] == 1, payload
+assert payload["restart_eligible"] == 1, payload
+PY
+rm -f "$GAP1_AGG_BODY_FILE"
 
 log "upgrade dry-run surfaces the eligibility-only disclaimer (#257)"
 UPGRADE_DRY_RUN_JSON="$("$REPO_ROOT/agent-bridge" upgrade --source "$REPO_ROOT" --target "$BRIDGE_HOME" --allow-dirty --dry-run --json)"
