@@ -5174,6 +5174,106 @@ assert "restarted" not in restart, "legacy key restarted must be gone after #257
 assert "restarted_agents" not in restart, "legacy key restarted_agents must be gone after #257"
 assert "would_restart" not in restart, "legacy key would_restart must be gone after #257"
 assert "would_restart_agents" not in restart, "legacy key would_restart_agents must be gone after #257"
+# #256 Gap 1: failed_details structure must exist on every apply payload,
+# even when no agent failed (empty list). Aggregator logic is validated
+# in the dedicated stand-alone block below so downstream consumers can
+# rely on the key always being present.
+assert "failed_details" in restart, "failed_details must be present on apply payload"
+assert isinstance(restart["failed_details"], list), restart["failed_details"]
+assert restart["failed_details"] == [], \
+    f"no failed agents expected in smoke fixture; got {restart['failed_details']!r}"
+PY
+
+log "upgrade restart report aggregator surfaces failed_details with decoded log tail (#256 Gap 1)"
+# The aggregator is a pure python function emitted inside a bash heredoc.
+# Reproduce its logic against a synthetic 7-column report with one failed
+# agent and confirm the decoded JSON shape. Drift risk is small because
+# the python body is copied verbatim from the aggregator — keep in sync.
+GAP1_TAIL_B64="$("$BASH4_BIN" -c 'printf "%s" "plugin telegram@claude-plugins-official failed to load\nprocess exited with code 1" | base64 | tr -d "\n"')"
+GAP1_SYNTH_REPORT=$(printf 'a1\twould-restart\teligible\t0\ts1\t\t\na2\trestarted\teligible\t0\ts2\t0\t\na3\tfailed\trestart-failed\t0\ts3\t7\t%s\n' "$GAP1_TAIL_B64")
+GAP1_AGG_OUTPUT="$(python3 - "$GAP1_SYNTH_REPORT" <<'PY'
+import base64
+import json
+import sys
+
+report = sys.argv[1]
+payload = {
+    "enabled": True,
+    "dry_run": False,
+    "considered": 0,
+    "eligible": 0,
+    "restart_eligible": 0,
+    "restart_attempted_ok": 0,
+    "failed": 0,
+    "skipped": 0,
+    "restart_attempted_ok_agents": [],
+    "restart_eligible_agents": [],
+    "failed_agents": [],
+    "failed_details": [],
+    "skipped_reasons": {},
+}
+
+
+def _decode_log_tail(raw_b64):
+    if not raw_b64:
+        return None
+    try:
+        decoded = base64.b64decode(raw_b64, validate=False)
+    except Exception:
+        return None
+    return decoded.decode("utf-8", errors="replace")
+
+
+for raw in report.splitlines():
+    raw = raw.rstrip("\n")
+    if not raw:
+        continue
+    parts = (raw.split("\t", 6) + ["", "", "", "", "", "", ""])[:7]
+    agent, status, reason, _attached, _session, exit_code, log_tail_b64 = parts
+    payload["considered"] += 1
+    if reason == "eligible":
+        payload["eligible"] += 1
+    if status == "would-restart":
+        payload["restart_eligible"] += 1
+        payload["restart_eligible_agents"].append(agent)
+    elif status == "restarted":
+        payload["restart_attempted_ok"] += 1
+        payload["restart_attempted_ok_agents"].append(agent)
+    elif status == "failed":
+        payload["failed"] += 1
+        payload["failed_agents"].append(agent)
+        detail = {"agent": agent}
+        try:
+            detail["exit_code"] = int(exit_code) if exit_code else None
+        except ValueError:
+            detail["exit_code"] = None
+        detail["last_log_tail"] = _decode_log_tail(log_tail_b64)
+        payload["failed_details"].append(detail)
+    else:
+        payload["skipped"] += 1
+        payload["skipped_reasons"][reason] = payload["skipped_reasons"].get(reason, 0) + 1
+
+print(json.dumps(payload, ensure_ascii=False))
+PY
+)"
+python3 - "$GAP1_AGG_OUTPUT" <<'PY'
+import json
+import sys
+
+payload = json.loads(sys.argv[1])
+assert payload["failed"] == 1, payload
+assert payload["failed_agents"] == ["a3"], payload
+details = payload.get("failed_details")
+assert isinstance(details, list) and len(details) == 1, payload
+detail = details[0]
+assert detail["agent"] == "a3", detail
+assert detail["exit_code"] == 7, detail
+tail = detail.get("last_log_tail") or ""
+assert "plugin telegram" in tail, detail
+assert "code 1" in tail, detail
+# Non-failed agents must NOT get entries.
+assert payload["restart_attempted_ok"] == 1, payload
+assert payload["restart_eligible"] == 1, payload
 PY
 
 log "upgrade dry-run surfaces the eligibility-only disclaimer (#257)"
