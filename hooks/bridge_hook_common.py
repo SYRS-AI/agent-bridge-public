@@ -109,6 +109,31 @@ def current_agent_workdir() -> Path:
     return agent_workdir(agent)
 
 
+def queue_cli_cwd() -> Path:
+    candidates: list[Path] = []
+    explicit_workdir = os.environ.get("BRIDGE_AGENT_WORKDIR", "").strip()
+    if explicit_workdir:
+        candidates.append(Path(explicit_workdir).expanduser())
+
+    agent = current_agent()
+    if agent:
+        candidates.append(agent_default_home(agent))
+
+    try:
+        candidates.append(Path.cwd())
+    except OSError:
+        pass
+    candidates.append(bridge_script_dir())
+
+    for path in candidates:
+        try:
+            if path.is_dir():
+                return path
+        except OSError:
+            continue
+    return Path("/")
+
+
 def path_within(path: Path, root: Path) -> bool:
     try:
         path.resolve().relative_to(root.resolve())
@@ -184,7 +209,7 @@ def queue_cli(args: list[str]) -> subprocess.CompletedProcess[str]:
         cmd = [sys.executable, str(bridge_script_dir() / "bridge-queue.py"), *args]
     return subprocess.run(
         cmd,
-        cwd=str(current_agent_workdir()),
+        cwd=str(queue_cli_cwd()),
         capture_output=True,
         text=True,
         check=False,
