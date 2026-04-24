@@ -188,11 +188,24 @@ def protected_path_reason(path: Path, agent: str) -> str | None:
 def protected_alias_reason(text: str, agent: str) -> str | None:
     home_root = agent_home_root()
     admin = is_admin_agent(agent)
-    if "agent-roster.local.sh" in text:
+    # Block only when the *resolved absolute path* appears verbatim in the
+    # bash command text, not when a filename suffix appears inside an
+    # incidental payload like `gh issue comment --body "…state/tasks.db…"`
+    # or `git commit -m "…agent-roster.local.sh…"`. The prior suffix checks
+    # (`"state/tasks.db" in text` / `"agent-roster.local.sh" in text`)
+    # fired on message bodies, commit subjects, ripgrep patterns, and even
+    # on the description of this very bug (#252). A command that actually
+    # opens the file still has to name the real path in argv, which
+    # includes the absolute `bridge_home_dir()` prefix.
+    # `protected_path_reason` continues to guard the non-Bash tool paths
+    # (Read/Write) with the structurally-correct `Path ==` check.
+    roster_abs = str(roster_local_path())
+    task_db_abs = str(task_db_path())
+    if roster_abs and roster_abs in text:
         if admin:
             return None
         return "shared roster secrets are not available inside Claude tool calls"
-    if "state/tasks.db" in text:
+    if task_db_abs and task_db_abs in text:
         return "direct queue DB access is blocked; use `agb` queue commands instead"
     if admin:
         return None

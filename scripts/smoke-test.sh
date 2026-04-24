@@ -1267,6 +1267,59 @@ printf '%s\n' "$TOOL_POLICY_PY_CHECK"
 assert_contains "$TOOL_POLICY_PY_CHECK" "[ok] tool-policy"
 rm -rf "$TOOL_POLICY_FIXTURE_ROOT"
 
+log "tool-policy: incidental protected-path substrings in bash bodies no longer false-positive (#252)"
+TOOL_POLICY_ALIAS_FIXTURE="$TMP_ROOT/tool-policy-alias-fixture"
+rm -rf "$TOOL_POLICY_ALIAS_FIXTURE"
+mkdir -p "$TOOL_POLICY_ALIAS_FIXTURE/state" "$TOOL_POLICY_ALIAS_FIXTURE/agents/self"
+: > "$TOOL_POLICY_ALIAS_FIXTURE/state/tasks.db"
+: > "$TOOL_POLICY_ALIAS_FIXTURE/agent-roster.local.sh"
+TOOL_POLICY_ALIAS_CHECK=$(BRIDGE_HOME="$TOOL_POLICY_ALIAS_FIXTURE" \
+    BRIDGE_AGENT_ID=self \
+    BRIDGE_AGENT_HOME_ROOT="$TOOL_POLICY_ALIAS_FIXTURE/agents" \
+    PYTHONPATH="$REPO_ROOT/hooks" \
+    python3 - "$REPO_ROOT" "$TOOL_POLICY_ALIAS_FIXTURE" <<'PY'
+import importlib.util, pathlib, sys
+repo_root = pathlib.Path(sys.argv[1])
+bridge_home = pathlib.Path(sys.argv[2])
+spec = importlib.util.spec_from_file_location("tp", repo_root / "hooks" / "tool-policy.py")
+tp = importlib.util.module_from_spec(spec)
+sys.modules["tp"] = tp
+spec.loader.exec_module(tp)
+
+task_db_abs = str(bridge_home / "state" / "tasks.db")
+roster_abs = str(bridge_home / "agent-roster.local.sh")
+
+# Incidental mentions must NOT block (#252 repro).
+assert tp.protected_alias_reason(
+    f"gh issue comment 252 --body \"mentions state/tasks.db only as a suffix\"",
+    "self",
+) is None, "substring-only tasks.db mention should not block"
+assert tp.protected_alias_reason(
+    f"git commit -m \"fix agent-roster.local.sh handling\"",
+    "self",
+) is None, "substring-only agent-roster mention should not block"
+assert tp.protected_alias_reason(
+    f"rg -n 'state/tasks.db' docs/",
+    "self",
+) is None, "ripgrep pattern with relative suffix should not block"
+
+# Absolute-path commands still block.
+sqlite_reason = tp.protected_alias_reason(f"sqlite3 {task_db_abs}", "self")
+assert sqlite_reason and "direct queue DB" in sqlite_reason, \
+    f"absolute sqlite3 invocation should still block: {sqlite_reason!r}"
+
+# Non-admin reading the absolute roster path still blocks.
+cat_reason = tp.protected_alias_reason(f"cat {roster_abs}", "self")
+assert cat_reason and "roster secrets" in cat_reason, \
+    f"absolute roster path cat should still block: {cat_reason!r}"
+
+print("[ok] tool-policy protected_alias_reason: incidental suffix substrings pass; absolute-path invocations still block")
+PY
+)
+printf '%s\n' "$TOOL_POLICY_ALIAS_CHECK"
+assert_contains "$TOOL_POLICY_ALIAS_CHECK" "[ok] tool-policy protected_alias_reason"
+rm -rf "$TOOL_POLICY_ALIAS_FIXTURE"
+
 log "diagnose acl reports clean on macOS (non-Linux host)"
 DIAGNOSE_OUTPUT="$("$REPO_ROOT/agent-bridge" diagnose acl)"
 if [[ "$(uname -s)" == "Linux" ]]; then
