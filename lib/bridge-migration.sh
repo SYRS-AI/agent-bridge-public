@@ -342,6 +342,142 @@ bridge_migration_unisolate() {
     fi
   fi
 
+  # Issue #233: the isolate path walked ancestors up to '/' granting
+  # `u:${os_user}:--x` search bits for the isolated UID, and separately
+  # granted `u:${controller_user}:--x` on parts of that chain. POSIX
+  # ACL's named-user override then stripped the operator's own read
+  # access on `/` and `/home` (base `other::r-x` was shadowed by
+  # `u:ec2-user:--x`). bun 1.3.x's ancestor-walk resolver hit EACCES
+  # there and every bun MCP plugin silently died. Unisolate previously
+  # left every one of those entries in place, so the poison stayed until
+  # a later Claude Code upgrade exposed it days or weeks later.
+  #
+  # Strip the named-user entries for both the isolated UID and the
+  # controller UID from every path the isolate step is known to have
+  # touched. Non-recursive on `/`, `/home`, and the controller home
+  # (never touch sibling user files); recursive inside BRIDGE_HOME,
+  # workdir, and runtime dirs that are scoped to this agent.
+  local controller_home=""
+  controller_home="$(getent passwd "$controller_user" 2>/dev/null | cut -d: -f6 || true)"
+  local isolated_home=""
+  isolated_home="$(bridge_migration_user_home "$os_user")"
+
+  local -a acl_strip_paths_shallow=()
+  acl_strip_paths_shallow+=("/")
+  acl_strip_paths_shallow+=("/home")
+  [[ -n "$controller_home" && -d "$controller_home" ]] && acl_strip_paths_shallow+=("$controller_home")
+  [[ -n "$isolated_home" && -d "$isolated_home" ]] && acl_strip_paths_shallow+=("$isolated_home")
+  [[ -n "${BRIDGE_HOME:-}" && -d "$BRIDGE_HOME" ]] && acl_strip_paths_shallow+=("$BRIDGE_HOME")
+  [[ -n "${BRIDGE_AGENT_HOME_ROOT:-}" && -d "$BRIDGE_AGENT_HOME_ROOT" ]] && acl_strip_paths_shallow+=("$BRIDGE_AGENT_HOME_ROOT")
+
+  # Codex rounds 1/2 walked the isolate write set (lib/bridge-agents.sh:985-1017)
+  # and flagged every grant that this cleanup still missed:
+  #   - line 998: u:<os_user>:r-x on memory_daily_root and memory_daily_root/shared
+  #     (the two *parents* of the per-agent + shared/aggregate dirs).
+  #   - line 1015: u:<os_user>:r-X recursive on recursive_read_paths — hooks,
+  #     shared, runtime, BRIDGE_HOME/{.claude,lib,plugins,scripts},
+  #     BRIDGE_AGENT_HOME_ROOT/.claude.
+  #   - lines 1000-1011: u:<os_user>:r-x on the root helper files
+  #     (agent-bridge, agb, VERSION, bridge-*.sh, bridge-*.py).
+  # Every one of those entries survived post-unisolate because the OS
+  # user is intentionally preserved. Add them to the sweep. Only ever
+  # remove the single u:<os_user> entry on shared paths — do not touch
+  # other isolated agents.
+  local history_file="" memory_daily_agent_dir="" memory_daily_shared_aggregate_dir=""
+  history_file="$(bridge_history_file_for_agent "$agent" 2>/dev/null || true)"
+  memory_daily_agent_dir="$BRIDGE_STATE_DIR/memory-daily/$agent"
+  memory_daily_shared_aggregate_dir="$BRIDGE_STATE_DIR/memory-daily/shared/aggregate"
+  local memory_daily_root="$BRIDGE_STATE_DIR/memory-daily"
+  local memory_daily_shared_root="$memory_daily_root/shared"
+
+  local -a acl_strip_paths_recursive=()
+  [[ -n "$workdir" && -d "$workdir" ]] && acl_strip_paths_recursive+=("$workdir")
+  [[ -n "$runtime_state_dir" && -d "$runtime_state_dir" ]] && acl_strip_paths_recursive+=("$runtime_state_dir")
+  [[ -n "$log_dir" && -d "$log_dir" ]] && acl_strip_paths_recursive+=("$log_dir")
+  [[ -n "$request_dir" && -d "$request_dir" ]] && acl_strip_paths_recursive+=("$request_dir")
+  [[ -n "$response_dir" && -d "$response_dir" ]] && acl_strip_paths_recursive+=("$response_dir")
+  [[ -n "$memory_daily_agent_dir" && -d "$memory_daily_agent_dir" ]] && acl_strip_paths_recursive+=("$memory_daily_agent_dir")
+  [[ -n "$memory_daily_shared_aggregate_dir" && -d "$memory_daily_shared_aggregate_dir" ]] && acl_strip_paths_recursive+=("$memory_daily_shared_aggregate_dir")
+  # recursive_read_paths from isolate (line 1015): grants are u:<os_user>:r-X
+  # on every file/dir under these trees. Strip the same scope.
+  [[ -n "${BRIDGE_HOOKS_DIR:-}" && -d "$BRIDGE_HOOKS_DIR" ]] && acl_strip_paths_recursive+=("$BRIDGE_HOOKS_DIR")
+  [[ -n "${BRIDGE_SHARED_DIR:-}" && -d "$BRIDGE_SHARED_DIR" ]] && acl_strip_paths_recursive+=("$BRIDGE_SHARED_DIR")
+  [[ -n "${BRIDGE_RUNTIME_ROOT:-}" && -d "$BRIDGE_RUNTIME_ROOT" ]] && acl_strip_paths_recursive+=("$BRIDGE_RUNTIME_ROOT")
+  [[ -n "${BRIDGE_HOME:-}" && -d "$BRIDGE_HOME/.claude" ]] && acl_strip_paths_recursive+=("$BRIDGE_HOME/.claude")
+  [[ -n "${BRIDGE_HOME:-}" && -d "$BRIDGE_HOME/lib" ]] && acl_strip_paths_recursive+=("$BRIDGE_HOME/lib")
+  [[ -n "${BRIDGE_HOME:-}" && -d "$BRIDGE_HOME/plugins" ]] && acl_strip_paths_recursive+=("$BRIDGE_HOME/plugins")
+  [[ -n "${BRIDGE_HOME:-}" && -d "$BRIDGE_HOME/scripts" ]] && acl_strip_paths_recursive+=("$BRIDGE_HOME/scripts")
+  [[ -n "${BRIDGE_AGENT_HOME_ROOT:-}" && -d "$BRIDGE_AGENT_HOME_ROOT/.claude" ]] && acl_strip_paths_recursive+=("$BRIDGE_AGENT_HOME_ROOT/.claude")
+
+  # Shallow parents that isolate grants u:<os_user>:r-x on but the
+  # recursive list above doesn't already cover: the memory-daily root
+  # and its shared subdir. Non-recursive so sibling agent dirs stay
+  # intact.
+  [[ -d "$memory_daily_root" ]] && acl_strip_paths_shallow+=("$memory_daily_root")
+  [[ -d "$memory_daily_shared_root" ]] && acl_strip_paths_shallow+=("$memory_daily_shared_root")
+
+  # Root-level helper files isolate grants u:<os_user>:r-x on
+  # (bridge-agents.sh:1000-1011). These are files, not directories, so
+  # handle them separately: a single `setfacl -x` per existing path.
+  local -a acl_strip_files=()
+  if [[ -n "${BRIDGE_HOME:-}" ]]; then
+    [[ -e "$BRIDGE_HOME/agent-bridge" ]] && acl_strip_files+=("$BRIDGE_HOME/agent-bridge")
+    [[ -e "$BRIDGE_HOME/agb" ]] && acl_strip_files+=("$BRIDGE_HOME/agb")
+    [[ -e "$BRIDGE_HOME/VERSION" ]] && acl_strip_files+=("$BRIDGE_HOME/VERSION")
+    local _helper
+    shopt -s nullglob
+    for _helper in "$BRIDGE_HOME"/bridge-*.sh "$BRIDGE_HOME"/bridge-*.py; do
+      [[ -e "$_helper" ]] && acl_strip_files+=("$_helper")
+    done
+    shopt -u nullglob
+  fi
+
+  local _acl_target=""
+  for _acl_target in "${acl_strip_paths_shallow[@]}"; do
+    [[ -n "$_acl_target" ]] || continue
+    bridge_migration_print_step "$dry_run" "setfacl -x u:${os_user} ${_acl_target}"
+    bridge_migration_print_step "$dry_run" "setfacl -x u:${controller_user} ${_acl_target}"
+    if [[ "$dry_run" != "1" ]]; then
+      bridge_linux_sudo_root setfacl -x "u:${os_user}" "$_acl_target" 2>/dev/null || true
+      bridge_linux_sudo_root setfacl -d -x "u:${os_user}" "$_acl_target" 2>/dev/null || true
+      bridge_linux_sudo_root setfacl -x "u:${controller_user}" "$_acl_target" 2>/dev/null || true
+      bridge_linux_sudo_root setfacl -d -x "u:${controller_user}" "$_acl_target" 2>/dev/null || true
+    fi
+  done
+  # `setfacl -R -x` strips access entries on every file and directory
+  # under the target. It does NOT touch default ACLs — those are a
+  # separate attribute stored only on directories, installed by
+  # `bridge_linux_acl_add_default_dirs_recursive` (lib/bridge-agents.sh:1017)
+  # and inherited by every new child. Remove them with a `find -type d`
+  # sweep so post-unisolate file creations do not keep inheriting the
+  # isolated UID's grants.
+  for _acl_target in "${acl_strip_paths_recursive[@]}"; do
+    [[ -n "$_acl_target" ]] || continue
+    bridge_migration_print_step "$dry_run" "setfacl -R -x u:${os_user} ${_acl_target}"
+    bridge_migration_print_step "$dry_run" "find ${_acl_target} -type d -exec setfacl -d -x u:${os_user} {} +"
+    if [[ "$dry_run" != "1" ]]; then
+      bridge_linux_sudo_root setfacl -R -x "u:${os_user}" "$_acl_target" 2>/dev/null || true
+      bridge_linux_sudo_root find "$_acl_target" -type d -exec setfacl -d -x "u:${os_user}" {} + 2>/dev/null || true
+    fi
+  done
+  # history_file is a regular file (not a directory). `-R` is a no-op
+  # there and default ACLs do not apply, so strip only the access entry.
+  if [[ -n "$history_file" && -e "$history_file" ]]; then
+    bridge_migration_print_step "$dry_run" "setfacl -x u:${os_user} ${history_file}"
+    if [[ "$dry_run" != "1" ]]; then
+      bridge_linux_sudo_root setfacl -x "u:${os_user}" "$history_file" 2>/dev/null || true
+    fi
+  fi
+  # Root-level helper file ACLs (agent-bridge, agb, VERSION,
+  # bridge-*.sh/*.py). Files, not directories — no default ACL.
+  for _acl_target in "${acl_strip_files[@]}"; do
+    [[ -n "$_acl_target" ]] || continue
+    bridge_migration_print_step "$dry_run" "setfacl -x u:${os_user} ${_acl_target}"
+    if [[ "$dry_run" != "1" ]]; then
+      bridge_linux_sudo_root setfacl -x "u:${os_user}" "$_acl_target" 2>/dev/null || true
+    fi
+  done
+
   bridge_migration_roster_upsert "$dry_run" "$agent" "shared" ""
 
   if [[ "$dry_run" == "1" ]]; then
