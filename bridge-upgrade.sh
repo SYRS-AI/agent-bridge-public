@@ -251,7 +251,14 @@ payload = {
 }
 
 
-def _decode_log_tail(raw_b64: str) -> str | None:
+def _decode_log_tail(raw_b64):
+    """Return the decoded log-tail string or None when absent/corrupt.
+
+    Deliberately plain-Python (no PEP 604 annotation) because the
+    reference install's system python is 3.9.6 — `str | None` would
+    raise `TypeError` at function-definition time before the summary
+    ever ran. See PR #261 round-1 review.
+    """
     if not raw_b64:
         return None
     try:
