@@ -182,7 +182,16 @@ bridge_diagnose_acl_main() {
     return 0
   fi
   if ! command -v getfacl >/dev/null 2>&1; then
-    printf '[skip] getfacl not installed — install the acl package to scan\n' >&2
+    # The skip banner has to land on stdout in both modes: callers
+    # (including the smoke harness) capture stdout, so writing to
+    # stderr would leave them with an empty string that looked like
+    # success on a host that actually can't scan. JSON mode still has
+    # to emit a parseable payload even in the "skipped" case.
+    if [[ "$json_mode" == "1" ]]; then
+      printf '{"platform":"linux","skipped":"getfacl-missing","findings":[]}\n'
+    else
+      printf '[skip] getfacl not installed — install the acl package to scan\n'
+    fi
     return 0
   fi
 
@@ -194,38 +203,46 @@ bridge_diagnose_acl_main() {
     [[ -n "$target" ]] && targets+=("$target")
   done < <(bridge_diagnose_acl_targets "$controller_user")
 
+  # Aggregate JSON findings through a bash array so cross-target results
+  # keep their per-finding boundary. Command substitution strips trailing
+  # newlines, so concatenating stdout from two scan_path calls used to
+  # yield `{a}\n{b}{c}\n{d}` — invalid JSON as soon as a second target
+  # added anything. Feeding scan_path's stdout through `while read` into
+  # an array preserves the one-finding-per-element contract.
   local any=0
-  local findings=""
+  local -a json_findings=()
   local result=""
   local target=""
 
-  if [[ "$json_mode" == "1" ]]; then
-    printf '{"platform":"linux","controller":%s,"findings":[' \
-      "$(bridge_diagnose_json_str "$controller_user")"
-  fi
-
   for target in "${targets[@]}"; do
-    result="$(bridge_diagnose_acl_scan_path "$target" "$controller_user" "$json_mode" || true)"
-    [[ -n "$result" ]] || continue
     if [[ "$json_mode" == "1" ]]; then
-      findings+="$result"
+      while IFS= read -r result; do
+        [[ -n "$result" ]] || continue
+        json_findings+=("$result")
+        any=1
+      done < <(bridge_diagnose_acl_scan_path "$target" "$controller_user" "$json_mode" || true)
     else
+      result="$(bridge_diagnose_acl_scan_path "$target" "$controller_user" "$json_mode" || true)"
+      [[ -n "$result" ]] || continue
       if (( any == 1 )); then
         printf '\n'
       fi
       printf '%s' "$result"
+      any=1
     fi
-    any=1
   done
 
   if [[ "$json_mode" == "1" ]]; then
-    if [[ -n "$findings" ]]; then
-      # Join on commas; each row already has a trailing newline.
-      printf '%s' "$findings" \
-        | awk 'NF' \
-        | paste -sd, -
+    local joined=""
+    if (( ${#json_findings[@]} > 0 )); then
+      local _old_ifs="$IFS"
+      IFS=','
+      joined="${json_findings[*]}"
+      IFS="$_old_ifs"
     fi
-    printf ']}\n'
+    printf '{"platform":"linux","controller":%s,"findings":[%s]}\n' \
+      "$(bridge_diagnose_json_str "$controller_user")" \
+      "$joined"
     return 0
   fi
 
