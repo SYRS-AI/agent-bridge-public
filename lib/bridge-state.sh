@@ -1250,6 +1250,67 @@ bridge_agent_next_session_marker_file() {
   printf '%s/next-session.sha' "$(bridge_agent_runtime_state_dir "$agent")"
 }
 
+bridge_path_age_seconds() {
+  local path="$1"
+
+  [[ -e "$path" ]] || return 1
+  bridge_require_python
+  python3 - "$path" <<'PY'
+import os
+import sys
+import time
+
+print(max(0, int(time.time() - os.path.getmtime(sys.argv[1]))))
+PY
+}
+
+bridge_agent_next_session_digest() {
+  local agent="$1"
+  local next_file=""
+
+  next_file="$(bridge_agent_next_session_file "$agent")"
+  [[ -f "$next_file" ]] || return 1
+  bridge_sha1 "$(cat "$next_file")"
+}
+
+bridge_agent_next_session_is_delivered() {
+  local agent="$1"
+  local marker_file=""
+  local digest=""
+  local marker=""
+
+  marker_file="$(bridge_agent_next_session_marker_file "$agent")"
+  [[ -f "$marker_file" ]] || return 1
+  digest="$(bridge_agent_next_session_digest "$agent" || true)"
+  [[ -n "$digest" ]] || return 1
+  marker="$(cat "$marker_file" 2>/dev/null || true)"
+  [[ -n "$marker" && "$marker" == "$digest" ]]
+}
+
+bridge_agent_next_session_age_seconds() {
+  local agent="$1"
+  bridge_path_age_seconds "$(bridge_agent_next_session_file "$agent")"
+}
+
+bridge_agent_clear_next_session_state() {
+  local agent="$1"
+  rm -f "$(bridge_agent_next_session_file "$agent")" "$(bridge_agent_next_session_marker_file "$agent")"
+}
+
+bridge_agent_maybe_expire_next_session() {
+  local agent="$1"
+  local ttl_seconds="${2:-${BRIDGE_NEXT_SESSION_AUTO_CLEAR_SECONDS:-300}}"
+  local age_seconds=0
+
+  [[ "$ttl_seconds" =~ ^[0-9]+$ ]] || ttl_seconds=300
+  bridge_agent_next_session_is_delivered "$agent" || return 1
+  age_seconds="$(bridge_agent_next_session_age_seconds "$agent" || echo 0)"
+  [[ "$age_seconds" =~ ^[0-9]+$ ]] || age_seconds=0
+  (( age_seconds >= ttl_seconds )) || return 1
+  bridge_agent_clear_next_session_state "$agent"
+  printf '%s' "$age_seconds"
+}
+
 bridge_agent_pending_attention_file() {
   local agent="$1"
   printf '%s/pending-attention.env' "$(bridge_agent_runtime_state_dir "$agent")"

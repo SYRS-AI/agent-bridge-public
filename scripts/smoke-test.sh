@@ -3646,8 +3646,13 @@ CLAUDE_STATIC_NEXT_DIGEST="$("$BASH4_BIN" -c '
   bridge_load_roster
   bridge_agent_next_session_digest "claude-static"
 ')"
-mkdir -p "$BRIDGE_STATE_DIR/next-session-prompts"
-printf '%s' "$CLAUDE_STATIC_NEXT_DIGEST" >"$BRIDGE_STATE_DIR/next-session-prompts/claude-static.sha"
+CLAUDE_STATIC_NEXT_MARKER_FILE="$("$BASH4_BIN" -c '
+  source "'"$REPO_ROOT"'/bridge-lib.sh"
+  bridge_load_roster
+  bridge_agent_next_session_marker_file "claude-static"
+')"
+mkdir -p "$(dirname "$CLAUDE_STATIC_NEXT_MARKER_FILE")"
+printf '%s' "$CLAUDE_STATIC_NEXT_DIGEST" >"$CLAUDE_STATIC_NEXT_MARKER_FILE"
 python3 - "$CLAUDE_STATIC_WORKDIR/NEXT-SESSION.md" <<'PY'
 import os
 import sys
@@ -3664,7 +3669,7 @@ CLAUDE_STALE_NEXT_CLEAR_AGE="$("$BASH4_BIN" -c '
 ')"
 [[ "$CLAUDE_STALE_NEXT_CLEAR_AGE" =~ ^[0-9]+$ ]] || die "expected stale NEXT-SESSION auto-clear age"
 [[ ! -f "$CLAUDE_STATIC_WORKDIR/NEXT-SESSION.md" ]] || die "expected stale NEXT-SESSION file to be cleared"
-[[ ! -f "$BRIDGE_STATE_DIR/next-session-prompts/claude-static.sha" ]] || die "expected stale NEXT-SESSION marker to be cleared"
+[[ ! -f "$CLAUDE_STATIC_NEXT_MARKER_FILE" ]] || die "expected stale NEXT-SESSION marker to be cleared"
 
 FAKE_CLAUDE_HOME="$TMP_ROOT/fake-claude-home"
 mkdir -p "$FAKE_CLAUDE_HOME/.claude/sessions"
