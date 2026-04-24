@@ -17,6 +17,21 @@
 # IMPORTANT: this script targets a *downstream* reference install. Never
 # commit to applying on production without review.
 
+# Re-exec under bash 4+ if we got picked up by macOS's default /bin/bash (3.2),
+# which lacks associative arrays. Mirrors the guard in bridge-lib.sh so this
+# script stays runnable standalone without sourcing the bridge library.
+if (( ${BASH_VERSINFO[0]:-0} < 4 )); then
+  for bridge_candidate_bash in /opt/homebrew/bin/bash /usr/local/bin/bash "$(command -v bash 2>/dev/null || true)"; do
+    [[ -n "$bridge_candidate_bash" && -x "$bridge_candidate_bash" ]] || continue
+    if "$bridge_candidate_bash" -lc '[[ ${BASH_VERSINFO[0]:-0} -ge 4 ]]' >/dev/null 2>&1; then
+      exec "$bridge_candidate_bash" "$0" "$@"
+    fi
+  done
+
+  echo "[bootstrap-memory] Agent Bridge requires Bash 4+ (current: ${BASH_VERSION:-unknown}). Install homebrew bash or set PATH accordingly." >&2
+  exit 1
+fi
+
 set -euo pipefail
 
 # -----------------------------------------------------------------------------
@@ -454,11 +469,18 @@ step_cron_one() {
 # Bootstrap cannot source bridge-lib safely without pulling in the roster, so we
 # approximate: the default is ON (matching the bash helper). An install that
 # disables the refresh sets BRIDGE_AGENT_MEMORY_DAILY_REFRESH_<agent>=0 in the
-# bootstrap env, or writes BRIDGE_AGENT_MEMORY_DAILY_REFRESH[<agent>]=0 into the
-# roster (which the daemon enforces at dispatch time regardless).
+# bootstrap env (agent id hyphens are normalised to underscores so the env name
+# is a valid bash identifier — e.g. agent `agb-dev-claude` → env key
+# `BRIDGE_AGENT_MEMORY_DAILY_REFRESH_agb_dev_claude`), or writes
+# BRIDGE_AGENT_MEMORY_DAILY_REFRESH[<agent>]=0 into the roster (which the daemon
+# enforces at dispatch time regardless).
 memory_daily_gate_on() {
   local agent="$1"
-  local key="BRIDGE_AGENT_MEMORY_DAILY_REFRESH_${agent}"
+  # Agent ids commonly contain hyphens (e.g. agb-dev-claude). Bash identifiers
+  # forbid hyphens, so indirect expansion via `${!key}` would abort with
+  # "invalid variable name". Normalise to underscores before building the key.
+  local safe_agent="${agent//-/_}"
+  local key="BRIDGE_AGENT_MEMORY_DAILY_REFRESH_${safe_agent}"
   local val
   val="${!key:-}"
   val="${val,,}"
