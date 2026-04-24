@@ -2878,27 +2878,54 @@ cmd_run_cron_worker() {
   # neither act on nor suppress — they just close the task. Burst-gate
   # the followup emission: only surface after the same cron family has
   # failed at least BRIDGE_CRON_FOLLOWUP_FAIL_BURST_THRESHOLD times
-  # consecutively. A success resets the counter. Existing open followups
-  # are still refreshed (update path below) regardless of burst state so
-  # long-running investigations don't stall.
-  local cron_family_key="${CRON_JOB_NAME:-$run_id}"
+  # consecutively. A success resets the counter, and a successful create
+  # also resets it so the "every-failure-after-the-first-N-creates-a-new-
+  # task" pattern doesn't resurface after the admin closes the first
+  # burst task. Existing open followups are still refreshed (update path
+  # below) regardless of burst state so long-running investigations
+  # don't stall.
+  #
+  # Key the counter by cron family (CRON_FAMILY), falling back to job
+  # name then run id. Family is the right granularity — parallel jobs
+  # in the same family (e.g. memory-daily across every agent) should
+  # accumulate toward one threshold, not each one independently.
+  local cron_family_key="${CRON_FAMILY:-${CRON_JOB_NAME:-$run_id}}"
   local fail_burst_dir="$BRIDGE_STATE_DIR/cron/consecutive-failures"
   local fail_burst_file="$fail_burst_dir/$(bridge_sha1 "$cron_family_key")"
+  local fail_burst_lock="${fail_burst_file}.lock"
   local fail_burst_threshold="${BRIDGE_CRON_FOLLOWUP_FAIL_BURST_THRESHOLD:-3}"
   [[ "$fail_burst_threshold" =~ ^[0-9]+$ ]] || fail_burst_threshold=3
   local fail_burst_count=0
-  if [[ "$CRON_NEEDS_HUMAN_FOLLOWUP" == "1" ]]; then
-    mkdir -p "$fail_burst_dir"
-    if [[ -f "$fail_burst_file" ]]; then
-      fail_burst_count=$(cat "$fail_burst_file" 2>/dev/null || echo 0)
-      [[ "$fail_burst_count" =~ ^[0-9]+$ ]] || fail_burst_count=0
-    fi
-    fail_burst_count=$(( fail_burst_count + 1 ))
-    printf '%s' "$fail_burst_count" >"$fail_burst_file"
-  else
-    # Success path — clear the burst state so the next failure starts fresh.
-    rm -f "$fail_burst_file" 2>/dev/null || true
+  mkdir -p "$fail_burst_dir"
+  # Cron workers run in parallel (BRIDGE_CRON_DISPATCH_MAX_PARALLEL=2+),
+  # so two failing workers of the same family could race the read-
+  # modify-write and lose an increment. Serialise with flock and fall
+  # through cleanly if `flock` is missing on the host.
+  local _has_flock=0
+  if command -v flock >/dev/null 2>&1; then
+    _has_flock=1
   fi
+  _burst_update() {
+    # Inner body runs while we hold the lock (or unconditionally if
+    # flock is unavailable). Updates fail_burst_count in the outer scope.
+    if [[ "$CRON_NEEDS_HUMAN_FOLLOWUP" == "1" ]]; then
+      fail_burst_count=0
+      if [[ -f "$fail_burst_file" ]]; then
+        fail_burst_count=$(cat "$fail_burst_file" 2>/dev/null || echo 0)
+        [[ "$fail_burst_count" =~ ^[0-9]+$ ]] || fail_burst_count=0
+      fi
+      fail_burst_count=$(( fail_burst_count + 1 ))
+      printf '%s' "$fail_burst_count" >"$fail_burst_file"
+    else
+      rm -f "$fail_burst_file" 2>/dev/null || true
+    fi
+  }
+  if (( _has_flock == 1 )); then
+    ( flock -x 9 && _burst_update ) 9>"$fail_burst_lock"
+  else
+    _burst_update
+  fi
+  unset -f _burst_update
 
   if [[ "$CRON_NEEDS_HUMAN_FOLLOWUP" == "1" ]]; then
     followup_body_file="$(bridge_cron_dispatch_followup_file_by_id "$run_id")"
@@ -2916,11 +2943,21 @@ cmd_run_cron_worker() {
       if [[ "$create_output" =~ created\ task\ \#([0-9]+) ]]; then
         followup_task_id="${BASH_REMATCH[1]}"
         daemon_info "created cron followup task #${followup_task_id} after ${fail_burst_count} consecutive failures of ${cron_family_key}"
+        # Reset the burst counter so subsequent failures don't rapid-
+        # fire a fresh followup task after the admin closes this one.
+        # The cycle restarts only after another BRIDGE_CRON_FOLLOWUP_FAIL_BURST_THRESHOLD
+        # consecutive failures or any success (handled above).
+        if (( _has_flock == 1 )); then
+          ( flock -x 9 && rm -f "$fail_burst_file" ) 9>"$fail_burst_lock"
+        else
+          rm -f "$fail_burst_file" 2>/dev/null || true
+        fi
       fi
     else
       bridge_audit_log daemon cron_followup_suppressed "$TASK_ASSIGNED_TO" \
         --detail run_id="$run_id" \
         --detail job_name="${CRON_JOB_NAME:-$run_id}" \
+        --detail family="${CRON_FAMILY:-}" \
         --detail fail_burst_count="$fail_burst_count" \
         --detail fail_burst_threshold="$fail_burst_threshold" \
         --detail reason=below_threshold
