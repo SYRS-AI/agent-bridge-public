@@ -1838,6 +1838,27 @@ CLAUDE_STATIC_SESSION_EXPECTED_DIGEST="$(python3 -c 'import hashlib,sys; print(h
 CLAUDE_STATIC_SESSION_ACTUAL_DIGEST="$(cat "$CLAUDE_STATIC_SESSION_MARKER_FILE")"
 [[ "$CLAUDE_STATIC_SESSION_EXPECTED_DIGEST" == "$CLAUDE_STATIC_SESSION_ACTUAL_DIGEST" ]] || die "next-session marker digest mismatch: expected $CLAUDE_STATIC_SESSION_EXPECTED_DIGEST got $CLAUDE_STATIC_SESSION_ACTUAL_DIGEST"
 rm -f "$CLAUDE_STATIC_WORKDIR/NEXT-SESSION.md" "$CLAUDE_STATIC_WORKDIR/SESSION-TYPE.md" "$CLAUDE_STATIC_SESSION_MARKER_FILE"
+
+# Issue #228 round 2: also exercise the path with BRIDGE_ACTIVE_AGENT_DIR
+# rerouted outside BRIDGE_STATE_DIR/agents. The Python writer must follow
+# the bash contract (bridge_agent_runtime_state_dir is rooted at
+# BRIDGE_ACTIVE_AGENT_DIR, not BRIDGE_STATE_DIR/agents), otherwise the
+# bash reader never sees the marker and auto-expiry stays dead.
+CLAUDE_STATIC_CUSTOM_ACTIVE_DIR="$TMP_ROOT/custom-active-agent-dir"
+mkdir -p "$CLAUDE_STATIC_CUSTOM_ACTIVE_DIR"
+cat >"$CLAUDE_STATIC_WORKDIR/NEXT-SESSION.md" <<'EOF'
+# Custom active-dir handoff
+EOF
+BRIDGE_ACTIVE_AGENT_DIR="$CLAUDE_STATIC_CUSTOM_ACTIVE_DIR" BRIDGE_AGENT_ID="claude-static" BRIDGE_AGENT_WORKDIR="$CLAUDE_STATIC_WORKDIR" BRIDGE_AGENT_HOME_ROOT="$BRIDGE_HOME/agents" python3 "$REPO_ROOT/hooks/session_start.py" >/dev/null
+CLAUDE_STATIC_CUSTOM_MARKER_FILE="$(BRIDGE_ACTIVE_AGENT_DIR="$CLAUDE_STATIC_CUSTOM_ACTIVE_DIR" "$BASH4_BIN" -c '
+  source "'"$REPO_ROOT"'/bridge-lib.sh"
+  bridge_load_roster
+  bridge_agent_next_session_marker_file "claude-static"
+')"
+[[ "$CLAUDE_STATIC_CUSTOM_MARKER_FILE" == "$CLAUDE_STATIC_CUSTOM_ACTIVE_DIR"/* ]] || die "bash did not resolve marker under BRIDGE_ACTIVE_AGENT_DIR override: $CLAUDE_STATIC_CUSTOM_MARKER_FILE"
+[[ -f "$CLAUDE_STATIC_CUSTOM_MARKER_FILE" ]] || die "session_start hook did not honour BRIDGE_ACTIVE_AGENT_DIR override — marker missing at $CLAUDE_STATIC_CUSTOM_MARKER_FILE"
+rm -f "$CLAUDE_STATIC_WORKDIR/NEXT-SESSION.md" "$CLAUDE_STATIC_CUSTOM_MARKER_FILE"
+rm -rf "$CLAUDE_STATIC_CUSTOM_ACTIVE_DIR"
 CODEX_PROMPT_OUTPUT="$(BRIDGE_AGENT_ID="$SMOKE_AGENT" BRIDGE_HOME="$BRIDGE_HOME" python3 "$REPO_ROOT/hooks/prompt_timestamp.py" --format codex)"
 assert_contains "$CODEX_PROMPT_OUTPUT" "\"hookEventName\": \"UserPromptSubmit\""
 assert_contains "$CODEX_PROMPT_OUTPUT" "now:"

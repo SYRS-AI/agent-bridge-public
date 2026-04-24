@@ -38,6 +38,18 @@ def bridge_state_dir() -> Path:
     return Path.home() / ".agent-bridge" / "state"
 
 
+def bridge_active_agent_dir() -> Path:
+    # Matches bridge-lib.sh:32 —
+    #   BRIDGE_ACTIVE_AGENT_DIR="${BRIDGE_ACTIVE_AGENT_DIR:-$BRIDGE_STATE_DIR/agents}"
+    # Any bash helper that reaches runtime_state_dir goes through this root,
+    # so Python must honour the same override to land files where the bash
+    # reader will look.
+    explicit = os.environ.get("BRIDGE_ACTIVE_AGENT_DIR", "").strip()
+    if explicit:
+        return Path(explicit).expanduser()
+    return bridge_state_dir() / "agents"
+
+
 def bridge_home_dir() -> Path:
     explicit = os.environ.get("BRIDGE_HOME", "").strip()
     if explicit:
@@ -241,9 +253,10 @@ def _stamp_next_session_delivered(agent: str, next_session: Path) -> None:
     digest = hashlib.sha1(content).hexdigest()
     # Mirror lib/bridge-state.sh::bridge_agent_next_session_marker_file,
     # which resolves to bridge_agent_runtime_state_dir/next-session.sha and
-    # runtime_state_dir is BRIDGE_ACTIVE_AGENT_DIR/<agent>
-    # (= BRIDGE_STATE_DIR/agents/<agent> by default).
-    marker_file = bridge_state_dir() / "agents" / agent / "next-session.sha"
+    # runtime_state_dir is BRIDGE_ACTIVE_AGENT_DIR/<agent>. Honour the env
+    # override so a deployment that reroots its active-agent dir (e.g. for
+    # linux-user isolation) gets the marker where bash will actually look.
+    marker_file = bridge_active_agent_dir() / agent / "next-session.sha"
     try:
         marker_file.parent.mkdir(parents=True, exist_ok=True)
         marker_file.write_text(digest, encoding="utf-8")
