@@ -3344,6 +3344,37 @@ assert_contains "$WATCHDOG_JSON" "\"agent\": \"$CREATED_AGENT\""
 assert_contains "$WATCHDOG_JSON" "\"onboarding_state\": \"complete\""
 assert_contains "$WATCHDOG_JSON" "\"problem_count\": 0"
 
+log "watchdog classify_status bypasses dynamic/cron pending onboarding (issue #241)"
+python3 - "$REPO_ROOT" <<'PY'
+import importlib.util
+import pathlib
+import sys
+
+repo_root = pathlib.Path(sys.argv[1])
+spec = importlib.util.spec_from_file_location("wd", repo_root / "bridge-watchdog.py")
+wd = importlib.util.module_from_spec(spec)
+sys.modules[spec.name] = wd
+spec.loader.exec_module(wd)
+
+# Bug: `dynamic` + pending used to be classified as warn, filing a
+# recurring `[watchdog] agent profile drift` task for every sweep.
+assert wd.classify_status([], [], "pending", False, "dynamic") == "ok"
+assert wd.classify_status([], [], "missing", False, "dynamic") == "ok"
+assert wd.classify_status([], [], "pending", False, "cron") == "ok"
+
+# Non-onboarding session types still trip the other checks.
+assert wd.classify_status([], ["bad-link"], "complete", False, "dynamic") == "warn"
+assert wd.classify_status([], [], "complete", True, "dynamic") == "warn"
+assert wd.classify_status(["CLAUDE.md"], [], "complete", False, "dynamic") == "error"
+
+# Regular agents keep the original pending → warn behaviour.
+assert wd.classify_status([], [], "pending", False, "admin") == "warn"
+assert wd.classify_status([], [], "missing", False, "router") == "warn"
+assert wd.classify_status([], [], "complete", False, "admin") == "ok"
+
+print("[ok] bridge-watchdog classify_status: dynamic/cron bypass + regression guard")
+PY
+
 log "bootstrapping a manager role with init"
 INIT_DRY_RUN_JSON="$("$REPO_ROOT/agent-bridge" init --admin "$INIT_AGENT" --engine claude --session "$INIT_SESSION" --channels plugin:telegram --dry-run --json 2>&1)" || die "init dry-run failed: $INIT_DRY_RUN_JSON"
 python3 - "$INIT_DRY_RUN_JSON" "$INIT_AGENT" "$INIT_SESSION" <<'PY'

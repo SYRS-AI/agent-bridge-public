@@ -81,10 +81,31 @@ def heartbeat_age_seconds(agent_dir: Path) -> tuple[bool, int | None]:
     return True, max(age, 0)
 
 
-def classify_status(missing_files: list[str], broken_links: list[str], onboarding_state: str, missing_block: bool) -> str:
+# Session types that have no interactive first-session onboarding by
+# design. `dynamic` agents (e.g. `librarian`) are provisioned by
+# `bootstrap-memory-system.sh` to drain a task family mechanically; they
+# never get a human-facing onboarding flow and therefore stay at
+# `Onboarding State: pending` forever. `cron` is the same shape —
+# non-interactive, no human ever flips it to complete. Treating those
+# as `warn` swamps the admin inbox with a false-positive
+# `[watchdog] agent profile drift` task every sweep (issue #241).
+NON_ONBOARDING_SESSION_TYPES: frozenset[str] = frozenset({"dynamic", "cron"})
+
+
+def classify_status(
+    missing_files: list[str],
+    broken_links: list[str],
+    onboarding_state: str,
+    missing_block: bool,
+    session_type: str,
+) -> str:
     if missing_files:
         return "error"
-    if broken_links or missing_block or onboarding_state in {"pending", "missing"}:
+    onboarding_stale = (
+        onboarding_state in {"pending", "missing"}
+        and session_type not in NON_ONBOARDING_SESSION_TYPES
+    )
+    if broken_links or missing_block or onboarding_stale:
         return "warn"
     return "ok"
 
@@ -96,7 +117,7 @@ def scan_agent(agent_dir: Path) -> AgentWatch:
     session_type, onboarding_state = parse_session_type(agent_dir)
     heartbeat_present, heartbeat_age = heartbeat_age_seconds(agent_dir)
     broken_links = collect_broken_links(agent_dir)
-    status = classify_status(missing_files, broken_links, onboarding_state, missing_block)
+    status = classify_status(missing_files, broken_links, onboarding_state, missing_block, session_type)
     return AgentWatch(
         agent=agent_dir.name,
         session_type=session_type,
