@@ -1282,6 +1282,27 @@ assert_contains "$DIAGNOSE_JSON_OUTPUT" "\"findings\""
 DIAGNOSE_HELP="$("$REPO_ROOT/agent-bridge" diagnose 2>&1 || true)"
 assert_contains "$DIAGNOSE_HELP" "diagnose acl"
 
+log "apply-channel-policy.sh writes overlay disabling singleton channel plugins (#244)"
+CHANNEL_POLICY_HOME="$TMP_ROOT/channel-policy-home"
+mkdir -p "$CHANNEL_POLICY_HOME/agents/.claude"
+printf '{}' > "$CHANNEL_POLICY_HOME/agents/.claude/settings.json"
+env -u BRIDGE_AGENT_HOME_ROOT BRIDGE_HOME="$CHANNEL_POLICY_HOME" \
+  bash "$REPO_ROOT/scripts/apply-channel-policy.sh" >/dev/null
+CHANNEL_POLICY_OVERLAY="$CHANNEL_POLICY_HOME/agents/.claude/settings.local.json"
+[[ -f "$CHANNEL_POLICY_OVERLAY" ]] || die "apply-channel-policy.sh did not write overlay"
+CHANNEL_POLICY_OVERLAY_PAYLOAD="$(cat "$CHANNEL_POLICY_OVERLAY")"
+assert_contains "$CHANNEL_POLICY_OVERLAY_PAYLOAD" "\"telegram@claude-plugins-official\": false"
+assert_contains "$CHANNEL_POLICY_OVERLAY_PAYLOAD" "\"discord@claude-plugins-official\": false"
+CHANNEL_POLICY_EFFECTIVE="$CHANNEL_POLICY_HOME/agents/.claude/settings.effective.json"
+[[ -f "$CHANNEL_POLICY_EFFECTIVE" ]] || die "apply-channel-policy.sh did not render effective settings"
+assert_contains "$(cat "$CHANNEL_POLICY_EFFECTIVE")" "\"telegram@claude-plugins-official\": false"
+# Idempotency: second run must be a no-op (overlay byte-identical).
+CHANNEL_POLICY_OVERLAY_FIRST="$(cat "$CHANNEL_POLICY_OVERLAY")"
+env -u BRIDGE_AGENT_HOME_ROOT BRIDGE_HOME="$CHANNEL_POLICY_HOME" \
+  bash "$REPO_ROOT/scripts/apply-channel-policy.sh" >/dev/null
+CHANNEL_POLICY_OVERLAY_SECOND="$(cat "$CHANNEL_POLICY_OVERLAY")"
+[[ "$CHANNEL_POLICY_OVERLAY_FIRST" == "$CHANNEL_POLICY_OVERLAY_SECOND" ]] || die "apply-channel-policy.sh was not idempotent"
+
 log "starting isolated daemon"
 bash "$REPO_ROOT/bridge-daemon.sh" ensure >/dev/null
 DAEMON_STATUS=""

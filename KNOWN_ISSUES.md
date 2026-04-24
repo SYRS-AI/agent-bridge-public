@@ -143,3 +143,21 @@ Operator guidance:
 
 - do not expose the Teams plugin's `/auth/callback` to the public internet without additional ingress-level auth (mTLS, ingress token, IP allowlist)
 - if you operate a multi-tenant hosted Teams plugin, layer your own `state` allowlist or HMAC before this handler
+
+## 10. Singleton channel plugins (Telegram / Discord) poll-lock across concurrent agents
+
+Current behavior:
+
+- Telegram and Discord bots enforce one-poller-per-bot-token: only one process at a time may hold the `getUpdates` long-poll (Telegram) or the gateway websocket (Discord). A second connection on the same token gets a `409 Conflict` (Telegram) or a session-kick (Discord).
+- Claude Code auto-spawns every `~/.claude/settings.json` `enabledPlugins` entry for every agent session, so absent an override every agent's claude process tries to run its own telegram/discord MCP child. The most recently restarted agent holds the lease; every earlier agent has been silently kicked off.
+
+Fix (applied by default from #244):
+
+- `scripts/apply-channel-policy.sh` writes the shared overlay at `agents/.claude/settings.local.json` so every non-admin agent's `.claude/settings.json` symlink resolves to an effective settings that explicitly disables `telegram@claude-plugins-official` and `discord@claude-plugins-official`.
+- The admin agent keeps its own non-shared `settings.json` and acts as the sole router for those channels.
+- `bridge-upgrade.sh` re-runs the policy on every upgrade (idempotent).
+
+Operator guidance:
+
+- Run `bash scripts/apply-channel-policy.sh` manually after adding or removing agents if the policy has drifted.
+- If a non-admin agent needs its own DM endpoint, provision a dedicated bot token per agent and add the plugin id to that agent's `.claude/settings.json` explicitly, rather than relying on the shared token.
