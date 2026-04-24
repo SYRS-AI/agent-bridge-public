@@ -4,6 +4,35 @@ All notable changes to Agent Bridge are documented here. This project adheres
 loosely to [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and tracks
 version bumps via the `VERSION` file.
 
+## [0.6.11] — 2026-04-25
+
+### Fixed
+- `bootstrap-memory-system.sh` no longer aborts on macOS installs with
+  hyphenated or dot-named agent ids (queue task #886, PR #250). Two
+  regressions introduced in 0.6.10 are addressed together: (a) the
+  script now re-execs under Bash 4+ when picked up by macOS's default
+  `/bin/bash` 3.2 (mirrors the guard in `bridge-lib.sh`), and (b)
+  `memory_daily_gate_on` normalises every character outside the bash
+  identifier alphabet to `_` before building the
+  `BRIDGE_AGENT_MEMORY_DAILY_REFRESH_<agent>` env lookup, so agents
+  like `agb-dev-claude` and `foo.bar` no longer trip `invalid variable
+  name` during indirect expansion. Operators overriding the env must
+  use the underscore-normalised key; the roster-level associative
+  array form (`BRIDGE_AGENT_MEMORY_DAILY_REFRESH[<agent>]=0`) is
+  unchanged.
+- `scripts/apply-channel-policy.sh` now writes a per-agent local
+  overlay at `agents/<admin>/.claude/settings.local.json` that
+  re-enables `telegram@claude-plugins-official` /
+  `discord@claude-plugins-official` for the configured admin agent
+  (issue #244, PR #246). Claude Code's settings merge order prefers
+  `.claude/settings.local.json` over the shared-effective
+  `.claude/settings.json` symlink, so the admin keeps the router role
+  while every other agent stops contending on the bot tokens. Admin
+  id is resolved only from an explicit signal (env
+  `BRIDGE_ADMIN_AGENT_ID` or a roster-file grep) and is a no-op when
+  the admin home does not yet exist, keeping the bypass safe on
+  smoke fixtures and pre-bootstrap hosts.
+
 ## [0.6.10] — 2026-04-24
 
 ### Fixed
