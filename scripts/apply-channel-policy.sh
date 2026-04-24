@@ -27,6 +27,23 @@
 #
 # This script is idempotent. It is safe to re-run on every upgrade.
 
+# Re-exec under bash 4+ if we got picked up by macOS's default /bin/bash (3.2),
+# which lacks `${val,,}`-style bash-4 parameter expansions used downstream and
+# chokes `bash -n` on the embedded Python heredoc bodies. Mirrors the guard in
+# bridge-lib.sh so the script stays runnable standalone from an operator shell
+# that isn't loading the bridge library (e.g. post-upgrade bootstrap of #254).
+if (( ${BASH_VERSINFO[0]:-0} < 4 )); then
+  for bridge_candidate_bash in /opt/homebrew/bin/bash /usr/local/bin/bash "$(command -v bash 2>/dev/null || true)"; do
+    [[ -n "$bridge_candidate_bash" && -x "$bridge_candidate_bash" ]] || continue
+    if "$bridge_candidate_bash" -lc '[[ ${BASH_VERSINFO[0]:-0} -ge 4 ]]' >/dev/null 2>&1; then
+      exec "$bridge_candidate_bash" "$0" "$@"
+    fi
+  done
+
+  echo "[apply-channel-policy] Agent Bridge requires Bash 4+ (current: ${BASH_VERSION:-unknown}). Install homebrew bash or set PATH accordingly." >&2
+  exit 1
+fi
+
 set -euo pipefail
 
 SCRIPT_DIR="$(cd -P "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
@@ -185,10 +202,16 @@ admin_agent_id=""
 if [[ -n "${BRIDGE_ADMIN_AGENT_ID:-}" ]]; then
   admin_agent_id="$BRIDGE_ADMIN_AGENT_ID"
 else
+  # `BRIDGE_ADMIN_AGENT_ID` is optional in the roster (agent-roster.local.example.sh
+  # leaves the line commented out), so the grep below must not abort the script
+  # when no admin line exists. Without `|| true` the pipeline exits 1 under
+  # `set -euo pipefail` and every downstream step — including the non-admin
+  # per-agent re-enable — is skipped, which is exactly the #254 symptom we are
+  # supposed to prevent.
   for _admin_roster in "$BRIDGE_HOME/agent-roster.local.sh" "$BRIDGE_HOME/agent-roster.sh"; do
     if [[ -r "$_admin_roster" ]]; then
-      _admin_line="$(grep -E '^[[:space:]]*(export[[:space:]]+)?BRIDGE_ADMIN_AGENT_ID=' "$_admin_roster" 2>/dev/null | head -n 1 | sed -E 's/^[[:space:]]*(export[[:space:]]+)?BRIDGE_ADMIN_AGENT_ID=//; s/^"([^"]*)".*/\1/; s/^'"'"'([^'"'"']*)'"'"'.*/\1/; s/[[:space:]]*#.*$//')"
-      if [[ -n "$_admin_line" ]]; then
+      _admin_line="$(grep -E '^[[:space:]]*(export[[:space:]]+)?BRIDGE_ADMIN_AGENT_ID=' "$_admin_roster" 2>/dev/null | head -n 1 | sed -E 's/^[[:space:]]*(export[[:space:]]+)?BRIDGE_ADMIN_AGENT_ID=//; s/^"([^"]*)".*/\1/; s/^'"'"'([^'"'"']*)'"'"'.*/\1/; s/[[:space:]]*#.*$//' || true)"
+      if [[ -n "${_admin_line:-}" ]]; then
         admin_agent_id="$_admin_line"
         break
       fi
@@ -306,8 +329,13 @@ roster_files = argv[2 + singleton_count :]
 # With either single or double quotes around the value. We keep this
 # tolerant because the roster file is hand-edited and may grow extra
 # whitespace or `export` prefixes.
+# Agent id charset matches bridge_validate_agent_name (lib/bridge-core.sh):
+# `[A-Za-z0-9._-]+` — includes dots so dotted agent ids like `foo.bar` are
+# parsed here. The earlier pattern dropped dots, leaving a valid singleton
+# owner in the exact silent-disable state this PR is meant to fix (see PR
+# #255 round-1 review, finding #1).
 channels_line = re.compile(
-    r'^\s*(?:export\s+)?BRIDGE_AGENT_CHANNELS\[\s*["\']?([A-Za-z0-9_\-]+)["\']?\s*\]\s*='
+    r'^\s*(?:export\s+)?BRIDGE_AGENT_CHANNELS\[\s*["\']?([A-Za-z0-9._\-]+)["\']?\s*\]\s*='
     r'\s*["\']([^"\']*)["\']\s*(?:#.*)?$'
 )
 
@@ -324,11 +352,11 @@ for path_str in roster_files:
             continue
         agent = match.group(1)
         value = match.group(2)
-        # Later roster overrides earlier (agent-roster.local.sh wins over
-        # tracked agent-roster.sh — last-read wins because we feed roster
-        # files in local-first order at the bash layer, but to be safe
-        # compute it explicitly: only overwrite if not already set by a
-        # higher-priority file).
+        # First-read wins. The bash layer feeds roster files in local-first
+        # priority order (`agent-roster.local.sh` before `agent-roster.sh`
+        # before the source-root fallbacks), so honouring the first entry we
+        # see is how local overrides the tracked roster. Do not flip this to
+        # last-read-wins without also reversing the file order above.
         if agent not in agent_channels:
             agent_channels[agent] = value
 

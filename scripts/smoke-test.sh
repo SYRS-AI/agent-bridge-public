@@ -1419,6 +1419,41 @@ assert_contains "$MULTI_OUTPUT" "WARNING: 'telegram@claude-plugins-official' dec
 [[ -f "$CHANNEL_POLICY_MULTI_HOME/agents/a2/.claude/settings.local.json" ]] \
   || die "multi-owner case did not write a2 overlay"
 
+log "apply-channel-policy.sh parses dotted agent ids in BRIDGE_AGENT_CHANNELS (#255 r1 finding 1)"
+CHANNEL_POLICY_DOT_HOME="$TMP_ROOT/channel-policy-dotted-home"
+mkdir -p \
+  "$CHANNEL_POLICY_DOT_HOME/agents/.claude" \
+  "$CHANNEL_POLICY_DOT_HOME/agents/dot_admin/.claude" \
+  "$CHANNEL_POLICY_DOT_HOME/agents/foo.bar/.claude"
+printf '{}' > "$CHANNEL_POLICY_DOT_HOME/agents/.claude/settings.json"
+cat > "$CHANNEL_POLICY_DOT_HOME/agent-roster.local.sh" <<'ROSTER'
+BRIDGE_ADMIN_AGENT_ID="dot_admin"
+BRIDGE_AGENT_CHANNELS["foo.bar"]="plugin:discord@claude-plugins-official"
+ROSTER
+env -u BRIDGE_AGENT_HOME_ROOT -u BRIDGE_ADMIN_AGENT_ID \
+  BRIDGE_HOME="$CHANNEL_POLICY_DOT_HOME" \
+  bash "$REPO_ROOT/scripts/apply-channel-policy.sh" >/dev/null
+DOTTED_OVERLAY="$CHANNEL_POLICY_DOT_HOME/agents/foo.bar/.claude/settings.local.json"
+[[ -f "$DOTTED_OVERLAY" ]] || die "apply-channel-policy.sh did not write overlay for dotted agent id"
+assert_contains "$(cat "$DOTTED_OVERLAY")" "\"discord@claude-plugins-official\": true"
+
+log "apply-channel-policy.sh still runs when roster has no BRIDGE_ADMIN_AGENT_ID line (#255 r1 finding 2)"
+CHANNEL_POLICY_NOADMIN_HOME="$TMP_ROOT/channel-policy-noadmin-home"
+mkdir -p \
+  "$CHANNEL_POLICY_NOADMIN_HOME/agents/.claude" \
+  "$CHANNEL_POLICY_NOADMIN_HOME/agents/dev_discord/.claude"
+printf '{}' > "$CHANNEL_POLICY_NOADMIN_HOME/agents/.claude/settings.json"
+cat > "$CHANNEL_POLICY_NOADMIN_HOME/agent-roster.local.sh" <<'ROSTER'
+BRIDGE_AGENT_CHANNELS["dev_discord"]="plugin:discord@claude-plugins-official"
+ROSTER
+env -u BRIDGE_AGENT_HOME_ROOT -u BRIDGE_ADMIN_AGENT_ID \
+  BRIDGE_HOME="$CHANNEL_POLICY_NOADMIN_HOME" \
+  bash "$REPO_ROOT/scripts/apply-channel-policy.sh" >/dev/null \
+  || die "apply-channel-policy.sh aborted on admin-less roster"
+NOADMIN_OVERLAY="$CHANNEL_POLICY_NOADMIN_HOME/agents/dev_discord/.claude/settings.local.json"
+[[ -f "$NOADMIN_OVERLAY" ]] || die "apply-channel-policy.sh skipped non-admin owner when roster has no admin id"
+assert_contains "$(cat "$NOADMIN_OVERLAY")" "\"discord@claude-plugins-official\": true"
+
 log "bootstrap-memory-system.sh memory_daily_gate_on handles hyphenated agent ids (task #886 regression)"
 GATE_FN="$(awk '/^memory_daily_gate_on\(\) \{$/,/^\}$/' "$REPO_ROOT/bootstrap-memory-system.sh")"
 [[ -n "$GATE_FN" ]] || die "could not extract memory_daily_gate_on from bootstrap-memory-system.sh"
