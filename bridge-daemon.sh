@@ -2905,9 +2905,27 @@ cmd_run_cron_worker() {
   if command -v flock >/dev/null 2>&1; then
     _has_flock=1
   fi
-  _burst_update() {
-    # Inner body runs while we hold the lock (or unconditionally if
-    # flock is unavailable). Updates fail_burst_count in the outer scope.
+  # Use a group command `{ ...; }` instead of a subshell `( ... )` so
+  # the variable assignment to fail_burst_count stays visible in the
+  # outer scope. A subshell would fork a child process whose local
+  # variable mutations evaporate on exit, leaving the downstream
+  # `(( fail_burst_count >= fail_burst_threshold ))` gate forever
+  # reading 0 → burst threshold never reached → task never created.
+  if (( _has_flock == 1 )); then
+    { flock -x 9
+      if [[ "$CRON_NEEDS_HUMAN_FOLLOWUP" == "1" ]]; then
+        fail_burst_count=0
+        if [[ -f "$fail_burst_file" ]]; then
+          fail_burst_count=$(cat "$fail_burst_file" 2>/dev/null || echo 0)
+          [[ "$fail_burst_count" =~ ^[0-9]+$ ]] || fail_burst_count=0
+        fi
+        fail_burst_count=$(( fail_burst_count + 1 ))
+        printf '%s' "$fail_burst_count" >"$fail_burst_file"
+      else
+        rm -f "$fail_burst_file" 2>/dev/null || true
+      fi
+    } 9>"$fail_burst_lock"
+  else
     if [[ "$CRON_NEEDS_HUMAN_FOLLOWUP" == "1" ]]; then
       fail_burst_count=0
       if [[ -f "$fail_burst_file" ]]; then
@@ -2919,13 +2937,7 @@ cmd_run_cron_worker() {
     else
       rm -f "$fail_burst_file" 2>/dev/null || true
     fi
-  }
-  if (( _has_flock == 1 )); then
-    ( flock -x 9 && _burst_update ) 9>"$fail_burst_lock"
-  else
-    _burst_update
   fi
-  unset -f _burst_update
 
   if [[ "$CRON_NEEDS_HUMAN_FOLLOWUP" == "1" ]]; then
     followup_body_file="$(bridge_cron_dispatch_followup_file_by_id "$run_id")"
@@ -2947,8 +2959,12 @@ cmd_run_cron_worker() {
         # fire a fresh followup task after the admin closes this one.
         # The cycle restarts only after another BRIDGE_CRON_FOLLOWUP_FAIL_BURST_THRESHOLD
         # consecutive failures or any success (handled above).
+        # Reset is a single rm, so a subshell is safe here — no outer
+        # scope state to preserve.
         if (( _has_flock == 1 )); then
-          ( flock -x 9 && rm -f "$fail_burst_file" ) 9>"$fail_burst_lock"
+          { flock -x 9
+            rm -f "$fail_burst_file" 2>/dev/null || true
+          } 9>"$fail_burst_lock"
         else
           rm -f "$fail_burst_file" 2>/dev/null || true
         fi
