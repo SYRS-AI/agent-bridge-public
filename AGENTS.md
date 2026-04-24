@@ -48,11 +48,19 @@ Codex agents MUST work inside their own git worktree, not the operator's primary
   git -C <project-root> worktree remove "<root-path-from-list>"
   # 3) Drop ONLY the matching registry entry. The same agent name can
   #    have --<sha12> entries for different project roots, so scope the
-  #    removal by grepping for the WORKTREE_ROOT you just removed:
+  #    removal by sourcing each env file and comparing WORKTREE_ROOT
+  #    directly. A grep would miss matches because the writer stores
+  #    the path via `printf '%q'` (shell-quoted), while `worktree list`
+  #    prints the raw path — paths containing spaces or regex
+  #    metacharacters never match the quoted form.
   target="<root-path-from-list>"
-  grep -l "^WORKTREE_ROOT=[\"']\?${target}[\"']\?$" \
-    "$BRIDGE_WORKTREE_META_DIR"/<agent>--*.env \
-    | xargs -r rm -f
+  for env in "$BRIDGE_WORKTREE_META_DIR"/<agent>--*.env; do
+    [[ -f "$env" ]] || continue
+    WORKTREE_ROOT=""
+    # shellcheck source=/dev/null
+    source "$env"
+    [[ "$WORKTREE_ROOT" == "$target" ]] && rm -f "$env"
+  done
   ```
   Never `rm -f "$BRIDGE_WORKTREE_META_DIR"/<agent>--*.env` blindly — that deletes every project's entry for the same agent name. And never `rm -rf` the worktree path without `git worktree remove` first — that leaves git's bookkeeping in a stale state and breaks future `--prefer new` spawns for the same name.
 - Never run `git checkout <branch>` or `git commit --amend` inside the operator's primary checkout from a Codex agent's session. Those operations belong in the agent's own worktree or in a short-lived temp clone.
