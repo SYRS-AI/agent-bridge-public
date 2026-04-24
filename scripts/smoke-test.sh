@@ -1863,6 +1863,18 @@ CODEX_PROMPT_OUTPUT="$(BRIDGE_AGENT_ID="$SMOKE_AGENT" BRIDGE_HOME="$BRIDGE_HOME"
 assert_contains "$CODEX_PROMPT_OUTPUT" "\"hookEventName\": \"UserPromptSubmit\""
 assert_contains "$CODEX_PROMPT_OUTPUT" "now:"
 assert_contains "$CODEX_PROMPT_OUTPUT" "session_age:"
+CODEX_DYNAMIC_NO_HOME_AGENT="agb-dev-codex-dynamic-no-home-$$"
+rm -rf "$BRIDGE_HOME/agents/$CODEX_DYNAMIC_NO_HOME_AGENT"
+CODEX_DYNAMIC_NO_HOME_OUTPUT="$(printf '%s' '{"stop_hook_active": false}' | BRIDGE_AGENT_ID="$CODEX_DYNAMIC_NO_HOME_AGENT" BRIDGE_AGENT_WORKDIR= BRIDGE_HOME="$BRIDGE_HOME" BRIDGE_TASK_DB="$BRIDGE_TASK_DB" python3 "$REPO_ROOT/hooks/check-inbox.py" --format codex)"
+python3 - "$CODEX_DYNAMIC_NO_HOME_OUTPUT" "$BRIDGE_HOME/agents/$CODEX_DYNAMIC_NO_HOME_AGENT" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+payload = json.loads(sys.argv[1])
+assert payload == {}, payload
+assert not Path(sys.argv[2]).exists(), sys.argv[2]
+PY
 CODEX_STOP_TASK_OUTPUT="$(bash "$REPO_ROOT/bridge-task.sh" create --to "$SMOKE_AGENT" --title "codex stop pickup" --body "pickup" --from "$REQUESTER_AGENT")"
 assert_contains "$CODEX_STOP_TASK_OUTPUT" "created task #"
 CODEX_STOP_TASK_ID="$(printf '%s\n' "$CODEX_STOP_TASK_OUTPUT" | sed -n 's/^created task #\([0-9][0-9]*\).*/\1/p' | head -n1)"
@@ -1877,7 +1889,9 @@ python3 "$REPO_ROOT/bridge-queue.py" done "$CODEX_STOP_TASK_ID" --agent "$SMOKE_
 
 log "nudging prompt-ready Codex sessions without waiting for idle threshold"
 tmux_kill_session_exact "$CODEX_CLI_SESSION" || true
-tmux new-session -d -s "$CODEX_CLI_SESSION" "$BASH4_BIN -lc 'printf \"› ready\\n\"; sleep 30'"
+# Keep the prompt empty. Text after the Codex glyph is treated as typed input
+# by the busy gate and intentionally spools daemon nudges.
+tmux new-session -d -s "$CODEX_CLI_SESSION" "$BASH4_BIN -lc 'printf \"› \\n\"; sleep 30'"
 bash "$REPO_ROOT/bridge-sync.sh" >/dev/null
 CODEX_READY_TASK_OUTPUT="$(python3 "$REPO_ROOT/bridge-queue.py" create --to "$CODEX_CLI_AGENT" --title "codex ready pickup" --body "pickup" --from "$REQUESTER_AGENT")"
 assert_contains "$CODEX_READY_TASK_OUTPUT" "created task #"
@@ -2014,8 +2028,8 @@ tmux_kill_session_exact "$CLAUDE_STATIC_SESSION" || true
 log "reloading dynamic agents inside a long-lived daemon cycle"
 cat >"$FAKE_BIN/codex" <<'EOF'
 #!/usr/bin/env bash
-printf '› ready\n'
-sleep 30
+printf '› \n'
+sleep 600
 EOF
 chmod +x "$FAKE_BIN/codex"
 LATE_DYNAMIC_OUTPUT="$("$BASH4_BIN" -lc '
@@ -2036,10 +2050,17 @@ LATE_DYNAMIC_OUTPUT="$("$BASH4_BIN" -lc '
   source "$tmp_daemon"
   "'"$REPO_ROOT"'/agent-bridge" --codex --name "'"$LATE_DYNAMIC_AGENT"'" --workdir "'"$LATE_DYNAMIC_WORKDIR"'" --no-attach >/dev/null
   python3 "'"$REPO_ROOT"'/bridge-queue.py" create --to "'"$LATE_DYNAMIC_AGENT"'" --title "late dynamic pickup" --body "pickup" --from "'"$REQUESTER_AGENT"'" >/dev/null
-  sleep 1
-  cmd_sync_cycle >/dev/null
-  python3 "'"$REPO_ROOT"'/bridge-queue.py" summary --agent "'"$LATE_DYNAMIC_AGENT"'" --format tsv
-  python3 - <<'"'"'PY'"'"'
+  for _ in {1..20}; do
+    tmux has-session -t "='"$LATE_DYNAMIC_AGENT"'" 2>/dev/null && break
+    sleep 0.2
+  done
+  late_summary=""
+  late_nudge_ts=0
+  for _ in {1..6}; do
+    sleep 1
+    cmd_sync_cycle >/dev/null
+    late_summary="$(python3 "'"$REPO_ROOT"'/bridge-queue.py" summary --agent "'"$LATE_DYNAMIC_AGENT"'" --format tsv)"
+    late_nudge_ts="$(python3 - <<'"'"'PY'"'"'
 import os
 import sqlite3
 
@@ -2051,10 +2072,15 @@ with sqlite3.connect(db) as conn:
         (agent,),
     ).fetchone()
 if row is None:
-    print("NUDGE_TS=0")
+    print("0")
 else:
-    print(f"NUDGE_TS={int(row[1] or 0) if int(row[0] or 0) == 1 else 0}")
+    print(int(row[1] or 0) if int(row[0] or 0) == 1 else 0)
 PY
+)"
+    [[ "$late_nudge_ts" =~ ^[1-9][0-9]*$ ]] && break
+  done
+  printf "%s\n" "$late_summary"
+  printf "NUDGE_TS=%s\n" "$late_nudge_ts"
 ')"
 LATE_DYNAMIC_SUMMARY="$(printf '%s\n' "$LATE_DYNAMIC_OUTPUT" | sed -n '1p')"
 LATE_DYNAMIC_NUDGE_TS="$(printf '%s\n' "$LATE_DYNAMIC_OUTPUT" | sed -n 's/^NUDGE_TS=//p' | tail -n1)"
@@ -2201,16 +2227,36 @@ done
 kill -0 "$MCP_ORPHAN_PID" >/dev/null 2>&1 || die "fake orphan MCP process did not start"
 MCP_ORPHAN_SCAN_JSON="$(python3 "$REPO_ROOT/bridge-mcp-cleanup.py" scan --pattern "$MCP_ORPHAN_PATTERN" --min-age 0 --json)"
 assert_contains "$MCP_ORPHAN_SCAN_JSON" "\"pid\": $MCP_ORPHAN_PID"
-BRIDGE_MCP_ORPHAN_CLEANUP_ENABLED=1 \
-BRIDGE_MCP_ORPHAN_CLEANUP_INTERVAL_SECONDS=0 \
-BRIDGE_MCP_ORPHAN_MIN_AGE_SECONDS=0 \
-BRIDGE_MCP_ORPHAN_PATTERNS="$MCP_ORPHAN_PATTERN" \
-  "$BASH4_BIN" "$REPO_ROOT/bridge-daemon.sh" sync >/dev/null
-if kill -0 "$MCP_ORPHAN_PID" >/dev/null 2>&1; then
-  die "daemon did not clean fake orphan MCP process"
-fi
+# Keep this assertion on the periodic MCP cleanup path. A full daemon sync can
+# run unrelated session reapers first, which also kill matching processes but do
+# not write the periodic audit event this smoke block is trying to verify.
+MCP_ORPHAN_CLEANUP_OUTPUT="$("$BASH4_BIN" -lc '
+  set -euo pipefail
+  tmp_daemon="'"$TMP_ROOT"'/daemon-mcp-cleanup.sh"
+  {
+    printf "%s\n" "set -euo pipefail"
+    printf "SCRIPT_DIR=%q\n" "'"$REPO_ROOT"'"
+    printf "%s\n" "source \"\$SCRIPT_DIR/bridge-lib.sh\""
+    printf "%s\n" "bridge_load_roster"
+    printf "%s\n" "daemon_info() { :; }"
+    sed -n '"'"'/^bridge_agent_heartbeat_file()/,/^CMD="${1:-}"/p'"'"' "'"$REPO_ROOT"'/bridge-daemon.sh" | sed '"'"'$d'"'"'
+  } >"$tmp_daemon"
+  source "$tmp_daemon"
+  export BRIDGE_MCP_ORPHAN_CLEANUP_ENABLED=1
+  export BRIDGE_MCP_ORPHAN_CLEANUP_INTERVAL_SECONDS=0
+  export BRIDGE_MCP_ORPHAN_MIN_AGE_SECONDS=0
+  export BRIDGE_MCP_ORPHAN_PATTERNS="'"$MCP_ORPHAN_PATTERN"'"
+  process_mcp_orphan_cleanup >/dev/null || true
+  if kill -0 "'"$MCP_ORPHAN_PID"'" >/dev/null 2>&1; then
+    echo "MCP_ORPHAN_ALIVE=yes"
+  else
+    echo "MCP_ORPHAN_ALIVE=no"
+  fi
+  cat "'"$BRIDGE_LOG_DIR"'/audit.jsonl" 2>/dev/null || true
+')"
+assert_contains "$MCP_ORPHAN_CLEANUP_OUTPUT" "MCP_ORPHAN_ALIVE=no"
 MCP_ORPHAN_PID=""
-assert_contains "$(cat "$BRIDGE_LOG_DIR/audit.jsonl")" "mcp_orphan_cleanup"
+assert_contains "$MCP_ORPHAN_CLEANUP_OUTPUT" "mcp_orphan_cleanup"
 
 python3 - "$MCP_ATTACHED_PATTERN" "$MCP_ATTACHED_PID_FILE" <<'PY' &
 import subprocess
