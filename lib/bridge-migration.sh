@@ -342,6 +342,61 @@ bridge_migration_unisolate() {
     fi
   fi
 
+  # Issue #233: the isolate path walked ancestors up to '/' granting
+  # `u:${os_user}:--x` search bits for the isolated UID, and separately
+  # granted `u:${controller_user}:--x` on parts of that chain. POSIX
+  # ACL's named-user override then stripped the operator's own read
+  # access on `/` and `/home` (base `other::r-x` was shadowed by
+  # `u:ec2-user:--x`). bun 1.3.x's ancestor-walk resolver hit EACCES
+  # there and every bun MCP plugin silently died. Unisolate previously
+  # left every one of those entries in place, so the poison stayed until
+  # a later Claude Code upgrade exposed it days or weeks later.
+  #
+  # Strip the named-user entries for both the isolated UID and the
+  # controller UID from every path the isolate step is known to have
+  # touched. Non-recursive on `/`, `/home`, and the controller home
+  # (never touch sibling user files); recursive inside BRIDGE_HOME,
+  # workdir, and runtime dirs that are scoped to this agent.
+  local controller_home=""
+  controller_home="$(getent passwd "$controller_user" 2>/dev/null | cut -d: -f6 || true)"
+  local isolated_home=""
+  isolated_home="$(bridge_migration_user_home "$os_user")"
+
+  local -a acl_strip_paths_shallow=()
+  acl_strip_paths_shallow+=("/")
+  acl_strip_paths_shallow+=("/home")
+  [[ -n "$controller_home" && -d "$controller_home" ]] && acl_strip_paths_shallow+=("$controller_home")
+  [[ -n "$isolated_home" && -d "$isolated_home" ]] && acl_strip_paths_shallow+=("$isolated_home")
+  [[ -n "${BRIDGE_HOME:-}" && -d "$BRIDGE_HOME" ]] && acl_strip_paths_shallow+=("$BRIDGE_HOME")
+  [[ -n "${BRIDGE_AGENT_HOME_ROOT:-}" && -d "$BRIDGE_AGENT_HOME_ROOT" ]] && acl_strip_paths_shallow+=("$BRIDGE_AGENT_HOME_ROOT")
+
+  local -a acl_strip_paths_recursive=()
+  [[ -n "$workdir" && -d "$workdir" ]] && acl_strip_paths_recursive+=("$workdir")
+  [[ -n "$runtime_state_dir" && -d "$runtime_state_dir" ]] && acl_strip_paths_recursive+=("$runtime_state_dir")
+  [[ -n "$log_dir" && -d "$log_dir" ]] && acl_strip_paths_recursive+=("$log_dir")
+  [[ -n "$request_dir" && -d "$request_dir" ]] && acl_strip_paths_recursive+=("$request_dir")
+  [[ -n "$response_dir" && -d "$response_dir" ]] && acl_strip_paths_recursive+=("$response_dir")
+
+  local _acl_target=""
+  for _acl_target in "${acl_strip_paths_shallow[@]}"; do
+    [[ -n "$_acl_target" ]] || continue
+    bridge_migration_print_step "$dry_run" "setfacl -x u:${os_user} ${_acl_target}"
+    bridge_migration_print_step "$dry_run" "setfacl -x u:${controller_user} ${_acl_target}"
+    if [[ "$dry_run" != "1" ]]; then
+      bridge_linux_sudo_root setfacl -x "u:${os_user}" "$_acl_target" 2>/dev/null || true
+      bridge_linux_sudo_root setfacl -d -x "u:${os_user}" "$_acl_target" 2>/dev/null || true
+      bridge_linux_sudo_root setfacl -x "u:${controller_user}" "$_acl_target" 2>/dev/null || true
+      bridge_linux_sudo_root setfacl -d -x "u:${controller_user}" "$_acl_target" 2>/dev/null || true
+    fi
+  done
+  for _acl_target in "${acl_strip_paths_recursive[@]}"; do
+    [[ -n "$_acl_target" ]] || continue
+    bridge_migration_print_step "$dry_run" "setfacl -R -x u:${os_user} ${_acl_target}"
+    if [[ "$dry_run" != "1" ]]; then
+      bridge_linux_sudo_root setfacl -R -x "u:${os_user}" "$_acl_target" 2>/dev/null || true
+    fi
+  done
+
   bridge_migration_roster_upsert "$dry_run" "$agent" "shared" ""
 
   if [[ "$dry_run" == "1" ]]; then
