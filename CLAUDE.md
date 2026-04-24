@@ -114,3 +114,20 @@ bash ./scripts/oss-preflight.sh
 - Prefer adding a `lib/bridge-*.sh` helper over growing root scripts.
 - If you change documented behavior, update the corresponding doc (`README.md`, `ARCHITECTURE.md`, `OPERATIONS.md`, `KNOWN_ISSUES.md`, or `docs/developer-handover.md`) in the same change.
 - Do not put private team names, channel tokens, or machine paths into tracked files — this repo is a public snapshot.
+
+## Working With Codex Reviewers
+
+This repo is normally operated by Claude + one or more Codex agents running side by side. The full collaboration contract lives in [`AGENTS.md` §"Multi-Agent Collaboration"](./AGENTS.md). The pieces you need to remember as a Claude author:
+
+1. **Never touch another agent's branch in the shared worktree.** Do not run `git checkout <other-branch>`, `git commit --amend`, `git reset`, or `git worktree prune` in the operator's primary checkout. If you need a clean workspace for a helper operation (e.g. verifying a Codex-authored PR), do it in a temp clone. Codex sessions themselves are expected to run inside their own `--prefer new` worktree; assume they do, and do not hand them paths inside your own.
+2. **Pair-review every non-trivial PR.** Default reviewer is `agb-dev-codex-2`. Workflow:
+   - Write a review brief to `/tmp/agb-<pr-number>-codex-review.md`: background, focus checklist, expected output shape (`implement-ok` / `needs-more: …`).
+   - Queue it: `bash bridge-task.sh create --from agb-dev-claude --to agb-dev-codex-2 --title "[PR #<N> review] <subject>" --body-file /tmp/agb-<pr-number>-codex-review.md`.
+   - Wait for the `[task-complete]` notification, `agb claim`, read the completion note.
+   - If `needs-more: …`, fix and enqueue the next round with a bumped title (`[PR #<N> re-review]`, then `r3`, etc.) and its own brief file. Each round is a fresh `bridge-task create`, not an edit of the prior task.
+   - Merge only after the final reviewer note opens with `implement-ok`. Codex may squash-merge itself when the operator has granted that permission; otherwise you perform the merge.
+3. **Release PRs change only `VERSION` + `CHANGELOG.md`.** Keep them on a `release/vX.Y.Z` branch. Same pair-review contract. `git tag -a vX.Y.Z` goes on the merge commit, never on the feature branch.
+4. **Branch naming.** `fix/<slug>` for bug fixes, `feat/<slug>` for new capability, `release/vX.Y.Z` for version bumps, `docs/<slug>` for doc-only changes. Keep one PR per branch; rebase to `main` rather than piggy-backing on another open PR (that was the source of the #235 "stacked on #232" confusion on 2026-04-24).
+5. **When a review round loops more than 3 times** without an `implement-ok`, stop and reconsider scope before continuing — that's usually a signal the PR is touching too much surface or the spec is ambiguous; a `codex-spec` round on the originating issue is often cheaper than another code round.
+
+Codex cannot observe your local worktree, so reproducibility is on you: include the exact path, env, and command in the review brief and the PR description — not just the symptom. Assume Codex will rerun your verification from scratch.
