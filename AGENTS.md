@@ -39,11 +39,14 @@ Codex agents MUST work inside their own git worktree, not the operator's primary
 
 - Spawn with `agent-bridge --codex --name <id> --prefer new` (use `--claude` for Claude agents). The top-level `agent-bridge` CLI creates a dedicated worktree under `${BRIDGE_WORKTREE_ROOT:-~/.agent-bridge/worktrees}/<repo>/<agent>` automatically. `bridge-run.sh` itself does not accept `--prefer`; always go through `agent-bridge` for the first launch.
 - Inspect the registry with `agent-bridge worktree list`.
-- There is no `agent-bridge worktree remove` subcommand today. To retire a stale worktree, use the git-native path:
+- There is no `agent-bridge worktree remove` subcommand today. The paths themselves are content-addressed (`$BRIDGE_WORKTREE_ROOT/<project-basename>-<sha8>/<agent>` for the tree, `$BRIDGE_WORKTREE_META_DIR/<agent>--<sha12>.env` for the registry entry), so never try to reconstruct them by hand. To retire a stale worktree, read the real path from `worktree list` and hand it to the git-native remove:
   ```bash
-  cd <repo>
-  git worktree remove "$BRIDGE_WORKTREE_ROOT/<repo-basename>/<agent>"
-  rm -f "$BRIDGE_WORKTREE_META_DIR/<agent>.env"   # drops the registry entry shown by `worktree list`
+  # 1) read root= from `agent-bridge worktree list` for the agent you're retiring
+  agent-bridge worktree list
+  # 2) git-native remove using that exact path
+  git -C <project-root> worktree remove "<root-path-from-list>"
+  # 3) drop the registry entry (the filename carries a --<sha12> suffix, so glob it)
+  rm -f "$BRIDGE_WORKTREE_META_DIR"/<agent>--*.env
   ```
   Never `rm -rf` the worktree path without `git worktree remove` first — that leaves git's bookkeeping in a stale state and breaks future `--prefer new` spawns for the same name.
 - Never run `git checkout <branch>` or `git commit --amend` inside the operator's primary checkout from a Codex agent's session. Those operations belong in the agent's own worktree or in a short-lived temp clone.
