@@ -4,6 +4,113 @@ All notable changes to Agent Bridge are documented here. This project adheres
 loosely to [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and tracks
 version bumps via the `VERSION` file.
 
+## [0.6.9] — 2026-04-24
+
+### Added
+- `agent-bridge diagnose acl [--json]` scanner (issue #233 stage 3,
+  PR #237): a read-only sweep over `/`, `/home`, the controller's
+  home, `BRIDGE_HOME`, `BRIDGE_AGENT_HOME_ROOT`, and `BRIDGE_STATE_DIR`
+  that flags named-user ACL entries left behind by earlier
+  isolate/unisolate cycles. Distinguishes access vs. default ACL
+  entries and prints the exact `setfacl -x` command to drain each
+  one. Linux-only; non-Linux hosts and hosts without `getfacl` exit 0
+  with a benign banner. `--json` mode emits
+  `{"platform":..., "controller":..., "findings":[…]}` for machine
+  consumption.
+- Restored `next-session.md` auto-expiry helpers in
+  `lib/bridge-state.sh` (issue #228, PR #229):
+  `bridge_path_age_seconds`, `bridge_agent_next_session_digest`,
+  `bridge_agent_next_session_is_delivered`,
+  `bridge_agent_next_session_age_seconds`,
+  `bridge_agent_clear_next_session_state`, and
+  `bridge_agent_maybe_expire_next_session`. All six were lost during
+  commit 7bf4e7d's lib trim; `bridge-run.sh:237` still referenced the
+  last one and printed `command not found` on every Claude-engine
+  launch. Restored verbatim (with the marker path routed through the
+  current `bridge_agent_next_session_marker_file`
+  `runtime_state_dir/next-session.sha` convention).
+- SessionStart hook persists the NEXT-SESSION.md digest (PR #229):
+  `hooks/bridge_hook_common.py::_stamp_next_session_delivered` now
+  writes `sha1(content.rstrip(b"\n"))` to the per-agent marker path
+  when `bootstrap_artifact_context` surfaces a handoff. The hook
+  honours `BRIDGE_ACTIVE_AGENT_DIR` so deployments with a rerooted
+  active-agent dir (e.g. linux-user isolation) land the marker where
+  the bash reader actually looks. Closes the auto-expiry loop that
+  was introduced in 1e75c0c but silently broken since 7bf4e7d.
+
+### Fixed
+- `scripts/*.sh` executable bit preserved across `agent-bridge upgrade`
+  (issue #222, PR #225): `bridge-upgrade.py` now trusts the git
+  index mode, not the checkout's filesystem mode, so a dev worktree
+  with drifted permissions no longer propagates wrong modes
+  downstream. A new `mode_drift` classification + `sync_mode` action
+  repairs byte-identical live files whose exec bit went missing.
+  `bootstrap-memory-system.sh::bootstrap_install_scripts` repairs the
+  same drift defensively. `scripts/install-daemon-launchagent.sh` and
+  `scripts/oss-preflight.sh` promoted to git mode 100755.
+- Bun plugin orphan accumulation across agent restarts (issue #223,
+  PR #226): `bridge-mcp-cleanup.py` DEFAULT_PATTERNS now matches the
+  plugin root itself —
+  `bun run --cwd .../.agent-bridge/plugins/` and
+  `bun run --cwd .../claude-plugins-official/` — so
+  `is_orphan_candidate`'s parent-chain check can classify the
+  `bun server.ts` child as an orphan when it is reparented to PID 1.
+  Non-greedy regex tolerates whitespace-bearing home directories.
+- Admin-inbox alert fatigue (issue #230, PR #231):
+  - `process_context_pressure_reports` only emits on severity-bucket
+    transitions; a sustained warning/info bucket no longer re-broadcasts
+    every 30 minutes. `critical` still uses the legacy cooldown
+    rebroadcast because it's an ongoing emergency worth pinging on.
+  - `dispatch_cron_work` gates `[cron-followup]` tasks behind a
+    consecutive-failure counter keyed on `CRON_FAMILY`. Default
+    threshold 3 (configurable via
+    `BRIDGE_CRON_FOLLOWUP_FAIL_BURST_THRESHOLD`); counter resets on
+    success or after a burst-triggered create. File update is
+    `flock`-serialised on hosts that ship flock.
+  - `process_crash_reports` skips manual-stop-armed agents entirely —
+    no more `crash_loop_report mode=refresh` audits on an
+    intentionally-offline agent.
+- `bridge-run.sh` no longer prints
+  `bridge_agent_maybe_expire_next_session: command not found` on every
+  Claude-engine launch (issue #228, PR #229). See **Added** for the
+  helpers and the SessionStart writer that completes the feature.
+- Linux-user isolation no longer poisons `/` and `/home` with
+  named-user ACL entries (issue #233, PRs #235/#236/#237):
+  - Stage 1 (PR #235, `lib/bridge-migration.sh`): `unisolate` now
+    strips `u:<os_user>` and `u:<controller>` named-user entries
+    (access + default) from the shallow paths isolate is known to
+    touch (`/`, `/home`, controller home, isolated home, BRIDGE_HOME,
+    BRIDGE_AGENT_HOME_ROOT, memory-daily root + shared) and removes
+    `u:<os_user>` recursively from agent-scoped trees including
+    hooks/shared/runtime/lib/plugins/scripts/.claude, `memory-daily/
+    <agent>`, `memory-daily/shared/aggregate`, and the root helper
+    files (`agent-bridge`, `agb`, `VERSION`, `bridge-*.sh`,
+    `bridge-*.py`). Default-ACL directories are swept with
+    `find -type d -exec setfacl -d -x`.
+  - Stage 2 (PR #236, `lib/bridge-agents.sh`, `lib/bridge-cron.sh`):
+    `bridge_linux_grant_traverse_chain` now requires an explicit
+    `stop_path`; `/` and empty strings warn + skip. A new
+    `bridge_linux_traverse_stop_for` helper returns the controller's
+    home when the target is under it, empty for system paths. Every
+    call site passes a controller-scoped stop — no more walking to
+    `/`. The `bridge_linux_grant_traverse_chain "$controller_user"
+    "$isolated_claude_dir"` call that tagged `/` and `/home` with the
+    operator UID is gone; replaced by scoped grants on
+    `$user_home` + `$isolated_claude_dir` only.
+  - Stage 3 (PR #237, `bridge-diagnose.sh`): `agent-bridge diagnose
+    acl` scanner (see **Added**) lets operators audit shared roots
+    for any lingering residue without running `unisolate`.
+- Hook queue CLI no longer FileNotFoundErrors when a dynamic agent
+  has no default home (PR #232, Sean Oh / SYRS-AI):
+  `hooks/bridge_hook_common.py::queue_cli` routes through a new
+  `queue_cli_cwd()` fallback chain
+  (`BRIDGE_AGENT_WORKDIR` → `agent_default_home` → `cwd` →
+  `bridge_script_dir` → `/`). Artifact lookup still uses
+  `current_agent_workdir()` so handoff paths aren't affected. Smoke
+  adds a `CODEX_DYNAMIC_NO_HOME_AGENT` regression asserting the hook
+  exits 0 with valid Codex JSON and doesn't auto-create the missing
+  home.
+
 ## [0.6.8] — 2026-04-23
 
 ### Added
