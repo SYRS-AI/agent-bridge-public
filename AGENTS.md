@@ -37,8 +37,15 @@ Agent Bridge is routinely operated by multiple agents at once — typically a pl
 
 Codex agents MUST work inside their own git worktree, not the operator's primary checkout. The reason is operational, not stylistic: when two agents share a worktree, `git checkout`, `git commit --amend`, and even idle `fetch`/`pull` from one will silently move `HEAD` out from under the other (observed on 2026-04-24 during the v0.6.9 release cut, where a Codex agent's merge-helper amended a commit on top of another agent's uncommitted work).
 
-- Spawn Codex agents with `bridge-run.sh --prefer new` (or the equivalent `agent-bridge --codex --name <id> --prefer new`). The bridge creates a dedicated worktree under `${BRIDGE_WORKTREE_ROOT:-~/.agent-bridge/worktrees}/<repo>/<agent>` automatically.
-- Inspect the registry with `agent-bridge worktree list`. Stale worktrees should be cleaned up with the same CLI, not `rm -rf`.
+- Spawn with `agent-bridge --codex --name <id> --prefer new` (use `--claude` for Claude agents). The top-level `agent-bridge` CLI creates a dedicated worktree under `${BRIDGE_WORKTREE_ROOT:-~/.agent-bridge/worktrees}/<repo>/<agent>` automatically. `bridge-run.sh` itself does not accept `--prefer`; always go through `agent-bridge` for the first launch.
+- Inspect the registry with `agent-bridge worktree list`.
+- There is no `agent-bridge worktree remove` subcommand today. To retire a stale worktree, use the git-native path:
+  ```bash
+  cd <repo>
+  git worktree remove "$BRIDGE_WORKTREE_ROOT/<repo-basename>/<agent>"
+  rm -f "$BRIDGE_WORKTREE_META_DIR/<agent>.env"   # drops the registry entry shown by `worktree list`
+  ```
+  Never `rm -rf` the worktree path without `git worktree remove` first — that leaves git's bookkeeping in a stale state and breaks future `--prefer new` spawns for the same name.
 - Never run `git checkout <branch>` or `git commit --amend` inside the operator's primary checkout from a Codex agent's session. Those operations belong in the agent's own worktree or in a short-lived temp clone.
 
 ### 2. Pair-review workflow
