@@ -1267,7 +1267,7 @@ printf '%s\n' "$TOOL_POLICY_PY_CHECK"
 assert_contains "$TOOL_POLICY_PY_CHECK" "[ok] tool-policy"
 rm -rf "$TOOL_POLICY_FIXTURE_ROOT"
 
-log "tool-policy: incidental protected-path substrings in bash bodies no longer false-positive (#252)"
+log "tool-policy: protected_alias_reason skips payload substrings but blocks argv-level DB access (#252)"
 TOOL_POLICY_ALIAS_FIXTURE="$TMP_ROOT/tool-policy-alias-fixture"
 rm -rf "$TOOL_POLICY_ALIAS_FIXTURE"
 mkdir -p "$TOOL_POLICY_ALIAS_FIXTURE/state" "$TOOL_POLICY_ALIAS_FIXTURE/agents/self"
@@ -1289,31 +1289,77 @@ spec.loader.exec_module(tp)
 task_db_abs = str(bridge_home / "state" / "tasks.db")
 roster_abs = str(bridge_home / "agent-roster.local.sh")
 
-# Incidental mentions must NOT block (#252 repro).
+# 1) Incidental mentions must NOT block — the original #252 repro class.
 assert tp.protected_alias_reason(
-    f"gh issue comment 252 --body \"mentions state/tasks.db only as a suffix\"",
+    "gh issue comment 252 --body \"mentions state/tasks.db only as a suffix\"",
     "self",
-) is None, "substring-only tasks.db mention should not block"
+) is None, "relative suffix tasks.db mention should not block"
 assert tp.protected_alias_reason(
-    f"git commit -m \"fix agent-roster.local.sh handling\"",
+    "git commit -m \"fix agent-roster.local.sh handling\"",
     "self",
-) is None, "substring-only agent-roster mention should not block"
+) is None, "relative suffix agent-roster mention should not block"
 assert tp.protected_alias_reason(
-    f"rg -n 'state/tasks.db' docs/",
+    "rg -n 'state/tasks.db' docs/",
     "self",
 ) is None, "ripgrep pattern with relative suffix should not block"
 
-# Absolute-path commands still block.
-sqlite_reason = tp.protected_alias_reason(f"sqlite3 {task_db_abs}", "self")
-assert sqlite_reason and "direct queue DB" in sqlite_reason, \
-    f"absolute sqlite3 invocation should still block: {sqlite_reason!r}"
+# 2) Absolute-path mentions inside message payloads must ALSO not block
+#    (Codex r1 finding for PR #260: the real #252 repro was a gh --body
+#    quoting daemon status output with the absolute queue DB path).
+assert tp.protected_alias_reason(
+    f"gh issue comment 252 --body \"daemon status db={task_db_abs}\"",
+    "self",
+) is None, "absolute tasks.db inside --body should not block"
+assert tp.protected_alias_reason(
+    f"git commit -m \"rollback attempted against {roster_abs}\"",
+    "self",
+) is None, "absolute roster path inside -m should not block"
+assert tp.protected_alias_reason(
+    f"gh issue comment 252 --body-file=/tmp/notes.txt",
+    "self",
+) is None, "--body-file should not block even with path-ish value"
 
-# Non-admin reading the absolute roster path still blocks.
-cat_reason = tp.protected_alias_reason(f"cat {roster_abs}", "self")
-assert cat_reason and "roster secrets" in cat_reason, \
-    f"absolute roster path cat should still block: {cat_reason!r}"
+# 3) Real opener-level access must still block, including tilde and
+#    $BRIDGE_HOME / $HOME expansion forms that argv-level shlex sees
+#    verbatim before the shell expands them.
+import os as _os
+_os.environ["BRIDGE_HOME"] = str(bridge_home)
+_os.environ["HOME"] = _os.environ.get("HOME", str(bridge_home.parent))
+sqlite_abs = tp.protected_alias_reason(f"sqlite3 {task_db_abs}", "self")
+assert sqlite_abs and "direct queue DB" in sqlite_abs, \
+    f"absolute sqlite3 invocation should block: {sqlite_abs!r}"
+sqlite_envvar = tp.protected_alias_reason(
+    "sqlite3 \"$BRIDGE_HOME\"/state/tasks.db", "self"
+)
+assert sqlite_envvar and "direct queue DB" in sqlite_envvar, \
+    f"$BRIDGE_HOME sqlite3 invocation should block after expansion: {sqlite_envvar!r}"
+# tilde expansion: only holds when HOME == BRIDGE_HOME parent, which we set
+# explicitly below to exercise the same codepath the Linux reference host
+# uses (BRIDGE_HOME = $HOME/.agent-bridge). Use a nested tmp directory so
+# tilde resolves back onto the fixture's task db.
+_tilde_home = bridge_home.parent
+_os.environ["HOME"] = str(_tilde_home)
+_tilde_path = bridge_home.name + "/state/tasks.db"
+sqlite_tilde = tp.protected_alias_reason(
+    f"sqlite3 ~/{_tilde_path}", "self"
+)
+assert sqlite_tilde and "direct queue DB" in sqlite_tilde, \
+    f"~/ sqlite3 invocation should block after expansion: {sqlite_tilde!r}"
+cat_abs = tp.protected_alias_reason(f"cat {roster_abs}", "self")
+assert cat_abs and "roster secrets" in cat_abs, \
+    f"absolute roster path cat should block: {cat_abs!r}"
 
-print("[ok] tool-policy protected_alias_reason: incidental suffix substrings pass; absolute-path invocations still block")
+# 4) Option-value guarding must survive common flag shapes.
+assert tp.protected_alias_reason(
+    f"gh issue comment 252 --body-file {task_db_abs}",
+    "self",
+) is None, "--body-file consumes its argv value, must not block"
+assert tp.protected_alias_reason(
+    f"gh issue edit 252 --description \"see {task_db_abs} for daemon status\"",
+    "self",
+) is None, "--description value must not block"
+
+print("[ok] tool-policy protected_alias_reason: payload substrings pass; argv openers (abs + env-var) still block")
 PY
 )
 printf '%s\n' "$TOOL_POLICY_ALIAS_CHECK"

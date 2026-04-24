@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import json
 import os
+import shlex
 import sys
 from pathlib import Path
 from typing import Any
@@ -185,27 +186,96 @@ def protected_path_reason(path: Path, agent: str) -> str | None:
     return None
 
 
+_PROTECTED_ALIAS_OPTION_VALUE_FLAGS = frozenset(
+    {
+        "--body",
+        "--body-file",
+        "-F",
+        "-m",
+        "--message",
+        "--title",
+        "-t",
+        "--description",
+        "--notes",
+        "--subject",
+    }
+)
+
+
+def _bash_argv_references_path(command: str, protected: Path) -> bool:
+    """Return True if *command*, interpreted as shell argv, names
+    *protected* as a positional filesystem argument.
+
+    The intent of the tool-policy alias check is to stop a Bash invocation
+    that actually opens the protected file (e.g. ``sqlite3 <queue-db>``),
+    not to block a message body that happens to mention the filename.
+    Substring matching the whole command text confused the two and filed
+    #252 as a live repro against itself. We now:
+
+    1. shlex-split the command into tokens;
+    2. skip tokens that are option-value pairs for long-form message
+       flags (``--body``/``--body-file``/``-m``/``--message``/``--title``/
+       ``--description``/``--notes``/``--subject``) — these are the
+       payload surfaces that triggered the original false positives;
+    3. skip ``--flag=value`` form (value never escapes into argv);
+    4. expand ``~`` and ``$VAR`` on each remaining token so aliased
+       forms like ``~/.agent-bridge/state/tasks.db`` or
+       ``"$BRIDGE_HOME"/state/tasks.db`` still match; and
+    5. compare the resulting :class:`Path` against *protected*.
+
+    A legitimately ambiguous case (e.g. a ``ValueError`` from unbalanced
+    quotes) falls back to a substring match so an evasion attempt using
+    intentionally malformed shell does not become strictly weaker than
+    the original check.
+    """
+    protected_str = str(protected)
+    if not protected_str:
+        return False
+    try:
+        tokens = shlex.split(command, posix=True, comments=False)
+    except ValueError:
+        return protected_str in command
+
+    skip_next = False
+    for tok in tokens:
+        if skip_next:
+            skip_next = False
+            continue
+        if tok in _PROTECTED_ALIAS_OPTION_VALUE_FLAGS:
+            skip_next = True
+            continue
+        if tok.startswith("--") and "=" in tok:
+            # `--body=foo` form packs the value into the same token; value
+            # is not on argv as a separate word, so the path (if any) is
+            # payload, not opener input.
+            continue
+        expanded = os.path.expandvars(os.path.expanduser(tok))
+        if not expanded:
+            continue
+        try:
+            candidate = Path(expanded)
+        except Exception:
+            continue
+        if candidate == protected:
+            return True
+    return False
+
+
 def protected_alias_reason(text: str, agent: str) -> str | None:
     home_root = agent_home_root()
     admin = is_admin_agent(agent)
-    # Block only when the *resolved absolute path* appears verbatim in the
-    # bash command text, not when a filename suffix appears inside an
-    # incidental payload like `gh issue comment --body "…state/tasks.db…"`
-    # or `git commit -m "…agent-roster.local.sh…"`. The prior suffix checks
-    # (`"state/tasks.db" in text` / `"agent-roster.local.sh" in text`)
-    # fired on message bodies, commit subjects, ripgrep patterns, and even
-    # on the description of this very bug (#252). A command that actually
-    # opens the file still has to name the real path in argv, which
-    # includes the absolute `bridge_home_dir()` prefix.
-    # `protected_path_reason` continues to guard the non-Bash tool paths
-    # (Read/Write) with the structurally-correct `Path ==` check.
-    roster_abs = str(roster_local_path())
-    task_db_abs = str(task_db_path())
-    if roster_abs and roster_abs in text:
+    # The two checks below use shlex argv matching rather than substring
+    # matching (closes #252). A Bash invocation that actually opens the
+    # protected file still has to name the real path as a positional
+    # argument; a mention inside a message body (`--body "…"`, `-m "…"`,
+    # `--description "…"`, etc.) is skipped. `protected_path_reason`
+    # continues to guard the non-Bash tool surfaces (Read/Write) with the
+    # structurally-correct `Path ==` check.
+    if _bash_argv_references_path(text, roster_local_path()):
         if admin:
             return None
         return "shared roster secrets are not available inside Claude tool calls"
-    if task_db_abs and task_db_abs in text:
+    if _bash_argv_references_path(text, task_db_path()):
         return "direct queue DB access is blocked; use `agb` queue commands instead"
     if admin:
         return None
