@@ -69,39 +69,54 @@ def is_admin_agent(agent: str) -> bool:
     return False
 
 
+_NON_AGENT_ENTRIES: frozenset[str] = frozenset({
+    # `shared` is the canonical symlink to BRIDGE_SHARED_DIR. Treating it
+    # as a peer agent home used to collapse every shared-dir write into
+    # the "cross-agent access blocked" rejection (issue #240).
+    "shared",
+    # Profile template shipped under agents/; never a real agent, but
+    # `is_dir()` returns True for it so it used to false-positive as a
+    # peer.
+    "_template",
+})
+
+
 def other_agent_homes(agent: str) -> list[Path]:
     """Return every sibling agent home under `agent_home_root()`.
 
-    Intentionally filters out:
+    Excludes entries that are never real agents on a standard install:
 
-    - Symlinks. `~/.agent-bridge/agents/shared` is historically a symlink
-      pointing at `BRIDGE_SHARED_DIR`, and `is_dir()` reports True for it.
-      Treating that alias as an "other agent home" made the later
-      `target_agent_for_path` check resolve every write under
-      `BRIDGE_SHARED_DIR` to the same canonical tree and reject it as
-      cross-agent access (issue #240).
-    - Names starting with `.` — internal state like `.claude`.
-    - Names starting with `_` — templates / fixtures (`_template`).
+    - The `shared` symlink alias (→ BRIDGE_SHARED_DIR). This was the
+      direct trigger for issue #240 — `path.resolve()` collapsed the
+      alias into the shared tree and blocked every legitimate write.
+    - `_template`, the shipped agent profile template.
+    - Dot-prefixed entries (`.claude`, `.cache`, …). POSIX hidden
+      convention reserves these for framework state, and
+      `bridge_validate_agent_name` refuses to mint agent names that
+      would conflict on that shape.
 
-    Everything else is a real agent home (patch, librarian, dev_mun, …)
-    and stays in the list so legitimate cross-agent isolation still
-    triggers.
+    Everything else — including non-alias symlink homes a site may
+    legitimately introduce — stays in the list so cross-agent
+    isolation continues to trigger on real peer paths. A real agent
+    named `_real` or similar would still be detected, which is what
+    Codex round-1 flagged as the over-filter regression in the first
+    cut.
     """
     homes: list[Path] = []
     root = agent_home_root()
     if not root.exists():
         return homes
     for candidate in root.iterdir():
-        if candidate.is_symlink():
-            continue
         if not candidate.is_dir():
             continue
         name = candidate.name
         if not name:
             continue
-        if name[0] in (".", "_"):
-            continue
         if name == agent:
+            continue
+        if name in _NON_AGENT_ENTRIES:
+            continue
+        if name.startswith("."):
             continue
         homes.append(candidate)
     return homes
