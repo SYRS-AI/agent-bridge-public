@@ -4,6 +4,32 @@ All notable changes to Agent Bridge are documented here. This project adheres
 loosely to [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and tracks
 version bumps via the `VERSION` file.
 
+## [0.6.12] — 2026-04-25
+
+### Fixed
+- `scripts/apply-channel-policy.sh` no longer silently disables the
+  singleton channel plugins for non-admin agents that explicitly own
+  them via `BRIDGE_AGENT_CHANNELS["<agent>"]="plugin:…"` in the roster
+  (issue #254, PR #255). The v0.6.11 admin-bypass overlay assumed the
+  admin agent was the sole router for every singleton channel, but
+  multi-persona deployments (e.g. `dev` owns discord while `dev_mun`
+  owns telegram) had their owning agent's plugin blanket-disabled —
+  claude silently exited during plugin resolution and the agent
+  entered a restart loop. The script now walks every reachable roster
+  file, parses `BRIDGE_AGENT_CHANNELS` entries (including dotted agent
+  ids like `foo.bar`), and writes a per-agent
+  `.claude/settings.local.json` that selectively re-enables only the
+  singleton plugins each agent actually owns. Admin retains the
+  existing full re-enable. When two or more agents declare the same
+  singleton plugin, a `WARNING: '<plugin>' declared by multiple
+  agents (…)` line is emitted on stderr — the upstream bot API still
+  enforces one-connection-per-token, so "most recently restarted
+  wins" is surfaced instead of both agents silently failing. A bash
+  4+ self-exec guard identical to `bridge-lib.sh` now protects the
+  script from macOS's default `/bin/bash` 3.2, and an admin grep that
+  previously aborted under `set -euo pipefail` when the roster had no
+  `BRIDGE_ADMIN_AGENT_ID` line is now tolerant of that shape.
+
 ## [0.6.11] — 2026-04-25
 
 ### Fixed
