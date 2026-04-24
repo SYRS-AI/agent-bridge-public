@@ -1349,15 +1349,64 @@ cat_abs = tp.protected_alias_reason(f"cat {roster_abs}", "self")
 assert cat_abs and "roster secrets" in cat_abs, \
     f"absolute roster path cat should block: {cat_abs!r}"
 
-# 4) Option-value guarding must survive common flag shapes.
-assert tp.protected_alias_reason(
-    f"gh issue comment 252 --body-file {task_db_abs}",
-    "self",
-) is None, "--body-file consumes its argv value, must not block"
+# 4) String-payload option flags still must not block when their value
+#    merely mentions the protected path (--body / --description / -m etc.).
 assert tp.protected_alias_reason(
     f"gh issue edit 252 --description \"see {task_db_abs} for daemon status\"",
     "self",
 ) is None, "--description value must not block"
+assert tp.protected_alias_reason(
+    "gh issue comment 252 --body=\"status logged\"",
+    "self",
+) is None, "--body=value form must not block on string payload"
+
+# 5) File-valued option flags (--body-file / -F / --file / --input) open
+#    files at runtime. If the value is the protected path, we must block —
+#    this is the Codex r2 regression on PR #260's round 1.
+bodyfile_reason = tp.protected_alias_reason(
+    f"gh issue comment 252 --body-file {task_db_abs}",
+    "self",
+)
+assert bodyfile_reason and "direct queue DB" in bodyfile_reason, \
+    f"--body-file pointing at the queue DB must block: {bodyfile_reason!r}"
+bodyfile_eq_reason = tp.protected_alias_reason(
+    f"gh issue comment 252 --body-file={task_db_abs}",
+    "self",
+)
+assert bodyfile_eq_reason and "direct queue DB" in bodyfile_eq_reason, \
+    f"--body-file=<queue-db> must block: {bodyfile_eq_reason!r}"
+git_f_reason = tp.protected_alias_reason(
+    f"git commit -F {roster_abs}",
+    "self",
+)
+assert git_f_reason and "roster secrets" in git_f_reason, \
+    f"git commit -F <roster> must block for non-admin: {git_f_reason!r}"
+# Innocent --body-file paths still pass.
+assert tp.protected_alias_reason(
+    "gh issue comment 252 --body-file /tmp/notes.txt",
+    "self",
+) is None, "innocent --body-file path should not block"
+
+# 6) Shell operators and redirection syntax must not hide a real opener
+#    (Codex r2 finding 2 on PR #260 round 1).
+semi_reason = tp.protected_alias_reason(
+    f"sqlite3 {task_db_abs}; echo ok",
+    "self",
+)
+assert semi_reason and "direct queue DB" in semi_reason, \
+    f"sqlite3 <db>; echo must block (trailing `;` was hiding the argv): {semi_reason!r}"
+and_reason = tp.protected_alias_reason(
+    f"sqlite3 {task_db_abs}&& echo ok",
+    "self",
+)
+assert and_reason and "direct queue DB" in and_reason, \
+    f"sqlite3 <db>&& echo must block (trailing `&&` was hiding the argv): {and_reason!r}"
+redir_reason = tp.protected_alias_reason(
+    f"cat <{roster_abs}",
+    "self",
+)
+assert redir_reason and "roster secrets" in redir_reason, \
+    f"cat <<roster> redirection must block: {redir_reason!r}"
 
 print("[ok] tool-policy protected_alias_reason: payload substrings pass; argv openers (abs + env-var) still block")
 PY

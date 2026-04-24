@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shlex
 import sys
 from pathlib import Path
@@ -186,11 +187,13 @@ def protected_path_reason(path: Path, agent: str) -> str | None:
     return None
 
 
-_PROTECTED_ALIAS_OPTION_VALUE_FLAGS = frozenset(
+# String-payload option flags: the next argv token (or the `=value` half of
+# `--flag=value`) is a literal message body, not a filesystem path the command
+# will open. These are the surfaces that fired #252 — a `--body` value that
+# merely *mentions* the queue DB path should not be treated as an opener.
+_STRING_PAYLOAD_FLAGS = frozenset(
     {
         "--body",
-        "--body-file",
-        "-F",
         "-m",
         "--message",
         "--title",
@@ -201,32 +204,97 @@ _PROTECTED_ALIAS_OPTION_VALUE_FLAGS = frozenset(
     }
 )
 
+# File-valued option flags: the next argv token (or `=value`) is the path of a
+# file the command is going to read. Codex round-2 on PR #260 caught that
+# treating these as skip-only unblocks `gh issue comment --body-file <db>` /
+# `git commit -F <roster>`, which really do open the protected file. These
+# values must flow through the same path check positional tokens get.
+_FILE_VALUED_FLAGS = frozenset(
+    {
+        "--body-file",
+        "-F",
+        "--file",
+        "--input",
+    }
+)
+
+# Shell operators that separate commands. `shlex.split(…, posix=True)` does
+# not treat `;` / `&&` / `||` / `|` / `&` / newlines as separators, so e.g.
+# `sqlite3 /path/file&&echo ok` arrives as a single `/path/file&&echo` token.
+# We split each token on these operators so a trailing operator doesn't hide
+# a real path argv from the Path comparison below.
+_COMMAND_OPERATOR_RE = re.compile(r"&&|\|\||\||;|&|\n")
+
+# Redirection prefixes that can ride with the path token (`<file`, `>out`,
+# `2>err`, `&>log`, `>>append`). We peel the prefix before the expanduser /
+# expandvars step so `<{abs task db}>` classifies as a read of the DB, not
+# of the literal `<…` string.
+_REDIRECTION_PREFIXES = ("&>", "2>", ">>", ">", "<")
+
+
+def _alias_path_fragments(token: str):
+    """Yield filesystem-like fragments hidden inside *token*.
+
+    Splits on shell control operators (`;` / `&&` / `||` / `|` / `&` /
+    newline) so a trailing operator does not hide the real path argv.
+    Peels a single redirection prefix (`<` / `>` / `>>` / `2>` / `&>`)
+    from each resulting fragment so Bash redirection syntax is comparable
+    against the protected path.
+    """
+    for raw in _COMMAND_OPERATOR_RE.split(token):
+        fragment = raw.strip()
+        if not fragment:
+            continue
+        for prefix in _REDIRECTION_PREFIXES:
+            if fragment.startswith(prefix):
+                fragment = fragment[len(prefix):]
+                break
+        if fragment:
+            yield fragment
+
+
+def _token_matches_protected(token: str, protected: Path) -> bool:
+    for fragment in _alias_path_fragments(token):
+        expanded = os.path.expandvars(os.path.expanduser(fragment))
+        if not expanded:
+            continue
+        try:
+            candidate = Path(expanded)
+        except Exception:
+            continue
+        if candidate == protected:
+            return True
+    return False
+
 
 def _bash_argv_references_path(command: str, protected: Path) -> bool:
     """Return True if *command*, interpreted as shell argv, names
-    *protected* as a positional filesystem argument.
+    *protected* as a filesystem argument — either positionally or as the
+    value of a file-valued option flag like ``--body-file`` / ``-F``.
 
-    The intent of the tool-policy alias check is to stop a Bash invocation
-    that actually opens the protected file (e.g. ``sqlite3 <queue-db>``),
-    not to block a message body that happens to mention the filename.
-    Substring matching the whole command text confused the two and filed
-    #252 as a live repro against itself. We now:
+    Behaviour contract (round-2 of PR #260 review):
 
-    1. shlex-split the command into tokens;
-    2. skip tokens that are option-value pairs for long-form message
-       flags (``--body``/``--body-file``/``-m``/``--message``/``--title``/
-       ``--description``/``--notes``/``--subject``) — these are the
-       payload surfaces that triggered the original false positives;
-    3. skip ``--flag=value`` form (value never escapes into argv);
-    4. expand ``~`` and ``$VAR`` on each remaining token so aliased
-       forms like ``~/.agent-bridge/state/tasks.db`` or
-       ``"$BRIDGE_HOME"/state/tasks.db`` still match; and
-    5. compare the resulting :class:`Path` against *protected*.
-
-    A legitimately ambiguous case (e.g. a ``ValueError`` from unbalanced
-    quotes) falls back to a substring match so an evasion attempt using
-    intentionally malformed shell does not become strictly weaker than
-    the original check.
+    - shlex-split the command into tokens.
+    - Skip tokens consumed by string-payload option flags
+      (``--body`` / ``-m`` / ``--message`` / ``--description`` /
+      ``--title`` / ``--notes`` / ``--subject``) — these are message
+      bodies the command sends somewhere else, not paths it opens.
+      The ``--flag=value`` packed form is skipped whole for the same
+      reason.
+    - Treat file-valued option flags (``--body-file`` / ``-F`` /
+      ``--file`` / ``--input``) as if the next token (or ``=value``
+      half) were positional: run the same path check over it.
+      Codex r2 caught that skipping these unblocked direct reads of
+      the protected file.
+    - Normalise every remaining positional token via
+      :func:`_alias_path_fragments` (strip trailing shell operators,
+      peel redirection prefixes) before the ``expanduser + expandvars
+      + Path ==`` comparison. ``sqlite3 /db;``, ``cat <db``, and
+      ``sqlite3 /db&& echo ok`` all surface the protected path.
+    - A ``shlex.split`` ``ValueError`` (unbalanced quotes etc.) falls
+      back to a substring match against the absolute path so an
+      evasion attempt via malformed shell is not strictly weaker than
+      the pre-#252 check.
     """
     protected_str = str(protected)
     if not protected_str:
@@ -236,27 +304,44 @@ def _bash_argv_references_path(command: str, protected: Path) -> bool:
     except ValueError:
         return protected_str in command
 
-    skip_next = False
+    def _check_value_token(value: str) -> bool:
+        return _token_matches_protected(value, protected)
+
+    skip_next_payload = False
+    treat_next_as_value = False
     for tok in tokens:
-        if skip_next:
-            skip_next = False
+        if skip_next_payload:
+            skip_next_payload = False
             continue
-        if tok in _PROTECTED_ALIAS_OPTION_VALUE_FLAGS:
-            skip_next = True
+        if treat_next_as_value:
+            treat_next_as_value = False
+            if _check_value_token(tok):
+                return True
+            continue
+        if tok in _STRING_PAYLOAD_FLAGS:
+            skip_next_payload = True
+            continue
+        if tok in _FILE_VALUED_FLAGS:
+            # Next argv word is the file path the command will read.
+            treat_next_as_value = True
             continue
         if tok.startswith("--") and "=" in tok:
-            # `--body=foo` form packs the value into the same token; value
-            # is not on argv as a separate word, so the path (if any) is
-            # payload, not opener input.
+            flag, _, value = tok.partition("=")
+            if flag in _STRING_PAYLOAD_FLAGS:
+                # --body=foo: value is a literal message body, skip.
+                continue
+            if flag in _FILE_VALUED_FLAGS:
+                # --body-file=<path>: value is a filesystem read, check it.
+                if _check_value_token(value):
+                    return True
+                continue
+            # Unknown --flag=value: fall through and check the value as if
+            # it were positional. Safer to block a real opener than to let
+            # a novel gh/git flag escape the check.
+            if _check_value_token(value):
+                return True
             continue
-        expanded = os.path.expandvars(os.path.expanduser(tok))
-        if not expanded:
-            continue
-        try:
-            candidate = Path(expanded)
-        except Exception:
-            continue
-        if candidate == protected:
+        if _token_matches_protected(tok, protected):
             return True
     return False
 
