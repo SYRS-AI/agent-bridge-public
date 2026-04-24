@@ -5016,9 +5016,42 @@ agent = sys.argv[2]
 restart = payload["agent_restart"]
 
 assert restart["enabled"] is True, restart
-assert restart["restarted"] >= 1, restart
-assert agent in restart["restarted_agents"], restart
+# Post-#257 contract: `restart_attempted_ok` replaces the prior `restarted`
+# (the count of `bridge-agent.sh restart` commands that returned exit 0).
+# The old `restarted` / `restarted_agents` keys are gone; the new names
+# must faithfully appear in the JSON.
+assert restart["restart_attempted_ok"] >= 1, restart
+assert agent in restart["restart_attempted_ok_agents"], restart
+assert "restarted" not in restart, "legacy key restarted must be gone after #257"
+assert "restarted_agents" not in restart, "legacy key restarted_agents must be gone after #257"
+assert "would_restart" not in restart, "legacy key would_restart must be gone after #257"
+assert "would_restart_agents" not in restart, "legacy key would_restart_agents must be gone after #257"
 PY
+
+log "upgrade dry-run surfaces the eligibility-only disclaimer (#257)"
+UPGRADE_DRY_RUN_JSON="$("$REPO_ROOT/agent-bridge" upgrade --source "$REPO_ROOT" --target "$BRIDGE_HOME" --allow-dirty --dry-run --json)"
+python3 - "$UPGRADE_DRY_RUN_JSON" "$ALWAYS_ON_AGENT" <<'PY'
+import json
+import sys
+
+payload = json.loads(sys.argv[1])
+agent = sys.argv[2]
+restart = payload["agent_restart"]
+
+# Dry-run must use the new key names too.
+assert restart["dry_run"] is True, restart
+assert restart["restart_eligible"] >= 1, restart
+assert agent in restart["restart_eligible_agents"], restart
+# The apply-only count stays zero on dry-run.
+assert restart["restart_attempted_ok"] == 0, restart
+PY
+UPGRADE_DRY_RUN_TEXT="$("$REPO_ROOT/agent-bridge" upgrade --source "$REPO_ROOT" --target "$BRIDGE_HOME" --allow-dirty --dry-run)"
+assert_contains "$UPGRADE_DRY_RUN_TEXT" "agent_restart_eligible_agents: $ALWAYS_ON_AGENT"
+assert_contains "$UPGRADE_DRY_RUN_TEXT" "agent_restart_note: dry-run reports pre-launch eligibility only"
+# Text summary must not leak the retired labels either.
+assert_not_contains "$UPGRADE_DRY_RUN_TEXT" "agent_restart_would_restart:"
+assert_not_contains "$UPGRADE_DRY_RUN_TEXT" "agent_restart_would_agents:"
+assert_not_contains "$UPGRADE_DRY_RUN_TEXT" "agent_restart_restarted:"
 
 log "rolling back from an upgrade backup snapshot"
 ROLLBACK_ROOT="$TMP_ROOT/rollback-root"
