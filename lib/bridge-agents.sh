@@ -587,17 +587,49 @@ bridge_linux_grant_engine_cli_access() {
   local engine="$2"
   local cli_path=""
   local cli_real=""
+  local stop_path=""
 
   cli_path="$(bridge_resolve_engine_cli "$engine")"
   [[ -n "$cli_path" ]] || return 0
   cli_real="$(readlink -f "$cli_path" 2>/dev/null || printf '%s' "$cli_path")"
 
-  bridge_linux_grant_traverse_chain "$os_user" "$cli_path"
+  # Only chain-grant when the CLI lives inside the operator's home
+  # (chmod 0700 blocks base-perm traversal there). System paths like
+  # /usr/bin/claude already have `r-x` for `other` so the isolated UID
+  # can open them without any ACL help. Walking all the way to `/` for
+  # those was pure noise and the trigger for issue #233's ACL residue.
+  stop_path="$(bridge_linux_traverse_stop_for "$cli_path")"
+  if [[ -n "$stop_path" ]]; then
+    bridge_linux_grant_traverse_chain "$os_user" "$cli_path" "$stop_path"
+  fi
   bridge_linux_acl_add "u:${os_user}:r-x" "$cli_path" >/dev/null 2>&1 || true
   if [[ -n "$cli_real" && "$cli_real" != "$cli_path" ]]; then
-    bridge_linux_grant_traverse_chain "$os_user" "$cli_real"
+    stop_path="$(bridge_linux_traverse_stop_for "$cli_real")"
+    if [[ -n "$stop_path" ]]; then
+      bridge_linux_grant_traverse_chain "$os_user" "$cli_real" "$stop_path"
+    fi
     bridge_linux_acl_add "u:${os_user}:r-x" "$cli_real" >/dev/null 2>&1 || true
   fi
+}
+
+bridge_linux_traverse_stop_for() {
+  # Return a safe stop_path for traversing ancestors of $target. Prefers
+  # the operator's home when $target sits under it (that's the case that
+  # actually needs traversal help — chmod 0700 on the controller home
+  # blocks base-perm search for everyone else). Returns empty for system
+  # paths (/usr/bin/..., /opt/..., etc.) so callers can skip the grant
+  # entirely — `other::r-x` already covers those.
+  local target="$1"
+  local controller_user="${2:-$(bridge_current_user)}"
+  local controller_home=""
+  controller_home="$(getent passwd "$controller_user" 2>/dev/null | cut -d: -f6 || true)"
+  if [[ -n "$controller_home" && "$target" == "$controller_home"/* ]]; then
+    printf '%s' "$controller_home"
+    return 0
+  fi
+  # No safe stop_path — caller must skip the grant. Never return '/',
+  # '/home', or similar shared roots (issue #233).
+  return 0
 }
 
 # Claude Code reads its auth from $CLAUDE_CONFIG_DIR/.credentials.json
@@ -653,7 +685,7 @@ bridge_linux_grant_claude_credentials_access() {
   bridge_linux_sudo_root chown "$os_user" "$isolated_claude_dir"
   bridge_linux_sudo_root chmod 0700 "$isolated_claude_dir"
 
-  bridge_linux_grant_traverse_chain "$os_user" "$controller_claude_dir"
+  bridge_linux_grant_traverse_chain "$os_user" "$controller_claude_dir" "$controller_home"
   bridge_linux_acl_add "u:${os_user}:r-x" "$controller_claude_dir" >/dev/null 2>&1 || true
   bridge_linux_acl_add "u:${os_user}:r--" "$controller_cred_file" >/dev/null 2>&1 || true
   bridge_linux_sudo_root setfacl -d -m "u:${os_user}:r--" "$controller_claude_dir" >/dev/null 2>&1 || true
@@ -697,26 +729,61 @@ bridge_linux_acl_add_default_dirs_recursive() {
 }
 
 bridge_linux_grant_traverse_chain() {
+  # Grant `u:${os_user}:--x` on every directory from $target up to
+  # (and including) $stop_path. Callers must pass an explicit stop_path
+  # — it used to default to `/`, which is how issue #233 happened:
+  # every isolate grant walked all the way up and left
+  # `user:agent-bridge-<agent>:--x` entries on `/`, `/home`, and the
+  # operator's home. A default-to-root API was a loaded footgun.
+  #
+  # The stop_path gets normalised to a real directory. If the caller
+  # passes a file (e.g. a credentials file path), we stop at its parent
+  # directory and still grant execute on the file's containing dir,
+  # because that's the access the isolated UID actually needs to open
+  # the file. `/` is always rejected as a stop_path so an accidental
+  # empty-string or regressed caller cannot reinstate the bug.
   local os_user="$1"
   local target="$2"
+  local stop_path="${3:-}"
   local path=""
+
+  if [[ -z "$stop_path" ]]; then
+    bridge_warn "bridge_linux_grant_traverse_chain: missing stop_path for target=$target (skipping grant to avoid ancestor poisoning)"
+    return 0
+  fi
+  case "$stop_path" in
+    "/"|"")
+      bridge_warn "bridge_linux_grant_traverse_chain: refusing stop_path=\"$stop_path\" for target=$target (would poison filesystem root)"
+      return 0
+      ;;
+  esac
 
   while IFS= read -r path; do
     [[ -d "$path" ]] || continue
     bridge_linux_acl_add "u:${os_user}:--x" "$path"
-  done < <(python3 - "$target" <<'PY'
+  done < <(python3 - "$target" "$stop_path" <<'PY'
 from pathlib import Path
-import os
 import sys
 
-path = Path(sys.argv[1]).expanduser().resolve()
+target = Path(sys.argv[1]).expanduser().resolve()
+stop_raw = Path(sys.argv[2]).expanduser().resolve()
+
+# Stop can be a file — walk terminates at its parent directory.
+stop = stop_raw if stop_raw.is_dir() else stop_raw.parent
+
+if target != stop and stop not in target.parents:
+    sys.exit(0)
+
 items = []
-current = path
+current = target
 while True:
     items.append(str(current))
+    if current == stop:
+        break
     if current.parent == current:
         break
     current = current.parent
+
 for item in reversed(items):
     print(item)
 PY
@@ -985,16 +1052,32 @@ bridge_linux_prepare_agent_isolation() {
   recursive_write_paths+=("$workdir" "$runtime_state_dir" "$log_dir" "$request_dir" "$response_dir" "$memory_daily_agent_dir" "$memory_daily_shared_aggregate_dir")
   hidden_paths+=("$BRIDGE_ROSTER_FILE" "$BRIDGE_ROSTER_LOCAL_FILE" "$BRIDGE_RUNTIME_CREDENTIALS_DIR" "$BRIDGE_RUNTIME_SECRETS_DIR" "$BRIDGE_RUNTIME_CONFIG_FILE" "$BRIDGE_TASK_DB" "${BRIDGE_LOG_DIR}/audit.jsonl")
 
-  bridge_linux_grant_traverse_chain "$os_user" "$BRIDGE_HOME"
-  bridge_linux_grant_traverse_chain "$os_user" "$workdir"
-  bridge_linux_grant_traverse_chain "$os_user" "$user_home"
-  bridge_linux_grant_traverse_chain "$os_user" "$runtime_state_dir"
-  bridge_linux_grant_traverse_chain "$os_user" "$log_dir"
-  bridge_linux_grant_traverse_chain "$os_user" "$history_file"
-  bridge_linux_grant_traverse_chain "$os_user" "$request_dir"
-  bridge_linux_grant_traverse_chain "$os_user" "$response_dir"
-  bridge_linux_grant_traverse_chain "$os_user" "$memory_daily_agent_dir"
-  bridge_linux_grant_traverse_chain "$os_user" "$memory_daily_shared_aggregate_dir"
+  # Issue #233: every traverse_chain call used to climb unconditionally
+  # to `/` and stamp `u:${os_user}:--x` on each ancestor, including
+  # `/home` and `/`. Pass an explicit stop_path so the walk terminates
+  # inside the controller's home. Ancestors above that (`/home`, `/`)
+  # already have base `r-x` for `other`, so no named entry is needed —
+  # and inserting one would strip the operator's own read access via
+  # POSIX ACL override, which is exactly the #233 regression.
+  #
+  # The $user_home chain is intentionally dropped here: the isolated
+  # UID owns its own home outright, and the ancestors `/home` + `/`
+  # are already reachable via base permissions.
+  local controller_home_for_traverse=""
+  controller_home_for_traverse="$(getent passwd "$controller_user" 2>/dev/null | cut -d: -f6 || true)"
+  if [[ -n "$controller_home_for_traverse" && -d "$controller_home_for_traverse" ]]; then
+    bridge_linux_grant_traverse_chain "$os_user" "$BRIDGE_HOME" "$controller_home_for_traverse"
+    bridge_linux_grant_traverse_chain "$os_user" "$workdir" "$controller_home_for_traverse"
+    bridge_linux_grant_traverse_chain "$os_user" "$runtime_state_dir" "$controller_home_for_traverse"
+    bridge_linux_grant_traverse_chain "$os_user" "$log_dir" "$controller_home_for_traverse"
+    bridge_linux_grant_traverse_chain "$os_user" "$history_file" "$controller_home_for_traverse"
+    bridge_linux_grant_traverse_chain "$os_user" "$request_dir" "$controller_home_for_traverse"
+    bridge_linux_grant_traverse_chain "$os_user" "$response_dir" "$controller_home_for_traverse"
+    bridge_linux_grant_traverse_chain "$os_user" "$memory_daily_agent_dir" "$controller_home_for_traverse"
+    bridge_linux_grant_traverse_chain "$os_user" "$memory_daily_shared_aggregate_dir" "$controller_home_for_traverse"
+  else
+    bridge_warn "controller_user=$controller_user has no passwd entry / home; traverse grants skipped (isolated agent may hit EACCES)"
+  fi
   bridge_linux_acl_add "u:${os_user}:r-x" "$memory_daily_root" "$memory_daily_root/shared" >/dev/null 2>&1 || true
 
   bridge_linux_acl_add "u:${os_user}:r-x" "$BRIDGE_HOME" "$BRIDGE_AGENT_HOME_ROOT"
@@ -1054,7 +1137,17 @@ bridge_linux_prepare_agent_isolation() {
   bridge_linux_sudo_root mkdir -p "$isolated_claude_dir"
   bridge_linux_sudo_root chown "$os_user" "$isolated_claude_dir" >/dev/null 2>&1 || true
   bridge_linux_sudo_root chmod 0700 "$isolated_claude_dir" >/dev/null 2>&1 || true
-  bridge_linux_grant_traverse_chain "$controller_user" "$isolated_claude_dir" >/dev/null 2>&1 || true
+  # Issue #233: the previous `bridge_linux_grant_traverse_chain
+  # $controller_user $isolated_claude_dir` call walked from
+  # /home/agent-bridge-<agent>/.claude all the way up to / and left
+  # `user:<controller>:--x` entries on `/home` and `/`. Under POSIX ACL
+  # that named entry *reduced* the operator's own read access, because
+  # the named entry overrides `other::r-x`. That's the exact mechanism
+  # that silenced bun-based plugins. Grant search access only on the
+  # two directories the controller actually needs to traverse: the
+  # isolated user's home and its .claude subdirectory. `/home` and `/`
+  # stay untouched — the controller reaches them via base perms.
+  bridge_linux_acl_add "u:${controller_user}:--x" "$user_home" >/dev/null 2>&1 || true
   bridge_linux_acl_add "u:${controller_user}:r-x" "$isolated_claude_dir" >/dev/null 2>&1 || true
   # Default ACL on .claude/ so any subdirectory (projects/, sessions/, ...)
   # created later by the isolated UID inherits controller read access.
