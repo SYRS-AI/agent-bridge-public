@@ -4,6 +4,20 @@ All notable changes to Agent Bridge are documented here. This project adheres
 loosely to [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and tracks
 version bumps via the `VERSION` file.
 
+## [0.6.10] — 2026-04-24
+
+### Fixed
+- `hooks/tool-policy.py::other_agent_homes` no longer classifies the
+  `agents/shared` symlink (or `.claude` / `_template` siblings) as
+  peer agent homes (issue #240, PR #242). Every Claude-authored Write
+  to `$BRIDGE_SHARED_DIR` on 0.6.9 was being rejected with
+  `cross-agent access is blocked: shared` because `path.resolve()`
+  collapsed the alias onto the real shared tree. The filter is now an
+  exact-name allowlist (`shared`, `_template`, `.claude`) — no
+  prefix/symlink heuristic — so agents whose names legitimately start
+  with `_` or `.` (e.g. `_real_agent_name`, `.real_dot_agent`) keep
+  their cross-agent isolation.
+
 ## [0.6.9] — 2026-04-24
 
 ### Added
