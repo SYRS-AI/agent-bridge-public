@@ -70,14 +70,38 @@ def is_admin_agent(agent: str) -> bool:
 
 
 def other_agent_homes(agent: str) -> list[Path]:
+    """Return every sibling agent home under `agent_home_root()`.
+
+    Intentionally filters out:
+
+    - Symlinks. `~/.agent-bridge/agents/shared` is historically a symlink
+      pointing at `BRIDGE_SHARED_DIR`, and `is_dir()` reports True for it.
+      Treating that alias as an "other agent home" made the later
+      `target_agent_for_path` check resolve every write under
+      `BRIDGE_SHARED_DIR` to the same canonical tree and reject it as
+      cross-agent access (issue #240).
+    - Names starting with `.` — internal state like `.claude`.
+    - Names starting with `_` — templates / fixtures (`_template`).
+
+    Everything else is a real agent home (patch, librarian, dev_mun, …)
+    and stays in the list so legitimate cross-agent isolation still
+    triggers.
+    """
     homes: list[Path] = []
     root = agent_home_root()
     if not root.exists():
         return homes
     for candidate in root.iterdir():
+        if candidate.is_symlink():
+            continue
         if not candidate.is_dir():
             continue
-        if candidate.name == agent:
+        name = candidate.name
+        if not name:
+            continue
+        if name[0] in (".", "_"):
+            continue
+        if name == agent:
             continue
         homes.append(candidate)
     return homes
