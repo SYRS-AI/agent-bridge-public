@@ -1210,6 +1210,21 @@ cp "$TMP_ROOT/openclaw.json" "$BRIDGE_RUNTIME_CONFIG_FILE"
 log "verifying empty runtime starts clean"
 BRIDGE_ROSTER_LOCAL_FILE=/nonexistent bash "$REPO_ROOT/bridge-start.sh" --list >/dev/null
 
+log "diagnose acl reports clean on macOS (non-Linux host)"
+DIAGNOSE_OUTPUT="$("$REPO_ROOT/agent-bridge" diagnose acl)"
+if [[ "$(uname -s)" == "Linux" ]]; then
+  # On Linux getfacl may or may not be installed; either way the
+  # scanner exits 0 with an "[ok]" or "[skip]" banner. The only thing
+  # smoke needs to assert is that it did not explode.
+  assert_contains "$DIAGNOSE_OUTPUT" "["
+else
+  assert_contains "$DIAGNOSE_OUTPUT" "non-linux"
+fi
+DIAGNOSE_JSON_OUTPUT="$("$REPO_ROOT/agent-bridge" diagnose acl --json)"
+assert_contains "$DIAGNOSE_JSON_OUTPUT" "\"findings\""
+DIAGNOSE_HELP="$("$REPO_ROOT/agent-bridge" diagnose 2>&1 || true)"
+assert_contains "$DIAGNOSE_HELP" "diagnose acl"
+
 log "starting isolated daemon"
 bash "$REPO_ROOT/bridge-daemon.sh" ensure >/dev/null
 DAEMON_STATUS=""
