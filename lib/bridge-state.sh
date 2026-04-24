@@ -60,6 +60,51 @@ bridge_claude_dynamic_launch_cmd() {
   bridge_join_quoted "${argv[@]}"
 }
 
+bridge_build_safe_launch_cmd() {
+  # Safe-mode launch helper shared between `bridge-run.sh --safe-mode`
+  # and the post-232 CI smoke fixture. Introduced in 15ed07b
+  # (`runtime: add safe-mode recovery and crash-loop breaker`) and
+  # silently dropped in 7bf4e7d (the same lib trim that lost the
+  # next-session helpers restored in #229). Both call sites have been
+  # referencing it ever since, so `bridge-run.sh --safe-mode` and
+  # `smoke-test.sh` hit `command not found` on any host that resolved
+  # the path. Restore the original body verbatim.
+  local agent="$1"
+  local engine=""
+  local continue_mode=""
+  local session_id=""
+
+  engine="$(bridge_agent_engine "$agent")"
+  continue_mode="$(bridge_agent_continue "$agent")"
+
+  case "$engine" in
+    codex)
+      bridge_normalize_agent_session_id "$agent"
+      session_id="$(bridge_agent_session_id "$agent")"
+      if [[ "$continue_mode" == "1" && -n "$session_id" ]]; then
+        bridge_join_quoted codex resume "$session_id" -c "features.codex_hooks=true" --dangerously-bypass-approvals-and-sandbox --no-alt-screen
+      else
+        bridge_join_quoted codex -c "features.codex_hooks=true" --dangerously-bypass-approvals-and-sandbox --no-alt-screen
+      fi
+      ;;
+    claude)
+      if [[ "$continue_mode" == "1" ]]; then
+        session_id="$(bridge_claude_resume_session_id_for_agent "$agent" || true)"
+        if [[ -n "$session_id" ]]; then
+          bridge_join_quoted claude --resume "$session_id" --dangerously-skip-permissions --name "$agent"
+        else
+          bridge_join_quoted claude --continue --dangerously-skip-permissions --name "$agent"
+        fi
+      else
+        bridge_join_quoted claude --dangerously-skip-permissions --name "$agent"
+      fi
+      ;;
+    *)
+      bridge_die "safe-mode launch is only supported for claude/codex agents: $agent"
+      ;;
+  esac
+}
+
 bridge_build_dynamic_launch_cmd() {
   local agent="$1"
   local engine continue_mode session_id continue_fallback effective_continue
