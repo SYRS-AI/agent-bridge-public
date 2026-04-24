@@ -1346,6 +1346,79 @@ ROSTER_POLICY_OVERLAY="$CHANNEL_POLICY_ROSTER_HOME/agents/admin_from_roster/.cla
 [[ -f "$ROSTER_POLICY_OVERLAY" ]] || die "apply-channel-policy.sh did not pick admin id up from the roster"
 assert_contains "$(cat "$ROSTER_POLICY_OVERLAY")" "\"telegram@claude-plugins-official\": true"
 
+log "apply-channel-policy.sh selectively re-enables per-agent singleton channels (closes #254)"
+CHANNEL_POLICY_OWNER_HOME="$TMP_ROOT/channel-policy-owner-home"
+mkdir -p \
+  "$CHANNEL_POLICY_OWNER_HOME/agents/.claude" \
+  "$CHANNEL_POLICY_OWNER_HOME/agents/admin_owner/.claude" \
+  "$CHANNEL_POLICY_OWNER_HOME/agents/dev_discord/.claude" \
+  "$CHANNEL_POLICY_OWNER_HOME/agents/dev_telegram/.claude" \
+  "$CHANNEL_POLICY_OWNER_HOME/agents/sales_teams_only/.claude"
+printf '{}' > "$CHANNEL_POLICY_OWNER_HOME/agents/.claude/settings.json"
+cat > "$CHANNEL_POLICY_OWNER_HOME/agent-roster.local.sh" <<'ROSTER'
+BRIDGE_ADMIN_AGENT_ID="admin_owner"
+BRIDGE_AGENT_CHANNELS["dev_discord"]="plugin:discord@claude-plugins-official"
+BRIDGE_AGENT_CHANNELS["dev_telegram"]="plugin:teams@agent-bridge,plugin:telegram@claude-plugins-official"
+BRIDGE_AGENT_CHANNELS["sales_teams_only"]="plugin:teams@agent-bridge"
+ROSTER
+env -u BRIDGE_AGENT_HOME_ROOT -u BRIDGE_ADMIN_AGENT_ID \
+  BRIDGE_HOME="$CHANNEL_POLICY_OWNER_HOME" \
+  bash "$REPO_ROOT/scripts/apply-channel-policy.sh" >/dev/null
+# Owner of discord gets discord re-enable only (not telegram).
+OWNER_DISCORD_OVERLAY="$CHANNEL_POLICY_OWNER_HOME/agents/dev_discord/.claude/settings.local.json"
+[[ -f "$OWNER_DISCORD_OVERLAY" ]] || die "apply-channel-policy.sh did not write overlay for discord-owning agent"
+assert_contains "$(cat "$OWNER_DISCORD_OVERLAY")" "\"discord@claude-plugins-official\": true"
+assert_not_contains "$(cat "$OWNER_DISCORD_OVERLAY")" "\"telegram@claude-plugins-official\""
+# Owner of telegram gets telegram re-enable only (teams is not in the singleton set).
+OWNER_TELEGRAM_OVERLAY="$CHANNEL_POLICY_OWNER_HOME/agents/dev_telegram/.claude/settings.local.json"
+[[ -f "$OWNER_TELEGRAM_OVERLAY" ]] || die "apply-channel-policy.sh did not write overlay for telegram-owning agent"
+assert_contains "$(cat "$OWNER_TELEGRAM_OVERLAY")" "\"telegram@claude-plugins-official\": true"
+assert_not_contains "$(cat "$OWNER_TELEGRAM_OVERLAY")" "\"discord@claude-plugins-official\""
+# Agent that owns only a non-singleton plugin (teams) gets no overlay at all —
+# the shared disable does not affect it, and we must not materialise an empty
+# enabledPlugins dict on its behalf.
+[[ ! -e "$CHANNEL_POLICY_OWNER_HOME/agents/sales_teams_only/.claude/settings.local.json" ]] \
+  || die "apply-channel-policy.sh wrote overlay for agent that owns no singleton plugin"
+# Admin still re-enables everything.
+OWNER_ADMIN_OVERLAY="$CHANNEL_POLICY_OWNER_HOME/agents/admin_owner/.claude/settings.local.json"
+[[ -f "$OWNER_ADMIN_OVERLAY" ]] || die "apply-channel-policy.sh did not write admin bypass overlay under roster-aware mode"
+assert_contains "$(cat "$OWNER_ADMIN_OVERLAY")" "\"telegram@claude-plugins-official\": true"
+assert_contains "$(cat "$OWNER_ADMIN_OVERLAY")" "\"discord@claude-plugins-official\": true"
+# Idempotency.
+OWNER_DISCORD_FIRST="$(cat "$OWNER_DISCORD_OVERLAY")"
+OWNER_TELEGRAM_FIRST="$(cat "$OWNER_TELEGRAM_OVERLAY")"
+env -u BRIDGE_AGENT_HOME_ROOT -u BRIDGE_ADMIN_AGENT_ID \
+  BRIDGE_HOME="$CHANNEL_POLICY_OWNER_HOME" \
+  bash "$REPO_ROOT/scripts/apply-channel-policy.sh" >/dev/null
+[[ "$(cat "$OWNER_DISCORD_OVERLAY")" == "$OWNER_DISCORD_FIRST" ]] \
+  || die "apply-channel-policy.sh per-agent discord overlay was not idempotent"
+[[ "$(cat "$OWNER_TELEGRAM_OVERLAY")" == "$OWNER_TELEGRAM_FIRST" ]] \
+  || die "apply-channel-policy.sh per-agent telegram overlay was not idempotent"
+
+log "apply-channel-policy.sh emits a multi-owner warning when 2+ agents claim the same singleton channel (#254)"
+CHANNEL_POLICY_MULTI_HOME="$TMP_ROOT/channel-policy-multi-home"
+mkdir -p \
+  "$CHANNEL_POLICY_MULTI_HOME/agents/.claude" \
+  "$CHANNEL_POLICY_MULTI_HOME/agents/multi_admin/.claude" \
+  "$CHANNEL_POLICY_MULTI_HOME/agents/a1/.claude" \
+  "$CHANNEL_POLICY_MULTI_HOME/agents/a2/.claude"
+printf '{}' > "$CHANNEL_POLICY_MULTI_HOME/agents/.claude/settings.json"
+cat > "$CHANNEL_POLICY_MULTI_HOME/agent-roster.local.sh" <<'ROSTER'
+BRIDGE_ADMIN_AGENT_ID="multi_admin"
+BRIDGE_AGENT_CHANNELS["a1"]="plugin:telegram@claude-plugins-official"
+BRIDGE_AGENT_CHANNELS["a2"]="plugin:telegram@claude-plugins-official"
+ROSTER
+MULTI_OUTPUT="$(env -u BRIDGE_AGENT_HOME_ROOT -u BRIDGE_ADMIN_AGENT_ID \
+  BRIDGE_HOME="$CHANNEL_POLICY_MULTI_HOME" \
+  bash "$REPO_ROOT/scripts/apply-channel-policy.sh" 2>&1)"
+assert_contains "$MULTI_OUTPUT" "WARNING: 'telegram@claude-plugins-official' declared by multiple agents"
+# Both owners still get the re-enable (so the runtime behaviour is "last restarter wins"
+# rather than "both silently fail to load the plugin").
+[[ -f "$CHANNEL_POLICY_MULTI_HOME/agents/a1/.claude/settings.local.json" ]] \
+  || die "multi-owner case did not write a1 overlay"
+[[ -f "$CHANNEL_POLICY_MULTI_HOME/agents/a2/.claude/settings.local.json" ]] \
+  || die "multi-owner case did not write a2 overlay"
+
 log "bootstrap-memory-system.sh memory_daily_gate_on handles hyphenated agent ids (task #886 regression)"
 GATE_FN="$(awk '/^memory_daily_gate_on\(\) \{$/,/^\}$/' "$REPO_ROOT/bootstrap-memory-system.sh")"
 [[ -n "$GATE_FN" ]] || die "could not extract memory_daily_gate_on from bootstrap-memory-system.sh"
