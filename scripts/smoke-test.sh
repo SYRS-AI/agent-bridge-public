@@ -1825,7 +1825,40 @@ assert_contains "$CLAUDE_SESSION_START_OUTPUT" "Handoff present: NEXT-SESSION.md
 assert_contains "$CLAUDE_SESSION_START_OUTPUT" "Resume Checklist"
 assert_contains "$CLAUDE_SESSION_START_OUTPUT" "Onboarding pending:"
 assert_contains "$CLAUDE_SESSION_START_OUTPUT" "agb inbox claude-static"
-rm -f "$CLAUDE_STATIC_WORKDIR/NEXT-SESSION.md" "$CLAUDE_STATIC_WORKDIR/SESSION-TYPE.md"
+# Issue #228: the SessionStart hook must also stamp the next-session
+# digest into the per-agent marker so bash-side
+# bridge_agent_maybe_expire_next_session can later age out the handoff.
+CLAUDE_STATIC_SESSION_MARKER_FILE="$("$BASH4_BIN" -c '
+  source "'"$REPO_ROOT"'/bridge-lib.sh"
+  bridge_load_roster
+  bridge_agent_next_session_marker_file "claude-static"
+')"
+[[ -f "$CLAUDE_STATIC_SESSION_MARKER_FILE" ]] || die "session_start hook did not write next-session marker"
+CLAUDE_STATIC_SESSION_EXPECTED_DIGEST="$(python3 -c 'import hashlib,sys; print(hashlib.sha1(open(sys.argv[1],"rb").read().rstrip(b"\n")).hexdigest())' "$CLAUDE_STATIC_WORKDIR/NEXT-SESSION.md")"
+CLAUDE_STATIC_SESSION_ACTUAL_DIGEST="$(cat "$CLAUDE_STATIC_SESSION_MARKER_FILE")"
+[[ "$CLAUDE_STATIC_SESSION_EXPECTED_DIGEST" == "$CLAUDE_STATIC_SESSION_ACTUAL_DIGEST" ]] || die "next-session marker digest mismatch: expected $CLAUDE_STATIC_SESSION_EXPECTED_DIGEST got $CLAUDE_STATIC_SESSION_ACTUAL_DIGEST"
+rm -f "$CLAUDE_STATIC_WORKDIR/NEXT-SESSION.md" "$CLAUDE_STATIC_WORKDIR/SESSION-TYPE.md" "$CLAUDE_STATIC_SESSION_MARKER_FILE"
+
+# Issue #228 round 2: also exercise the path with BRIDGE_ACTIVE_AGENT_DIR
+# rerouted outside BRIDGE_STATE_DIR/agents. The Python writer must follow
+# the bash contract (bridge_agent_runtime_state_dir is rooted at
+# BRIDGE_ACTIVE_AGENT_DIR, not BRIDGE_STATE_DIR/agents), otherwise the
+# bash reader never sees the marker and auto-expiry stays dead.
+CLAUDE_STATIC_CUSTOM_ACTIVE_DIR="$TMP_ROOT/custom-active-agent-dir"
+mkdir -p "$CLAUDE_STATIC_CUSTOM_ACTIVE_DIR"
+cat >"$CLAUDE_STATIC_WORKDIR/NEXT-SESSION.md" <<'EOF'
+# Custom active-dir handoff
+EOF
+BRIDGE_ACTIVE_AGENT_DIR="$CLAUDE_STATIC_CUSTOM_ACTIVE_DIR" BRIDGE_AGENT_ID="claude-static" BRIDGE_AGENT_WORKDIR="$CLAUDE_STATIC_WORKDIR" BRIDGE_AGENT_HOME_ROOT="$BRIDGE_HOME/agents" python3 "$REPO_ROOT/hooks/session_start.py" >/dev/null
+CLAUDE_STATIC_CUSTOM_MARKER_FILE="$(BRIDGE_ACTIVE_AGENT_DIR="$CLAUDE_STATIC_CUSTOM_ACTIVE_DIR" "$BASH4_BIN" -c '
+  source "'"$REPO_ROOT"'/bridge-lib.sh"
+  bridge_load_roster
+  bridge_agent_next_session_marker_file "claude-static"
+')"
+[[ "$CLAUDE_STATIC_CUSTOM_MARKER_FILE" == "$CLAUDE_STATIC_CUSTOM_ACTIVE_DIR"/* ]] || die "bash did not resolve marker under BRIDGE_ACTIVE_AGENT_DIR override: $CLAUDE_STATIC_CUSTOM_MARKER_FILE"
+[[ -f "$CLAUDE_STATIC_CUSTOM_MARKER_FILE" ]] || die "session_start hook did not honour BRIDGE_ACTIVE_AGENT_DIR override — marker missing at $CLAUDE_STATIC_CUSTOM_MARKER_FILE"
+rm -f "$CLAUDE_STATIC_WORKDIR/NEXT-SESSION.md" "$CLAUDE_STATIC_CUSTOM_MARKER_FILE"
+rm -rf "$CLAUDE_STATIC_CUSTOM_ACTIVE_DIR"
 CODEX_PROMPT_OUTPUT="$(BRIDGE_AGENT_ID="$SMOKE_AGENT" BRIDGE_HOME="$BRIDGE_HOME" python3 "$REPO_ROOT/hooks/prompt_timestamp.py" --format codex)"
 assert_contains "$CODEX_PROMPT_OUTPUT" "\"hookEventName\": \"UserPromptSubmit\""
 assert_contains "$CODEX_PROMPT_OUTPUT" "now:"
@@ -3646,8 +3679,13 @@ CLAUDE_STATIC_NEXT_DIGEST="$("$BASH4_BIN" -c '
   bridge_load_roster
   bridge_agent_next_session_digest "claude-static"
 ')"
-mkdir -p "$BRIDGE_STATE_DIR/next-session-prompts"
-printf '%s' "$CLAUDE_STATIC_NEXT_DIGEST" >"$BRIDGE_STATE_DIR/next-session-prompts/claude-static.sha"
+CLAUDE_STATIC_NEXT_MARKER_FILE="$("$BASH4_BIN" -c '
+  source "'"$REPO_ROOT"'/bridge-lib.sh"
+  bridge_load_roster
+  bridge_agent_next_session_marker_file "claude-static"
+')"
+mkdir -p "$(dirname "$CLAUDE_STATIC_NEXT_MARKER_FILE")"
+printf '%s' "$CLAUDE_STATIC_NEXT_DIGEST" >"$CLAUDE_STATIC_NEXT_MARKER_FILE"
 python3 - "$CLAUDE_STATIC_WORKDIR/NEXT-SESSION.md" <<'PY'
 import os
 import sys
@@ -3664,7 +3702,7 @@ CLAUDE_STALE_NEXT_CLEAR_AGE="$("$BASH4_BIN" -c '
 ')"
 [[ "$CLAUDE_STALE_NEXT_CLEAR_AGE" =~ ^[0-9]+$ ]] || die "expected stale NEXT-SESSION auto-clear age"
 [[ ! -f "$CLAUDE_STATIC_WORKDIR/NEXT-SESSION.md" ]] || die "expected stale NEXT-SESSION file to be cleared"
-[[ ! -f "$BRIDGE_STATE_DIR/next-session-prompts/claude-static.sha" ]] || die "expected stale NEXT-SESSION marker to be cleared"
+[[ ! -f "$CLAUDE_STATIC_NEXT_MARKER_FILE" ]] || die "expected stale NEXT-SESSION marker to be cleared"
 
 FAKE_CLAUDE_HOME="$TMP_ROOT/fake-claude-home"
 mkdir -p "$FAKE_CLAUDE_HOME/.claude/sessions"
