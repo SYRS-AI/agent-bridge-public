@@ -69,7 +69,43 @@ def is_admin_agent(agent: str) -> bool:
     return False
 
 
+_NON_AGENT_ENTRIES: frozenset[str] = frozenset({
+    # `shared` is the canonical symlink to BRIDGE_SHARED_DIR. Treating it
+    # as a peer agent home used to collapse every shared-dir write into
+    # the "cross-agent access blocked" rejection (issue #240).
+    "shared",
+    # Profile template shipped under agents/; never a real agent, but
+    # `is_dir()` returns True for it so it used to false-positive as a
+    # peer.
+    "_template",
+    # Framework-internal dotfile. `bridge-agent.sh create` does not
+    # reserve leading-dot names today (Codex round-2 repro: `create
+    # .real --dry-run` succeeds), so the exclusion has to be an exact
+    # match, not a prefix rule — otherwise a legitimate `.real` agent
+    # would silently lose cross-agent detection.
+    ".claude",
+})
+
+
 def other_agent_homes(agent: str) -> list[Path]:
+    """Return every sibling agent home under `agent_home_root()`.
+
+    Excludes only entries that are never real agents on a standard
+    install — an exact-name allowlist, no prefix heuristic:
+
+    - The `shared` symlink alias (→ BRIDGE_SHARED_DIR). This was the
+      direct trigger for issue #240 — `path.resolve()` collapsed the
+      alias into the shared tree and blocked every legitimate write.
+    - `_template`, the shipped agent profile template.
+    - `.claude`, framework-internal runtime directory.
+
+    Everything else — including agents whose names start with `_` or
+    `.`, and non-alias symlink homes a site may legitimately
+    introduce — stays in the list so cross-agent isolation continues
+    to trigger on real peer paths. Codex rounds 1 and 2 on PR #242
+    both landed on this over-filter class, so we deliberately avoid
+    any prefix-based skip.
+    """
     homes: list[Path] = []
     root = agent_home_root()
     if not root.exists():
@@ -77,7 +113,12 @@ def other_agent_homes(agent: str) -> list[Path]:
     for candidate in root.iterdir():
         if not candidate.is_dir():
             continue
-        if candidate.name == agent:
+        name = candidate.name
+        if not name:
+            continue
+        if name == agent:
+            continue
+        if name in _NON_AGENT_ENTRIES:
             continue
         homes.append(candidate)
     return homes

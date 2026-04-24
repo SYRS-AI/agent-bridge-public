@@ -1210,6 +1210,63 @@ cp "$TMP_ROOT/openclaw.json" "$BRIDGE_RUNTIME_CONFIG_FILE"
 log "verifying empty runtime starts clean"
 BRIDGE_ROSTER_LOCAL_FILE=/nonexistent bash "$REPO_ROOT/bridge-start.sh" --list >/dev/null
 
+log "tool-policy: shared symlink + dot/underscore dirs are not treated as other agents (issue #240)"
+TOOL_POLICY_FIXTURE_ROOT="$TMP_ROOT/tool-policy-fixture"
+TOOL_POLICY_AGENT_HOME_ROOT="$TOOL_POLICY_FIXTURE_ROOT/agents"
+TOOL_POLICY_SHARED_DIR="$TOOL_POLICY_FIXTURE_ROOT/shared"
+rm -rf "$TOOL_POLICY_FIXTURE_ROOT"
+mkdir -p "$TOOL_POLICY_AGENT_HOME_ROOT/self" \
+         "$TOOL_POLICY_AGENT_HOME_ROOT/peer" \
+         "$TOOL_POLICY_AGENT_HOME_ROOT/_real_agent_name" \
+         "$TOOL_POLICY_AGENT_HOME_ROOT/.real_dot_agent" \
+         "$TOOL_POLICY_AGENT_HOME_ROOT/_template" \
+         "$TOOL_POLICY_AGENT_HOME_ROOT/.claude" \
+         "$TOOL_POLICY_SHARED_DIR"
+# The regression trigger: an `agents/shared` symlink that points at the
+# real BRIDGE_SHARED_DIR outside the agents tree. Before the fix,
+# target_agent_for_path resolved every write under shared/ back into
+# this alias and rejected it as cross-agent access.
+ln -s "$TOOL_POLICY_SHARED_DIR" "$TOOL_POLICY_AGENT_HOME_ROOT/shared"
+TOOL_POLICY_PY_CHECK=$(BRIDGE_AGENT_ID=self BRIDGE_AGENT_HOME_ROOT="$TOOL_POLICY_AGENT_HOME_ROOT" PYTHONPATH="$REPO_ROOT/hooks" python3 - "$TOOL_POLICY_SHARED_DIR" "$TOOL_POLICY_AGENT_HOME_ROOT" "$REPO_ROOT" <<'PY'
+import importlib.util, pathlib, sys
+shared_dir = pathlib.Path(sys.argv[1])
+agents_root = pathlib.Path(sys.argv[2])
+repo_root = pathlib.Path(sys.argv[3])
+spec = importlib.util.spec_from_file_location("tp", repo_root / "hooks" / "tool-policy.py")
+tp = importlib.util.module_from_spec(spec)
+sys.modules["tp"] = tp
+spec.loader.exec_module(tp)
+
+homes = tp.other_agent_homes("self")
+names = sorted(h.name for h in homes)
+# Exact-name blocklist only. Both `_real_agent_name` and `.real_dot_agent`
+# are real agents (bridge-agent.sh create does not reserve either
+# prefix today) and must survive. Non-agents `shared`, `_template`,
+# and `.claude` are filtered.
+assert names == [".real_dot_agent", "_real_agent_name", "peer"], f"expected ['.real_dot_agent', '_real_agent_name', 'peer'], got {names}"
+
+# Writing into shared/ must not be classified as cross-agent.
+target = tp.target_agent_for_path(shared_dir / "note.md", "self")
+assert target is None, f"shared/ write misclassified as cross-agent: {target}"
+
+# Writing into a real peer home must still trigger.
+peer_target = tp.target_agent_for_path(agents_root / "peer" / "foo.md", "self")
+assert peer_target == "peer", f"peer write not detected: {peer_target}"
+
+# Prefix-bearing real agents (underscore or dot) are still detected
+# (Codex r1 + r2 both flagged these over-filter regressions).
+underscore_target = tp.target_agent_for_path(agents_root / "_real_agent_name" / "foo.md", "self")
+assert underscore_target == "_real_agent_name", f"underscore-prefixed peer not detected: {underscore_target}"
+dot_target = tp.target_agent_for_path(agents_root / ".real_dot_agent" / "foo.md", "self")
+assert dot_target == ".real_dot_agent", f"dot-prefixed peer not detected: {dot_target}"
+
+print("[ok] tool-policy other_agent_homes: shared/_template/.claude filtered; prefixed real agents kept; shared write allowed; peer write blocked")
+PY
+)
+printf '%s\n' "$TOOL_POLICY_PY_CHECK"
+assert_contains "$TOOL_POLICY_PY_CHECK" "[ok] tool-policy"
+rm -rf "$TOOL_POLICY_FIXTURE_ROOT"
+
 log "diagnose acl reports clean on macOS (non-Linux host)"
 DIAGNOSE_OUTPUT="$("$REPO_ROOT/agent-bridge" diagnose acl)"
 if [[ "$(uname -s)" == "Linux" ]]; then
