@@ -788,7 +788,16 @@ bridge_cron_run_dir_grant_isolation() {
   if ! bridge_linux_acl_add_default_dirs_recursive "u:${os_user}:rwX" "$run_dir" 2>/dev/null; then
     rc=1
   fi
-  bridge_linux_grant_traverse_chain "$os_user" "$run_dir" >/dev/null 2>&1 || true
+  # Issue #233: the traverse chain call must carry an explicit stop_path
+  # now (the old implicit walk-to-`/` was the root cause of the ACL
+  # poison on `/` and `/home`). Derive the stop from the controller's
+  # home — the run_dir sits under $BRIDGE_STATE_DIR, which is itself
+  # under the controller's home on every shipped install.
+  local _traverse_stop
+  _traverse_stop="$(bridge_linux_traverse_stop_for "$run_dir")"
+  if [[ -n "$_traverse_stop" ]]; then
+    bridge_linux_grant_traverse_chain "$os_user" "$run_dir" "$_traverse_stop" >/dev/null 2>&1 || true
+  fi
   return "$rc"
 }
 
