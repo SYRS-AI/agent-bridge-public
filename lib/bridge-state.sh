@@ -571,6 +571,144 @@ else:
 PY
 }
 
+bridge_build_safe_claude_launch_cmd() {
+  local agent="$1"
+  local fallback=""
+  local continue_mode=""
+  local session_id=""
+
+  fallback="${BRIDGE_AGENT_LAUNCH_CMD[$agent]-}"
+  if [[ -z "$fallback" ]]; then
+    fallback="$(bridge_claude_dynamic_launch_cmd "$agent" 0 0 "")"
+  fi
+
+  continue_mode="$(bridge_agent_continue "$agent")"
+  if [[ "$continue_mode" == "1" ]]; then
+    session_id="$(bridge_claude_resume_session_id_for_agent "$agent" 2>/dev/null || true)"
+  fi
+
+  bridge_require_python
+  python3 - "$agent" "$continue_mode" "$session_id" "$fallback" <<'PY'
+import re
+import shlex
+import sys
+
+agent, continue_mode, session_id, original = sys.argv[1:]
+match = re.match(r"^(?P<prefix>.*?)(?P<command>claude(?:\s|$).*)$", original)
+if not match:
+    print(original)
+    raise SystemExit(0)
+
+env_prefix = match.group("prefix")
+args = shlex.split(match.group("command"))
+if not args or args[0] != "claude":
+    print(original)
+    raise SystemExit(0)
+
+rest = args[1:]
+extras = []
+i = 0
+while i < len(rest):
+    token = rest[i]
+    if token in {"-c", "--continue", "--dangerously-skip-permissions"}:
+        i += 1
+        continue
+    if token in {"--resume", "--name", "--channels"}:
+        i += 2 if i + 1 < len(rest) else 1
+        continue
+    if token.startswith("--channels="):
+        i += 1
+        continue
+    if token == "--dangerously-load-development-channels":
+        i += 1
+        while i < len(rest) and not rest[i].startswith("-"):
+            i += 1
+        continue
+    if token.startswith("--dangerously-load-development-channels="):
+        i += 1
+        continue
+    extras.append(token)
+    if token.startswith("--") and i + 1 < len(rest) and not rest[i + 1].startswith("-"):
+        extras.append(rest[i + 1])
+        i += 2
+        continue
+    i += 1
+
+base = ["claude"]
+if continue_mode == "1" and session_id:
+    base.extend(["--resume", session_id])
+elif continue_mode == "1":
+    base.append("--continue")
+base.extend(["--dangerously-skip-permissions", "--name", agent])
+base.extend(extras)
+
+quoted = " ".join(shlex.quote(token) for token in base)
+if env_prefix:
+    print(f"{env_prefix}{quoted}")
+else:
+    print(quoted)
+PY
+}
+
+bridge_safe_mode_resume_mode() {
+  local agent="$1"
+  local engine=""
+  local session_id=""
+
+  [[ "$(bridge_agent_continue "$agent")" == "1" ]] || {
+    printf '%s' "fresh"
+    return 0
+  }
+
+  engine="$(bridge_agent_engine "$agent")"
+  case "$engine" in
+    claude)
+      session_id="$(bridge_claude_resume_session_id_for_agent "$agent" 2>/dev/null || true)"
+      if [[ -n "$session_id" ]]; then
+        printf '%s' "resume"
+      else
+        printf '%s' "continue"
+      fi
+      ;;
+    codex)
+      bridge_normalize_agent_session_id "$agent"
+      session_id="$(bridge_agent_session_id "$agent")"
+      if [[ -n "$session_id" ]]; then
+        printf '%s' "resume"
+      else
+        printf '%s' "fresh"
+      fi
+      ;;
+    *)
+      printf '%s' "fresh"
+      ;;
+  esac
+}
+
+bridge_build_safe_launch_cmd() {
+  local agent="$1"
+  local engine=""
+  local launch_cmd=""
+
+  engine="$(bridge_agent_engine "$agent")"
+  case "$engine" in
+    claude)
+      bridge_build_safe_claude_launch_cmd "$agent"
+      ;;
+    codex)
+      if launch_cmd="$(bridge_build_resume_launch_cmd "$agent")"; then
+        bridge_codex_launch_with_hooks "$launch_cmd"
+      else
+        launch_cmd="$(bridge_build_dynamic_launch_cmd "$agent")"
+        bridge_codex_launch_with_hooks "$launch_cmd"
+      fi
+      ;;
+    *)
+      printf '%s' "${BRIDGE_AGENT_LAUNCH_CMD[$agent]-}"
+      ;;
+  esac
+}
+
 bridge_agent_launch_cmd() {
   local agent="$1"
   local fallback=""
@@ -1001,6 +1139,7 @@ bridge_load_roster() {
   : "${BRIDGE_TASK_HEARTBEAT_WINDOW_SECONDS:=300}"
   : "${BRIDGE_HEALTH_WARN_SECONDS:=3600}"
   : "${BRIDGE_HEALTH_CRITICAL_SECONDS:=14400}"
+  : "${BRIDGE_CHANNEL_HEALTH_ENABLED:=1}"
   : "${BRIDGE_CHANNEL_HEALTH_REPORT_COOLDOWN_SECONDS:=1800}"
   : "${BRIDGE_CRASH_REPORT_COOLDOWN_SECONDS:=1800}"
   : "${BRIDGE_DAEMON_NOTIFY_DRY_RUN:=0}"
@@ -1008,6 +1147,7 @@ bridge_load_roster() {
   : "${BRIDGE_USAGE_WARN_PERCENT:=90}"
   : "${BRIDGE_USAGE_ELEVATED_PERCENT:=95}"
   : "${BRIDGE_USAGE_CRITICAL_PERCENT:=100}"
+  : "${BRIDGE_USAGE_MONITOR_ENABLED:=1}"
   : "${BRIDGE_USAGE_MONITOR_INTERVAL_SECONDS:=300}"
   : "${BRIDGE_USAGE_MONITOR_STATE_FILE:=$BRIDGE_STATE_DIR/usage/monitor-state.json}"
   : "${BRIDGE_DAILY_BACKUP_ENABLED:=1}"
@@ -1031,6 +1171,7 @@ bridge_load_roster() {
   : "${BRIDGE_STALL_UNKNOWN_RETRY_SECONDS:=300}"
   : "${BRIDGE_STALL_NETWORK_ESCALATE_SECONDS:=600}"
   : "${BRIDGE_STALL_UNKNOWN_ESCALATE_SECONDS:=600}"
+  : "${BRIDGE_CONTEXT_PRESSURE_SCAN_ENABLED:=1}"
   : "${BRIDGE_ADMIN_AGENT_ID:=}"
   if bridge_cron_sync_enabled; then
     BRIDGE_CRON_SYNC_ENABLED=1
@@ -1365,6 +1506,49 @@ CRASH_LAUNCH_CMD=$(printf '%q' "$launch_cmd")
 CRASH_ERROR_HASH=$(printf '%q' "$error_hash")
 CRASH_REPORTED_AT=$(printf '%q' "$(bridge_now_iso)")
 EOF
+}
+
+bridge_agent_write_broken_launch_state() {
+  local agent="$1"
+  local engine="$2"
+  local fail_count="$3"
+  local exit_code="$4"
+  local stderr_file="$5"
+  local launch_cmd="$6"
+  local stderr_offset="${7:-0}"
+  local state_file=""
+  local tail_file=""
+  local recovery_cmd=""
+
+  state_file="$(bridge_agent_broken_launch_file "$agent")"
+  tail_file="$(bridge_agent_crash_tail_file "$agent")"
+  recovery_cmd="agent-bridge agent safe-mode $agent"
+
+  mkdir -p "$(dirname "$state_file")" "$(dirname "$tail_file")"
+  if [[ -f "$stderr_file" ]]; then
+    if [[ "$stderr_offset" =~ ^[0-9]+$ ]] && (( stderr_offset > 0 )); then
+      tail -c +"$((stderr_offset + 1))" "$stderr_file" 2>/dev/null | tail -n 50 >"$tail_file" 2>/dev/null || true
+    else
+      tail -n 50 "$stderr_file" >"$tail_file" 2>/dev/null || true
+    fi
+  else
+    : >"$tail_file"
+  fi
+
+  cat >"$state_file" <<EOF
+BROKEN_AGENT=$(printf '%q' "$agent")
+BROKEN_ENGINE=$(printf '%q' "$engine")
+BROKEN_FAIL_COUNT=$(printf '%q' "$fail_count")
+BROKEN_EXIT_CODE=$(printf '%q' "$exit_code")
+BROKEN_STDERR_FILE=$(printf '%q' "$stderr_file")
+BROKEN_TAIL_FILE=$(printf '%q' "$tail_file")
+BROKEN_LAUNCH_CMD=$(printf '%q' "$launch_cmd")
+BROKEN_RECOVERY_CMD=$(printf '%q' "$recovery_cmd")
+BROKEN_REPORTED_AT=$(printf '%q' "$(bridge_now_iso)")
+# recovery: $recovery_cmd
+# stderr_tail:
+EOF
+  sed 's/^/# /' "$tail_file" >>"$state_file" 2>/dev/null || true
 }
 
 bridge_agent_clear_crash_report() {

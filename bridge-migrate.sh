@@ -113,6 +113,26 @@ for item in src.iterdir():
 PY
 }
 
+runtime_secure_private_tree() {
+  local root="$1"
+  local path=""
+
+  [[ -e "$root" ]] || return 0
+  if [[ -d "$root" ]]; then
+    chmod 700 "$root"
+    while IFS= read -r path; do
+      [[ -n "$path" ]] || continue
+      if [[ -d "$path" ]]; then
+        chmod 700 "$path"
+      elif [[ -f "$path" ]]; then
+        chmod 600 "$path"
+      fi
+    done < <(find "$root" -mindepth 1 \( -type d -o -type f \))
+  elif [[ -f "$root" ]]; then
+    chmod 600 "$root"
+  fi
+}
+
 runtime_sync_one() {
   local label="$1"
   local source_root="$2"
@@ -156,9 +176,15 @@ runtime_sync_one() {
   if [[ -d "$source_root" ]]; then
     mkdir -p "$target_root"
     runtime_copy_tree "$source_root" "$target_root"
+    if [[ "$label" == "credentials" || "$label" == "secrets" ]]; then
+      runtime_secure_private_tree "$target_root"
+    fi
     printf '  target_files_after: %s\n' "$(runtime_count_files "$target_root")"
   else
     cp -RP "$source_root" "$target_root"
+    if [[ "$label" == "credentials" || "$label" == "secrets" ]]; then
+      runtime_secure_private_tree "$target_root"
+    fi
     printf '  target_files_after: 1\n'
   fi
 }
@@ -300,6 +326,8 @@ cmd_runtime_canonicalize() {
 
   mkdir -p "$runtime_root"
   runtime_copy_tree "$template_root" "$runtime_root"
+  runtime_secure_private_tree "$runtime_root/credentials"
+  runtime_secure_private_tree "$runtime_root/secrets"
 }
 
 MIGRATE_AGENT=""

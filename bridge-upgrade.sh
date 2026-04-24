@@ -117,6 +117,7 @@ bridge_upgrade_version_at_ref() {
 bridge_upgrade_collect_agent_restart_report() {
   local target_root="$1"
   local dry_run="${2:-0}"
+  local source_root="${3:-$SOURCE_ROOT}"
 
   # Tuple format (tab-separated, 7 columns — grew from 5 to capture
   # restart-failure diagnostics per issue #256 Gap 1):
@@ -133,8 +134,9 @@ bridge_upgrade_collect_agent_restart_report() {
     set -euo pipefail
     target_root="$1"
     dry_run="$2"
+    source_root="$3"
     export BRIDGE_HOME="$target_root"
-    source "$target_root/bridge-lib.sh"
+    source "$source_root/bridge-lib.sh"
     bridge_load_roster
 
     agent=""
@@ -206,7 +208,7 @@ bridge_upgrade_collect_agent_restart_report() {
         "$agent" "$status" "$reason" "$attached" "$session" \
         "${exit_code:-}" "${log_tail_b64:-}"
     done
-  ' -- "$target_root" "$dry_run"
+  ' -- "$target_root" "$dry_run" "$source_root"
 }
 
 bridge_upgrade_agent_restart_json() {
@@ -1025,7 +1027,7 @@ if [[ $DRY_RUN -eq 0 ]]; then
   if [[ -z "$_post_admin" ]]; then
     for _roster in "$TARGET_ROOT/agent-roster.local.sh" "$TARGET_ROOT/agent-roster.sh"; do
       if [[ -r "$_roster" ]]; then
-        _admin_line="$(grep -E '^[[:space:]]*(export[[:space:]]+)?BRIDGE_ADMIN_AGENT_ID=' "$_roster" 2>/dev/null | head -n 1 | sed -E 's/^[[:space:]]*(export[[:space:]]+)?BRIDGE_ADMIN_AGENT_ID=//; s/^"([^"]*)".*/\1/; s/^'"'"'([^'"'"']*)'"'"'.*/\1/; s/[[:space:]]*#.*$//')"
+        _admin_line="$(grep -E '^[[:space:]]*(export[[:space:]]+)?BRIDGE_ADMIN_AGENT_ID=' "$_roster" 2>/dev/null | head -n 1 | sed -E 's/^[[:space:]]*(export[[:space:]]+)?BRIDGE_ADMIN_AGENT_ID=//; s/^"([^"]*)".*/\1/; s/^'"'"'([^'"'"']*)'"'"'.*/\1/; s/[[:space:]]*#.*$//' || true)"
         if [[ -n "$_admin_line" ]]; then
           _post_admin="$_admin_line"
           break
@@ -1206,15 +1208,28 @@ if [[ $RESTART_AGENTS -eq 1 ]]; then
 fi
 
 if [[ $JSON -eq 1 ]]; then
-  python3 - "$SOURCE_ROOT" "$TARGET_ROOT" "$PULL" "$DRY_RUN" "$RESTART_DAEMON" "$RESTART_AGENTS" "$BACKUP" "$MIGRATE_AGENTS" "$BACKUP_ROOT" "$BACKUP_JSON" "$MIGRATION_JSON" "$APPLY_JSON" "$ANALYSIS_JSON" "$AGENT_RESTART_JSON" "$STRICT_MERGE" "$CHANNEL" "$SOURCE_VERSION" "$SOURCE_REF" "$SOURCE_HEAD" "$TARGET_REF" "$TARGET_VERSION" "$TARGET_HEAD" "$CHANNEL_GUARD_JSON" <<'PY'
+  _json_payload_dir="$(mktemp -d "${TMPDIR:-/tmp}/bridge-upgrade-json.XXXXXX")"
+  printf '%s' "$BACKUP_JSON" >"$_json_payload_dir/backup.json"
+  printf '%s' "$MIGRATION_JSON" >"$_json_payload_dir/migration.json"
+  printf '%s' "$APPLY_JSON" >"$_json_payload_dir/apply.json"
+  printf '%s' "$ANALYSIS_JSON" >"$_json_payload_dir/analysis.json"
+  printf '%s' "$AGENT_RESTART_JSON" >"$_json_payload_dir/agent-restart.json"
+  printf '%s' "$CHANNEL_GUARD_JSON" >"$_json_payload_dir/channel-guard.json"
+  set +e
+  python3 - "$SOURCE_ROOT" "$TARGET_ROOT" "$PULL" "$DRY_RUN" "$RESTART_DAEMON" "$RESTART_AGENTS" "$BACKUP" "$MIGRATE_AGENTS" "$BACKUP_ROOT" "$STRICT_MERGE" "$CHANNEL" "$SOURCE_VERSION" "$SOURCE_REF" "$SOURCE_HEAD" "$TARGET_REF" "$TARGET_VERSION" "$TARGET_HEAD" "$_json_payload_dir/backup.json" "$_json_payload_dir/migration.json" "$_json_payload_dir/apply.json" "$_json_payload_dir/analysis.json" "$_json_payload_dir/agent-restart.json" "$_json_payload_dir/channel-guard.json" <<'PY'
 import json, sys
-source_root, target_root, pull, dry_run, restart_daemon, restart_agents, backup_enabled, migrate_agents, backup_root, backup_json, migration_json, apply_json, analysis_json, agent_restart_json, strict_merge, channel, source_version, source_ref, source_head, target_ref, target_version, target_head, channel_guard_json = sys.argv[1:]
-backup_payload = json.loads(backup_json)
-migration_payload = json.loads(migration_json)
-apply_payload = json.loads(apply_json)
-analysis_payload = json.loads(analysis_json)
-agent_restart_payload = json.loads(agent_restart_json)
-channel_guard_payload = json.loads(channel_guard_json)
+source_root, target_root, pull, dry_run, restart_daemon, restart_agents, backup_enabled, migrate_agents, backup_root, strict_merge, channel, source_version, source_ref, source_head, target_ref, target_version, target_head, backup_json_file, migration_json_file, apply_json_file, analysis_json_file, agent_restart_json_file, channel_guard_json_file = sys.argv[1:]
+
+def load_json(path):
+    with open(path, encoding="utf-8") as fh:
+        return json.load(fh)
+
+backup_payload = load_json(backup_json_file)
+migration_payload = load_json(migration_json_file)
+apply_payload = load_json(apply_json_file)
+analysis_payload = load_json(analysis_json_file)
+agent_restart_payload = load_json(agent_restart_json_file)
+channel_guard_payload = load_json(channel_guard_json_file)
 payload = {
     "mode": "upgrade",
     "version": source_version,
@@ -1252,7 +1267,10 @@ payload = {
   }
 print(json.dumps(payload, ensure_ascii=False, indent=2))
 PY
-  exit 0
+  _json_rc=$?
+  set -e
+  rm -rf "$_json_payload_dir"
+  exit "$_json_rc"
 fi
 
 echo "== Agent Bridge upgrade =="

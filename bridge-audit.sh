@@ -36,7 +36,7 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-files=("$BRIDGE_HOME/logs/audit.jsonl")
+files=("$BRIDGE_AUDIT_LOG")
 if [[ -n "$agent" ]]; then
   files+=("$(bridge_agent_audit_log_file "$agent")")
 else

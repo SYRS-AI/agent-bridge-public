@@ -251,7 +251,9 @@ def _is_ephemeral(path: str) -> bool:
             return True
     return False
 
-if _is_ephemeral(resolved_home):
+resolved_settings = os.path.realpath(settings_path)
+
+if _is_ephemeral(resolved_home) and not _is_ephemeral(resolved_settings):
     sys.stderr.write(
         f"[bridge-agent] refusing to seed autoMemoryDirectory for "
         f"'{agent}' from ephemeral BRIDGE_HOME {resolved_home!r}. "
