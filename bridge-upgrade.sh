@@ -871,6 +871,18 @@ if [[ $MIGRATE_AGENTS -eq 1 ]]; then
       --bridge-home "$TARGET_ROOT" \
       --target-root "$TARGET_ROOT/agents" >/dev/null 2>&1 || true
   fi
+
+  # Enforce the singleton channel plugin policy (closes #244). Running this
+  # on every upgrade is idempotent — it only writes the overlay when an
+  # entry would change. `--quiet` keeps upgrade output terse; failures are
+  # tolerated so an unexpected overlay error never blocks the upgrade.
+  policy_args=(--quiet)
+  if [[ $DRY_RUN -eq 1 ]]; then
+    policy_args+=(--dry-run)
+  fi
+  BRIDGE_HOME="$TARGET_ROOT" \
+    "$BRIDGE_BASH_BIN" "$SOURCE_ROOT/scripts/apply-channel-policy.sh" "${policy_args[@]}" \
+    >/dev/null 2>&1 || true
 fi
 
 if [[ $RESTART_DAEMON -eq 1 && $DRY_RUN -eq 0 ]]; then
