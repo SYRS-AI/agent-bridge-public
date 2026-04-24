@@ -1218,6 +1218,7 @@ rm -rf "$TOOL_POLICY_FIXTURE_ROOT"
 mkdir -p "$TOOL_POLICY_AGENT_HOME_ROOT/self" \
          "$TOOL_POLICY_AGENT_HOME_ROOT/peer" \
          "$TOOL_POLICY_AGENT_HOME_ROOT/_real_agent_name" \
+         "$TOOL_POLICY_AGENT_HOME_ROOT/.real_dot_agent" \
          "$TOOL_POLICY_AGENT_HOME_ROOT/_template" \
          "$TOOL_POLICY_AGENT_HOME_ROOT/.claude" \
          "$TOOL_POLICY_SHARED_DIR"
@@ -1238,11 +1239,11 @@ spec.loader.exec_module(tp)
 
 homes = tp.other_agent_homes("self")
 names = sorted(h.name for h in homes)
-# Expect every real agent home to survive: `peer` plus `_real_agent_name`
-# (Codex round-1 flagged that blanket underscore-prefix skip would miss
-# real agents). Only exact non-agent entries get filtered: `shared`
-# alias, `_template`, and `.claude`.
-assert names == ["_real_agent_name", "peer"], f"expected ['_real_agent_name', 'peer'], got {names}"
+# Exact-name blocklist only. Both `_real_agent_name` and `.real_dot_agent`
+# are real agents (bridge-agent.sh create does not reserve either
+# prefix today) and must survive. Non-agents `shared`, `_template`,
+# and `.claude` are filtered.
+assert names == [".real_dot_agent", "_real_agent_name", "peer"], f"expected ['.real_dot_agent', '_real_agent_name', 'peer'], got {names}"
 
 # Writing into shared/ must not be classified as cross-agent.
 target = tp.target_agent_for_path(shared_dir / "note.md", "self")
@@ -1252,11 +1253,14 @@ assert target is None, f"shared/ write misclassified as cross-agent: {target}"
 peer_target = tp.target_agent_for_path(agents_root / "peer" / "foo.md", "self")
 assert peer_target == "peer", f"peer write not detected: {peer_target}"
 
-# Underscore-prefixed real agents are still detected (issue #240 r2).
+# Prefix-bearing real agents (underscore or dot) are still detected
+# (Codex r1 + r2 both flagged these over-filter regressions).
 underscore_target = tp.target_agent_for_path(agents_root / "_real_agent_name" / "foo.md", "self")
 assert underscore_target == "_real_agent_name", f"underscore-prefixed peer not detected: {underscore_target}"
+dot_target = tp.target_agent_for_path(agents_root / ".real_dot_agent" / "foo.md", "self")
+assert dot_target == ".real_dot_agent", f"dot-prefixed peer not detected: {dot_target}"
 
-print("[ok] tool-policy other_agent_homes: shared/_template/.claude filtered; _real_agent_name kept; shared write allowed; peer write blocked")
+print("[ok] tool-policy other_agent_homes: shared/_template/.claude filtered; prefixed real agents kept; shared write allowed; peer write blocked")
 PY
 )
 printf '%s\n' "$TOOL_POLICY_PY_CHECK"
