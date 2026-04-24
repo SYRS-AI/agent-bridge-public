@@ -1649,8 +1649,22 @@ process_context_pressure_reports() {
     body_file="$(bridge_agent_context_pressure_report_file "$agent" "$severity")"
     bridge_write_context_pressure_report_body "$agent" "$session" "$severity" "$idle" "$first_detected_ts" "$matched_pattern" "$excerpt" "$body_file"
 
+    # Issue #230-A: in the default policy, silent re-broadcast every
+    # `report_cooldown` for an agent that simply stayed in the same
+    # severity bucket is pure inbox noise — the admin already saw the
+    # first alert. Only `critical` keeps the legacy cooldown rebroadcast
+    # (that is an ongoing emergency, operators want the recurring ping).
+    # info/warning get a single alert per bucket entry; a severity change
+    # already zeroes last_report_ts above so an escalation still fires.
+    local should_emit=0
+    if (( last_report_ts == 0 )); then
+      should_emit=1
+    elif [[ "$severity" == "critical" ]] && (( now_ts - last_report_ts >= report_cooldown )); then
+      should_emit=1
+    fi
+
     if [[ "$agent" == "$admin_agent" ]] && bridge_agent_has_notify_transport "$admin_agent"; then
-      if (( last_report_ts == 0 || now_ts - last_report_ts >= report_cooldown )); then
+      if (( should_emit == 1 )); then
         bridge_notify_send "$admin_agent" "$title" "Context pressure detected for ${agent}; compact or restart with handoff before quality degrades." "" "$priority" "${BRIDGE_DAEMON_NOTIFY_DRY_RUN:-0}" >/dev/null 2>&1 || true
         last_report_ts="$now_ts"
         bridge_audit_log daemon context_pressure_report "$admin_agent" \
@@ -1666,7 +1680,7 @@ process_context_pressure_reports() {
         task_id="$existing_id"
         last_report_ts="$now_ts"
         changed=0
-      elif (( last_report_ts == 0 || now_ts - last_report_ts >= report_cooldown )); then
+      elif (( should_emit == 1 )); then
         create_output="$(bridge_queue_cli create --to "$admin_agent" --from daemon --priority "$priority" --title "$title" --body-file "$body_file" 2>/dev/null || true)"
         if [[ "$create_output" =~ created\ task\ \#([0-9]+) ]]; then
           task_id="${BASH_REMATCH[1]}"
@@ -1921,6 +1935,16 @@ process_crash_reports() {
     [[ -n "$agent" ]] || continue
     if ! bridge_agent_exists "$agent"; then
       bridge_agent_clear_crash_report "$agent"
+      continue
+    fi
+    # Issue #230-C: a manual-stop-armed agent is deliberately offline —
+    # the operator has already acknowledged it (typically by closing the
+    # original [crash-loop] task with a blocked/skip note). Re-reading
+    # the stale crash report every sync cycle used to refresh state and
+    # emit `crash_loop_report mode=refresh` audits with the same
+    # error_hash indefinitely (17×/48h observed for pref-smoke). Skip
+    # the entire detection path so nothing mutates, nothing re-audits.
+    if bridge_agent_manual_stop_active "$agent"; then
       continue
     fi
     state_file="$(bridge_agent_crash_state_file "$agent")"
@@ -2849,6 +2873,72 @@ cmd_run_cron_worker() {
   # The alwaysFollowup override was creating noise tasks for no-op results
   # (e.g. "after hours, skipped"). Subagents already set the flag correctly.
 
+  # Issue #230-B: Claude API transients (ConnectionRefused, stream idle
+  # timeout, etc.) produce one-off cron failures that the admin can
+  # neither act on nor suppress — they just close the task. Burst-gate
+  # the followup emission: only surface after the same cron family has
+  # failed at least BRIDGE_CRON_FOLLOWUP_FAIL_BURST_THRESHOLD times
+  # consecutively. A success resets the counter, and a successful create
+  # also resets it so the "every-failure-after-the-first-N-creates-a-new-
+  # task" pattern doesn't resurface after the admin closes the first
+  # burst task. Existing open followups are still refreshed (update path
+  # below) regardless of burst state so long-running investigations
+  # don't stall.
+  #
+  # Key the counter by cron family (CRON_FAMILY), falling back to job
+  # name then run id. Family is the right granularity — parallel jobs
+  # in the same family (e.g. memory-daily across every agent) should
+  # accumulate toward one threshold, not each one independently.
+  local cron_family_key="${CRON_FAMILY:-${CRON_JOB_NAME:-$run_id}}"
+  local fail_burst_dir="$BRIDGE_STATE_DIR/cron/consecutive-failures"
+  local fail_burst_file="$fail_burst_dir/$(bridge_sha1 "$cron_family_key")"
+  local fail_burst_lock="${fail_burst_file}.lock"
+  local fail_burst_threshold="${BRIDGE_CRON_FOLLOWUP_FAIL_BURST_THRESHOLD:-3}"
+  [[ "$fail_burst_threshold" =~ ^[0-9]+$ ]] || fail_burst_threshold=3
+  local fail_burst_count=0
+  mkdir -p "$fail_burst_dir"
+  # Cron workers run in parallel (BRIDGE_CRON_DISPATCH_MAX_PARALLEL=2+),
+  # so two failing workers of the same family could race the read-
+  # modify-write and lose an increment. Serialise with flock and fall
+  # through cleanly if `flock` is missing on the host.
+  local _has_flock=0
+  if command -v flock >/dev/null 2>&1; then
+    _has_flock=1
+  fi
+  # Use a group command `{ ...; }` instead of a subshell `( ... )` so
+  # the variable assignment to fail_burst_count stays visible in the
+  # outer scope. A subshell would fork a child process whose local
+  # variable mutations evaporate on exit, leaving the downstream
+  # `(( fail_burst_count >= fail_burst_threshold ))` gate forever
+  # reading 0 → burst threshold never reached → task never created.
+  if (( _has_flock == 1 )); then
+    { flock -x 9
+      if [[ "$CRON_NEEDS_HUMAN_FOLLOWUP" == "1" ]]; then
+        fail_burst_count=0
+        if [[ -f "$fail_burst_file" ]]; then
+          fail_burst_count=$(cat "$fail_burst_file" 2>/dev/null || echo 0)
+          [[ "$fail_burst_count" =~ ^[0-9]+$ ]] || fail_burst_count=0
+        fi
+        fail_burst_count=$(( fail_burst_count + 1 ))
+        printf '%s' "$fail_burst_count" >"$fail_burst_file"
+      else
+        rm -f "$fail_burst_file" 2>/dev/null || true
+      fi
+    } 9>"$fail_burst_lock"
+  else
+    if [[ "$CRON_NEEDS_HUMAN_FOLLOWUP" == "1" ]]; then
+      fail_burst_count=0
+      if [[ -f "$fail_burst_file" ]]; then
+        fail_burst_count=$(cat "$fail_burst_file" 2>/dev/null || echo 0)
+        [[ "$fail_burst_count" =~ ^[0-9]+$ ]] || fail_burst_count=0
+      fi
+      fail_burst_count=$(( fail_burst_count + 1 ))
+      printf '%s' "$fail_burst_count" >"$fail_burst_file"
+    else
+      rm -f "$fail_burst_file" 2>/dev/null || true
+    fi
+  fi
+
   if [[ "$CRON_NEEDS_HUMAN_FOLLOWUP" == "1" ]]; then
     followup_body_file="$(bridge_cron_dispatch_followup_file_by_id "$run_id")"
     bridge_cron_write_followup_body "$run_id" "$followup_body_file"
@@ -2860,11 +2950,33 @@ cmd_run_cron_worker() {
       bridge_queue_cli update "$existing_followup_id" --actor "$followup_actor" --title "$followup_title" --priority "$followup_priority" --body-file "$followup_body_file" >/dev/null 2>&1 || true
       followup_task_id="$existing_followup_id"
       daemon_info "refreshed cron followup task #${followup_task_id} for ${CRON_JOB_NAME:-$run_id}"
-    else
+    elif (( fail_burst_count >= fail_burst_threshold )); then
       create_output="$(bridge_queue_cli create --to "$TASK_ASSIGNED_TO" --title "$followup_title" --from "$followup_actor" --priority "$followup_priority" --body-file "$followup_body_file" 2>/dev/null || true)"
       if [[ "$create_output" =~ created\ task\ \#([0-9]+) ]]; then
         followup_task_id="${BASH_REMATCH[1]}"
+        daemon_info "created cron followup task #${followup_task_id} after ${fail_burst_count} consecutive failures of ${cron_family_key}"
+        # Reset the burst counter so subsequent failures don't rapid-
+        # fire a fresh followup task after the admin closes this one.
+        # The cycle restarts only after another BRIDGE_CRON_FOLLOWUP_FAIL_BURST_THRESHOLD
+        # consecutive failures or any success (handled above).
+        # Reset is a single rm, so a subshell is safe here — no outer
+        # scope state to preserve.
+        if (( _has_flock == 1 )); then
+          { flock -x 9
+            rm -f "$fail_burst_file" 2>/dev/null || true
+          } 9>"$fail_burst_lock"
+        else
+          rm -f "$fail_burst_file" 2>/dev/null || true
+        fi
       fi
+    else
+      bridge_audit_log daemon cron_followup_suppressed "$TASK_ASSIGNED_TO" \
+        --detail run_id="$run_id" \
+        --detail job_name="${CRON_JOB_NAME:-$run_id}" \
+        --detail family="${CRON_FAMILY:-}" \
+        --detail fail_burst_count="$fail_burst_count" \
+        --detail fail_burst_threshold="$fail_burst_threshold" \
+        --detail reason=below_threshold
     fi
   fi
 
