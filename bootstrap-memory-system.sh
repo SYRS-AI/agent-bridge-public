@@ -469,17 +469,21 @@ step_cron_one() {
 # Bootstrap cannot source bridge-lib safely without pulling in the roster, so we
 # approximate: the default is ON (matching the bash helper). An install that
 # disables the refresh sets BRIDGE_AGENT_MEMORY_DAILY_REFRESH_<agent>=0 in the
-# bootstrap env (agent id hyphens are normalised to underscores so the env name
-# is a valid bash identifier — e.g. agent `agb-dev-claude` → env key
-# `BRIDGE_AGENT_MEMORY_DAILY_REFRESH_agb_dev_claude`), or writes
+# bootstrap env (every char that isn't a bash identifier char is normalised to
+# `_` so the env name is valid — e.g. agent `agb-dev-claude` → env key
+# `BRIDGE_AGENT_MEMORY_DAILY_REFRESH_agb_dev_claude`, agent `foo.bar` →
+# `BRIDGE_AGENT_MEMORY_DAILY_REFRESH_foo_bar`), or writes
 # BRIDGE_AGENT_MEMORY_DAILY_REFRESH[<agent>]=0 into the roster (which the daemon
-# enforces at dispatch time regardless).
+# enforces at dispatch time regardless, using the raw agent id as the key).
 memory_daily_gate_on() {
   local agent="$1"
-  # Agent ids commonly contain hyphens (e.g. agb-dev-claude). Bash identifiers
-  # forbid hyphens, so indirect expansion via `${!key}` would abort with
-  # "invalid variable name". Normalise to underscores before building the key.
-  local safe_agent="${agent//-/_}"
+  # `bridge_validate_agent_name` accepts `[A-Za-z0-9._-]+`, but bash identifiers
+  # are restricted to `[A-Za-z_][A-Za-z0-9_]*`. Indirect expansion via `${!key}`
+  # aborts with "invalid variable name" on hyphens, dots, or anything else
+  # outside the identifier alphabet. Normalise *all* non-identifier chars to
+  # `_` before building the env key — not just hyphens — so every valid agent
+  # id is safely mappable.
+  local safe_agent="${agent//[!A-Za-z0-9_]/_}"
   local key="BRIDGE_AGENT_MEMORY_DAILY_REFRESH_${safe_agent}"
   local val
   val="${!key:-}"

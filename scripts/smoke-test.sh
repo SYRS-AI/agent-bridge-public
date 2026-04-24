@@ -1365,6 +1365,20 @@ GATE_ERR="$(env -u BRIDGE_AGENT_MEMORY_DAILY_REFRESH_agb_dev_claude \
               "$BASH4_BIN" -c "$GATE_FN"$'\n''memory_daily_gate_on agb-dev-claude' 2>&1 >/dev/null || true)"
 assert_not_contains "$GATE_ERR" "invalid variable name"
 assert_not_contains "$GATE_ERR" "부적절한 변수 이름"
+# Dot-named agent ids are also valid per `bridge_validate_agent_name` and must
+# take the same underscore-normalised path (task #886 round-2).
+if ! env -u BRIDGE_AGENT_MEMORY_DAILY_REFRESH_foo_bar \
+       "$BASH4_BIN" -c "$GATE_FN"$'\n''memory_daily_gate_on foo.bar'; then
+  die "memory_daily_gate_on defaulted off for dotted agent id (should be on)"
+fi
+if BRIDGE_AGENT_MEMORY_DAILY_REFRESH_foo_bar=0 \
+     "$BASH4_BIN" -c "$GATE_FN"$'\n''memory_daily_gate_on foo.bar'; then
+  die "BRIDGE_AGENT_MEMORY_DAILY_REFRESH_foo_bar=0 did not gate off dotted agent"
+fi
+GATE_ERR_DOT="$(env -u BRIDGE_AGENT_MEMORY_DAILY_REFRESH_foo_bar \
+                  "$BASH4_BIN" -c "$GATE_FN"$'\n''memory_daily_gate_on foo.bar' 2>&1 >/dev/null || true)"
+assert_not_contains "$GATE_ERR_DOT" "invalid variable name"
+assert_not_contains "$GATE_ERR_DOT" "부적절한 변수 이름"
 
 log "starting isolated daemon"
 bash "$REPO_ROOT/bridge-daemon.sh" ensure >/dev/null
