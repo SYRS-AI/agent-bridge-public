@@ -370,12 +370,25 @@ bridge_migration_unisolate() {
   [[ -n "${BRIDGE_HOME:-}" && -d "$BRIDGE_HOME" ]] && acl_strip_paths_shallow+=("$BRIDGE_HOME")
   [[ -n "${BRIDGE_AGENT_HOME_ROOT:-}" && -d "$BRIDGE_AGENT_HOME_ROOT" ]] && acl_strip_paths_shallow+=("$BRIDGE_AGENT_HOME_ROOT")
 
+  # Codex review round 1 flagged that history_file and the memory-daily
+  # trees were missing from the first cut. Isolate grants u:${os_user}
+  # access + default ACLs on these, so leaving them behind would be a
+  # stale access leak once the OS user lingers post-unisolate (which is
+  # deliberate — the `[note]` at the end of this function says the
+  # operator must `userdel` separately).
+  local history_file="" memory_daily_agent_dir="" memory_daily_shared_aggregate_dir=""
+  history_file="$(bridge_history_file_for_agent "$agent" 2>/dev/null || true)"
+  memory_daily_agent_dir="$BRIDGE_STATE_DIR/memory-daily/$agent"
+  memory_daily_shared_aggregate_dir="$BRIDGE_STATE_DIR/memory-daily/shared/aggregate"
+
   local -a acl_strip_paths_recursive=()
   [[ -n "$workdir" && -d "$workdir" ]] && acl_strip_paths_recursive+=("$workdir")
   [[ -n "$runtime_state_dir" && -d "$runtime_state_dir" ]] && acl_strip_paths_recursive+=("$runtime_state_dir")
   [[ -n "$log_dir" && -d "$log_dir" ]] && acl_strip_paths_recursive+=("$log_dir")
   [[ -n "$request_dir" && -d "$request_dir" ]] && acl_strip_paths_recursive+=("$request_dir")
   [[ -n "$response_dir" && -d "$response_dir" ]] && acl_strip_paths_recursive+=("$response_dir")
+  [[ -n "$memory_daily_agent_dir" && -d "$memory_daily_agent_dir" ]] && acl_strip_paths_recursive+=("$memory_daily_agent_dir")
+  [[ -n "$memory_daily_shared_aggregate_dir" && -d "$memory_daily_shared_aggregate_dir" ]] && acl_strip_paths_recursive+=("$memory_daily_shared_aggregate_dir")
 
   local _acl_target=""
   for _acl_target in "${acl_strip_paths_shallow[@]}"; do
@@ -389,13 +402,30 @@ bridge_migration_unisolate() {
       bridge_linux_sudo_root setfacl -d -x "u:${controller_user}" "$_acl_target" 2>/dev/null || true
     fi
   done
+  # `setfacl -R -x` strips access entries on every file and directory
+  # under the target. It does NOT touch default ACLs — those are a
+  # separate attribute stored only on directories, installed by
+  # `bridge_linux_acl_add_default_dirs_recursive` (lib/bridge-agents.sh:1017)
+  # and inherited by every new child. Remove them with a `find -type d`
+  # sweep so post-unisolate file creations do not keep inheriting the
+  # isolated UID's grants.
   for _acl_target in "${acl_strip_paths_recursive[@]}"; do
     [[ -n "$_acl_target" ]] || continue
     bridge_migration_print_step "$dry_run" "setfacl -R -x u:${os_user} ${_acl_target}"
+    bridge_migration_print_step "$dry_run" "find ${_acl_target} -type d -exec setfacl -d -x u:${os_user} {} +"
     if [[ "$dry_run" != "1" ]]; then
       bridge_linux_sudo_root setfacl -R -x "u:${os_user}" "$_acl_target" 2>/dev/null || true
+      bridge_linux_sudo_root find "$_acl_target" -type d -exec setfacl -d -x "u:${os_user}" {} + 2>/dev/null || true
     fi
   done
+  # history_file is a regular file (not a directory). `-R` is a no-op
+  # there and default ACLs do not apply, so strip only the access entry.
+  if [[ -n "$history_file" && -e "$history_file" ]]; then
+    bridge_migration_print_step "$dry_run" "setfacl -x u:${os_user} ${history_file}"
+    if [[ "$dry_run" != "1" ]]; then
+      bridge_linux_sudo_root setfacl -x "u:${os_user}" "$history_file" 2>/dev/null || true
+    fi
+  fi
 
   bridge_migration_roster_upsert "$dry_run" "$agent" "shared" ""
 
