@@ -175,6 +175,18 @@ bridge_upgrade_agent_restart_json() {
   local enabled="$2"
   local dry_run="${3:-0}"
 
+  # JSON key contract (post-#257): dry-run reports *eligibility*, not success;
+  # apply reports the `bridge-agent.sh restart` exit-0 count, not agent health.
+  #   - restart_eligible / restart_eligible_agents: dry-run candidates. This
+  #     is what we would attempt; it does NOT predict whether the agent will
+  #     stay stably up after launch (plugin resolution, settings corruption,
+  #     dependency outages can still surface at apply).
+  #   - restart_attempted_ok / restart_attempted_ok_agents: apply tally of
+  #     `bridge-agent.sh restart` commands that returned exit 0. Does NOT
+  #     prove the agent survived the first few seconds after launch; that
+  #     requires post-restart health reconciliation (tracked in #256).
+  # The prior keys `would_restart`/`restarted` over-promised at both layers
+  # and caused the #253→#254 misdiagnosis. Renamed here per issue #257.
   python3 - "$enabled" "$dry_run" "$report" <<'PY'
 import json
 import sys
@@ -187,12 +199,12 @@ payload = {
     "dry_run": dry_run,
     "considered": 0,
     "eligible": 0,
-    "would_restart": 0,
-    "restarted": 0,
+    "restart_eligible": 0,
+    "restart_attempted_ok": 0,
     "failed": 0,
     "skipped": 0,
-    "restarted_agents": [],
-    "would_restart_agents": [],
+    "restart_attempted_ok_agents": [],
+    "restart_eligible_agents": [],
     "failed_agents": [],
     "skipped_reasons": {},
 }
@@ -206,11 +218,11 @@ for raw in report.splitlines():
     if reason == "eligible":
         payload["eligible"] += 1
     if status == "would-restart":
-        payload["would_restart"] += 1
-        payload["would_restart_agents"].append(agent)
+        payload["restart_eligible"] += 1
+        payload["restart_eligible_agents"].append(agent)
     elif status == "restarted":
-        payload["restarted"] += 1
-        payload["restarted_agents"].append(agent)
+        payload["restart_attempted_ok"] += 1
+        payload["restart_attempted_ok_agents"].append(agent)
     elif status == "failed":
         payload["failed"] += 1
         payload["failed_agents"].append(agent)
@@ -225,6 +237,12 @@ PY
 bridge_upgrade_print_agent_restart_summary() {
   local payload="$1"
 
+  # Text-summary labels align with the JSON contract above: eligibility
+  # vs restart-attempted-ok. A dry-run-only disclaimer warns that the
+  # count is pre-launch eligibility; runtime failures (plugin resolution,
+  # settings corruption, dependency outages) only surface at apply. See
+  # issue #257 for why the prior "would_restart/restarted" labels misled
+  # operators into reading accurate planning where none existed.
   python3 - "$payload" <<'PY'
 import json
 import sys
@@ -233,19 +251,25 @@ payload = json.loads(sys.argv[1])
 print(f"agent_restart_enabled: {'yes' if payload.get('enabled') else 'no'}")
 print(f"agent_restart_considered: {payload.get('considered', 0)}")
 print(f"agent_restart_eligible: {payload.get('eligible', 0)}")
-print(f"agent_restart_restarted: {payload.get('restarted', 0)}")
+print(f"agent_restart_attempted_ok: {payload.get('restart_attempted_ok', 0)}")
 print(f"agent_restart_failed: {payload.get('failed', 0)}")
 print(f"agent_restart_skipped: {payload.get('skipped', 0)}")
-if payload.get("would_restart"):
-    print(f"agent_restart_would_restart: {payload.get('would_restart', 0)}")
-if payload.get("restarted_agents"):
-    print(f"agent_restart_agents: {','.join(payload['restarted_agents'])}")
-if payload.get("would_restart_agents"):
-    print(f"agent_restart_would_agents: {','.join(payload['would_restart_agents'])}")
+if payload.get("restart_eligible"):
+    print(f"agent_restart_eligible_count: {payload.get('restart_eligible', 0)}")
+if payload.get("restart_attempted_ok_agents"):
+    print(f"agent_restart_attempted_ok_agents: {','.join(payload['restart_attempted_ok_agents'])}")
+if payload.get("restart_eligible_agents"):
+    print(f"agent_restart_eligible_agents: {','.join(payload['restart_eligible_agents'])}")
 if payload.get("failed_agents"):
     print(f"agent_restart_failed_agents: {','.join(payload['failed_agents'])}")
 for reason in sorted(payload.get("skipped_reasons", {})):
     print(f"agent_restart_skipped_{reason}: {payload['skipped_reasons'][reason]}")
+if payload.get("dry_run") and payload.get("restart_eligible"):
+    print(
+        "agent_restart_note: dry-run reports pre-launch eligibility only. "
+        "Runtime failures (plugin resolution, settings corruption, "
+        "dependency outages) will surface only in the actual apply run."
+    )
 PY
 }
 
