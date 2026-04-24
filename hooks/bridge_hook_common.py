@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import pwd
@@ -212,6 +213,44 @@ def onboarding_state_from_file(path: Path | None) -> str:
     return match.group(1)
 
 
+def _stamp_next_session_delivered(agent: str, next_session: Path) -> None:
+    """Persist the SHA-1 digest of NEXT-SESSION.md into the per-agent marker.
+
+    The bash-side `bridge_agent_maybe_expire_next_session` gates on
+    `bridge_agent_next_session_is_delivered` (marker file equals the current
+    file digest). Without this writer the auto-clear path is dead code — a
+    regression introduced when `bridge_run_schedule_next_session_prompt` was
+    removed in b38e584 in favour of the SessionStart hook. We restore the
+    marker here so `bridge-run.sh`'s reconcile step can age out a stale
+    handoff file the next time a Claude agent restarts.
+
+    Best-effort: any IO failure is swallowed so the hook never blocks agent
+    startup over marker bookkeeping.
+    """
+    try:
+        content = next_session.read_bytes()
+    except OSError:
+        return
+    # bridge_agent_next_session_digest (bash) pipes the file through
+    # `bridge_sha1 "$(cat $file)"`. Command substitution strips trailing
+    # newlines before the argument reaches Python's hashlib, so hashing
+    # the raw bytes here would produce a different digest whenever
+    # NEXT-SESSION.md ends in `\n` — which is virtually always. Strip
+    # trailing newlines to match.
+    content = content.rstrip(b"\n")
+    digest = hashlib.sha1(content).hexdigest()
+    # Mirror lib/bridge-state.sh::bridge_agent_next_session_marker_file,
+    # which resolves to bridge_agent_runtime_state_dir/next-session.sha and
+    # runtime_state_dir is BRIDGE_ACTIVE_AGENT_DIR/<agent>
+    # (= BRIDGE_STATE_DIR/agents/<agent> by default).
+    marker_file = bridge_state_dir() / "agents" / agent / "next-session.sha"
+    try:
+        marker_file.parent.mkdir(parents=True, exist_ok=True)
+        marker_file.write_text(digest, encoding="utf-8")
+    except OSError:
+        return
+
+
 def bootstrap_artifact_context(agent: str) -> str:
     workdir = agent_workdir(agent)
     default_home = agent_default_home(agent)
@@ -232,6 +271,7 @@ def bootstrap_artifact_context(agent: str) -> str:
         if excerpt:
             lines.append("Handoff excerpt:")
             lines.append(excerpt)
+        _stamp_next_session_delivered(agent, next_session)
 
     session_type = first_existing_path(
         [

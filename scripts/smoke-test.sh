@@ -1825,7 +1825,19 @@ assert_contains "$CLAUDE_SESSION_START_OUTPUT" "Handoff present: NEXT-SESSION.md
 assert_contains "$CLAUDE_SESSION_START_OUTPUT" "Resume Checklist"
 assert_contains "$CLAUDE_SESSION_START_OUTPUT" "Onboarding pending:"
 assert_contains "$CLAUDE_SESSION_START_OUTPUT" "agb inbox claude-static"
-rm -f "$CLAUDE_STATIC_WORKDIR/NEXT-SESSION.md" "$CLAUDE_STATIC_WORKDIR/SESSION-TYPE.md"
+# Issue #228: the SessionStart hook must also stamp the next-session
+# digest into the per-agent marker so bash-side
+# bridge_agent_maybe_expire_next_session can later age out the handoff.
+CLAUDE_STATIC_SESSION_MARKER_FILE="$("$BASH4_BIN" -c '
+  source "'"$REPO_ROOT"'/bridge-lib.sh"
+  bridge_load_roster
+  bridge_agent_next_session_marker_file "claude-static"
+')"
+[[ -f "$CLAUDE_STATIC_SESSION_MARKER_FILE" ]] || die "session_start hook did not write next-session marker"
+CLAUDE_STATIC_SESSION_EXPECTED_DIGEST="$(python3 -c 'import hashlib,sys; print(hashlib.sha1(open(sys.argv[1],"rb").read().rstrip(b"\n")).hexdigest())' "$CLAUDE_STATIC_WORKDIR/NEXT-SESSION.md")"
+CLAUDE_STATIC_SESSION_ACTUAL_DIGEST="$(cat "$CLAUDE_STATIC_SESSION_MARKER_FILE")"
+[[ "$CLAUDE_STATIC_SESSION_EXPECTED_DIGEST" == "$CLAUDE_STATIC_SESSION_ACTUAL_DIGEST" ]] || die "next-session marker digest mismatch: expected $CLAUDE_STATIC_SESSION_EXPECTED_DIGEST got $CLAUDE_STATIC_SESSION_ACTUAL_DIGEST"
+rm -f "$CLAUDE_STATIC_WORKDIR/NEXT-SESSION.md" "$CLAUDE_STATIC_WORKDIR/SESSION-TYPE.md" "$CLAUDE_STATIC_SESSION_MARKER_FILE"
 CODEX_PROMPT_OUTPUT="$(BRIDGE_AGENT_ID="$SMOKE_AGENT" BRIDGE_HOME="$BRIDGE_HOME" python3 "$REPO_ROOT/hooks/prompt_timestamp.py" --format codex)"
 assert_contains "$CODEX_PROMPT_OUTPUT" "\"hookEventName\": \"UserPromptSubmit\""
 assert_contains "$CODEX_PROMPT_OUTPUT" "now:"
