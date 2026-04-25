@@ -355,6 +355,16 @@ start_static_agent() {
   exec "$BRIDGE_BASH_BIN" "$SCRIPT_DIR/bridge-start.sh" "$agent" "${start_args[@]}"
 }
 
+# Issue #283 Track D: bare invocation prints help instead of falling through
+# to the legacy ad-hoc spawn parser, which dies with the misleading
+# "--codex 또는 --claude 중 하나를 지정하세요" error. The legacy spawn path is
+# rare; the common path is queue/inbox dispatching, which is what the help
+# summary highlights.
+if [[ $# -eq 0 ]]; then
+  usage
+  exit 0
+fi
+
 if [[ $# -gt 0 ]]; then
   case "$1" in
     admin)
