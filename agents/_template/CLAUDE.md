@@ -110,6 +110,27 @@ When the daemon injects a line that starts with `[Agent Bridge] event=` (queue i
 - 채널 setup 때문에 현재 Claude 세션을 재시작해야 하면, `exit` 안내 전에 `NEXT-SESSION.md`를 작성한다. 포함할 내용: 왜 재시작하는지, 방금 설정한 채널, 다음 세션에서 실행할 검증 명령, 성공 후 사용자에게 보낼 안내, 검증 완료 후 `NEXT-SESSION.md` 삭제.
 - admin 온보딩이 끝나면 `agent start patch`, `agent restart patch`, `start patch` 같은 표현을 사용자에게 안내하지 않는다. 대신 "현재 Claude 세션에는 새 설정이 아직 완전히 붙지 않을 수 있습니다. 이 세션에서 `exit`로 종료하면 바깥 쉘로 돌아가고, 온보딩 완료된 admin은 백그라운드에서 다시 뜹니다. 그 다음 바깥 쉘에서 `agb admin`을 다시 실행하세요."라고 안내한다.
 
+## Admin Self-Cleanup of Own Queue
+- 이 섹션은 `SESSION-TYPE.md`의 Session Type이 `admin`일 때만 적용된다. admin은 자기 큐의 소유자이며, 자기 큐를 닫는 책임도 자기에게 있다. 무한정 parking하지 않는다.
+- 자기 소유의 모든 `blocked` task에 대해 규칙은: `[blocked-aging]`이 발화할 때마다(또는 idle한 inbox 방문마다) task body를 매번 처음부터 끝까지 다시 읽는다. blind refresh 금지.
+- 어떤 행동을 하기 전에 반드시 아래 결정 트리를 이 순서로 적용한다:
+  - (a) 원래 전제가 이후 사건으로 충족되었거나 무효화되었는가? → `done`으로 닫고 `stale: <이유>` note를 남긴다.
+  - (b) 원본 에이전트가 다음 단계로 넘어갔거나, 그 driving cycle을 닫았는가? → `done`으로 닫고 `source moved on` note를 남긴다.
+  - (c) 다른 active task가 이미 같은 일을 다루고 있는가? → handoff하거나 cross-reference와 함께 `done`으로 닫는다.
+  - (d) 이 admin 혼자 15분 안에 끝낼 수 있는 일인가? → 지금 unblock하고 처리한다. `tech debt`로 미루지 않는다.
+  - (e) operator의 결정이 정말 필요하고, 오늘 공유 외부 채널(Discord / Telegram)에서 받을 수 있는가? → 그 채널로 에스컬레이션한 뒤 deadline을 명시해서 blocked refresh.
+  - (f) 위 어디에도 해당하지 않으면 → "X가 일어나면 다시 본다"는 형태의 구체적 trigger를 note에 적고 `blocked` refresh. note는 검증 가능한 trigger를 명시해야 하며, 모호한 `when free`류는 거절된다.
+- `agb update --status blocked --note "..."`는 refresh-only outcome이며, (a)–(e)가 note 안에서 글로 배제된 뒤에만 허용된다.
+- 기본은 close다. Refresh는 예외이지 평형 상태가 아니다.
+
+## Admin Static vs Dynamic Agent Boundary
+- 이 섹션은 `SESSION-TYPE.md`의 Session Type이 `admin`일 때만 적용된다.
+- dynamic 에이전트는 nudge하지 않는다. dynamic 에이전트는 TUI 앞에 있는 개발자 operator가 직접 관리하며, context pressure, 세션 재시작, 유사한 유지보수도 operator가 직접 처리한다. daemon이 발화한 유지보수 task(`[context-pressure]`, `[stall]`, `[crash-loop]`, `[wake-miss]`, `[blocked-aging]` 등)가 dynamic 에이전트를 대상으로 들어오면, `<reason>: dynamic agent — operator-managed`라는 한 줄 note로 닫고 추가 행동은 하지 않는다.
+- static 에이전트의 경우 이 admin이 유일한 관리자다. static 에이전트의 end-user는 Discord / Telegram / Teams로 도달하며 어떤 Claude Code slash command도 실행할 수 없다.
+- 따라서 static 에이전트(또는 그 end-user)에게 `/compact`, `/clear`, `NEXT-SESSION.md` 작성, 기타 어떤 CLI surface 실행도 요청하는 후속 task를 만들지 않는다. end-user는 그 안내를 절대 보지 못하고, 에이전트는 계속 degrade한다.
+- 유지보수 trigger는 이 admin이 오늘 사용할 수 있는 bridge primitive만으로 전부 해소한다. (#304 Track B에서 bridge-managed `autopilot-compact` / `handoff-restart` primitive가 요청되어 있고, 그것이 들어오기 전까지는 static 에이전트를 nudge하는 대신 외부 채널의 사람 operator에게 에스컬레이션하는 것이 옳은 경로다. nudge는 옳지 않다.)
+- end-user에게는 그들이 실제로 체감할 만한 동작 변화가 있을 때만 알린다. 그 외 admin이 처리한 유지보수는 조용히 끝낸다.
+
 ## Channel Setup Protocol
 - 사용자가 어떤 에이전트든 새로 만들거나 설정하면서 채널을 언급하면, 먼저 선택지를 명확히 확인한다: `터미널만`, `Discord`, `Telegram`, `Discord와 Telegram 둘 다`.
 - Discord 또는 Telegram을 하나라도 선택하면 해당 에이전트는 Claude Code 엔진이어야 한다. Codex 요청과 외부 채널 요청이 충돌하면, 이유를 한 문장으로 설명하고 Claude Code로 진행한다.
