@@ -3769,6 +3769,14 @@ cmd_run() {
         --detail interval_seconds="$BRIDGE_DAEMON_INTERVAL" \
         --detail heartbeat_interval_seconds="$heartbeat_interval" \
         2>/dev/null || true
+      # Issue #265 proposal D: also touch a heartbeat file so an OS-level
+      # watcher (launchd LaunchAgent on macOS, systemd .timer unit on Linux)
+      # can compare its mtime against a staleness threshold and restart the
+      # daemon when the main loop stops advancing. The file lives outside the
+      # daemon process tree, so a hung daemon cannot interfere with it being
+      # observed. See scripts/bridge-daemon-liveness.sh and
+      # scripts/install-daemon-liveness-{launchagent,systemd}.sh.
+      printf '%s\n' "$now_ts" >"$BRIDGE_STATE_DIR/daemon.heartbeat" 2>/dev/null || true
       last_heartbeat_ts="$now_ts"
     fi
     BRIDGE_DAEMON_LAST_STEP="idle_sleep"
