@@ -51,6 +51,23 @@ cd ~/.agent-bridge
 launchctl print gui/$UID/ai.agent-bridge.daemon
 ```
 
+`agb bootstrap` also installs a sibling LaunchAgent / systemd timer
+(`ai.agent-bridge.daemon-liveness` on macOS,
+`agent-bridge-daemon-liveness.timer` on Linux) that watches
+`state/daemon.heartbeat`. KeepAlive only catches process death; the
+liveness watcher catches the silent-hang case (issue #265) where the
+daemon process is alive but its main loop has frozen. It restarts the
+daemon when the heartbeat mtime exceeds
+`BRIDGE_DAEMON_LIVENESS_THRESHOLD_SECONDS` (default 600s) and honours
+`BRIDGE_DAEMON_LIVENESS_COOLDOWN_SECONDS` (default 600s) to avoid
+restart loops on a broken daemon. Pass `--skip-liveness` to `bootstrap`
+to opt out, or invoke the installer directly:
+
+```bash
+./scripts/install-daemon-liveness-launchagent.sh --apply --load    # macOS
+./scripts/install-daemon-liveness-systemd.sh --apply --enable      # Linux
+```
+
 Check overall status:
 
 ```bash
@@ -64,6 +81,8 @@ If the daemon misbehaves, inspect live runtime logs:
 tail -n 80 ~/.agent-bridge/state/daemon.log
 tail -n 80 ~/.agent-bridge/state/daemon-crash.log
 tail -n 80 ~/.agent-bridge/state/launchagent.log
+tail -n 80 ~/.agent-bridge/state/launchagent-liveness.log     # macOS liveness watcher
+tail -n 80 ~/.agent-bridge/state/systemd-daemon-liveness.log  # Linux liveness watcher
 ```
 
 ## Upgrade

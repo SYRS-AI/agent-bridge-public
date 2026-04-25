@@ -19,6 +19,7 @@ Bootstrap options:
   --skip-daemon
   --skip-launchagent      Do not install/load the macOS LaunchAgent
   --skip-systemd          Do not install/enable the Linux systemd user unit
+  --skip-liveness         Do not install the daemon liveness watcher (issue #265 D)
   --dry-run
   --json
 
@@ -37,6 +38,7 @@ skip_shell_integration=0
 skip_daemon=0
 skip_launchagent=0
 skip_systemd=0
+skip_liveness=0
 dry_run=0
 json_mode=0
 init_args=()
@@ -67,6 +69,10 @@ while [[ $# -gt 0 ]]; do
       ;;
     --skip-systemd)
       skip_systemd=1
+      shift
+      ;;
+    --skip-liveness)
+      skip_liveness=1
       shift
       ;;
     --dry-run)
@@ -113,6 +119,7 @@ shell_status="skipped"
 daemon_status="skipped"
 launchagent_status="skipped"
 systemd_status="skipped"
+liveness_status="skipped"
 next_command="agb admin"
 reload_command="source \"$bootstrap_rcfile\" || export PATH=\"\$HOME/.agent-bridge:\$PATH\""
 bootstrap_os="${BRIDGE_BOOTSTRAP_OS:-$(uname -s)}"
@@ -161,8 +168,42 @@ if [[ $skip_systemd -eq 0 ]]; then
   fi
 fi
 
+# Issue #265 proposal D: install the OS-level liveness watcher alongside the
+# daemon plist/unit. Skip if the operator opted out, if the matching daemon
+# install was skipped (no point watching a heartbeat that nothing writes), or
+# if the platform is unsupported.
+if [[ $skip_liveness -eq 0 ]]; then
+  case "$bootstrap_os" in
+    Darwin)
+      if [[ $skip_launchagent -eq 1 ]]; then
+        liveness_status="skipped"
+      else
+        liveness_status="planned"
+        if [[ $dry_run -eq 0 ]]; then
+          "$BRIDGE_BASH_BIN" "$SCRIPT_DIR/scripts/install-daemon-liveness-launchagent.sh" --apply --load >/dev/null
+          liveness_status="loaded"
+        fi
+      fi
+      ;;
+    Linux)
+      if [[ $skip_systemd -eq 1 ]]; then
+        liveness_status="skipped"
+      else
+        liveness_status="planned"
+        if [[ $dry_run -eq 0 ]]; then
+          "$BRIDGE_BASH_BIN" "$SCRIPT_DIR/scripts/install-daemon-liveness-systemd.sh" --apply --enable >/dev/null
+          liveness_status="enabled"
+        fi
+      fi
+      ;;
+    *)
+      liveness_status="unsupported"
+      ;;
+  esac
+fi
+
 if [[ $json_mode -eq 1 ]]; then
-  python3 - "$init_json" "$shell_status" "$bootstrap_shell" "$bootstrap_rcfile" "$daemon_status" "$launchagent_status" "$systemd_status" "$next_command" "$reload_command" <<'PY'
+  python3 - "$init_json" "$shell_status" "$bootstrap_shell" "$bootstrap_rcfile" "$daemon_status" "$launchagent_status" "$systemd_status" "$next_command" "$reload_command" "$liveness_status" <<'PY'
 import json
 import sys
 
@@ -178,6 +219,7 @@ payload = {
     "daemon": {"status": sys.argv[5]},
     "launchagent": {"status": sys.argv[6]},
     "systemd": {"status": sys.argv[7]},
+    "liveness": {"status": sys.argv[10]},
     "next_command": sys.argv[8],
     "reload_command": sys.argv[9],
     "handoff_steps": [
@@ -204,6 +246,7 @@ printf 'shell_integration: %s\n' "$shell_status"
 printf 'daemon: %s\n' "$daemon_status"
 printf 'launchagent: %s\n' "$launchagent_status"
 printf 'systemd: %s\n' "$systemd_status"
+printf 'liveness: %s\n' "$liveness_status"
 printf 'rc_reload_command: %s\n' "$reload_command"
 echo
 echo "handoff:"

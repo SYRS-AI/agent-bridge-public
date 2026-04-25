@@ -4001,7 +4001,103 @@ payload = json.loads(sys.argv[1])
 assert payload["mode"] == "bootstrap"
 assert payload["launchagent"]["status"] == "skipped"
 assert payload["systemd"]["status"] == "planned"
+# Issue #265 D: when systemd is planned and the operator did not pass
+# --skip-liveness, the liveness watcher should be planned alongside it.
+assert payload["liveness"]["status"] == "planned", payload["liveness"]
 PY
+
+# Issue #265 proposal D — render the OS liveness installers without
+# touching launchctl/systemctl, then exercise the checker against fake
+# heartbeat states in an isolated state dir. Keeps the tests safe to run
+# on any host (no daemon restart side effects).
+log "rendering daemon-liveness launchagent + systemd installers (issue #265 D)"
+LIVENESS_LAUNCHAGENT_OUTPUT="$("$REPO_ROOT/scripts/install-daemon-liveness-launchagent.sh" --bridge-home "$BRIDGE_HOME")"
+assert_contains "$LIVENESS_LAUNCHAGENT_OUTPUT" "<key>Label</key>"
+assert_contains "$LIVENESS_LAUNCHAGENT_OUTPUT" "ai.agent-bridge.daemon-liveness"
+assert_contains "$LIVENESS_LAUNCHAGENT_OUTPUT" "<key>StartInterval</key>"
+assert_contains "$LIVENESS_LAUNCHAGENT_OUTPUT" "bridge-daemon-liveness.sh"
+assert_contains "$LIVENESS_LAUNCHAGENT_OUTPUT" "BRIDGE_DAEMON_LIVENESS_THRESHOLD_SECONDS"
+
+LIVENESS_SYSTEMD_OUTPUT="$("$REPO_ROOT/scripts/install-daemon-liveness-systemd.sh" --bridge-home "$BRIDGE_HOME")"
+assert_contains "$LIVENESS_SYSTEMD_OUTPUT" "agent-bridge-daemon-liveness.service"
+assert_contains "$LIVENESS_SYSTEMD_OUTPUT" "agent-bridge-daemon-liveness.timer"
+assert_contains "$LIVENESS_SYSTEMD_OUTPUT" "OnUnitInactiveSec="
+assert_contains "$LIVENESS_SYSTEMD_OUTPUT" "BRIDGE_DAEMON_LIVENESS_THRESHOLD_SECONDS="
+
+log "exercising daemon-liveness checker decisions (issue #265 D)"
+LIVENESS_TMP="$TMP_ROOT/liveness"
+mkdir -p "$LIVENESS_TMP/state" "$LIVENESS_TMP/logs"
+LIVENESS_HEARTBEAT="$LIVENESS_TMP/state/daemon.heartbeat"
+LIVENESS_PIDFILE="$LIVENESS_TMP/state/daemon.pid"
+LIVENESS_AUDIT="$LIVENESS_TMP/logs/audit.jsonl"
+LIVENESS_COOLDOWN="$LIVENESS_TMP/state/daemon-liveness-cooldown.ts"
+
+# 1. No baseline: no heartbeat file at all -> skip_no_baseline, no restart.
+rm -f "$LIVENESS_HEARTBEAT" "$LIVENESS_PIDFILE" "$LIVENESS_COOLDOWN" "$LIVENESS_AUDIT"
+BRIDGE_HOME="$LIVENESS_TMP" \
+  BRIDGE_STATE_DIR="$LIVENESS_TMP/state" \
+  BRIDGE_AUDIT_LOG="$LIVENESS_AUDIT" \
+  BRIDGE_DAEMON_PID_FILE="$LIVENESS_PIDFILE" \
+  BRIDGE_DAEMON_LIVENESS_DRY_RUN=1 \
+  bash "$REPO_ROOT/scripts/bridge-daemon-liveness.sh" >/dev/null 2>&1 \
+  || die "liveness checker no-baseline run exited non-zero"
+assert_contains "$(cat "$LIVENESS_AUDIT" 2>/dev/null)" "daemon_liveness_skip_no_baseline"
+
+# 2. Fresh heartbeat: file mtime is now -> ok, no restart.
+rm -f "$LIVENESS_AUDIT"
+date +%s >"$LIVENESS_HEARTBEAT"
+BRIDGE_HOME="$LIVENESS_TMP" \
+  BRIDGE_STATE_DIR="$LIVENESS_TMP/state" \
+  BRIDGE_AUDIT_LOG="$LIVENESS_AUDIT" \
+  BRIDGE_DAEMON_PID_FILE="$LIVENESS_PIDFILE" \
+  BRIDGE_DAEMON_LIVENESS_DRY_RUN=1 \
+  bash "$REPO_ROOT/scripts/bridge-daemon-liveness.sh" >/dev/null 2>&1 \
+  || die "liveness checker fresh-heartbeat run exited non-zero"
+assert_contains "$(cat "$LIVENESS_AUDIT" 2>/dev/null)" "daemon_liveness_ok"
+
+# 3. Stale heartbeat but daemon not running: skip_not_running.
+rm -f "$LIVENESS_AUDIT" "$LIVENESS_PIDFILE"
+date +%s >"$LIVENESS_HEARTBEAT"
+# Backdate to 1 hour ago via touch -t (works on macOS BSD touch and GNU touch).
+LIVENESS_PAST="$(date -v-1H +%Y%m%d%H%M.%S 2>/dev/null || date -d '1 hour ago' +%Y%m%d%H%M.%S)"
+touch -t "$LIVENESS_PAST" "$LIVENESS_HEARTBEAT"
+BRIDGE_HOME="$LIVENESS_TMP" \
+  BRIDGE_STATE_DIR="$LIVENESS_TMP/state" \
+  BRIDGE_AUDIT_LOG="$LIVENESS_AUDIT" \
+  BRIDGE_DAEMON_PID_FILE="$LIVENESS_PIDFILE" \
+  BRIDGE_DAEMON_LIVENESS_DRY_RUN=1 \
+  bash "$REPO_ROOT/scripts/bridge-daemon-liveness.sh" >/dev/null 2>&1 \
+  || die "liveness checker stale-no-pid run exited non-zero"
+assert_contains "$(cat "$LIVENESS_AUDIT" 2>/dev/null)" "daemon_liveness_skip_not_running"
+
+# 4. Stale heartbeat AND a live daemon pid: dry-run records restart_attempt
+# and writes the cooldown file. Use the smoke shell's own pid as the
+# "alive daemon" — kill -0 succeeds and we never actually call stop/start
+# because BRIDGE_DAEMON_LIVENESS_DRY_RUN=1.
+rm -f "$LIVENESS_AUDIT" "$LIVENESS_COOLDOWN"
+echo "$$" >"$LIVENESS_PIDFILE"
+touch -t "$LIVENESS_PAST" "$LIVENESS_HEARTBEAT"
+BRIDGE_HOME="$LIVENESS_TMP" \
+  BRIDGE_STATE_DIR="$LIVENESS_TMP/state" \
+  BRIDGE_AUDIT_LOG="$LIVENESS_AUDIT" \
+  BRIDGE_DAEMON_PID_FILE="$LIVENESS_PIDFILE" \
+  BRIDGE_DAEMON_LIVENESS_DRY_RUN=1 \
+  bash "$REPO_ROOT/scripts/bridge-daemon-liveness.sh" >/dev/null 2>&1 \
+  || die "liveness checker stale-with-pid dry-run exited non-zero"
+assert_contains "$(cat "$LIVENESS_AUDIT" 2>/dev/null)" "daemon_liveness_restart_attempt"
+[[ -f "$LIVENESS_COOLDOWN" ]] || die "liveness checker did not record cooldown ts"
+
+# 5. Stale heartbeat, live pid, but cooldown still active: skip_cooldown.
+rm -f "$LIVENESS_AUDIT"
+touch -t "$LIVENESS_PAST" "$LIVENESS_HEARTBEAT"
+BRIDGE_HOME="$LIVENESS_TMP" \
+  BRIDGE_STATE_DIR="$LIVENESS_TMP/state" \
+  BRIDGE_AUDIT_LOG="$LIVENESS_AUDIT" \
+  BRIDGE_DAEMON_PID_FILE="$LIVENESS_PIDFILE" \
+  BRIDGE_DAEMON_LIVENESS_DRY_RUN=1 \
+  bash "$REPO_ROOT/scripts/bridge-daemon-liveness.sh" >/dev/null 2>&1 \
+  || die "liveness checker cooldown run exited non-zero"
+assert_contains "$(cat "$LIVENESS_AUDIT" 2>/dev/null)" "daemon_liveness_skip_cooldown"
 
 log "surfacing bootstrap failure output and parsing tokenFile dotenv values"
 cat >"$TOKENFILE_ENV" <<'EOF'
