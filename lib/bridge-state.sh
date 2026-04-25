@@ -2052,6 +2052,36 @@ bridge_daemon_is_running() {
   [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null
 }
 
+bridge_daemon_all_pids() {
+  # Issue #269: cmd_stop only killed the pid-file PID, so any earlier daemon
+  # that lost its pid-file (e.g. install moved paths, orphan re-parented to
+  # PPID=1, manual `bridge-daemon.sh run` from diagnostics) survived stop +
+  # systemd restart and ran concurrently with the systemd-managed daemon —
+  # silently ignoring later env drop-ins. Match every own-user process whose
+  # cmdline ends in "bridge-daemon.sh run" so stop can sweep all of them,
+  # including daemons launched from a different BRIDGE_HOME path.
+  # BRIDGE_DAEMON_STOP_PATTERN overrides the match pattern so isolated tests
+  # do not pick up the operator's live daemons via system-wide pgrep.
+  # The `-U "$(id -u)"` scope is required because the previous narrower
+  # fallback (path-prefixed by BRIDGE_HOME) implicitly limited matches to
+  # this operator; broadening to a path-agnostic pattern without a UID
+  # filter would let `pgrep -f` return processes owned by other users
+  # (default on Linux), inflating orphan_count and risking SIGTERM to a
+  # different user's daemon if cmd_stop is ever invoked under sudo/root.
+  local pattern="${BRIDGE_DAEMON_STOP_PATTERN:-bridge-daemon\\.sh run$}"
+  local self_pid="${BASHPID:-$$}"
+  local self_uid
+  self_uid="$(id -u 2>/dev/null || printf '%s' "${UID:-}")"
+  local pgrep_user_args=()
+  [[ -n "$self_uid" ]] && pgrep_user_args=(-U "$self_uid")
+  local candidate
+  while IFS= read -r candidate; do
+    [[ -n "$candidate" ]] || continue
+    [[ "$candidate" == "$self_pid" ]] && continue
+    printf '%s\n' "$candidate"
+  done < <(pgrep "${pgrep_user_args[@]}" -f "$pattern" 2>/dev/null || true)
+}
+
 bridge_write_agent_snapshot() {
   local file="$1"
   local agent
