@@ -571,6 +571,144 @@ else:
 PY
 }
 
+bridge_build_safe_claude_launch_cmd() {
+  local agent="$1"
+  local fallback=""
+  local continue_mode=""
+  local session_id=""
+
+  fallback="${BRIDGE_AGENT_LAUNCH_CMD[$agent]-}"
+  if [[ -z "$fallback" ]]; then
+    fallback="$(bridge_claude_dynamic_launch_cmd "$agent" 0 0 "")"
+  fi
+
+  continue_mode="$(bridge_agent_continue "$agent")"
+  if [[ "$continue_mode" == "1" ]]; then
+    session_id="$(bridge_claude_resume_session_id_for_agent "$agent" 2>/dev/null || true)"
+  fi
+
+  bridge_require_python
+  python3 - "$agent" "$continue_mode" "$session_id" "$fallback" <<'PY'
+import re
+import shlex
+import sys
+
+agent, continue_mode, session_id, original = sys.argv[1:]
+match = re.match(r"^(?P<prefix>.*?)(?P<command>claude(?:\s|$).*)$", original)
+if not match:
+    print(original)
+    raise SystemExit(0)
+
+env_prefix = match.group("prefix")
+args = shlex.split(match.group("command"))
+if not args or args[0] != "claude":
+    print(original)
+    raise SystemExit(0)
+
+rest = args[1:]
+extras = []
+i = 0
+while i < len(rest):
+    token = rest[i]
+    if token in {"-c", "--continue", "--dangerously-skip-permissions"}:
+        i += 1
+        continue
+    if token in {"--resume", "--name", "--channels"}:
+        i += 2 if i + 1 < len(rest) else 1
+        continue
+    if token.startswith("--channels="):
+        i += 1
+        continue
+    if token == "--dangerously-load-development-channels":
+        i += 1
+        while i < len(rest) and not rest[i].startswith("-"):
+            i += 1
+        continue
+    if token.startswith("--dangerously-load-development-channels="):
+        i += 1
+        continue
+    extras.append(token)
+    if token.startswith("--") and i + 1 < len(rest) and not rest[i + 1].startswith("-"):
+        extras.append(rest[i + 1])
+        i += 2
+        continue
+    i += 1
+
+base = ["claude"]
+if continue_mode == "1" and session_id:
+    base.extend(["--resume", session_id])
+elif continue_mode == "1":
+    base.append("--continue")
+base.extend(["--dangerously-skip-permissions", "--name", agent])
+base.extend(extras)
+
+quoted = " ".join(shlex.quote(token) for token in base)
+if env_prefix:
+    print(f"{env_prefix}{quoted}")
+else:
+    print(quoted)
+PY
+}
+
+bridge_safe_mode_resume_mode() {
+  local agent="$1"
+  local engine=""
+  local session_id=""
+
+  [[ "$(bridge_agent_continue "$agent")" == "1" ]] || {
+    printf '%s' "fresh"
+    return 0
+  }
+
+  engine="$(bridge_agent_engine "$agent")"
+  case "$engine" in
+    claude)
+      session_id="$(bridge_claude_resume_session_id_for_agent "$agent" 2>/dev/null || true)"
+      if [[ -n "$session_id" ]]; then
+        printf '%s' "resume"
+      else
+        printf '%s' "continue"
+      fi
+      ;;
+    codex)
+      bridge_normalize_agent_session_id "$agent"
+      session_id="$(bridge_agent_session_id "$agent")"
+      if [[ -n "$session_id" ]]; then
+        printf '%s' "resume"
+      else
+        printf '%s' "fresh"
+      fi
+      ;;
+    *)
+      printf '%s' "fresh"
+      ;;
+  esac
+}
+
+bridge_build_safe_launch_cmd() {
+  local agent="$1"
+  local engine=""
+  local launch_cmd=""
+
+  engine="$(bridge_agent_engine "$agent")"
+  case "$engine" in
+    claude)
+      bridge_build_safe_claude_launch_cmd "$agent"
+      ;;
+    codex)
+      if launch_cmd="$(bridge_build_resume_launch_cmd "$agent")"; then
+        bridge_codex_launch_with_hooks "$launch_cmd"
+      else
+        launch_cmd="$(bridge_build_dynamic_launch_cmd "$agent")"
+        bridge_codex_launch_with_hooks "$launch_cmd"
+      fi
+      ;;
+    *)
+      printf '%s' "${BRIDGE_AGENT_LAUNCH_CMD[$agent]-}"
+      ;;
+  esac
+}
+
 bridge_agent_launch_cmd() {
   local agent="$1"
   local fallback=""
