@@ -453,12 +453,22 @@ bridge_export_env_prefix() {
 bridge_project_root_for_path() {
   local path="$1"
 
+  # Callers iterate every registered agent's workdir; a stale registration whose
+  # directory has been removed (deleted repo, expired worktree, renamed home)
+  # must not abort the enumeration nor leak `cd: No such file or directory`
+  # noise to operator stderr. Return the registered path verbatim when it is
+  # missing — that is what the caller would have shown anyway. See issue #305.
+  if [[ -z "$path" || ! -d "$path" ]]; then
+    printf '%s' "$path"
+    return 0
+  fi
+
   if git -C "$path" rev-parse --show-toplevel >/dev/null 2>&1; then
     git -C "$path" rev-parse --show-toplevel | sed 's#/*$##'
     return 0
   fi
 
-  (cd "$path" && pwd -P)
+  (cd "$path" 2>/dev/null && pwd -P) || printf '%s' "$path"
 }
 
 bridge_compat_config_file() {

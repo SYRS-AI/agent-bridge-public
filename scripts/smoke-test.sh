@@ -107,6 +107,60 @@ kill_stale_smoke_tmux_sessions() {
   done < <(tmux list-sessions -F '#{session_name}' 2>/dev/null || true)
 }
 
+# Track managed-role agent ids the smoke fixture wrote into
+# $BRIDGE_ROSTER_LOCAL_FILE so cleanup() can strip the
+# `# BEGIN AGENT BRIDGE MANAGED ROLE: <id>` ... `# END ...` blocks on exit.
+# Issue #305 — without teardown, an operator who points the smoke roster at a
+# real file (or whose $BRIDGE_HOME survives the run) keeps a dead static role
+# registration forever.
+SMOKE_REGISTERED_AGENT_IDS=()
+
+smoke_track_managed_role_id() {
+  local id="$1"
+  [[ -n "$id" ]] || return 0
+  SMOKE_REGISTERED_AGENT_IDS+=("$id")
+}
+
+smoke_strip_managed_role_block() {
+  # Remove `# BEGIN AGENT BRIDGE MANAGED ROLE: <id>` ... `# END ...` block from
+  # $BRIDGE_ROSTER_LOCAL_FILE. No-op if the file is missing or the markers are
+  # absent. Idempotent so cleanup can be re-entered safely.
+  local id="$1"
+  local file="${2:-${BRIDGE_ROSTER_LOCAL_FILE:-}}"
+  [[ -n "$id" && -n "$file" && -f "$file" ]] || return 0
+  if ! grep -qF "# BEGIN AGENT BRIDGE MANAGED ROLE: $id" "$file" 2>/dev/null; then
+    return 0
+  fi
+  if ! grep -qF "# END AGENT BRIDGE MANAGED ROLE: $id" "$file" 2>/dev/null; then
+    return 0
+  fi
+  python3 - "$file" "$id" <<'PY' || return 0
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+agent = sys.argv[2]
+begin = f"# BEGIN AGENT BRIDGE MANAGED ROLE: {agent}"
+end = f"# END AGENT BRIDGE MANAGED ROLE: {agent}"
+text = path.read_text(encoding="utf-8")
+lines = text.splitlines(keepends=True)
+out = []
+inside = False
+for line in lines:
+    stripped = line.rstrip("\n")
+    if not inside and stripped == begin:
+        inside = True
+        continue
+    if inside and stripped == end:
+        inside = False
+        continue
+    if inside:
+        continue
+    out.append(line)
+path.write_text("".join(out), encoding="utf-8")
+PY
+}
+
 require_cmd bash
 require_cmd tmux
 require_cmd python3
@@ -809,6 +863,26 @@ fi
 
 [[ "$BRIDGE_ROSTER_LOCAL_FILE" != "$LIVE_ROSTER_FILE" ]] || die "smoke roster must not target the live roster"
 
+# Refuse to start when a previous smoke run leaked a managed-role block into
+# $BRIDGE_ROSTER_LOCAL_FILE. Without this guard the next run silently
+# double-registers a dead static role under the same id (issue #305). We match
+# `smoke-temp` (the historical leaked id) plus any id containing `smoke` or
+# `bridge-smoke-` so future fixture renames stay covered.
+if [[ -f "$BRIDGE_ROSTER_LOCAL_FILE" ]]; then
+  _smoke_leaked_blocks="$(grep -nE '^# BEGIN AGENT BRIDGE MANAGED ROLE: (smoke-temp|.*smoke.*|.*bridge-smoke-.*)$' "$BRIDGE_ROSTER_LOCAL_FILE" 2>/dev/null || true)"
+  if [[ -n "$_smoke_leaked_blocks" ]]; then
+    _smoke_leaked_ids="$(printf '%s\n' "$_smoke_leaked_blocks" | sed -E 's/^[0-9]+:# BEGIN AGENT BRIDGE MANAGED ROLE: //' | paste -sd ',' -)"
+    printf '[smoke][error] 이전 smoke 실행이 남긴 roster 블록이 있습니다. 다음 블록을 정리한 뒤 재시도하세요: %s\n' "$_smoke_leaked_ids" >&2
+    printf '[smoke][error] roster=%s\n' "$BRIDGE_ROSTER_LOCAL_FILE" >&2
+    printf '[smoke][error] %s\n' "$_smoke_leaked_blocks" >&2
+    grep -nE '^# END AGENT BRIDGE MANAGED ROLE: (smoke-temp|.*smoke.*|.*bridge-smoke-.*)$' "$BRIDGE_ROSTER_LOCAL_FILE" 2>/dev/null | while IFS= read -r _smoke_end_line; do
+      printf '[smoke][error] %s\n' "$_smoke_end_line" >&2
+    done
+    exit 1
+  fi
+  unset _smoke_leaked_blocks _smoke_leaked_ids
+fi
+
 cleanup() {
   local status=$?
   local _cleanup_attempt=""
@@ -860,6 +934,19 @@ cleanup() {
   if [[ -n "$MCP_ATTACHED_PARENT_PID" ]]; then
     kill "$MCP_ATTACHED_PARENT_PID" >/dev/null 2>&1 || true
     wait "$MCP_ATTACHED_PARENT_PID" >/dev/null 2>&1 || true
+  fi
+  # Strip every managed-role block the smoke fixture wrote into
+  # $BRIDGE_ROSTER_LOCAL_FILE. When the roster lives under $TMP_ROOT this is a
+  # no-op once `rm -rf "$TMP_ROOT"` runs below, but the strip protects
+  # operators who explicitly overrode BRIDGE_ROSTER_LOCAL_FILE to a path
+  # outside $TMP_ROOT (issue #305). Idempotent: each strip is guarded by
+  # presence of both BEGIN and END markers, so re-entry under `set +e` cleanup
+  # cannot fail the trap.
+  if [[ ${#SMOKE_REGISTERED_AGENT_IDS[@]} -gt 0 && -n "${BRIDGE_ROSTER_LOCAL_FILE:-}" ]]; then
+    local _smoke_id=""
+    for _smoke_id in "${SMOKE_REGISTERED_AGENT_IDS[@]}"; do
+      smoke_strip_managed_role_block "$_smoke_id" "$BRIDGE_ROSTER_LOCAL_FILE" || true
+    done
   fi
   if [[ "$LIVE_ROSTER_PRESENT" == "1" ]] && ! cmp -s "$LIVE_ROSTER_BACKUP" "$LIVE_ROSTER_FILE"; then
     cp "$LIVE_ROSTER_BACKUP" "$LIVE_ROSTER_FILE"
@@ -3029,6 +3116,7 @@ BRIDGE_AGENT_LOOP["$MCP_RESTART_AGENT"]="1"
 BRIDGE_AGENT_CONTINUE["$MCP_RESTART_AGENT"]="0"
 # END AGENT BRIDGE MANAGED ROLE: $MCP_RESTART_AGENT
 EOF
+smoke_track_managed_role_id "$MCP_RESTART_AGENT"
 BRIDGE_MCP_ORPHAN_CLEANUP_ENABLED=1 \
 BRIDGE_MCP_ORPHAN_SESSION_STOP_MIN_AGE_SECONDS=0 \
 BRIDGE_MCP_ORPHAN_PATTERNS="$MCP_RESTART_PATTERN" \
@@ -4924,6 +5012,7 @@ BRIDGE_AGENT_LOOP["$CIRCUIT_AGENT"]="1"
 BRIDGE_AGENT_CONTINUE["$CIRCUIT_AGENT"]="0"
 # END AGENT BRIDGE MANAGED ROLE: $CIRCUIT_AGENT
 EOF
+smoke_track_managed_role_id "$CIRCUIT_AGENT"
 CIRCUIT_BREAKER_OUTPUT="$(
   BRIDGE_RUN_MAX_RAPID_FAILS=3 \
   BRIDGE_RUN_FAIL_BACKOFFS_CSV=1,1,1 \
