@@ -790,6 +790,595 @@ PY
 )
 }
 
+bridge_linux_revoke_traverse_chain() {
+  # Mirror of bridge_linux_grant_traverse_chain: remove `u:${os_user}` from
+  # every directory between $target and $stop_path (inclusive). Stop_path
+  # follows the same `/` and empty-string guards as the grant function so
+  # an accidental call cannot strip ACLs from filesystem ancestors.
+  local os_user="$1"
+  local target="$2"
+  local stop_path="${3:-}"
+
+  if [[ -z "$stop_path" ]]; then
+    bridge_warn "bridge_linux_revoke_traverse_chain: missing stop_path for target=$target (skipping)"
+    return 0
+  fi
+  case "$stop_path" in
+    "/"|"")
+      bridge_warn "bridge_linux_revoke_traverse_chain: refusing stop_path=\"$stop_path\" for target=$target"
+      return 0
+      ;;
+  esac
+
+  bridge_require_python
+  local path=""
+  while IFS= read -r path; do
+    [[ -d "$path" ]] || continue
+    bridge_linux_sudo_root setfacl -x "u:${os_user}" "$path" >/dev/null 2>&1 || true
+  done < <(python3 - "$target" "$stop_path" <<'PY'
+from pathlib import Path
+import sys
+
+target = Path(sys.argv[1]).expanduser().resolve()
+stop_raw = Path(sys.argv[2]).expanduser().resolve()
+stop = stop_raw if stop_raw.is_dir() else stop_raw.parent
+if target != stop and stop not in target.parents:
+    sys.exit(0)
+items = []
+current = target
+while True:
+    items.append(str(current))
+    if current == stop:
+        break
+    if current.parent == current:
+        break
+    current = current.parent
+for item in reversed(items):
+    print(item)
+PY
+)
+}
+
+bridge_resolve_plugin_install_path() {
+  # Resolve <plugin>@<marketplace> to its on-disk install directory.
+  # Tries installed_plugins.json's installPath first; falls back to the
+  # marketplace's source.path/plugins/<plugin> for directory-source
+  # marketplaces (used by Agent Bridge's own teams/ms365 plugins, where
+  # installed_plugins.json may carry a stale cache path). The fallback
+  # is only used for directory-source marketplaces — non-directory
+  # sources (git, http, etc.) resolve solely via installed_plugins.json
+  # so we don't accidentally synthesise a path that does not match how
+  # the controller actually fetched the plugin (Risk 2 in PR #302 r1).
+  local plugin_id="$1"
+  local plugins_root="$2"
+  local manifest="$plugins_root/installed_plugins.json"
+  local marketplaces_json="$plugins_root/known_marketplaces.json"
+
+  bridge_require_python
+  python3 - "$plugin_id" "$manifest" "$marketplaces_json" <<'PY'
+import json, os, sys
+
+plugin_id = sys.argv[1]
+manifest_path = sys.argv[2]
+marketplaces_path = sys.argv[3]
+
+
+def warn(msg):
+    sys.stderr.write("[bridge-isolate] " + msg + "\n")
+
+
+resolved = ""
+
+if os.path.isfile(manifest_path):
+    try:
+        with open(manifest_path) as f:
+            manifest = json.load(f)
+    except (OSError, ValueError) as exc:
+        # Loud failure: corrupt controller manifest is operator-actionable
+        # state. Refuse to resolve from it and let the caller fall back to
+        # the directory marketplace path (which is independent of the
+        # broken manifest); if that also fails the caller will skip the
+        # grant rather than silently degrade.
+        warn(
+            "controller installed_plugins.json unreadable (%s): %s — refusing to resolve %s from manifest"
+            % (type(exc).__name__, manifest_path, plugin_id)
+        )
+        manifest = None
+    if isinstance(manifest, dict):
+        for entry in manifest.get("plugins", {}).get(plugin_id, []):
+            ip = entry.get("installPath")
+            if ip and os.path.isdir(ip):
+                resolved = ip
+                break
+
+if not resolved and "@" in plugin_id and os.path.isfile(marketplaces_path):
+    try:
+        with open(marketplaces_path) as f:
+            markets = json.load(f)
+    except (OSError, ValueError) as exc:
+        # known_marketplaces.json is not strictly required (manifest path
+        # already failed; the directory-marketplace fallback only applies
+        # when this file is parseable). Log it but don't escalate.
+        warn(
+            "controller known_marketplaces.json unreadable (%s): %s — directory-marketplace fallback skipped for %s"
+            % (type(exc).__name__, marketplaces_path, plugin_id)
+        )
+        markets = None
+    if isinstance(markets, dict):
+        plugin_name, marketplace = plugin_id.split("@", 1)
+        entry = markets.get(marketplace, {})
+        if isinstance(entry, dict):
+            src = entry.get("source")
+            candidate = ""
+            # Risk 2 (PR #302 r1): the installLocation/plugins/<name>
+            # fallback only matches reality for directory-source
+            # marketplaces. For git/http/etc. sources, installLocation
+            # is the cache root, not the source-of-truth, so synthesising
+            # a path there would mis-grant ACLs.
+            if isinstance(src, dict) and src.get("source") == "directory":
+                candidate = src.get("path", "") or entry.get("installLocation", "")
+            if candidate:
+                guess = os.path.join(candidate, "plugins", plugin_name)
+                if os.path.isdir(guess):
+                    resolved = guess
+
+print(resolved or "")
+PY
+}
+
+bridge_isolated_plugin_grants_state_file() {
+  # State file recording the channel set last granted plugin-share ACLs to
+  # an isolated agent. Lives under $BRIDGE_ACTIVE_AGENT_DIR/<agent>/ — the
+  # same per-agent state pattern used by other isolation helpers. Used by
+  # bridge_linux_share_plugin_catalog (to compute added/removed channels
+  # across reapply) and by bridge_migration_unisolate (to revoke channels
+  # the live roster may already have dropped).
+  local agent="$1"
+  printf '%s/%s/isolated-plugin-grants.json' "$BRIDGE_ACTIVE_AGENT_DIR" "$agent"
+}
+
+bridge_isolated_plugin_grants_read() {
+  # Read the persisted plugin-channel set for $1. Emits a CSV (channel
+  # ids without the `plugin:` prefix would lose round-trip fidelity, so
+  # we store the full `plugin:<id>` form). Returns the empty string when
+  # the file is missing or unreadable. Channels are deduped + sorted on
+  # write so callers can rely on stable ordering.
+  local agent="$1"
+  local state_file=""
+  state_file="$(bridge_isolated_plugin_grants_state_file "$agent")"
+  [[ -e "$state_file" ]] || { printf ''; return 0; }
+  bridge_require_python
+  bridge_linux_sudo_root python3 - "$state_file" <<'PY'
+import json, os, sys
+path = sys.argv[1]
+try:
+    with open(path) as f:
+        data = json.load(f)
+except (OSError, ValueError) as exc:
+    sys.stderr.write(
+        "[bridge-isolate] isolated-plugin-grants.json unreadable (%s): %s — treating as empty grant set\n"
+        % (type(exc).__name__, path)
+    )
+    sys.exit(0)
+channels = data.get("channels", []) if isinstance(data, dict) else []
+print(",".join(c for c in channels if isinstance(c, str)))
+PY
+}
+
+bridge_isolated_plugin_grants_write() {
+  # Persist the channel set as JSON, root-owned 0640 so the isolated UID
+  # cannot tamper with the recorded grant set (a tamper there could trick
+  # a future unisolate into skipping a still-granted channel).
+  local agent="$1"
+  local channels_csv="$2"
+  local state_file=""
+  local state_dir=""
+  local tmp_file=""
+  state_file="$(bridge_isolated_plugin_grants_state_file "$agent")"
+  state_dir="$(dirname "$state_file")"
+  bridge_linux_sudo_root mkdir -p "$state_dir"
+  # Place the temp file in the destination dir so the mv is always within
+  # one filesystem (atomic rename); see Blocking 2 in PR #302 r1.
+  tmp_file="$(bridge_linux_sudo_root mktemp "${state_file}.tmp.XXXXXX")"
+  bridge_require_python
+  bridge_linux_sudo_root python3 - "$tmp_file" "$channels_csv" <<'PY'
+import json, sys
+out_path, csv = sys.argv[1], sys.argv[2]
+channels = sorted({c.strip() for c in csv.split(",") if c.strip()})
+with open(out_path, "w") as f:
+    json.dump({"channels": channels}, f, indent=2)
+PY
+  bridge_linux_sudo_root mv "$tmp_file" "$state_file"
+  bridge_linux_sudo_root chown root:root "$state_file"
+  bridge_linux_sudo_root chmod 0640 "$state_file"
+  bridge_linux_sudo_root chown root:root "$state_dir" >/dev/null 2>&1 || true
+  bridge_linux_sudo_root chmod 0750 "$state_dir" >/dev/null 2>&1 || true
+}
+
+bridge_isolated_plugin_grants_remove() {
+  # Delete the persisted grant-set file (called from unisolate after the
+  # ACL strip completes successfully).
+  local agent="$1"
+  local state_file=""
+  state_file="$(bridge_isolated_plugin_grants_state_file "$agent")"
+  [[ -e "$state_file" ]] || return 0
+  bridge_linux_sudo_root rm -f "$state_file" >/dev/null 2>&1 || true
+}
+
+bridge_linux_revoke_plugin_channel_grants() {
+  # Strip the per-channel install-path ACL + traverse-chain + isolated
+  # catalog symlink for one plugin channel. Mirror of the per-channel
+  # grant block in bridge_linux_share_plugin_catalog and the per-channel
+  # strip block in bridge_migration_unisolate; factored here so both
+  # reapply (when a channel is removed mid-run) and unisolate (full
+  # teardown) share one implementation.
+  local os_user="$1"
+  local plugin_id="$2"
+  local controller_plugins="$3"
+  local controller_home="$4"
+  local install_path=""
+  install_path="$(bridge_resolve_plugin_install_path "$plugin_id" "$controller_plugins")"
+  if [[ -n "$install_path" && -d "$install_path" ]]; then
+    bridge_linux_sudo_root setfacl -Rx "u:${os_user}" "$install_path" >/dev/null 2>&1 || true
+    bridge_linux_revoke_traverse_chain "$os_user" "$install_path" "$controller_home"
+  fi
+}
+
+bridge_write_isolated_installed_plugins_manifest() {
+  # Write a per-isolated-UID installed_plugins.json containing only the
+  # plugins this agent declared in BRIDGE_AGENT_CHANNELS, with installPath
+  # rewritten to the actually-existing location resolved by
+  # bridge_resolve_plugin_install_path. The file is owned by root so the
+  # isolated UID cannot tamper with which plugins it loads.
+  local os_user="$1"
+  local isolated_plugins="$2"
+  local controller_plugins="$3"
+  local channels_csv="$4"
+  local manifest="$isolated_plugins/installed_plugins.json"
+  local manifest_tmp=""
+
+  bridge_require_python
+  # Place the temp file in the destination dir so the subsequent mv is
+  # always within one filesystem and therefore an atomic rename. Plain
+  # mktemp(1) honours $TMPDIR, which can land on /tmp while $manifest is
+  # under /home/<user>/.claude/plugins/ — across mounts mv degrades to
+  # copy+unlink and a concurrent reader can see a half-written or
+  # transiently missing manifest. (Blocking 2 in PR #302 r1.)
+  manifest_tmp="$(bridge_linux_sudo_root mktemp "${manifest}.tmp.XXXXXX")"
+  if ! bridge_linux_sudo_root python3 - "$controller_plugins" "$channels_csv" "$manifest_tmp" <<'PY'
+import json, os, sys
+
+controller_plugins, channels_csv, out_path = sys.argv[1:]
+controller_manifest = os.path.join(controller_plugins, "installed_plugins.json")
+markets_path = os.path.join(controller_plugins, "known_marketplaces.json")
+
+
+def warn(msg):
+    sys.stderr.write("[bridge-isolate] " + msg + "\n")
+
+
+# Distinguish "controller manifest exists but is corrupt" (operator-
+# actionable; refuse to proceed for that plugin entry) from "controller
+# manifest absent" (legitimate — fresh install or pre-plugin Claude;
+# directory-marketplace fallback is acceptable).
+source = {}
+manifest_present = os.path.isfile(controller_manifest)
+if manifest_present:
+    try:
+        with open(controller_manifest) as f:
+            source = json.load(f)
+        if not isinstance(source, dict):
+            raise ValueError("expected JSON object at root, got %r" % type(source).__name__)
+    except (OSError, ValueError) as exc:
+        warn(
+            "controller installed_plugins.json unparseable (%s): %s — refusing to write per-UID manifest"
+            % (type(exc).__name__, controller_manifest)
+        )
+        sys.exit(2)
+
+markets = {}
+if os.path.isfile(markets_path):
+    try:
+        with open(markets_path) as f:
+            markets = json.load(f)
+        if not isinstance(markets, dict):
+            raise ValueError("expected JSON object at root, got %r" % type(markets).__name__)
+    except (OSError, ValueError) as exc:
+        # Marketplace data missing/corrupt is informational: the manifest
+        # write can still succeed for entries whose installPath is valid
+        # in the controller manifest. The directory-marketplace fallback
+        # is the only thing we lose.
+        warn(
+            "controller known_marketplaces.json unparseable (%s): %s — directory-marketplace fallback disabled"
+            % (type(exc).__name__, markets_path)
+        )
+        markets = {}
+
+
+def directory_marketplace_path(plugin_id):
+    if "@" not in plugin_id:
+        return ""
+    plugin_name, marketplace = plugin_id.split("@", 1)
+    entry = markets.get(marketplace, {})
+    if not isinstance(entry, dict):
+        return ""
+    candidate = ""
+    src = entry.get("source")
+    # Risk 2 (PR #302 r1): match bridge_resolve_plugin_install_path —
+    # only fall back for directory-source marketplaces.
+    if isinstance(src, dict) and src.get("source") == "directory":
+        candidate = src.get("path", "") or entry.get("installLocation", "")
+    if not candidate:
+        return ""
+    guess = os.path.join(candidate, "plugins", plugin_name)
+    return guess if os.path.isdir(guess) else ""
+
+
+def resolve(plugin_id):
+    # Preserve controller entry metadata (version, gitCommitSha, etc.) when
+    # we can; only rewrite installPath if it is missing or stale.
+    for entry in source.get("plugins", {}).get(plugin_id, []):
+        ip = entry.get("installPath")
+        if ip and os.path.isdir(ip):
+            return entry, ip
+        fallback = directory_marketplace_path(plugin_id)
+        if fallback:
+            return entry, fallback
+    fallback = directory_marketplace_path(plugin_id)
+    if fallback:
+        return {"scope": "user", "installPath": fallback}, fallback
+    return None, None
+
+
+declared = set()
+for chan in channels_csv.split(","):
+    chan = chan.strip()
+    if chan.startswith("plugin:"):
+        declared.add(chan[len("plugin:"):])
+
+out = {"version": source.get("version", 2), "plugins": {}}
+for plugin_id in sorted(declared):
+    entry, real_path = resolve(plugin_id)
+    if not entry or not real_path:
+        continue
+    new_entry = dict(entry)
+    new_entry["installPath"] = real_path
+    out["plugins"][plugin_id] = [new_entry]
+
+with open(out_path, "w") as f:
+    json.dump(out, f, indent=2)
+PY
+  then
+    bridge_linux_sudo_root rm -f "$manifest_tmp" >/dev/null 2>&1 || true
+    bridge_warn "bridge_write_isolated_installed_plugins_manifest: refused to write per-UID manifest for $os_user (controller state unparseable)"
+    return 1
+  fi
+
+  # Set final ownership/perm/ACL on the temp file BEFORE the atomic rename
+  # so the destination never exists with the wrong metadata even
+  # momentarily. Readers see either the previous manifest or the new one
+  # with correct ownership/perm/ACL — never an in-between state.
+  # (Blocking 2 in PR #302 r2.)
+  bridge_linux_sudo_root chown root:root "$manifest_tmp"
+  bridge_linux_sudo_root chmod 0640 "$manifest_tmp"
+  bridge_linux_acl_add "u:${os_user}:r--" "$manifest_tmp"
+  bridge_linux_sudo_root mv "$manifest_tmp" "$manifest"
+}
+
+bridge_linux_share_plugin_catalog() {
+  # Channel-ownership-aware plugin sharing for an isolated agent.
+  # Grants the isolated UID read-only access to:
+  #   - the controller's catalog metadata files (audit-level disclosure),
+  #   - a per-UID generated installed_plugins.json that only lists the
+  #     plugins declared in BRIDGE_AGENT_CHANNELS for this agent,
+  #   - each declared plugin's install-path tree, with a traverse chain
+  #     up to the controller home (#233 stop guard).
+  # Leaves the isolated UID's plugins/ root and the per-UID manifest
+  # root-owned (the agent cannot tamper with what it loads), and leaves
+  # plugins/data/ writable so plugins can persist runtime state.
+  #
+  # Reapply contract: the helper is rerun on every isolate refresh. To
+  # keep the isolation boundary tight, the previously-granted channel
+  # set is persisted under $BRIDGE_ACTIVE_AGENT_DIR/<agent>/ and diffed
+  # against the current channels — channels removed from the roster
+  # have their ACLs and catalog symlinks revoked here, not just at
+  # unisolate. (Blocking 1 in PR #302 r1.)
+  local os_user="$1"
+  local user_home="$2"
+  local controller_user="$3"
+  local agent="$4"
+
+  local controller_home=""
+  # Test-only seam: BRIDGE_CONTROLLER_HOME_OVERRIDE replaces the getent
+  # passwd lookup so the regression test in tests/isolation-plugin-sharing.sh
+  # can drive the helper against a fake controller plugin tree without
+  # touching the operator's real ~/.claude/plugins/. The override is
+  # ignored unless BRIDGE_HOME points under a recognised tempdir prefix
+  # (/tmp, /var/tmp, or $TMPDIR), which guards against accidental
+  # production use.
+  if [[ -n "${BRIDGE_CONTROLLER_HOME_OVERRIDE:-}" ]]; then
+    local _override_ok=0
+    local _bridge_home_norm="${BRIDGE_HOME:-}"
+    case "$_bridge_home_norm" in
+      /tmp/*|/var/tmp/*) _override_ok=1 ;;
+    esac
+    if [[ "$_override_ok" -eq 0 && -n "${TMPDIR:-}" ]]; then
+      local _tmpdir_trimmed="${TMPDIR%/}"
+      case "$_bridge_home_norm" in
+        "$_tmpdir_trimmed"/*) _override_ok=1 ;;
+      esac
+    fi
+    if [[ "$_override_ok" -eq 1 ]]; then
+      controller_home="$BRIDGE_CONTROLLER_HOME_OVERRIDE"
+    else
+      bridge_warn "bridge_linux_share_plugin_catalog: ignoring BRIDGE_CONTROLLER_HOME_OVERRIDE because BRIDGE_HOME is not under a tempdir prefix (got '${BRIDGE_HOME:-<unset>}')"
+    fi
+  fi
+  if [[ -z "$controller_home" ]]; then
+    controller_home="$(getent passwd "$controller_user" 2>/dev/null | cut -d: -f6 || true)"
+  fi
+  [[ -n "$controller_home" && -d "$controller_home/.claude/plugins" ]] || return 0
+
+  local controller_plugins="$controller_home/.claude/plugins"
+  local isolated_plugins="$user_home/.claude/plugins"
+
+  # 1. plugins/ root: root-owned, isolated UID r-x.
+  bridge_linux_sudo_root mkdir -p "$isolated_plugins"
+  bridge_linux_sudo_root chown root:root "$isolated_plugins"
+  bridge_linux_sudo_root chmod 0750 "$isolated_plugins"
+  bridge_linux_acl_add "u:${os_user}:r-x" "$isolated_plugins"
+
+  # 2. plugins/data/: isolated UID owns this so plugin runtime state writes work.
+  bridge_linux_sudo_root mkdir -p "$isolated_plugins/data"
+  bridge_linux_sudo_root chown "$os_user" "$isolated_plugins/data"
+  bridge_linux_sudo_root chmod 0700 "$isolated_plugins/data"
+
+  # 3. Read-only catalog metadata symlinks. Always remove the prior dst
+  #    first (independent of source presence) so a controller-side delete
+  #    invalidates the isolated symlink rather than leaving it dangling at
+  #    a now-stale target. (Risk 1 in PR #302 r1.)
+  local catalog_file=""
+  local src=""
+  local dst=""
+  for catalog_file in "${BRIDGE_ISOLATION_SHARED_CATALOG_READ_FILES[@]}"; do
+    src="$controller_plugins/$catalog_file"
+    dst="$isolated_plugins/$catalog_file"
+    bridge_linux_sudo_root rm -f "$dst" >/dev/null 2>&1 || true
+    [[ -e "$src" ]] || continue
+    bridge_linux_sudo_root ln -s "$src" "$dst"
+    bridge_linux_sudo_root chown -h root:root "$dst" >/dev/null 2>&1 || true
+    bridge_linux_grant_traverse_chain "$os_user" "$src" "$controller_home"
+    bridge_linux_acl_add "u:${os_user}:r--" "$src"
+  done
+
+  # 4. Per-UID installed_plugins.json — declared plugins only, real install paths.
+  local channels_csv=""
+  channels_csv="$(bridge_agent_channels_csv "$agent" 2>/dev/null || true)"
+  bridge_write_isolated_installed_plugins_manifest "$os_user" "$isolated_plugins" "$controller_plugins" "$channels_csv"
+
+  # 5. Compute the channel diff against the persisted grant set so we can
+  #    revoke channels that were previously granted but are no longer in
+  #    the roster (Blocking 1 in PR #302 r1). Only entries with a
+  #    `plugin:` prefix participate; non-plugin channels are ignored on
+  #    both sides of the diff.
+  local prior_channels_csv=""
+  prior_channels_csv="$(bridge_isolated_plugin_grants_read "$agent" 2>/dev/null || true)"
+  local -a _current_plugin_channels=()
+  local -a _prior_plugin_channels=()
+  if [[ -n "$channels_csv" ]]; then
+    local _cur_split=()
+    local _cur_chan=""
+    IFS=',' read -ra _cur_split <<<"$channels_csv"
+    for _cur_chan in "${_cur_split[@]}"; do
+      _cur_chan="${_cur_chan// /}"
+      [[ "$_cur_chan" == plugin:* ]] || continue
+      _current_plugin_channels+=("$_cur_chan")
+    done
+  fi
+  if [[ -n "$prior_channels_csv" ]]; then
+    local _prior_split=()
+    local _prior_chan=""
+    IFS=',' read -ra _prior_split <<<"$prior_channels_csv"
+    for _prior_chan in "${_prior_split[@]}"; do
+      _prior_chan="${_prior_chan// /}"
+      [[ "$_prior_chan" == plugin:* ]] || continue
+      _prior_plugin_channels+=("$_prior_chan")
+    done
+  fi
+
+  # 5a. Revoke removed channels (in prior set but not in current set).
+  local _prior_entry=""
+  local _cur_entry=""
+  local _found=0
+  for _prior_entry in "${_prior_plugin_channels[@]+"${_prior_plugin_channels[@]}"}"; do
+    _found=0
+    for _cur_entry in "${_current_plugin_channels[@]+"${_current_plugin_channels[@]}"}"; do
+      [[ "$_cur_entry" == "$_prior_entry" ]] && { _found=1; break; }
+    done
+    if [[ "$_found" -eq 0 ]]; then
+      bridge_linux_revoke_plugin_channel_grants \
+        "$os_user" "${_prior_entry#plugin:}" "$controller_plugins" "$controller_home"
+    fi
+  done
+
+  # 5b. Grant current plugin channel install paths + traverse chain.
+  local channel=""
+  local plugin_id=""
+  local install_path=""
+  for channel in "${_current_plugin_channels[@]+"${_current_plugin_channels[@]}"}"; do
+    plugin_id="${channel#plugin:}"
+    install_path="$(bridge_resolve_plugin_install_path "$plugin_id" "$controller_plugins")"
+    [[ -n "$install_path" && -d "$install_path" ]] || continue
+    # Order matters: traverse_chain stamps `--x` on every node from target up
+    # to controller_home (including target). The recursive r-X grant must run
+    # AFTER so target/<file> entries end up with r--/r-x rather than --x.
+    bridge_linux_grant_traverse_chain "$os_user" "$install_path" "$controller_home"
+    bridge_linux_acl_add_recursive "u:${os_user}:r-X" "$install_path"
+  done
+
+  # 5c. Persist the new grant set so the next reapply / unisolate sees
+  #     exactly what we touched here.
+  local _persist_csv=""
+  if [[ "${#_current_plugin_channels[@]}" -gt 0 ]]; then
+    _persist_csv="$(IFS=','; printf '%s' "${_current_plugin_channels[*]}")"
+  fi
+  bridge_isolated_plugin_grants_write "$agent" "$_persist_csv"
+}
+
+bridge_linux_unshare_plugin_catalog() {
+  # Tear down the isolated-side artifacts created by
+  # bridge_linux_share_plugin_catalog: catalog symlinks under
+  # $user_home/.claude/plugins/, the per-UID installed_plugins.json,
+  # and the plugins/ directory itself if it ends up empty after the
+  # symlink + manifest cleanup. plugins/data/ is preserved on purpose —
+  # it is owned by the isolated UID and contains plugin-runtime state
+  # the agent has produced; resetting that is a separate concern. The
+  # function is dry-run aware so it can compose with
+  # bridge_migration_unisolate's existing dry_run gate. (Blocking 4 in
+  # PR #302 r1.)
+  local os_user="$1"
+  local user_home="$2"
+  local dry_run="$3"
+
+  local isolated_plugins="$user_home/.claude/plugins"
+  [[ -n "$user_home" ]] || return 0
+  [[ -d "$isolated_plugins" ]] || return 0
+
+  local catalog_file=""
+  local link=""
+  for catalog_file in "${BRIDGE_ISOLATION_SHARED_CATALOG_READ_FILES[@]}"; do
+    link="$isolated_plugins/$catalog_file"
+    [[ -e "$link" || -L "$link" ]] || continue
+    bridge_migration_print_step "$dry_run" "rm $link (isolated catalog symlink)"
+    if [[ "$dry_run" != "1" ]]; then
+      bridge_linux_sudo_root rm -f "$link" >/dev/null 2>&1 || true
+    fi
+  done
+
+  local manifest="$isolated_plugins/installed_plugins.json"
+  if [[ -e "$manifest" ]]; then
+    bridge_migration_print_step "$dry_run" "rm $manifest (per-UID installed_plugins.json)"
+    if [[ "$dry_run" != "1" ]]; then
+      bridge_linux_sudo_root rm -f "$manifest" >/dev/null 2>&1 || true
+    fi
+  fi
+
+  # Only rmdir plugins/ when it ends up empty after the strip. If
+  # plugins/data/ (or anything else the agent has produced) still
+  # exists, leave the directory alone — its contents belong to the
+  # isolated UID, not to bridge isolation.
+  if [[ "$dry_run" != "1" ]]; then
+    if bridge_linux_sudo_root bash -c "shopt -s nullglob dotglob; entries=(\"$isolated_plugins\"/*); ((\${#entries[@]} == 0))" >/dev/null 2>&1; then
+      bridge_migration_print_step "$dry_run" "rmdir $isolated_plugins (empty)"
+      bridge_linux_sudo_root rmdir "$isolated_plugins" >/dev/null 2>&1 || true
+    else
+      bridge_migration_print_step "$dry_run" "$isolated_plugins not empty (preserving plugins/data/ etc.)"
+    fi
+  else
+    bridge_migration_print_step "$dry_run" "rmdir $isolated_plugins if empty (skipped in dry-run)"
+  fi
+}
+
 bridge_write_linux_agent_env_file() {
   local agent="$1"
   local file="${2:-$(bridge_agent_linux_env_file "$agent")}"
@@ -1023,7 +1612,11 @@ bridge_linux_prepare_agent_isolation() {
   [[ -d "$BRIDGE_RUNTIME_ROOT" ]] && recursive_read_paths+=("$BRIDGE_RUNTIME_ROOT")
   [[ -d "$BRIDGE_HOME/.claude" ]] && recursive_read_paths+=("$BRIDGE_HOME/.claude")
   [[ -d "$BRIDGE_HOME/lib" ]] && recursive_read_paths+=("$BRIDGE_HOME/lib")
-  [[ -d "$BRIDGE_HOME/plugins" ]] && recursive_read_paths+=("$BRIDGE_HOME/plugins")
+  # Note: $BRIDGE_HOME/plugins (directory-marketplace source for agent-bridge
+  # plugins like teams/ms365) is intentionally NOT in the broad recursive_read
+  # set. bridge_linux_share_plugin_catalog grants r-X to declared plugin code
+  # paths only, keyed off BRIDGE_AGENT_CHANNELS, so each isolated UID sees
+  # only its own plugins.
   [[ -d "$BRIDGE_HOME/scripts" ]] && recursive_read_paths+=("$BRIDGE_HOME/scripts")
   [[ -d "$BRIDGE_AGENT_HOME_ROOT/.claude" ]] && recursive_read_paths+=("$BRIDGE_AGENT_HOME_ROOT/.claude")
   bridge_linux_acl_remove_recursive "u:${os_user}" "$BRIDGE_STATE_DIR" "$BRIDGE_LOG_DIR"
@@ -1156,6 +1749,14 @@ bridge_linux_prepare_agent_isolation() {
   bridge_linux_sudo_root mkdir -p "$isolated_claude_dir"
   bridge_linux_sudo_root chown "$os_user" "$isolated_claude_dir" >/dev/null 2>&1 || true
   bridge_linux_sudo_root chmod 0700 "$isolated_claude_dir" >/dev/null 2>&1 || true
+  # Channel-ownership-aware plugin sharing. Without this the isolated UID's
+  # ~/.claude/plugins/ is empty and Claude starts with no MCP servers loaded
+  # (Teams/ms365/cosmax-* all silently missing). The helper writes a per-UID
+  # installed_plugins.json that lists only this agent's declared channel
+  # plugins, grants r-X on each declared plugin's install path, and exposes
+  # catalog metadata read-only. plugins/data/ stays writable by the isolated
+  # UID so plugin runtime state still works.
+  bridge_linux_share_plugin_catalog "$os_user" "$user_home" "$controller_user" "$agent"
   # Issue #233: the previous `bridge_linux_grant_traverse_chain
   # $controller_user $isolated_claude_dir` call walked from
   # /home/agent-bridge-<agent>/.claude all the way up to / and left
