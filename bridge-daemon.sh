@@ -3633,6 +3633,18 @@ cmd_run() {
   BRIDGE_DAEMON_LAST_STEP="startup"
   echo "$$" >"$BRIDGE_DAEMON_PID_FILE"
 
+  # Issue #265: emit a periodic audit `daemon_tick` so external monitoring
+  # (and bridge-supervisor) can detect a hung main loop. Without this, a
+  # blocked subprocess (the canonical example: tmux send-keys hanging on a
+  # closed Discord SSL pipe) leaves the daemon process alive but silent for
+  # tens of hours — every operator-facing health check still reports
+  # "running" and no cron fires. The tick is throttled (default 60s) so the
+  # audit log doesn't grow by 1 line per BRIDGE_DAEMON_INTERVAL second.
+  local heartbeat_interval="${BRIDGE_DAEMON_HEARTBEAT_SECONDS:-60}"
+  [[ "$heartbeat_interval" =~ ^[0-9]+$ ]] || heartbeat_interval=60
+  local last_heartbeat_ts=0
+  local now_ts
+
   while true; do
     BRIDGE_DAEMON_LAST_STEP="sync_cycle"
     if cmd_sync_cycle; then
@@ -3640,6 +3652,15 @@ cmd_run() {
     else
       cycle_status=$?
       daemon_log_event "sync cycle failed with exit=$cycle_status"
+    fi
+    now_ts="$(date +%s)"
+    if (( heartbeat_interval > 0 )) && (( now_ts - last_heartbeat_ts >= heartbeat_interval )); then
+      bridge_audit_log daemon daemon_tick daemon \
+        --detail loop_step="$BRIDGE_DAEMON_LAST_STEP" \
+        --detail interval_seconds="$BRIDGE_DAEMON_INTERVAL" \
+        --detail heartbeat_interval_seconds="$heartbeat_interval" \
+        2>/dev/null || true
+      last_heartbeat_ts="$now_ts"
     fi
     BRIDGE_DAEMON_LAST_STEP="idle_sleep"
     sleep "$BRIDGE_DAEMON_INTERVAL"
