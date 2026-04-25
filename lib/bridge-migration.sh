@@ -336,6 +336,62 @@ bridge_migration_unisolate() {
     fi
   fi
 
+  # Strip plugin-share ACLs granted by bridge_linux_share_plugin_catalog.
+  # Mirrors the catalog file list and per-channel install path grants, plus
+  # the traverse chain that reached up to controller_home. The isolated
+  # UID's plugins/ directory itself lives under user_home (already torn
+  # down by the workdir/state ownership reset above when applicable);
+  # what we need to strip is the u:<os_user> ACL entries we left on
+  # controller-side surfaces.
+  local controller_home_for_plugins=""
+  controller_home_for_plugins="$(getent passwd "$controller_user" 2>/dev/null | cut -d: -f6 || true)"
+  if [[ -n "$controller_home_for_plugins" && -d "$controller_home_for_plugins/.claude/plugins" ]]; then
+    local controller_plugins="$controller_home_for_plugins/.claude/plugins"
+    local catalog_file=""
+    local src=""
+    for catalog_file in "${BRIDGE_ISOLATION_SHARED_CATALOG_READ_FILES[@]}"; do
+      src="$controller_plugins/$catalog_file"
+      [[ -e "$src" ]] || continue
+      bridge_migration_print_step "$dry_run" "setfacl -x u:${os_user} $src + revoke traverse chain"
+      if [[ "$dry_run" != "1" ]]; then
+        bridge_linux_sudo_root setfacl -x "u:${os_user}" "$src" >/dev/null 2>&1 || true
+        bridge_linux_revoke_traverse_chain "$os_user" "$src" "$controller_home_for_plugins"
+      fi
+    done
+
+    local plugin_channels_csv=""
+    plugin_channels_csv="$(bridge_agent_channels_csv "$agent" 2>/dev/null || true)"
+    if [[ -n "$plugin_channels_csv" ]]; then
+      local _plugin_channels=()
+      local _plugin_channel=""
+      local _plugin_id=""
+      local _plugin_install_path=""
+      IFS=',' read -ra _plugin_channels <<<"$plugin_channels_csv"
+      for _plugin_channel in "${_plugin_channels[@]}"; do
+        [[ "$_plugin_channel" == plugin:* ]] || continue
+        _plugin_id="${_plugin_channel#plugin:}"
+        _plugin_install_path="$(bridge_resolve_plugin_install_path "$_plugin_id" "$controller_plugins")"
+        [[ -n "$_plugin_install_path" && -d "$_plugin_install_path" ]] || continue
+        bridge_migration_print_step "$dry_run" "setfacl -Rx u:${os_user} $_plugin_install_path + revoke traverse chain"
+        if [[ "$dry_run" != "1" ]]; then
+          bridge_linux_sudo_root setfacl -Rx "u:${os_user}" "$_plugin_install_path" >/dev/null 2>&1 || true
+          bridge_linux_revoke_traverse_chain "$os_user" "$_plugin_install_path" "$controller_home_for_plugins"
+        fi
+      done
+    fi
+  fi
+
+  # Backward-compat: prior versions broadly granted u:<os_user>:r-X on the
+  # entire $BRIDGE_HOME/plugins tree (independent of BRIDGE_AGENT_CHANNELS).
+  # Strip any leftover entries for this os_user; only this UID's entries are
+  # affected, other agents' grants on the same path are preserved.
+  if [[ -n "${BRIDGE_HOME:-}" && -d "$BRIDGE_HOME/plugins" ]]; then
+    bridge_migration_print_step "$dry_run" "setfacl -Rx u:${os_user} $BRIDGE_HOME/plugins (legacy cleanup)"
+    if [[ "$dry_run" != "1" ]]; then
+      bridge_linux_sudo_root setfacl -Rx "u:${os_user}" "$BRIDGE_HOME/plugins" >/dev/null 2>&1 || true
+    fi
+  fi
+
   # Remove the scoped roster snapshot (agent-env.sh). In shared mode the
   # snapshot is stale — it still carries linux-user isolation metadata and
   # would be picked up by bridge_load_roster's BRIDGE_AGENT_ID fallback,

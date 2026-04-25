@@ -204,6 +204,17 @@ bridge_queue_gateway_root() {
   printf '%s/queue-gateway' "$BRIDGE_STATE_DIR"
 }
 
+# Plugin catalog metadata files exposed read-only to isolated UIDs as
+# symlinks into the controller's ~/.claude/plugins/. We treat these as
+# "audit-level" disclosure — they reveal plugin names/versions but no
+# secrets and no plugin source code. The matching strip in
+# bridge_migration_unisolate iterates the same constant.
+declare -ga BRIDGE_ISOLATION_SHARED_CATALOG_READ_FILES=(
+  known_marketplaces.json
+  install-counts-cache.json
+  blocklist.json
+)
+
 # Returns 0 (success) if the cron sync path should run, 1 otherwise.
 # Contract: walk the new name and its two legacy aliases.
 #   - If any variable is a recognized off-form (0, false, no, off), disable.
