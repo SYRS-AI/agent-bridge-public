@@ -412,6 +412,35 @@ Use this guide when a task involves tmux-based agent coordination through \`${br
 - Prefer task queue entries plus file paths over direct message pastes
 - Runtime state under \`${bridge_home}/state/\` and logs under \`${bridge_home}/logs/\` are generated files and should not be hand-edited
 EOF
+
+  # Issue #283 Track A — root fix for skill staleness. The intent-grouped
+  # sections above are still hand-curated narrative (they tell the reader
+  # *which* command to reach for given an intent). The section below is the
+  # complement: a flat enumeration of every Usage line `agent-bridge --help`
+  # currently emits, so newly added subcommands cannot drift out of the skill
+  # surface without a corresponding regeneration. If `agent-bridge` is missing
+  # or its --help output is malformed, the helpers degrade to empty output
+  # and we emit nothing — never an exit failure during skill regeneration.
+  #
+  # The CLI source-of-truth here is the source-checkout binary
+  # (`$BRIDGE_SCRIPT_DIR/agent-bridge`), not `${bridge_home}/agent-bridge` —
+  # the runtime path is a symlink back into the source checkout, so reading
+  # the source binary keeps the render reproducible from a fresh checkout
+  # before any live runtime has been linked. The helpers' default fallback
+  # picks this up automatically when called with no explicit CLI path.
+  local auto_subcommand=""
+  local auto_usage_line=""
+
+  printf '\n## Full Subcommand Reference\n\n'
+  printf '_Auto-generated from `agent-bridge --help` at agent setup time. If a command is missing here, run `%s/agent-bridge upgrade --restart-daemon` to refresh the runtime, then `%s/bridge-setup.sh` to regenerate the skill._\n' "$bridge_home" "$bridge_home"
+  while IFS= read -r auto_subcommand; do
+    [[ -n "$auto_subcommand" ]] || continue
+    printf '\n### %s\n\n' "$auto_subcommand"
+    while IFS= read -r auto_usage_line; do
+      [[ -n "$auto_usage_line" ]] || continue
+      printf -- '- `%s`\n' "$auto_usage_line"
+    done < <(bridge_cli_subcommand_help_summary "$auto_subcommand")
+  done < <(bridge_cli_top_level_subcommands)
 }
 
 bridge_render_codex_project_skill() {

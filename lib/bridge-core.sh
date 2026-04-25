@@ -129,6 +129,86 @@ PY
   fi
 }
 
+# bridge_cli_subcommand_help_summary — extract Usage lines for one subcommand.
+#
+# Issue #283 Track A: skill content (`bridge-commands.md`) was hand-maintained
+# and drifted out of sync with the real CLI surface. This helper parses
+# `<cli> --help` and returns every Usage line whose first token after the CLI
+# name matches `$1`. Caller renders the result however it wants (one bullet
+# per line, in the auto-discovered "Full Subcommand Reference" section).
+#
+# Defensive contract: missing CLI, unreadable CLI, malformed --help output, or
+# a subcommand that has no Usage entries all return empty stdout with rc=0.
+# Never fails. Never writes to stderr.
+#
+# Usage:
+#   bridge_cli_subcommand_help_summary cron "$BRIDGE_HOME/agent-bridge"
+#
+# Args:
+#   $1 — top-level subcommand name (e.g. "cron", "task"). Required; empty
+#        returns empty.
+#   $2 — path to the agent-bridge CLI binary. Optional; defaults to
+#        ${BRIDGE_CLI_NAME:-${BRIDGE_SCRIPT_DIR}/agent-bridge} so the helper
+#        works inside the source checkout without explicit wiring.
+bridge_cli_subcommand_help_summary() {
+  local subcommand="$1"
+  local cli="${2:-${BRIDGE_CLI_NAME:-${BRIDGE_SCRIPT_DIR:-.}/agent-bridge}}"
+
+  [[ -n "$subcommand" ]] || return 0
+  [[ -n "$cli" && -f "$cli" ]] || return 0
+
+  "$cli" --help 2>/dev/null | awk -v cmd="$subcommand" '
+    BEGIN { in_usage = 0 }
+    /^Usage:/                    { in_usage = 1; next }
+    in_usage == 0                { next }
+    /^[^[:space:]]/              { in_usage = 0; next }
+    /^[[:space:]]*$/             { next }
+    {
+      sub(/^[[:space:]]+/, "")
+      if (NF < 2) next
+      if ($2 == cmd) print $0
+    }
+  '
+}
+
+# bridge_cli_top_level_subcommands — list unique top-level subcommand names.
+#
+# Issue #283 Track A: the auto-discovered subcommand reference renders one
+# section per top-level subcommand. This helper returns the unique
+# second-tokens of every Usage line in `<cli> --help`, skipping flag-shaped
+# entries like `--codex|--claude` so the renderer doesn't produce a section
+# titled with a flag union.
+#
+# Defensive contract: missing or unreadable CLI returns empty stdout with rc=0.
+# Output is one subcommand per line, in the order they first appear in --help
+# (so the rendered reference mirrors the operator-facing layout).
+bridge_cli_top_level_subcommands() {
+  local cli="${1:-${BRIDGE_CLI_NAME:-${BRIDGE_SCRIPT_DIR:-.}/agent-bridge}}"
+
+  [[ -n "$cli" && -f "$cli" ]] || return 0
+
+  "$cli" --help 2>/dev/null | awk '
+    BEGIN { in_usage = 0 }
+    /^Usage:/                    { in_usage = 1; next }
+    in_usage == 0                { next }
+    /^[^[:space:]]/              { in_usage = 0; next }
+    /^[[:space:]]*$/             { next }
+    {
+      sub(/^[[:space:]]+/, "")
+      if (NF < 2) next
+      sub_cmd = $2
+      # Skip flag-shaped pseudo-subcommands (e.g. "--codex|--claude") so
+      # the rendered reference does not produce a `### --codex|--claude`
+      # section header.
+      if (sub_cmd ~ /^-/) next
+      if (!(sub_cmd in seen)) {
+        seen[sub_cmd] = 1
+        print sub_cmd
+      }
+    }
+  '
+}
+
 bridge_warn() {
   echo -e "${YELLOW}[경고] $*${NC}" >&2
 }
