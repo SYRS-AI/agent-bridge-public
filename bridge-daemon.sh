@@ -2062,6 +2062,19 @@ bridge_daemon_autostart_allowed() {
   local next_retry_ts=0
   local now=0
 
+  # #256 Gap 2: a `broken-launch` state file means `bridge-run.sh` tripped
+  # its rapid-fail circuit breaker on this agent. The daemon must stop
+  # relaunching until an operator clears the quarantine with `agent-bridge
+  # agent start <agent>` / `safe-mode <agent>` / `restart <agent>`. Before
+  # this gate was wired, the daemon's 1s post-start liveness heuristic saw
+  # a session that was still inside claude's ~5–10s startup window, called
+  # `bridge_daemon_clear_autostart_failure`, then relaunched on the next
+  # reconcile tick — reproducing 137 cycles in 2h13m on the reference
+  # host during the #254 crash loop.
+  if [[ -f "$(bridge_agent_broken_launch_file "$agent")" ]]; then
+    return 1
+  fi
+
   file="$(bridge_daemon_autostart_state_file "$agent")"
   [[ -f "$file" ]] || return 0
   # shellcheck source=/dev/null

@@ -1380,6 +1380,13 @@ run_restart() {
   local agent="${1:-}"
   local session=""
   local start_args=()
+  # #256 Gap 2: explicit operator restart clears the rapid-fail
+  # quarantine marker so the daemon's autostart gate lets the agent
+  # come back up. If the agent is still crashing, `bridge-run.sh` will
+  # trip the circuit breaker again and re-write the marker.
+  if [[ -n "$agent" ]]; then
+    bridge_agent_clear_broken_launch "$agent" 2>/dev/null || true
+  fi
   local attach_mode=0
   local dry_run_mode=0
   local engine=""

@@ -1415,6 +1415,68 @@ printf '%s\n' "$TOOL_POLICY_ALIAS_CHECK"
 assert_contains "$TOOL_POLICY_ALIAS_CHECK" "[ok] tool-policy protected_alias_reason"
 rm -rf "$TOOL_POLICY_ALIAS_FIXTURE"
 
+log "daemon autostart gate honours broken-launch quarantine marker (#256 Gap 2)"
+BROKEN_LAUNCH_HOME="$TMP_ROOT/broken-launch-home"
+rm -rf "$BROKEN_LAUNCH_HOME"
+mkdir -p "$BROKEN_LAUNCH_HOME/state/agents/broken-smoke"
+: > "$BROKEN_LAUNCH_HOME/state/agents/broken-smoke/broken-launch"
+GATE_BODY="$(awk '/^bridge_daemon_autostart_allowed\(\) \{/,/^\}$/' "$REPO_ROOT/bridge-daemon.sh")"
+[[ -n "$GATE_BODY" ]] || die "could not extract bridge_daemon_autostart_allowed from bridge-daemon.sh"
+"$BASH4_BIN" -c '
+  set -euo pipefail
+  export BRIDGE_STATE_DIR="'"$BROKEN_LAUNCH_HOME/state"'"
+  # Minimal stubs for the helpers the gate calls; the real definitions live
+  # in lib/bridge-{agents,state,daemon}.sh and are sourced by the daemon at
+  # runtime. We reproduce just enough to exercise the broken-launch path.
+  bridge_agent_broken_launch_file() { printf "%s/agents/%s/broken-launch" "$BRIDGE_STATE_DIR" "$1"; }
+  bridge_daemon_autostart_state_file() { printf "%s/agents/%s/autostart" "$BRIDGE_STATE_DIR" "$1"; }
+  '"$GATE_BODY"'
+  if bridge_daemon_autostart_allowed broken-smoke; then
+    echo "[fail] daemon autostart gate allowed relaunch while broken-launch file present" >&2
+    exit 1
+  fi
+  rm -f "$BRIDGE_STATE_DIR/agents/broken-smoke/broken-launch"
+  if ! bridge_daemon_autostart_allowed broken-smoke; then
+    echo "[fail] daemon autostart gate still blocked after broken-launch cleared" >&2
+    exit 1
+  fi
+' || die "daemon autostart gate broken-launch regression test failed"
+
+log "bridge_agent_write_broken_launch_state / clear round-trip (#256 Gap 2)"
+BROKEN_LAUNCH_AGENT=broken-smoke
+BRIDGE_STATE_DIR="$BROKEN_LAUNCH_HOME/state" "$BASH4_BIN" -lc '
+  set -euo pipefail
+  export BRIDGE_HOME="'"$BROKEN_LAUNCH_HOME"'"
+  # `bridge_load_roster` would error without a roster file; skip it — the two
+  # helpers we are exercising only touch $BRIDGE_STATE_DIR.
+  source "'"$REPO_ROOT"'/bridge-lib.sh"
+  bridge_agent_write_broken_launch_state "'"$BROKEN_LAUNCH_AGENT"'" "claude" 5 1 "/tmp/err.log" "bash bridge-run.sh broken-smoke" 0
+'
+BROKEN_FILE="$BROKEN_LAUNCH_HOME/state/agents/$BROKEN_LAUNCH_AGENT/broken-launch"
+[[ -s "$BROKEN_FILE" ]] || die "bridge_agent_write_broken_launch_state did not create the quarantine file"
+python3 - "$BROKEN_FILE" "$BROKEN_LAUNCH_AGENT" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+payload = json.loads(Path(sys.argv[1]).read_text())
+assert payload.get("agent") == sys.argv[2], payload
+assert payload.get("fail_count") == 5, payload
+assert payload.get("exit_code") == 1, payload
+assert payload.get("engine") == "claude", payload
+assert payload.get("launch_cmd"), payload
+assert payload.get("stderr_file") == "/tmp/err.log", payload
+assert payload.get("quarantined_at"), payload
+PY
+BRIDGE_STATE_DIR="$BROKEN_LAUNCH_HOME/state" "$BASH4_BIN" -lc '
+  set -euo pipefail
+  export BRIDGE_HOME="'"$BROKEN_LAUNCH_HOME"'"
+  source "'"$REPO_ROOT"'/bridge-lib.sh"
+  bridge_agent_clear_broken_launch "'"$BROKEN_LAUNCH_AGENT"'"
+'
+[[ ! -e "$BROKEN_FILE" ]] || die "bridge_agent_clear_broken_launch did not remove the quarantine file"
+rm -rf "$BROKEN_LAUNCH_HOME"
+
 log "diagnose acl reports clean on macOS (non-Linux host)"
 DIAGNOSE_OUTPUT="$("$REPO_ROOT/agent-bridge" diagnose acl)"
 if [[ "$(uname -s)" == "Linux" ]]; then

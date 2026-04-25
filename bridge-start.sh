@@ -93,6 +93,12 @@ fi
 
 bridge_require_agent "$AGENT"
 bridge_agent_clear_manual_stop "$AGENT"
+# #256 Gap 2: an explicit start/safe-mode from the operator is the
+# documented way out of a rapid-fail quarantine. Clear the broken-launch
+# marker so the daemon's autostart gate stops blocking this agent. If
+# the underlying cause is still present, `bridge-run.sh` will trip the
+# circuit breaker again and re-write the marker.
+bridge_agent_clear_broken_launch "$AGENT"
 
 SESSION="$(bridge_agent_session "$AGENT")"
 WORK_DIR="$(bridge_agent_workdir "$AGENT")"
