@@ -5491,21 +5491,21 @@ BRIDGE_AGENT_SESSION["live-leak-agent"]="live-leak-session"
 BRIDGE_AGENT_WORKDIR["live-leak-agent"]="$UPGRADE_ENV_LIVE_HOME/agents/live-leak-agent"
 BRIDGE_AGENT_LAUNCH_CMD["live-leak-agent"]='sleep 30'
 EOF
-UPGRADE_ENV_JSON="$(
-  BRIDGE_HOME="$UPGRADE_ENV_LIVE_HOME" \
+UPGRADE_ENV_JSON_FILE="$TMP_ROOT/upgrade-env.json"
+BRIDGE_HOME="$UPGRADE_ENV_LIVE_HOME" \
   BRIDGE_ROSTER_FILE="$UPGRADE_ENV_LIVE_HOME/agent-roster.sh" \
   BRIDGE_ROSTER_LOCAL_FILE="$UPGRADE_ENV_LIVE_HOME/agent-roster.local.sh" \
   BRIDGE_STATE_DIR="$UPGRADE_ENV_LIVE_HOME/state" \
   BRIDGE_TASK_DB="$UPGRADE_ENV_LIVE_HOME/state/tasks.db" \
   BRIDGE_AGENT_HOME_ROOT="$UPGRADE_ENV_LIVE_HOME/agents" \
   "$REPO_ROOT/agent-bridge" upgrade --source "$REPO_ROOT" --target "$UPGRADE_ENV_TARGET_HOME" \
-    --channel current --no-pull --allow-dirty --dry-run --json --restart-agents
-)"
-python3 - "$UPGRADE_ENV_JSON" <<'PY'
+    --channel current --no-pull --allow-dirty --dry-run --json --restart-agents >"$UPGRADE_ENV_JSON_FILE"
+python3 - "$UPGRADE_ENV_JSON_FILE" <<'PY'
 import json
 import sys
 
-payload = json.loads(sys.argv[1])
+with open(sys.argv[1], encoding="utf-8") as fh:
+    payload = json.load(fh)
 restart = payload["agent_restart"]
 assert restart["enabled"] is True, restart
 assert restart["considered"] == 0, restart
