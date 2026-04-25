@@ -4,6 +4,73 @@ All notable changes to Agent Bridge are documented here. This project adheres
 loosely to [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and tracks
 version bumps via the `VERSION` file.
 
+## [0.6.13] — 2026-04-25
+
+### Changed
+- Upgrade restart summary labels renamed from `would_restart` /
+  `restarted` / `would_restart_agents` / `restarted_agents` to
+  `restart_eligible` / `restart_attempted_ok` and the matching
+  `_agents` pairs (issue #257, PR #259). The prior names
+  over-promised at both layers — dry-run predicted eligibility
+  (not success), apply recorded a `bridge-agent.sh restart` exit-0
+  count (not agent health). `agent-bridge upgrade --dry-run` now
+  additionally prints an `agent_restart_note` disclaimer reminding
+  operators that runtime failures (plugin resolution, settings
+  corruption, dependency outages) only surface at apply. This is a
+  small JSON-key breaking change for any external consumer of the
+  `agent_restart` payload; in-tree consumers (smoke) are updated in
+  the same release.
+
+### Fixed
+- `hooks/tool-policy.py::protected_alias_reason` no longer
+  substring-matches the queue DB and roster filenames across the
+  entire Bash command text (issue #252, PR #260). The prior check
+  blocked any invocation whose body merely mentioned the suffix —
+  `gh issue comment --body "…state/tasks.db…"`,
+  `git commit -m "…roster file…"`, `rg '…state/tasks.db' docs/`,
+  even the description of the bug report itself. The rewrite
+  `shlex.split`s the command, skips message-body option flags
+  (`--body` / `-m` / `--message` / `--title` / `--description` /
+  `--notes` / `--subject`), routes file-valued flags
+  (`--body-file` / `-F` / `--file` / `--input`) through the same
+  path comparison positional tokens use, splits each token on
+  shell control operators (`;` / `&&` / `||` / `|` / `&` /
+  newline) and peels a single redirection prefix (`<` / `>` /
+  `>>` / `2>` / `&>`), then expands `~` / `$VAR` before the
+  `Path ==` check. `sqlite3 <abs>/state/tasks.db`,
+  `sqlite3 "$BRIDGE_HOME"/state/tasks.db`, `cat <abs roster>`,
+  and `git commit -F <abs roster>` still block with the intended
+  reasons; incidental suffix mentions pass through.
+- `bridge-upgrade.sh` now surfaces per-agent restart-failure
+  diagnostics on the apply summary (issue #256 Gap 1, PR #261).
+  The restart report tuple grew from 5 to 7 columns to carry the
+  failing `bridge-agent.sh restart` exit code and the agent's
+  most recent `.err.log` tail (or `.log` tail when `.err.log`
+  is empty — the silent-exit common case). The JSON payload's
+  `agent_restart` object now includes a `failed_details` list
+  with `{agent, exit_code, last_log_tail}` entries, and the
+  text summary prints one
+  `agent_restart_failed_detail_<agent>: exit=<N> tail=<flat>`
+  line per failure. The aggregator tolerates older 5-column
+  tuples so a half-upgraded host does not crash the parser, and
+  a PEP 604 `str | None` annotation slipped into r1 was fixed
+  in r2 (Python 3.9.6 compatibility).
+- `bridge_daemon_autostart_allowed` now honours the broken-launch
+  quarantine marker and stops relaunching an agent whose
+  `bridge-run.sh` rapid-fail circuit breaker has tripped (issue
+  #256 Gap 2, PR #262). The missing
+  `bridge_agent_write_broken_launch_state` writer (called from
+  `bridge-run.sh:512` since the circuit breaker landed but never
+  defined anywhere in the tree) is now present in
+  `lib/bridge-state.sh`, so the marker is actually written on
+  trip. Matching `bridge_agent_clear_broken_launch` helper is
+  wired onto the `agent-bridge agent start` / `safe-mode` /
+  `restart` entry points, guarded behind the dry-run
+  short-circuit and restart preflight so an inspection or a
+  pre-launch failure does not silently unquarantine the agent.
+  Root cause of the 137-relaunch-in-2h13m #254 repro on the
+  reference host.
+
 ## [0.6.12] — 2026-04-25
 
 ### Fixed
