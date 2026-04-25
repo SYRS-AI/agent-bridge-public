@@ -4441,6 +4441,11 @@ rm -f "$CLAUDE_STATIC_WORKDIR/NEXT-SESSION.md"
 REALPATH_REAL_WORKDIR="$TMP_ROOT/claude-realpath-real"
 REALPATH_LINK_WORKDIR="$TMP_ROOT/claude-realpath-link"
 mkdir -p "$REALPATH_REAL_WORKDIR"
+# bridge_claude_launch_with_channels reads the realpath-resolved workdir's
+# .discord/.env to decide whether to attach the discord channel arg, so the
+# launch_cmd assertion below would otherwise test a missing-channel path
+# instead of the realpath resume path it advertises.
+cp -R "$CLAUDE_STATIC_WORKDIR/.discord" "$REALPATH_REAL_WORKDIR/.discord"
 ln -s "$REALPATH_REAL_WORKDIR" "$REALPATH_LINK_WORKDIR"
 FAKE_CLAUDE_REALPATH_HOME="$TMP_ROOT/fake-claude-realpath-home"
 mkdir -p "$FAKE_CLAUDE_REALPATH_HOME/.claude/sessions"
@@ -4523,7 +4528,23 @@ EOF
 ')"
 [[ "$STATIC_HISTORY_CONTINUE" == "1" ]] || die "static history should not override continue defaults"
 
-CLAUDE_STALE_RESUME_FALLBACK="$("$BASH4_BIN" -c '
+FAKE_CLAUDE_CONTINUE_HOME="$TMP_ROOT/fake-claude-continue-home"
+# Seed a fresh transcript at the realpath-resolved project dir so the launch
+# path can discover a non-stale session id and exercise the resume branch
+# (the previous fixture only verified the --continue fallback that fires when
+# *no* transcript exists, hiding the stale-id rejection path under test).
+python3 - "$FAKE_CLAUDE_CONTINUE_HOME" "$CLAUDE_STATIC_WORKDIR" <<'PY'
+import os
+import sys
+
+home, workdir = sys.argv[1:]
+slug = os.path.realpath(workdir).replace("/", "-")
+project_dir = os.path.join(home, ".claude", "projects", slug)
+os.makedirs(project_dir, exist_ok=True)
+with open(os.path.join(project_dir, "continue-session-id.jsonl"), "w", encoding="utf-8") as handle:
+    handle.write('{"sessionId":"continue-session-id"}\n')
+PY
+CLAUDE_STALE_RESUME_FALLBACK="$(HOME="$FAKE_CLAUDE_CONTINUE_HOME" "$BASH4_BIN" -c '
   source "'"$REPO_ROOT"'/bridge-lib.sh"
   bridge_load_roster
   history_file="$(bridge_history_file_for_agent "claude-static")"
@@ -4537,8 +4558,8 @@ EOF
   bridge_load_roster
   bridge_agent_launch_cmd "claude-static"
 ')"
-assert_contains "$CLAUDE_STALE_RESUME_FALLBACK" "claude --continue --dangerously-skip-permissions --name claude-static --channels plugin:discord@claude-plugins-official"
-[[ "$CLAUDE_STALE_RESUME_FALLBACK" != *" --resume "* ]] || die "stale Claude session_id should not be used for resume"
+assert_contains "$CLAUDE_STALE_RESUME_FALLBACK" "claude --resume continue-session-id --dangerously-skip-permissions --name claude-static --channels plugin:discord@claude-plugins-official"
+assert_not_contains "$CLAUDE_STALE_RESUME_FALLBACK" "--resume stale-session-id"
 
 log "reloading roster inside the long-lived bridge-run loop"
 FAKE_CLAUDE_BIN="$TMP_ROOT/fake-claude-bin"

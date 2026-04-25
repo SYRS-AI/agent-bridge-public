@@ -1734,11 +1734,17 @@ except Exception:
     print(hashlib.sha256(raw.encode("utf-8")).hexdigest() if raw else "")
     raise SystemExit(0)
 
-canonical = json.dumps(
-    payload.get("agents", []),
-    sort_keys=True,
-    separators=(",", ":"),
-)
+agents = []
+for item in payload.get("agents", []):
+    if isinstance(item, dict):
+        stable = dict(item)
+        # Age advances every scan; keep heartbeat_present, but exclude the
+        # volatile age value so unchanged drift dedupes correctly.
+        stable.pop("heartbeat_age_seconds", None)
+        agents.append(stable)
+    else:
+        agents.append(item)
+canonical = json.dumps(agents, sort_keys=True, separators=(",", ":"))
 print(hashlib.sha256(canonical.encode("utf-8")).hexdigest() if canonical else "")
 PY
 }
