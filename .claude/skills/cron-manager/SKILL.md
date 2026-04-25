@@ -22,8 +22,20 @@ agb cron update <job-id> --schedule "0 10 * * *"
 agb cron delete <job-id>
 ```
 
+## Inspection & Recovery
+
+- `agb cron inventory --agent <agent>` — full catalogue across all states, not just enabled jobs (`--enabled yes|no|all`, `--mode recurring|one-shot|all`).
+- `agb cron show <job-name-or-id>` — full detail for a single job (schedule, payload, tz, last/next run).
+- `agb cron errors report --agent <agent>` — failed-run history. **Agents commonly guess `cron history` / `cron logs` / `cron status` — those do not exist; use `cron errors report` instead.**
+- `agb cron sync` — manually re-sync the schedule. Rare; the daemon normally does this.
+- `agb cron enqueue <job-name-or-id> --target <agent>` — fire a job ad-hoc into the target agent's inbox without waiting for its schedule.
+
 ## Guidance
 
 - Default timezone is the local system timezone unless `--tz` is set.
 - If the recurring work only matters after explicit human approval, do not schedule it automatically.
 - If the job routinely produces "no change" results, the disposable cron worker should return `needs_human_followup=false`.
+
+## CLI Help
+
+`agb` is a compact dispatcher for `agent-bridge`. Use `agb --help` and `agb cron --help` for the full surface. `agb help` (without dashes) is **not** a recognised command; nor are `agb list` / `agb status` (use `agent-bridge ...` for those — `agb` is queue/dispatch only).
