@@ -63,6 +63,18 @@ BRIDGE_AGENT_SESSION["codex-developer"]="codex-developer"
 # launch command so the bridge can validate and inject them consistently.
 # BRIDGE_AGENT_CHANNELS["tester"]="plugin:discord@claude-plugins-official"
 # BRIDGE_AGENT_CHANNELS["developer"]="plugin:telegram@claude-plugins-official"
+#
+# Optional: per-agent plugin allowlist (issue #272). When set, every globally-
+# installed Claude plugin (per ~/.claude/plugins/installed_plugins.json) that
+# is NOT in the allowlist (and is not declared as a channel above) is
+# disabled in this agent's `agents/<agent>/.claude/settings.local.json` so
+# the Claude session does not spawn that plugin's MCP server. Plugins from
+# BRIDGE_AGENT_CHANNELS are auto-included so allowlist mistakes do not break
+# a declared channel. Agents without this key inherit the legacy "all
+# plugins enabled" behaviour (no regression for existing rosters).
+# Tokens are space- or comma-separated, with or without a `plugin:` prefix.
+# BRIDGE_AGENT_PLUGINS["tester"]="syrs-shopify@syrs-local syrs-gmail@syrs-local"
+# BRIDGE_AGENT_PLUGINS["developer"]="superpowers@claude-plugins-official"
 # Optional: declare extra runtime skills to symlink into managed Claude homes.
 # These should match directories under ~/.agent-bridge/runtime/skills/.
 # BRIDGE_AGENT_SKILLS["tester"]="shopify-api tracx-logis-api"
