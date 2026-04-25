@@ -632,7 +632,10 @@ process_release_monitor() {
   bridge_release_paths_valid || return 1
   bridge_release_due || return 1
 
-  if ! monitor_json="$(python3 "$SCRIPT_DIR/bridge-release.py" monitor --repo "$BRIDGE_RELEASE_REPO" --installed-version "$(bridge_version)" --state-file "$BRIDGE_RELEASE_CHECK_STATE_FILE" --json 2>/dev/null)"; then
+  # Issue #265 proposal A: release monitor hits the GitHub releases endpoint
+  # over the network; a stuck SSL handshake here would freeze the main loop
+  # at __wait4 with no recovery. Per-call timeout caps the worst case.
+  if ! monitor_json="$(bridge_with_timeout "" release_monitor python3 "$SCRIPT_DIR/bridge-release.py" monitor --repo "$BRIDGE_RELEASE_REPO" --installed-version "$(bridge_version)" --state-file "$BRIDGE_RELEASE_CHECK_STATE_FILE" --json 2>/dev/null)"; then
     bridge_note_release_poll
     return 1
   fi
@@ -715,7 +718,11 @@ process_daily_backup() {
   [[ "$retain_days" =~ ^[0-9]+$ ]] || retain_days=30
   (( retain_days > 0 )) || retain_days=30
 
-  if ! backup_json="$(python3 "$SCRIPT_DIR/bridge-upgrade.py" daily-backup-live --target-root "$BRIDGE_HOME" --backup-dir "$BRIDGE_DAILY_BACKUP_DIR" --retain-days "$retain_days" 2>/dev/null)"; then
+  # Issue #265 proposal A: daily-backup walks BRIDGE_HOME (large file tree on
+  # long-lived installs) and writes a tarball; a hung filesystem (NFS,
+  # external mount, full disk waiting on flush) would otherwise stall the
+  # daemon main loop. 120s ceiling is well above the observed normal runtime.
+  if ! backup_json="$(bridge_with_timeout 120 daily_backup python3 "$SCRIPT_DIR/bridge-upgrade.py" daily-backup-live --target-root "$BRIDGE_HOME" --backup-dir "$BRIDGE_DAILY_BACKUP_DIR" --retain-days "$retain_days" 2>/dev/null)"; then
     return 1
   fi
 
@@ -1115,7 +1122,10 @@ process_stall_reports() {
           # (context-pressure: bridge-daemon.sh:1583) already use `join`.
           capture="$(bridge_capture_recent "$session" "${BRIDGE_STALL_CAPTURE_LINES:-120}" join 2>/dev/null || true)"
           if [[ -n "$capture" ]]; then
-            analysis_shell="$(printf '%s' "$capture" | python3 "$SCRIPT_DIR/bridge-stall.py" analyze --format shell 2>/dev/null || true)"
+            # Issue #265 proposal A: stall analyzer runs once per active agent
+            # per cycle; a single hang would multiply across the roster on
+            # every tick. Wrap so a stuck child cannot freeze the whole loop.
+            analysis_shell="$(bridge_with_timeout "" stall_analyze python3 "$SCRIPT_DIR/bridge-stall.py" analyze --format shell <<<"$capture" 2>/dev/null || true)"
             if [[ -n "$analysis_shell" ]]; then
               STALL_CLASSIFICATION=""
               STALL_MATCHED_PATTERN=""
@@ -1594,7 +1604,9 @@ process_context_pressure_reports() {
     excerpt_b64=""
     excerpt=""
     if [[ -n "$capture" ]]; then
-      analysis_shell="$(printf '%s' "$capture" | python3 "$SCRIPT_DIR/bridge-context-pressure.py" analyze --format shell --engine "$engine" 2>/dev/null || true)"
+      # Issue #265 proposal A: same risk profile as the stall analyzer above
+      # (per-agent per-cycle); cap subprocess time to keep the loop moving.
+      analysis_shell="$(bridge_with_timeout "" context_pressure_analyze python3 "$SCRIPT_DIR/bridge-context-pressure.py" analyze --format shell --engine "$engine" <<<"$capture" 2>/dev/null || true)"
       if [[ -n "$analysis_shell" ]]; then
         CONTEXT_PRESSURE_SEVERITY=""
         CONTEXT_PRESSURE_MATCHED_PATTERN=""
@@ -2142,7 +2154,11 @@ bridge_dashboard_post_if_changed() {
   printf '%s\n' "$summary_output" >"$summary_file"
 
   bridge_require_python
-  python3 "$SCRIPT_DIR/bridge-dashboard.py" \
+  # Issue #265 proposal A: dashboard post issues an outbound HTTP request to
+  # the configured webhook URL; a hung handshake or unreachable host would
+  # otherwise block the daemon's main-loop tail. Wrap so it can never freeze
+  # the scheduler.
+  bridge_with_timeout "" dashboard_post python3 "$SCRIPT_DIR/bridge-dashboard.py" \
     --summary-tsv "$summary_file" \
     --state-file "$BRIDGE_DASHBOARD_STATE_FILE" \
     --webhook-url "$BRIDGE_DASHBOARD_WEBHOOK_URL" \
@@ -3385,7 +3401,11 @@ PY
 process_queue_gateway_requests() {
   local processed=0
 
-  processed="$(python3 "$SCRIPT_DIR/bridge-queue-gateway.py" serve-once \
+  # Issue #265 proposal A: queue-gateway is mostly local (sqlite + filesystem),
+  # but it shells out into bridge-queue.py per pending request — a stuck DB
+  # lock or a runaway request batch would otherwise block the loop. Wrap the
+  # whole serve-once invocation under one ceiling.
+  processed="$(bridge_with_timeout "" queue_gateway_serve_once python3 "$SCRIPT_DIR/bridge-queue-gateway.py" serve-once \
     --root "$(bridge_queue_gateway_root)" \
     --queue-script "$SCRIPT_DIR/bridge-queue.py" \
     --max-requests "${BRIDGE_QUEUE_GATEWAY_MAX_REQUESTS_PER_CYCLE:-100}" 2>/dev/null || printf '0')"
