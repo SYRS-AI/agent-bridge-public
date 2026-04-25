@@ -4,6 +4,76 @@ All notable changes to Agent Bridge are documented here. This project adheres
 loosely to [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and tracks
 version bumps via the `VERSION` file.
 
+## [0.6.14] — 2026-04-25
+
+### Fixed
+- `bridge-stall.py` no longer self-loops on the agent's own narration
+  of a past provider error (issue #264, PR #270, three rounds). The
+  classifier had matched `PATTERN_GROUPS` regexes inside
+  `looks_like_agent_output`, treating any agent reply containing
+  `429` / `rate limit` / `timeout` as agent UI and re-firing a fresh
+  stall against the agent's own text every daemon tick. r1 collapsed
+  the loop but regressed glyph-less raw provider errors arriving
+  immediately after an `[Agent Bridge]` nudge; r2 restored that
+  capture path; r3 added the `join` mode to the stall-side
+  `bridge_capture_recent` call so `tmux capture-pane` runs with `-J`
+  and a long agent reply does not wrap into a glyph-less continuation
+  line that classify mistakes for raw provider output.
+  `AGENT_GLYPH_PREFIXES` documents the Claude UI markers that the
+  layered classify-pass excludes (`❯`, `>`, `›`, `⏺`, `⎿`, `✢`, `✻`,
+  `✱`, `ℹ`, `✓`, `✗`).
+- `bridge-queue.py` cron-dispatch dedup now preserves fresh and
+  pre-fire sibling slots so high-frequency crons survive worker-pool
+  backlog (issue #266, PR #275). The previous dedup cancelled every
+  non-newest open slot regardless of whether the newest had been
+  fired; under recovery from a daemon hang, every fresh slot was
+  superseded by the next before any worker could claim it
+  (`cs-line-poll-5m` ran zero successful fires across 144 slots in
+  36h). Two layered guards: a grace window
+  (`BRIDGE_CRON_SUPERSEDE_GRACE_SECONDS`, default 60s) preserves
+  unclaimed siblings while they may still get picked up, and a
+  newest-not-fired guard preserves all unclaimed siblings while the
+  newest itself is still queued. Claimed-but-not-newest siblings are
+  still cancelled (genuine duplicate work). Normal operation is
+  unchanged because newest fires quickly and the guards stay
+  inactive.
+- `bridge-daemon.sh stop` now sweeps every own-user
+  `bridge-daemon.sh run` process, not just the PID recorded in
+  `BRIDGE_DAEMON_PID_FILE` (issue #269, PR #273, two rounds). An
+  earlier daemon that lost its pid-file (install moved paths,
+  `bridge-daemon.sh run` invoked manually for diagnostics, orphan
+  re-parented to PPID=1) survived stop + systemd's
+  `Restart=always` and ran concurrently with the systemd-managed
+  daemon, silently ignoring later env drop-ins like
+  `BRIDGE_SKIP_PLUGIN_LIVENESS=1`. The new helper
+  `bridge_daemon_all_pids` matches own-user processes by cmdline
+  (path-agnostic, scoped to `pgrep -U "$(id -u)"` so other users on
+  the same host are never touched), excludes the caller's own PID,
+  and is overridable via `BRIDGE_DAEMON_STOP_PATTERN` for isolated
+  tests. `cmd_stop` audits `killed_count`, `failed_count`,
+  `orphan_count`, and `recorded_pid` so after-the-fact inspection can
+  tell sweeping cycles from clean stops.
+
+### Added
+- Periodic `daemon_tick` audit event so a hung daemon main loop is
+  externally observable (issue #265 partial, PR #274, proposal B
+  only). The previous daemon kept emitting "alive" to launchctl and
+  `agent-bridge status` while the bash main loop was wedged at
+  `__wait4` for 34 hours after a `tmux send-keys` blocked on a
+  closed Discord SSL pipe — every observable health check stayed
+  green and audit went silent. The daemon now writes a
+  `daemon_tick` audit row at the end of each completed sync cycle,
+  throttled by `BRIDGE_DAEMON_HEARTBEAT_SECONDS` (default 60s,
+  ~1.4k lines/day; set to 0 to disable). Detail fields surface
+  `loop_step` (the value of `BRIDGE_DAEMON_LAST_STEP` when the tick
+  fired), `interval_seconds`, and `heartbeat_interval_seconds` so
+  operators and a future audit-silence supervisor can pinpoint
+  which loop step the daemon was in immediately before going
+  silent. Followups for proposals A (per-call `timeout`s on every
+  external invocation), C (sibling supervisor that restarts the
+  daemon on audit silence), and D (launchd liveness watcher on a
+  heartbeat file) are tracked separately on issue #265.
+
 ## [0.6.13] — 2026-04-25
 
 ### Changed
