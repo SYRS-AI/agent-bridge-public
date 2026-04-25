@@ -1376,6 +1376,64 @@ bridge_agent_clear_crash_report() {
     "$(bridge_agent_crash_state_file "$agent")" >/dev/null 2>&1 || true
 }
 
+# #256 Gap 2: persist the rapid-fail circuit-breaker trip so the daemon's
+# autostart gate can honour it and stop relaunching a quarantined agent.
+# `bridge-run.sh` has been calling this helper since the circuit breaker
+# landed (line 512), but the helper itself was missing — the unbound-function
+# call raised `command not found` under `set -e`, the broken-launch file was
+# never written, and the daemon kept relaunching the crashing agent (137×
+# in 2h13m on the reference host during the #254 repro). This definition
+# closes that loop.
+bridge_agent_write_broken_launch_state() {
+  local agent="$1"
+  local engine="${2:-}"
+  local fail_count="${3:-0}"
+  local exit_code="${4:-0}"
+  local stderr_file="${5:-}"
+  local launch_cmd="${6:-}"
+  local err_size_before="${7:-0}"
+  local file=""
+
+  file="$(bridge_agent_broken_launch_file "$agent")"
+  mkdir -p "$(dirname "$file")"
+  bridge_require_python
+  python3 - "$file" "$agent" "$engine" "$fail_count" "$exit_code" "$stderr_file" "$launch_cmd" "$err_size_before" <<'PY'
+import json
+import sys
+from datetime import datetime, timezone
+from pathlib import Path
+
+
+def _as_int(value):
+    try:
+        return int(str(value).strip())
+    except (TypeError, ValueError):
+        return None
+
+
+path = Path(sys.argv[1])
+agent, engine, fail_count, exit_code, stderr_file, launch_cmd, err_size_before = sys.argv[2:]
+
+payload = {
+    "agent": agent,
+    "engine": engine,
+    "fail_count": _as_int(fail_count),
+    "exit_code": _as_int(exit_code),
+    "stderr_file": stderr_file,
+    "launch_cmd": launch_cmd,
+    "err_size_before": _as_int(err_size_before),
+    "quarantined_at": datetime.now(timezone.utc).astimezone().isoformat(timespec="seconds"),
+}
+
+path.write_text(json.dumps(payload, indent=2, ensure_ascii=False) + "\n")
+PY
+}
+
+bridge_agent_clear_broken_launch() {
+  local agent="$1"
+  rm -f "$(bridge_agent_broken_launch_file "$agent")" >/dev/null 2>&1 || true
+}
+
 bridge_agent_ack_crash_report() {
   local agent="$1"
   local report_file=""
