@@ -26,6 +26,8 @@ Use Bash with `#!/usr/bin/env bash` and `set -euo pipefail` unless a loop intent
 ## Testing Guidelines
 This snapshot does not include a full unit test suite, so rely on linting plus manual smoke checks. At minimum, run `shellcheck`, `./scripts/smoke-test.sh`, one `--dry-run` path for the script you changed, and one daemon pass via `bash bridge-daemon.sh sync`. Test heartbeat-sensitive changes in an isolated `BRIDGE_HOME` with temporary tmux sessions so live agents are not interrupted.
 
+When a smoke failure is being investigated, prefer the fastest valid repro first: reduce fixture wait/timeout values or run a targeted extracted block when the behavior under test does not depend on the production-length delay. Record any shortened waits in the verification notes, and still run the full default `./scripts/smoke-test.sh` before merge, release, or deployment when timing-sensitive behavior could be affected.
+
 ## Commit & Pull Request Guidelines
 This working copy does not include `.git`, so there is no local history to infer conventions from. Use short imperative commit subjects such as `bridge: add task queue heartbeat`. Keep pull requests narrow, list the scripts touched, include the exact manual verification commands you ran, and call out any changes to queue semantics, roster behavior, `tmux` session handling, or generated `state/` file formats.
 
