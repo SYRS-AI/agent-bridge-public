@@ -6105,6 +6105,132 @@ command, _ = module.run_claude(opt_in_request, opt_in_prompt, 30)
 assert command[2:4] == ["--channels", "plugin:telegram"]
 PY
 
+log "honouring metadata.disableMcp on disposable cron child (#263)"
+CRON_NOMCP_JOBS_FILE="$TMP_ROOT/cron-nomcp-jobs.json"
+cat >"$CRON_NOMCP_JOBS_FILE" <<EOF
+{
+  "jobs": [
+    {
+      "id": "no-mcp-job",
+      "name": "no-mcp-job",
+      "enabled": true,
+      "agentId": "$SMOKE_AGENT",
+      "schedule": {
+        "kind": "cron",
+        "expr": "*/15 * * * *",
+        "tz": "UTC"
+      },
+      "metadata": {
+        "disableMcp": true
+      },
+      "payload": {
+        "text": "ping"
+      }
+    },
+    {
+      "id": "snake-mcp-job",
+      "name": "snake-mcp-job",
+      "enabled": true,
+      "agentId": "$SMOKE_AGENT",
+      "schedule": {
+        "kind": "cron",
+        "expr": "0 9 * * *",
+        "tz": "UTC"
+      },
+      "metadata": {
+        "disposable_disable_mcp": true
+      },
+      "payload": {
+        "text": "ping"
+      }
+    },
+    {
+      "id": "mcp-default-job",
+      "name": "mcp-default-job",
+      "enabled": true,
+      "agentId": "$SMOKE_AGENT",
+      "schedule": {
+        "kind": "cron",
+        "expr": "0 9 * * *",
+        "tz": "UTC"
+      },
+      "payload": {
+        "text": "ping"
+      }
+    }
+  ]
+}
+EOF
+NOMCP_SHELL="$(python3 "$REPO_ROOT/bridge-cron.py" show --jobs-file "$CRON_NOMCP_JOBS_FILE" --format shell no-mcp-job)"
+assert_contains "$NOMCP_SHELL" "CRON_JOB_DISABLE_MCP=1"
+SNAKE_SHELL="$(python3 "$REPO_ROOT/bridge-cron.py" show --jobs-file "$CRON_NOMCP_JOBS_FILE" --format shell snake-mcp-job)"
+assert_contains "$SNAKE_SHELL" "CRON_JOB_DISABLE_MCP=1"
+DEFAULT_SHELL="$(python3 "$REPO_ROOT/bridge-cron.py" show --jobs-file "$CRON_NOMCP_JOBS_FILE" --format shell mcp-default-job)"
+assert_contains "$DEFAULT_SHELL" "CRON_JOB_DISABLE_MCP=0"
+
+python3 - <<'PY'
+import importlib.util
+import os
+import subprocess
+from pathlib import Path
+
+path = Path("bridge-cron-runner.py").resolve()
+spec = importlib.util.spec_from_file_location("bridge_cron_runner", path)
+module = importlib.util.module_from_spec(spec)
+assert spec.loader is not None
+spec.loader.exec_module(module)
+
+base = {
+    "target_agent": "tester",
+    "target_engine": "claude",
+    "job_name": "j",
+    "family": "j",
+    "slot": "s",
+    "run_id": "r",
+    "payload_file": "/tmp/p",
+    "target_workdir": str(Path(".").resolve()),
+    "target_channels": "",
+    "allow_channel_delivery": False,
+    "disposable_needs_channels": False,
+}
+
+# Default: no flag.
+assert module.disable_mcp_for_request(dict(base)) is False
+# Per-request opt-in.
+on = dict(base, disable_mcp=True)
+assert module.disable_mcp_for_request(on) is True
+# Env override forces ON.
+os.environ["BRIDGE_CRON_DISPOSABLE_DISABLE_MCP"] = "1"
+assert module.disable_mcp_for_request(dict(base)) is True
+# Env override forces OFF.
+os.environ["BRIDGE_CRON_DISPOSABLE_DISABLE_MCP"] = "0"
+assert module.disable_mcp_for_request(on) is False
+del os.environ["BRIDGE_CRON_DISPOSABLE_DISABLE_MCP"]
+# Channel relays must always keep MCP enabled, regardless of the flag.
+relay = dict(base, disable_mcp=True, disposable_needs_channels=True, target_channels="plugin:telegram")
+assert module.disable_mcp_for_request(relay) is False
+
+# Wire-through: --strict-mcp-config flag in the spawned claude command.
+captured = {}
+real_run = subprocess.run
+
+def fake_run(cmd, **kw):
+    captured["cmd"] = cmd
+    return subprocess.CompletedProcess(cmd, 0, "{}", "")
+
+subprocess.run = fake_run
+try:
+    module.resolve_binary = lambda name, env_var: f"/fake/{name}"
+    module.run_claude(dict(base), "prompt", 30)
+    assert "--strict-mcp-config" not in captured["cmd"]
+    module.run_claude(on, "prompt", 30)
+    assert "--strict-mcp-config" in captured["cmd"]
+finally:
+    subprocess.run = real_run
+
+print("disable_mcp wire-through OK")
+PY
+
 log "rendering typed channel relay blocks into cron follow-up bodies"
 CRON_RELAY_RUN_ID="relay-smoke--2026-04-16T13-20"
 CRON_RELAY_RUN_DIR="$BRIDGE_CRON_STATE_DIR/runs/$CRON_RELAY_RUN_ID"

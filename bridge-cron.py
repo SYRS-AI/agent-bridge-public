@@ -290,6 +290,18 @@ def build_job_record(job):
         "disposable_needs_channels": bool(
             metadata.get("disposableNeedsChannels") or metadata.get("disposable_needs_channels")
         ),
+        # #263: opt-in flag that tells the disposable cron child to launch
+        # without any MCP servers. Eliminates per-fire MCP cold-start cost for
+        # cron payloads that do not call MCP tools (the common case for
+        # polling/reminder crons). Recognised aliases:
+        #   metadata.disableMcp / disable_mcp
+        #   metadata.disposableDisableMcp / disposable_disable_mcp
+        "disable_mcp": bool(
+            metadata.get("disableMcp")
+            or metadata.get("disable_mcp")
+            or metadata.get("disposableDisableMcp")
+            or metadata.get("disposable_disable_mcp")
+        ),
         "payload_text": payload_text,
         "payload_preview": preview_text(payload_text),
         "raw": job,
@@ -404,6 +416,7 @@ def serialize_record(record, include_payload=False):
         "job_delivery_target": record["job_delivery_target"],
         "allow_channel_delivery": record["allow_channel_delivery"],
         "disposable_needs_channels": record["disposable_needs_channels"],
+        "disable_mcp": record["disable_mcp"],
         "payload_preview": record["payload_preview"],
     }
     if include_payload:
