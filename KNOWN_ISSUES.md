@@ -162,3 +162,23 @@ Operator guidance:
 - Run `bash scripts/apply-channel-policy.sh` manually after adding or removing agents if the policy has drifted.
 - If you change the admin agent (`BRIDGE_ADMIN_AGENT_ID`), re-run `apply-channel-policy.sh` and then remove `agents/<previous-admin>/.claude/settings.local.json` — the script only writes the new admin's overlay, it does not clean up prior admins.
 - If a non-admin agent needs its own DM endpoint, provision a dedicated bot token per agent and add the plugin id to that agent's `.claude/settings.json` explicitly, rather than relying on the shared token.
+
+## 11. Daemon exit observability (historical issue #194 closed by v0.6.x hardening)
+
+Background:
+
+- Issue #194 tracked a v0.4.2 → v0.6.0 upgrade where `launchd` respawned `bridge-daemon` six times in ~24 minutes; the only signal at the time was `mtime` gaps in OPERATIONS log because the daemon left no exit reason in `state/launchagent.log`, `state/daemon.log`, or `logs/audit.jsonl`. The issue body explicitly named "exit observability hook" as a precondition to root-causing the cascade.
+
+Current behavior (from v0.6.x; see commit history of `bridge-daemon.sh`):
+
+- `cmd_run` registers four traps before entering the main loop: `_bridge_daemon_on_signal` for `TERM`/`INT`/`HUP`, `_bridge_daemon_on_err` (under `set -E`) for any `set -e` abort, and `_bridge_daemon_on_exit` for `EXIT`.
+- Every loop step writes its name into `BRIDGE_DAEMON_LAST_STEP` (27 distinct values across `load_roster`, `discord_relay`, `bridge_sync`, `queue_gateway`, `nudge_scan`, `plugin_liveness`, `idle_sleep`, etc.).
+- On exit the EXIT trap appends a single structured line to `state/launchagent.log` and emits a `daemon daemon_exit` row to `logs/audit.jsonl` carrying `pid`, `exit_code`, `signal`, `last_step`, and `err_location` (file:line of the first ERR-trapped failure). `state/daemon-crash.log` also receives the message on non-zero exit.
+- Issue #265's four-part hardening compounds the coverage: per-call `bridge_with_timeout` wrapper around the high-risk subprocess sites including every `tmux send-keys` (PRs #279, #281), periodic `daemon_tick` audit + heartbeat file (PR #274), sibling silence supervisor (PR #293), and OS-level liveness watcher (PR #292). Issues #261/#262 added broken-launch quarantine, #270 closed the stall self-loop, #273 sweeps PPID=1 orphan daemons.
+- Result: the three plausible exit scenarios from #194 (`set -e` abort, SIGTERM, supervisor-driven restart cascade) all now leave a complete attribution trail across `launchagent.log` + `audit.jsonl` + `daemon-crash.log`.
+
+Operator guidance:
+
+- After a `launchd`/`systemd` respawn cascade, look first at `logs/audit.jsonl` filtered to `actor=daemon` — every exit pairs `daemon_exit` with the prior `daemon_tick` (showing which loop step was active before the silence), `daemon_subprocess_timeout` (showing which call_site hung), or `daemon_silence_*` (showing supervisor-initiated restarts).
+- `state/launchagent.log` keeps the same line in plain text for hosts where the audit log is unreadable.
+- The original v0.4.2 → v0.6.0 specific hypotheses in #194 (post-upgrade python helper missing, plugin MCP liveness restart against gone session, librarian cron cascade) refer to code paths that no longer exist in their #194-era form; the chain of fixes above either removed them or made them externally observable. Treat #194 as historical — if a similar respawn cascade reappears on a current install, file a fresh issue with the `daemon_exit` audit excerpt rather than reopening #194.
