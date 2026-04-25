@@ -1107,7 +1107,13 @@ process_stall_reports() {
       [[ "$attached" =~ ^[0-9]+$ ]] || attached=0
       if (( attached == 0 )) && [[ "$engine" == "claude" || "$engine" == "codex" ]]; then
         if (( claimed > 0 || refresh_pending == 1 )) || [[ "$loop_mode" == "1" ]]; then
-          capture="$(bridge_capture_recent "$session" "${BRIDGE_STALL_CAPTURE_LINES:-120}" 2>/dev/null || true)"
+          # Issue #264 r3: pass `join` so tmux capture-pane runs with `-J`.
+          # Without -J, a long agent reply wraps onto multiple physical lines
+          # and only the first carries the glyph prefix; classify() then
+          # treats the wrapped continuation as raw provider output and the
+          # self-loop returns. Other capture sites that feed classification
+          # (context-pressure: bridge-daemon.sh:1583) already use `join`.
+          capture="$(bridge_capture_recent "$session" "${BRIDGE_STALL_CAPTURE_LINES:-120}" join 2>/dev/null || true)"
           if [[ -n "$capture" ]]; then
             analysis_shell="$(printf '%s' "$capture" | python3 "$SCRIPT_DIR/bridge-stall.py" analyze --format shell 2>/dev/null || true)"
             if [[ -n "$analysis_shell" ]]; then
