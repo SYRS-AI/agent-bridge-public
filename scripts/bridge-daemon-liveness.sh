@@ -113,7 +113,7 @@ cooldown_active() {
   # Returns 0 (true) when last restart attempt is within cooldown window.
   local last_ts now
   [[ -f "$BRIDGE_DAEMON_LIVENESS_COOLDOWN_FILE" ]] || return 1
-  last_ts="$(cat "$BRIDGE_DAEMON_LIVENESS_COOLDOWN_FILE" 2>/dev/null | tr -d '[:space:]')"
+  last_ts="$(tr -d '[:space:]' <"$BRIDGE_DAEMON_LIVENESS_COOLDOWN_FILE" 2>/dev/null)"
   [[ "$last_ts" =~ ^[0-9]+$ ]] || return 1
   now="$(now_ts)"
   (( now - last_ts < BRIDGE_DAEMON_LIVENESS_COOLDOWN_SECONDS ))
