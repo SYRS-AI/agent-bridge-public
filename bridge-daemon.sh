@@ -3641,12 +3641,22 @@ cmd_run() {
 }
 
 cmd_stop() {
-  local pid
   local recorded_pid
+  local entry
+  local -a pids=()
+  local killed=0
+  local failed=0
+  local orphans=0
+  local first_pid=""
+  local is_orphan
 
-  pid="$(bridge_daemon_pid)"
   recorded_pid="$(bridge_daemon_recorded_pid)"
-  if [[ -z "$pid" ]]; then
+  while IFS= read -r entry; do
+    [[ -n "$entry" ]] || continue
+    pids+=("$entry")
+  done < <(bridge_daemon_all_pids)
+
+  if (( ${#pids[@]} == 0 )); then
     if [[ -n "$recorded_pid" ]]; then
       rm -f "$BRIDGE_DAEMON_PID_FILE"
       daemon_info "stale bridge daemon pid removed"
@@ -3656,16 +3666,37 @@ cmd_stop() {
     return 0
   fi
 
-  if kill -0 "$pid" 2>/dev/null; then
-    kill "$pid"
-    rm -f "$BRIDGE_DAEMON_PID_FILE"
-    bridge_audit_log daemon daemon_stopped daemon --detail pid="$pid"
-    daemon_info "bridge daemon stopped"
-    return 0
-  fi
+  first_pid="${pids[0]}"
+  for entry in "${pids[@]}"; do
+    is_orphan=1
+    if [[ -n "$recorded_pid" && "$entry" == "$recorded_pid" ]]; then
+      is_orphan=0
+    fi
+    if (( is_orphan == 1 )); then
+      orphans=$(( orphans + 1 ))
+    fi
+    if kill -0 "$entry" 2>/dev/null; then
+      if kill "$entry" 2>/dev/null; then
+        killed=$(( killed + 1 ))
+      else
+        failed=$(( failed + 1 ))
+      fi
+    fi
+  done
 
   rm -f "$BRIDGE_DAEMON_PID_FILE"
-  daemon_info "stale bridge daemon pid removed"
+  bridge_audit_log daemon daemon_stopped daemon \
+    --detail pid="$first_pid" \
+    --detail killed_count="$killed" \
+    --detail failed_count="$failed" \
+    --detail orphan_count="$orphans" \
+    --detail recorded_pid="${recorded_pid:-}"
+
+  if (( orphans > 0 )); then
+    daemon_info "bridge daemon stopped (killed=$killed, swept $orphans orphan(s) outside pid-file)"
+  else
+    daemon_info "bridge daemon stopped (pid=$first_pid)"
+  fi
 }
 
 cmd_status() {

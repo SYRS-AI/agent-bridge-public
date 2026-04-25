@@ -2052,6 +2052,26 @@ bridge_daemon_is_running() {
   [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null
 }
 
+bridge_daemon_all_pids() {
+  # Issue #269: cmd_stop only killed the pid-file PID, so any earlier daemon
+  # that lost its pid-file (e.g. install moved paths, orphan re-parented to
+  # PPID=1, manual `bridge-daemon.sh run` from diagnostics) survived stop +
+  # systemd restart and ran concurrently with the systemd-managed daemon —
+  # silently ignoring later env drop-ins. Match every own-user process whose
+  # cmdline ends in "bridge-daemon.sh run" so stop can sweep all of them,
+  # including daemons launched from a different BRIDGE_HOME path.
+  # BRIDGE_DAEMON_STOP_PATTERN overrides the match pattern so isolated tests
+  # do not pick up the operator's live daemons via system-wide pgrep.
+  local pattern="${BRIDGE_DAEMON_STOP_PATTERN:-bridge-daemon\\.sh run$}"
+  local self_pid="${BASHPID:-$$}"
+  local candidate
+  while IFS= read -r candidate; do
+    [[ -n "$candidate" ]] || continue
+    [[ "$candidate" == "$self_pid" ]] && continue
+    printf '%s\n' "$candidate"
+  done < <(pgrep -f "$pattern" 2>/dev/null || true)
+}
+
 bridge_write_agent_snapshot() {
   local file="$1"
   local agent
