@@ -6,6 +6,63 @@ version bumps via the `VERSION` file.
 
 ## [0.6.16] — 2026-04-25
 
+### Added
+- New `agb agent forget-session` complement: parallel-wave operator pattern
+  validated and shipped a large hotfix wave on top of v0.6.15. See PR list
+  below for full scope.
+- `BRIDGE_AGENT_PLUGINS["<agent>"]` per-agent plugin allowlist (issue #272,
+  PR #298). `scripts/apply-channel-policy.sh` writes
+  `agents/<agent>/.claude/settings.local.json` with `enabledPlugins=false`
+  for every globally-installed plugin not in the allowlist. Channels
+  declared via `BRIDGE_AGENT_CHANNELS` are auto-included so an oversight
+  cannot break a required transport. Legacy agents without the key keep
+  full-set behaviour. Closes the ~250 MCP process / ~1 GB RSS scenario the
+  issue documented.
+- New `bridge-watchdog-silence.py` sibling supervisor (issue #265 proposal
+  C, PR #293). Reads daemon_tick audit log; if no tick in
+  `BRIDGE_DAEMON_SILENCE_THRESHOLD_SECONDS` (default 600s), emits
+  `daemon_silence_detected` + restarts daemon. Cooldown protected. Spawned
+  by `bridge-daemon.sh start`, killed by `stop` before the daemon itself.
+- New launchd LaunchAgent (macOS) + systemd `.service` + `.timer`
+  (Linux) liveness watcher (issue #265 proposal D, PR #292). Checks the
+  heartbeat file mtime every 60s; restarts daemon on staleness. Sibling to
+  the daemon plist/unit, lives outside the bridge process tree. Opt-out
+  via `--skip-liveness` to bootstrap.
+- Daemon writes a `daemon.heartbeat` file alongside the `daemon_tick`
+  audit row (PR #292 prep). Throttled by the same
+  `BRIDGE_DAEMON_HEARTBEAT_SECONDS`.
+- Per-job `metadata.disableMcp` (4 aliases) + install-wide
+  `BRIDGE_CRON_DISPOSABLE_DISABLE_MCP` env opt-in `--strict-mcp-config`
+  for cron disposable Claude children (issue #263 partial, PR #297). Local
+  bench: ~5–10s real → ~3.2–3.7s real per fire (~78% CPU saved). Channel-
+  relay safety override built-in.
+- New `interactive_picker` stall classification + admin escalation
+  (PR #295). Daemon detects `/rate-limit-options`, `claude --resume` long-
+  resume, and verbatim picker tail patterns; routes through the same
+  admin-escalation branch as `auth` (no nudge — picker takes a keystroke,
+  not text). Picker-specific recommended message distinguishes safe-default
+  Enter from billing-impact options.
+- `bridge-memory.py migrate-canonical --home <home> [--user <id>] [--apply]`
+  folds legacy `<home>/users/<user>/memory/*.md` into the unified
+  `<home>/memory/` root (issue #220, PR #296). Default mode is dry-run; pass
+  `--apply` to perform an atomic move and write
+  `<home>/memory/_migration_log.json` (schema
+  `memory-canonical-migration-v1`). Idempotent — a second `--apply`
+  on a converged install reports `moved: 0`. Collisions (the same
+  `<date>.md` exists in both roots) are renamed to
+  `<date>.legacy.md` in the canonical root and an admin task is
+  filed best-effort via `agent-bridge task create --to patch`. The
+  manifest accumulates a `runs[]` history so multi-pass migrations
+  retain provenance. `--i-know-this-is-live` flag required to run
+  `--apply` against the live `BRIDGE_HOME` (refused by default to
+  prevent the demonstrated accident class — codex review of PR #296).
+- `BRIDGE_MEMORY_LEGACY_PROBE` env var now gates the harvester's
+  legacy `<home>/users/default/memory/<date>.md` read-only probe.
+  Defaults to `1` for one release so partially-migrated installs
+  don't see false-positive backfills; set to `0` after running
+  `migrate-canonical --apply` everywhere. Probe removal target:
+  v0.7.
+
 ### Fixed
 - Daily-note canonical path is now unified at `<agent-home>/memory/<date>.md`
   for every user, including `default` (issue #220). Closes the
@@ -21,26 +78,20 @@ version bumps via the `VERSION` file.
   `users/<user>/memory/` partitions remain an indexed escape hatch
   (`collect_index_documents` still walks them) but are no longer the
   bridge writer's target — see `docs/agent-runtime/memory-schema.md`.
-
-### Added
-- `bridge-memory.py migrate-canonical --home <home> [--user <id>] [--apply]`
-  folds legacy `<home>/users/<user>/memory/*.md` into the unified
-  `<home>/memory/` root (issue #220). Default mode is dry-run; pass
-  `--apply` to perform an atomic move and write
-  `<home>/memory/_migration_log.json` (schema
-  `memory-canonical-migration-v1`). Idempotent — a second `--apply`
-  on a converged install reports `moved: 0`. Collisions (the same
-  `<date>.md` exists in both roots) are renamed to
-  `<date>.legacy.md` in the canonical root and an admin task is
-  filed best-effort via `agent-bridge task create --to patch`. The
-  manifest accumulates a `runs[]` history so multi-pass migrations
-  retain provenance.
-- `BRIDGE_MEMORY_LEGACY_PROBE` env var now gates the harvester's
-  legacy `<home>/users/default/memory/<date>.md` read-only probe.
-  Defaults to `1` for one release so partially-migrated installs
-  don't see false-positive backfills; set to `0` after running
-  `migrate-canonical --apply` everywhere. Probe removal target:
-  v0.7.
+- `bridge_linux_prepare_agent_isolation` now grants the queue-gateway
+  agent directory + root the necessary ACLs (`--x` for the isolated UID,
+  `r-x` + default ACL for the controller) so `bridge-queue-gateway.py
+  serve-once`'s glob doesn't silently return empty when the root is
+  `root:root 700` (PR #287, issue from operator). New
+  `tests/isolation-queue-gateway-acl.sh` (Linux-only) covers isolate,
+  cross-agent isolation, isolated-uid write access, serve-once
+  consumption, and unisolate ACL strip. `bridge-state.sh diagnose acl`
+  scanner reaches the new ACL paths without changes.
+- Documentation-only update: `KNOWN_ISSUES.md` adds entry #11 closing
+  historical issue #194 daemon-exit observability — the
+  v0.6.15 hardening (#261/#262/#270/#273/#274/#279/#281/#289/#293/#292)
+  subsumes every observability gap the original tracking issue named
+  (PR #299).
 
 ## [0.6.15] — 2026-04-25
 
