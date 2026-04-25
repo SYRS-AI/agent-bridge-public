@@ -350,7 +350,35 @@ bridge_migration_unisolate() {
   # (older agents that pre-date the grant-set persistence). (Blocking 1
   # in PR #302 r1.)
   local controller_home_for_plugins=""
-  controller_home_for_plugins="$(getent passwd "$controller_user" 2>/dev/null | cut -d: -f6 || true)"
+  # Test-only seam: BRIDGE_CONTROLLER_HOME_OVERRIDE replaces the getent
+  # passwd lookup so the regression test in tests/isolation-plugin-sharing.sh
+  # can drive unisolate cleanup against the same fake controller plugin
+  # tree it uses for the share path. The override is ignored unless
+  # BRIDGE_HOME points under a recognised tempdir prefix (/tmp, /var/tmp,
+  # or $TMPDIR), which guards against accidental production use. Mirrors
+  # the seam in bridge_linux_share_plugin_catalog. (Blocking 5(b) in PR
+  # #302 r2.)
+  if [[ -n "${BRIDGE_CONTROLLER_HOME_OVERRIDE:-}" ]]; then
+    local _override_ok=0
+    local _bridge_home_norm="${BRIDGE_HOME:-}"
+    case "$_bridge_home_norm" in
+      /tmp/*|/var/tmp/*) _override_ok=1 ;;
+    esac
+    if [[ "$_override_ok" -eq 0 && -n "${TMPDIR:-}" ]]; then
+      local _tmpdir_trimmed="${TMPDIR%/}"
+      case "$_bridge_home_norm" in
+        "$_tmpdir_trimmed"/*) _override_ok=1 ;;
+      esac
+    fi
+    if [[ "$_override_ok" -eq 1 ]]; then
+      controller_home_for_plugins="$BRIDGE_CONTROLLER_HOME_OVERRIDE"
+    else
+      bridge_warn "bridge_migration_unisolate: ignoring BRIDGE_CONTROLLER_HOME_OVERRIDE because BRIDGE_HOME is not under a tempdir prefix (got '${BRIDGE_HOME:-<unset>}')"
+    fi
+  fi
+  if [[ -z "$controller_home_for_plugins" ]]; then
+    controller_home_for_plugins="$(getent passwd "$controller_user" 2>/dev/null | cut -d: -f6 || true)"
+  fi
   if [[ -n "$controller_home_for_plugins" && -d "$controller_home_for_plugins/.claude/plugins" ]]; then
     local controller_plugins="$controller_home_for_plugins/.claude/plugins"
     local catalog_file=""

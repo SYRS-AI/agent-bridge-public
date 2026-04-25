@@ -285,6 +285,72 @@ chans = data.get("channels", [])
 assert chans == ["plugin:declared-plugin@td-mkt"], f"unexpected persisted channels: {chans!r}"
 ' || die "persisted grant-set contents do not match"
 
+log "stale-ACL revoke on channel change (Blocking 1 regression)"
+
+# At this point declared-plugin@td-mkt has been granted (line ~195 above).
+# Confirm the grant landed on the original install path before flipping
+# channels — without this baseline we can't tell a true revoke from a
+# never-granted state.
+sudo -n getfacl --no-effective "$BRIDGE_HOME/plugins/declared-plugin" 2>/dev/null \
+  | grep -Eq "^user:${TEST_OS_USER}:r(-x|wx)" \
+  || die "expected u:${TEST_OS_USER}:r-x on declared-plugin before channel flip"
+
+# Add a fresh plugin (replacement-plugin) to both the directory marketplace
+# tree and the controller's installed_plugins.json, then flip the agent's
+# channel to it — drops declared-plugin, adds replacement-plugin.
+mkdir -p "$CONTROLLER_PLUGINS/cache/td-mkt/replacement-plugin/0.1.0"
+echo 'replacement plugin source (cache)' \
+  > "$CONTROLLER_PLUGINS/cache/td-mkt/replacement-plugin/0.1.0/index.js"
+mkdir -p "$BRIDGE_HOME/plugins/replacement-plugin"
+echo 'replacement plugin (dir-marketplace)' \
+  > "$BRIDGE_HOME/plugins/replacement-plugin/server.ts"
+chmod -R o+rX "$CONTROLLER_HOME_FAKE" "$BRIDGE_HOME/plugins"
+
+python3 - "$CONTROLLER_PLUGINS/installed_plugins.json" "$BRIDGE_HOME/plugins/replacement-plugin" <<'PY'
+import json, sys
+manifest_path, install_path = sys.argv[1], sys.argv[2]
+with open(manifest_path) as f:
+    data = json.load(f)
+data.setdefault("plugins", {})["replacement-plugin@td-mkt"] = [
+    {"scope": "user", "version": "0.1.0", "installPath": install_path}
+]
+with open(manifest_path, "w") as f:
+    json.dump(data, f, indent=2)
+PY
+
+BRIDGE_AGENT_CHANNELS["$TEST_AGENT"]='plugin:replacement-plugin@td-mkt'
+
+# Re-apply with the new channel set. This is the call shape that
+# triggers the stale-revoke path on declared-plugin (prior set) and the
+# grant path on replacement-plugin (current set).
+BRIDGE_CONTROLLER_HOME_OVERRIDE="$CONTROLLER_HOME_FAKE" \
+  bridge_linux_share_plugin_catalog "$TEST_OS_USER" "$TEST_OS_HOME" "$CONTROLLER_USER" "$TEST_AGENT"
+
+log "verifying old plugin's u:${TEST_OS_USER} ACL is gone after channel flip"
+stale_count="$(sudo -n getfacl --no-effective "$BRIDGE_HOME/plugins/declared-plugin" 2>/dev/null \
+  | grep -cE "^user:${TEST_OS_USER}:" || true)"
+[[ "$stale_count" == "0" ]] \
+  || die "expected u:${TEST_OS_USER} ACL gone from declared-plugin after channel flip; still has $stale_count entr(ies)"
+
+log "verifying new plugin's u:${TEST_OS_USER}:r-x ACL is present after channel flip"
+sudo -n getfacl --no-effective "$BRIDGE_HOME/plugins/replacement-plugin" 2>/dev/null \
+  | grep -Eq "^user:${TEST_OS_USER}:r(-x|wx)" \
+  || die "expected u:${TEST_OS_USER}:r-x on replacement-plugin after channel flip"
+
+log "verifying persisted grant-set reflects the new channel set, not the old"
+sudo -n cat "$state_file" | python3 -c '
+import json, sys
+data = json.load(sys.stdin)
+chans = data.get("channels", [])
+assert chans == ["plugin:replacement-plugin@td-mkt"], f"unexpected persisted channels after flip: {chans!r}"
+' || die "persisted grant-set did not reflect channel flip (expected only replacement-plugin)"
+
+# After the channel flip the saved grant-set persists replacement-plugin
+# only, so the upcoming unisolate-cleanup assertions need to target that
+# path. Reassign declared_path here rather than introducing a parallel
+# variable so the existing assertion loop below stays intact.
+declared_path="$BRIDGE_HOME/plugins/replacement-plugin"
+
 log "running bridge_migration_unisolate (dry_run=0) and verifying full ACL strip"
 BRIDGE_CONTROLLER_HOME_OVERRIDE="$CONTROLLER_HOME_FAKE" \
   bridge_migration_unisolate "$TEST_AGENT" 0 \

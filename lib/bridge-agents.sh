@@ -1154,10 +1154,15 @@ PY
     return 1
   fi
 
+  # Set final ownership/perm/ACL on the temp file BEFORE the atomic rename
+  # so the destination never exists with the wrong metadata even
+  # momentarily. Readers see either the previous manifest or the new one
+  # with correct ownership/perm/ACL — never an in-between state.
+  # (Blocking 2 in PR #302 r2.)
+  bridge_linux_sudo_root chown root:root "$manifest_tmp"
+  bridge_linux_sudo_root chmod 0640 "$manifest_tmp"
+  bridge_linux_acl_add "u:${os_user}:r--" "$manifest_tmp"
   bridge_linux_sudo_root mv "$manifest_tmp" "$manifest"
-  bridge_linux_sudo_root chown root:root "$manifest"
-  bridge_linux_sudo_root chmod 0640 "$manifest"
-  bridge_linux_acl_add "u:${os_user}:r--" "$manifest"
 }
 
 bridge_linux_share_plugin_catalog() {
