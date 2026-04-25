@@ -1,6 +1,35 @@
 #!/usr/bin/env bash
 # shellcheck shell=bash
 
+# Issue #265 followup to PR #279: wrap `tmux send-keys` with a per-call
+# watchdog so a hung tmux child (canonically: send-keys blocked on a closed
+# Discord SSL pipe upstream of the pane program) cannot freeze the daemon
+# main loop the way the 34-hour silent hang documented in #265 did. PR #279
+# wrapped the daemon's python subprocess sites; this closes the actual
+# `tmux send-keys` vector the issue body called out.
+#
+# Default timeout: 10s (override BRIDGE_TMUX_SEND_TIMEOUT_SECONDS). These
+# are local IPC to a tmux server on the same host; anything past 10s is a
+# genuine hang, not a slow path. The daemon-wide default
+# (BRIDGE_DAEMON_SUBPROCESS_TIMEOUT_SECONDS, 30s) is too generous for this
+# shape of call.
+#
+# Only `tmux send-keys` is wrapped — `tmux capture-pane`, `display-message`,
+# `set-buffer`, etc. are not on the documented hang path and wrapping them
+# would add cost to hot, well-behaved calls.
+bridge_tmux_send_keys_with_timeout() {
+  local label="$1"
+  shift
+  local secs="${BRIDGE_TMUX_SEND_TIMEOUT_SECONDS:-10}"
+  [[ "$secs" =~ ^[0-9]+$ ]] || secs=10
+  # bridge_with_timeout is defined in lib/bridge-state.sh which is sourced
+  # AFTER this file in bridge-lib.sh. Bash resolves function names at call
+  # time, not source time, so this is safe as long as both modules finish
+  # sourcing before any call site runs — which is guaranteed by the
+  # bridge-lib.sh load order.
+  bridge_with_timeout "$secs" "$label" tmux send-keys "$@"
+}
+
 bridge_tmux_session_exists() {
   local session="$1"
   tmux has-session -t "$(bridge_tmux_session_target "$session")" 2>/dev/null
@@ -384,13 +413,15 @@ bridge_tmux_claude_advance_blocker() {
   state="$(bridge_tmux_claude_blocker_state "$session")"
   case "$state" in
     trust|summary)
-      tmux send-keys -t "$(bridge_tmux_pane_target "$session")" C-m
+      bridge_tmux_send_keys_with_timeout "tmux_send_advance_blocker_${state}" \
+        -t "$(bridge_tmux_pane_target "$session")" C-m
       sleep 0.3
       return 0
       ;;
     devchannels)
       if [[ "$allow_devchannels" == "1" ]]; then
-        tmux send-keys -t "$(bridge_tmux_pane_target "$session")" C-m
+        bridge_tmux_send_keys_with_timeout tmux_send_advance_blocker_devchannels \
+          -t "$(bridge_tmux_pane_target "$session")" C-m
         sleep 0.3
         return 0
       fi
@@ -553,11 +584,13 @@ bridge_tmux_paste_and_submit() {
   # an empty input line and the paste stays buffered. Warm sessions land
   # instantly; the retry branch only fires under the observed race.
   sleep 0.05
-  tmux send-keys -t "$pane_target" C-m
+  bridge_tmux_send_keys_with_timeout tmux_send_paste_submit \
+    -t "$pane_target" C-m
   sleep 0.1
   if bridge_tmux_session_has_pending_input "$session" "$engine"; then
     sleep 0.15
-    tmux send-keys -t "$pane_target" C-m
+    bridge_tmux_send_keys_with_timeout tmux_send_paste_submit_retry \
+      -t "$pane_target" C-m
   fi
 }
 
@@ -579,10 +612,12 @@ bridge_tmux_type_and_submit() {
 
   while IFS= read -r line || [[ -n "$line" ]]; do
     if [[ $first_line -eq 0 ]]; then
-      tmux send-keys -t "$pane_target" C-j
+      bridge_tmux_send_keys_with_timeout tmux_send_type_newline \
+        -t "$pane_target" C-j
     fi
     if [[ -n "$line" ]]; then
-      tmux send-keys -t "$pane_target" -l -- "$line"
+      bridge_tmux_send_keys_with_timeout tmux_send_type_line \
+        -t "$pane_target" -l -- "$line"
     fi
     first_line=0
   done <<<"$text"
@@ -600,11 +635,13 @@ bridge_tmux_type_and_submit() {
   # lines of scrollback and the retry only fires when we actually
   # observe the race symptom.
   sleep 0.05
-  tmux send-keys -t "$pane_target" C-m
+  bridge_tmux_send_keys_with_timeout tmux_send_type_submit \
+    -t "$pane_target" C-m
   sleep 0.1
   if bridge_tmux_session_has_pending_input "$session" "$engine"; then
     sleep 0.15
-    tmux send-keys -t "$pane_target" C-m
+    bridge_tmux_send_keys_with_timeout tmux_send_type_submit_retry \
+      -t "$pane_target" C-m
   fi
 }
 
