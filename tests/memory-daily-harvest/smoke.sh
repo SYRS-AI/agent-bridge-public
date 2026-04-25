@@ -207,7 +207,7 @@ clear_state
 # Build a tiny git repo in $WORKDIR with a commit inside the target date window.
 rm -rf "$WORKDIR/.git" 2>/dev/null || true
 (cd "$WORKDIR" && git init -q 2>/dev/null \
-  && git config user.email "smoke@example.test" \
+  && git config user.email "smoke@local.invalid" \
   && git config user.name "smoke" \
   && : > weak-file.txt \
   && git add weak-file.txt >/dev/null 2>&1) || true
