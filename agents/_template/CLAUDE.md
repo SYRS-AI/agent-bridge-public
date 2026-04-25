@@ -131,6 +131,14 @@ When the daemon injects a line that starts with `[Agent Bridge] event=` (queue i
 - 유지보수 trigger는 이 admin이 오늘 사용할 수 있는 bridge primitive만으로 전부 해소한다. (#304 Track B에서 bridge-managed `autopilot-compact` / `handoff-restart` primitive가 요청되어 있고, 그것이 들어오기 전까지는 static 에이전트를 nudge하는 대신 외부 채널의 사람 operator에게 에스컬레이션하는 것이 옳은 경로다. nudge는 옳지 않다.)
 - end-user에게는 그들이 실제로 체감할 만한 동작 변화가 있을 때만 알린다. 그 외 admin이 처리한 유지보수는 조용히 끝낸다.
 
+## Admin Upgrade Protocol
+- 이 섹션은 `SESSION-TYPE.md`의 Session Type이 `admin`일 때만 적용된다.
+- 실행 중인 에이전트가 있는 호스트에서 `~/.agent-bridge/agent-bridge upgrade --apply`는 **유일하게 허가된 업그레이드 엔트리포인트**다. 업그레이더가 daemon stop, restart, 에이전트 재기동을 내부적으로 모두 처리한다.
+- `bash bridge-daemon.sh stop`이나 `agb daemon stop`을 `upgrade --apply` 이전 단계로 분리해서 실행하지 않는다. v0.6.14+ daemon hardening wave가 적용되지 않은 호스트에서 이를 실행하면, 모든 에이전트의 tmux 세션이 재생성되며 stale `AGENT_SESSION_ID`로 resume되는 cascade가 발생할 수 있다 (이슈 #314, #315 참고).
+- 어떤 문서가 "stop → upgrade → verify"를 분리된 단계로 보여주더라도 그 sequence를 만들지 않는다. 업그레이드는 단일 atomic 명령으로 취급한다.
+- `agent-bridge upgrade --apply` 자체가 실패하면(network, source-checkout drift, 중간 abort), daemon을 수동으로 stop하지 말고 공유 외부 채널로 사람 operator에게 실패를 보고한다. manual daemon-stop은 표준 업그레이드 경로의 일부가 아니라 recovery action이며, 실패를 본 operator의 명시적 승인 후에만 사용한다.
+- 업그레이드 후 daemon health 확인은 read-only 명령으로 한다: Linux에서는 `pgrep -af 'bridge-daemon\.sh run$'`, 어느 OS에서든 `agb daemon status`를 사용한다.
+
 ## Channel Setup Protocol
 - 사용자가 어떤 에이전트든 새로 만들거나 설정하면서 채널을 언급하면, 먼저 선택지를 명확히 확인한다: `터미널만`, `Discord`, `Telegram`, `Discord와 Telegram 둘 다`.
 - Discord 또는 Telegram을 하나라도 선택하면 해당 에이전트는 Claude Code 엔진이어야 한다. Codex 요청과 외부 채널 요청이 충돌하면, 이유를 한 문장으로 설명하고 Claude Code로 진행한다.

@@ -51,22 +51,30 @@ version bumps via the `VERSION` file.
   intent in your local roster and continue indexing-only via
   `collect_index_documents` (still walks both roots). See
   `docs/agent-runtime/memory-schema.md`.
+- **Do not run `bridge-daemon.sh stop` separately before `upgrade --apply`** —
+  the upgrader handles daemon orchestration internally. Stopping the daemon
+  manually on a v0.6.13 host can cascade into all-agent tmux respawn with
+  stale `AGENT_SESSION_ID` resume (see issue #314). On hosts upgraded past
+  v0.6.13 the cascade is mitigated by hardening waves shipped in v0.6.14-0.6.16,
+  but `upgrade --apply` remains the only sanctioned entrypoint.
 - **Recommended upgrade order on a host with running agents**:
   ```bash
-  # 1. Stop the daemon (sweeps any pre-#273 orphans)
-  bash ~/.agent-bridge/bridge-daemon.sh stop
-  # 2. Pull source + upgrade (auto: apply-channel-policy, restart agents)
+  # Recommended upgrade on a host with running agents — single entrypoint
   agent-bridge upgrade --apply
-  # 3. (Linux) verify single daemon PID
+
+  # (Linux) verify single daemon PID
   pgrep -af 'bridge-daemon\.sh run$'
-  # 4. (Optional) per-agent plugin allowlist + restart specific agents
+
+  # (Optional) per-agent plugin allowlist + restart specific agents
   $EDITOR ~/.agent-bridge/agent-roster.local.sh   # add BRIDGE_AGENT_PLUGINS
   bash ~/.agent-bridge/scripts/apply-channel-policy.sh
   agb agent restart <agent>
-  # 5. (Optional, per agent) daily-note migration
+
+  # (Optional, per agent) daily-note migration
   bridge-memory.py migrate-canonical --home ~/.agent-bridge/agents/<agent> \
     --user default --apply --i-know-this-is-live
-  # 6. (Optional, per host) liveness watcher install
+
+  # (Optional, per host) liveness watcher install
   bash ~/.agent-bridge/scripts/install-daemon-liveness-launchagent.sh \
     --apply --load
   ```
