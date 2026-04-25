@@ -2200,11 +2200,24 @@ with sqlite3.connect(db) as conn:
     )
     conn.commit()
 PY
+CLAIM_BEFORE_TS="$(date +%s)"
 bash "$REPO_ROOT/bridge-task.sh" claim "$QUEUE_TASK_ID" --agent "$SMOKE_AGENT" >/dev/null
-CLAIM_SUMMARY_TSV="$(python3 "$REPO_ROOT/bridge-queue.py" summary --agent "$SMOKE_AGENT" --format tsv)"
-CLAIM_IDLE_SECONDS="$(printf '%s\n' "$CLAIM_SUMMARY_TSV" | awk -F'\t' 'NR==1 {print $6}')"
-[[ "$CLAIM_IDLE_SECONDS" =~ ^[0-9]+$ ]] || die "claim idle seconds was not numeric: $CLAIM_IDLE_SECONDS"
-(( CLAIM_IDLE_SECONDS < 10 )) || die "claim should refresh agent activity; idle=$CLAIM_IDLE_SECONDS"
+CLAIM_ACTIVITY_TS="$(SMOKE_AGENT="$SMOKE_AGENT" BRIDGE_TASK_DB="$BRIDGE_TASK_DB" python3 - <<'PY'
+import os
+import sqlite3
+
+db = os.environ["BRIDGE_TASK_DB"]
+agent = os.environ["SMOKE_AGENT"]
+with sqlite3.connect(db) as conn:
+    value = conn.execute(
+        "SELECT session_activity_ts FROM agent_state WHERE agent = ?",
+        (agent,),
+    ).fetchone()
+print(int(value[0] or 0))
+PY
+)"
+[[ "$CLAIM_ACTIVITY_TS" =~ ^[0-9]+$ ]] || die "claim activity ts was not numeric: $CLAIM_ACTIVITY_TS"
+(( CLAIM_ACTIVITY_TS >= CLAIM_BEFORE_TS )) || die "claim should refresh agent activity; activity_ts=$CLAIM_ACTIVITY_TS before=$CLAIM_BEFORE_TS"
 
 SMOKE_AGENT="$SMOKE_AGENT" BRIDGE_TASK_DB="$BRIDGE_TASK_DB" python3 - <<'PY'
 import os
