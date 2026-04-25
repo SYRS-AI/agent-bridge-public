@@ -4,6 +4,96 @@ All notable changes to Agent Bridge are documented here. This project adheres
 loosely to [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and tracks
 version bumps via the `VERSION` file.
 
+## [0.6.15] — 2026-04-25
+
+### Added
+- `agb agent forget-session <agent>` clears persisted `AGENT_SESSION_ID`
+  from all authoritative state files (active env, history env, optional
+  linux-user overlay) under a per-agent lock (issue #268, PR #280).
+  Idempotent: a second call exits with `already_forgotten` and no
+  rewrite. Concurrent callers serialize via `flock` (with `mkdir`
+  fallback for hosts without flock) so only one writer ever logs the
+  cleared audit row. `bridge-start.sh` and `bridge-run.sh` now warn on
+  `--no-continue` when a persisted id remains, and `agent show --json`
+  surfaces a `session_source` field naming which file the active id
+  came from. `--fresh --persist` one-shot recovery, tombstone for
+  forgotten ids, and tmux duplicate-session race hardening are
+  intentionally deferred to follow-up PRs per the spec round.
+- "External Tool Latency and User Visibility" section in
+  `docs/agent-runtime/common-instructions.md` (issue #271, PR #278).
+  Six directive bullets: pre-call announcement on slow external calls,
+  30s/2m/5m visibility tiers (status → escalation → assumed-failure),
+  no `sleep` loops or silent polling, explicit "this will take a
+  while" up-front for deliberate long jobs, user-reply-first as the
+  first action of any post-failure turn. Triggering incident: a
+  21-minute silent MCP wait that broke the user contract.
+
+### Fixed
+- Daemon main loop now wraps high-risk subprocess invocations in
+  `bridge_with_timeout` (issue #265 proposal A, PR #279) and the
+  same helper now wraps every `tmux send-keys` call site in
+  `lib/bridge-tmux.sh` (PR #281). The original 34h hang documented
+  in #265 was a `tmux send-keys` blocked on a closed Discord SSL
+  pipe; PR #279 capped the daemon python sites first, PR #281
+  closed the actual hang vector. Default 30s for daemon python
+  sites (`BRIDGE_DAEMON_SUBPROCESS_TIMEOUT_SECONDS`) and 10s for
+  tmux IPC (`BRIDGE_TMUX_SEND_TIMEOUT_SECONDS`). On 124/137 exit
+  the helper writes a `daemon_subprocess_timeout` audit row tagged
+  with the call-site label. Hosts without `timeout`/`gtimeout`
+  fall back to running unwrapped after a one-time
+  `daemon_subprocess_timeout_unavailable` warn.
+- Closed PR #239's 14-bullet bundle has been re-landed as eight
+  scope-isolated PRs after the original umbrella PR cycled through
+  CLAUDE.md's three-round limit. The split shipped in five waves
+  using the new wave-style operator pattern (parallel
+  `upstream-issue-fixer` dispatch + `codex:codex-rescue` review).
+  Bullet 6 (broken-launch state file from circuit breaker) was
+  already in #262; bullet 9 was a duplicate of bullet 1. The
+  remaining bullets landed as:
+  - PR #282 — smoke fixture hardening: fake `claude` binary in
+    isolated smoke PATH so init preflight does not depend on a real
+    Claude install, bootstrap smoke pinned to `--shell zsh
+    --skip-systemd`, daemon side-work reduced by default with
+    per-block re-enables, plugin liveness cooldown / watchdog
+    dedupe / admin manual-stop fixture stabilizations (PR #239
+    bullets 3 + 4 + 11 partial + 13 partial).
+  - PR #284 — `agent-bridge audit` reads `BRIDGE_AUDIT_LOG`
+    instead of hard-coding `$BRIDGE_HOME/logs/audit.jsonl`, and
+    auto-memory seeding is allowed when both `BRIDGE_HOME` and
+    the target settings path are ephemeral (bullets 1 + 2).
+  - PR #285 — Claude resume smoke fixtures explicit for realpath
+    and stale-session cases (no longer silently passing on a
+    missing-channel launch path), and `bridge_watchdog_problem_key`
+    strips volatile `heartbeat_age_seconds` from the dedupe hash
+    while keeping `heartbeat_present` and drift fields (bullets
+    10 + 14).
+  - PR #286 — upgrade dry-run restart analysis sources `bridge-lib.sh`
+    from `SOURCE_ROOT` instead of assuming the target `BRIDGE_HOME`
+    contains it; large upgrade JSON payloads route through a temp
+    file instead of process argv (avoiding Linux `Argument list
+    too long`); restart-analysis subshell scrubs caller-side
+    `BRIDGE_*` exports so `--target <fresh-temp-home> --dry-run`
+    reports the target's roster (`considered=0`), not the live
+    caller's (bullets 7 + 8 + r2 env isolation).
+  - PR #288 — `runtime/credentials` and `runtime/secrets` are
+    secured to `0700`/`0600` after canonical template overlay so
+    repo-managed credential templates do not inherit `0644` and
+    leak (bullet 12).
+  - PR #289 — `process_channel_health` and `process_usage_monitor`
+    in `bridge-daemon.sh` now honour
+    `BRIDGE_CHANNEL_HEALTH_ENABLED` / `BRIDGE_USAGE_MONITOR_ENABLED`
+    env gates so PR #282's smoke env exports are no longer silently
+    dead (bullet 11 daemon side).
+  - PR #290 — restored safe-mode launch helpers
+    (`bridge_build_safe_claude_launch_cmd`,
+    `bridge_safe_mode_resume_mode`, `bridge_build_safe_launch_cmd`)
+    so `bridge-run.sh --safe-mode` (already wired up) can build
+    minimal Claude launches without channel flags; smoke fixture
+    clears the admin manual-stop overlay before the admin crash
+    daemon-sync block so the upgrade-restart fixture's bulk
+    manual-stop does not silently disable admin alerting
+    (bullets 5 + 13).
+
 ## [0.6.14] — 2026-04-25
 
 ### Fixed
