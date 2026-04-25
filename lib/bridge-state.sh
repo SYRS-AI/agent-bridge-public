@@ -1070,6 +1070,82 @@ bridge_audit_log() {
   python3 "$BRIDGE_SCRIPT_DIR/bridge-audit.py" write --file "$BRIDGE_AUDIT_LOG" --actor "$actor" --action "$action" --target "$target" "$@" >/dev/null
 }
 
+# bridge_with_timeout — issue #265 proposal A.
+#
+# Wraps an external command with `timeout(1)` so a single hung subprocess in
+# the daemon main loop cannot block the scheduler indefinitely (the canonical
+# stack the issue describes is bash blocked at __wait4 on a tmux send-keys
+# child whose far end is a closed Discord SSL pipe). On 124/137 (timeout or
+# SIGKILL after timeout) the helper writes a `daemon_subprocess_timeout`
+# audit row tagged with the call-site label so the operator can see which
+# step actually hung; the exit code is propagated so existing `|| true` /
+# `|| return 1` handling at the call site keeps working.
+#
+# Usage:
+#   bridge_with_timeout <secs> <call_site_label> <cmd> [args...]
+#
+# - <secs> defaults to BRIDGE_DAEMON_SUBPROCESS_TIMEOUT_SECONDS (default 30s)
+#   when passed as empty string.
+# - <call_site_label> is the symbolic name used in the audit detail
+#   (e.g. "release_monitor", "stall_analyze").
+# - When neither `timeout` nor `gtimeout` is on PATH, the helper falls
+#   through to a plain exec so behavior on bare hosts matches today; a
+#   one-time `daemon_subprocess_timeout_unavailable` audit row is written
+#   the first time so the gap is visible without spamming the log.
+#
+# Caveat: only wrappable around *external* commands. Bash functions cannot be
+# wrapped with `timeout(1)` directly — those must be exposed through a
+# subshell + `bash -c` first, which is out of scope for this helper.
+_BRIDGE_WITH_TIMEOUT_BIN_CACHED=0
+_BRIDGE_WITH_TIMEOUT_BIN=""
+_BRIDGE_WITH_TIMEOUT_UNAVAILABLE_LOGGED=0
+
+bridge_with_timeout() {
+  local secs="${1:-}"
+  local label="${2:-unknown}"
+  shift 2 || true
+  local default_secs="${BRIDGE_DAEMON_SUBPROCESS_TIMEOUT_SECONDS:-30}"
+  local started_ts=0
+  local elapsed=0
+  local rc=0
+
+  [[ "$secs" =~ ^[0-9]+$ ]] || secs="$default_secs"
+  [[ "$secs" =~ ^[0-9]+$ ]] || secs=30
+
+  if (( _BRIDGE_WITH_TIMEOUT_BIN_CACHED == 0 )); then
+    _BRIDGE_WITH_TIMEOUT_BIN="$(command -v timeout 2>/dev/null || command -v gtimeout 2>/dev/null || true)"
+    _BRIDGE_WITH_TIMEOUT_BIN_CACHED=1
+  fi
+
+  started_ts="$(date +%s 2>/dev/null || echo 0)"
+
+  if [[ -z "$_BRIDGE_WITH_TIMEOUT_BIN" ]]; then
+    if (( _BRIDGE_WITH_TIMEOUT_UNAVAILABLE_LOGGED == 0 )); then
+      bridge_audit_log daemon daemon_subprocess_timeout_unavailable daemon \
+        --detail call_site="$label" \
+        --detail requested_seconds="$secs" \
+        --detail note="neither timeout nor gtimeout on PATH; running unwrapped" \
+        2>/dev/null || true
+      _BRIDGE_WITH_TIMEOUT_UNAVAILABLE_LOGGED=1
+    fi
+    "$@"
+    return $?
+  fi
+
+  "$_BRIDGE_WITH_TIMEOUT_BIN" "$secs" "$@"
+  rc=$?
+  if [[ "$rc" == "124" || "$rc" == "137" ]]; then
+    elapsed=$(( $(date +%s 2>/dev/null || echo "$started_ts") - started_ts ))
+    bridge_audit_log daemon daemon_subprocess_timeout daemon \
+      --detail call_site="$label" \
+      --detail timeout_seconds="$secs" \
+      --detail elapsed_seconds="$elapsed" \
+      --detail exit_code="$rc" \
+      2>/dev/null || true
+  fi
+  return "$rc"
+}
+
 bridge_mcp_orphan_cleanup_state_dir() {
   printf '%s/mcp-orphan-cleanup' "$BRIDGE_STATE_DIR"
 }
