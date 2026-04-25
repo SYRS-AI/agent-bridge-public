@@ -54,11 +54,17 @@ bridge_suggest_subcommand() {
     "cron list --failed"|"cron failed"|"cron failures"|"cron errors"|"cron error")
       suggestions="agent-bridge cron errors report"
       ;;
+    "cron history"|"cron log"|"cron logs"|"cron audit"|"cron runs")
+      suggestions="agent-bridge cron errors report  |  agent-bridge cron show <job>"
+      ;;
     "queue status"|"queue stats"|"task stats")
       suggestions="agent-bridge summary  |  agent-bridge status"
       ;;
     ps|processes|agents)
       suggestions="agent-bridge list  |  agent-bridge status"
+      ;;
+    help)
+      suggestions="agent-bridge --help"
       ;;
   esac
 

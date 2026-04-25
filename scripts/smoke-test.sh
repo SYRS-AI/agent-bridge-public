@@ -287,6 +287,14 @@ run_suggest_case "task stats -> summary (task dispatcher intent)" \
   "task stats" "" "agent-bridge summary"
 run_suggest_case "diagnose -> status/watchdog (top-level intent)" \
   "diagnose" "" "agent-bridge status"
+# Issue #283 Track C: cron history / logs / audit / runs all redirect to
+# cron errors report (the actual answer); plain `help` redirects to --help.
+run_suggest_case "cron history -> cron errors report (#283 Track C)" \
+  "cron history" "" "agent-bridge cron errors report"
+run_suggest_case "cron logs -> cron errors report (#283 Track C)" \
+  "cron logs" "" "agent-bridge cron errors report"
+run_suggest_case "help -> --help (#283 Track C)" \
+  "help" "" "agent-bridge --help"
 
 run_dispatch_suggest_case() {
   local label="$1"
