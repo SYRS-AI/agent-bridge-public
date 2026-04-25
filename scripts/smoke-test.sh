@@ -6701,7 +6701,9 @@ PLUGIN_WATCH_OUTPUT="$("$BASH4_BIN" -lc '
   } >"$tmp_daemon"
   source "$tmp_daemon"
   bridge_agent_channel_status() { printf "ok"; }
-  bridge_agent_missing_plugin_mcp_channels_csv() { printf "plugin:telegram@claude-plugins-official"; }
+  bridge_agent_missing_plugin_mcp_channels_csv() {
+    [[ "$1" == "'"$PLUGIN_WATCH_AGENT"'" ]] && printf "plugin:telegram@claude-plugins-official"
+  }
   bridge_tmux_session_attached_count() { printf "0\n"; }
   BRIDGE_SKIP_PLUGIN_LIVENESS=0
   BRIDGE_PLUGIN_LIVENESS_RESTART_COOLDOWN_SECONDS=60
@@ -6739,7 +6741,9 @@ PLUGIN_WATCH_FAIL_OUTPUT="$("$BASH4_BIN" -lc '
   } >"$tmp_daemon"
   source "$tmp_daemon"
   bridge_agent_channel_status() { printf "ok"; }
-  bridge_agent_missing_plugin_mcp_channels_csv() { printf "plugin:telegram@claude-plugins-official"; }
+  bridge_agent_missing_plugin_mcp_channels_csv() {
+    [[ "$1" == "'"$PLUGIN_WATCH_AGENT"'" ]] && printf "plugin:telegram@claude-plugins-official"
+  }
   bridge_tmux_session_attached_count() { printf "0\n"; }
   rm -f "$(bridge_plugin_liveness_state_file "'"$PLUGIN_WATCH_AGENT"'")"
   BRIDGE_SKIP_PLUGIN_LIVENESS=0
