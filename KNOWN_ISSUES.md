@@ -182,3 +182,22 @@ Operator guidance:
 - After a `launchd`/`systemd` respawn cascade, look first at `logs/audit.jsonl` filtered to `actor=daemon` — every exit pairs `daemon_exit` with the prior `daemon_tick` (showing which loop step was active before the silence), `daemon_subprocess_timeout` (showing which call_site hung), or `daemon_silence_*` (showing supervisor-initiated restarts).
 - `state/launchagent.log` keeps the same line in plain text for hosts where the audit log is unreadable.
 - The original v0.4.2 → v0.6.0 specific hypotheses in #194 (post-upgrade python helper missing, plugin MCP liveness restart against gone session, librarian cron cascade) refer to code paths that no longer exist in their #194-era form; the chain of fixes above either removed them or made them externally observable. Treat #194 as historical — if a similar respawn cascade reappears on a current install, file a fresh issue with the `daemon_exit` audit excerpt rather than reopening #194.
+## 12. Disposable cron child cold-start latency
+
+Current behavior:
+
+- Each native cron fire spawns a fresh `claude -p --no-session-persistence ...` child via `bridge-cron-runner.py`. That child cold-loads the Claude CLI binary, every MCP server wired into the agent's plugin set, and a new session bootstrap.
+- On warm hosts this adds several seconds per fire; on memory-pressured hosts (e.g. 8 GB Mac mini) it can push the child past `BRIDGE_CRON_SUBAGENT_TIMEOUT_SECONDS` before user code runs (issue #263).
+- Most polling/reminder crons (`event-reminder-30min`, `cs-line-poll-5m`, etc.) never call MCP tools, so the MCP cold-load is pure waste.
+
+Mitigation (applied from #263):
+
+- Per-job opt-in: set `metadata.disableMcp` (or `disable_mcp` / `disposableDisableMcp` / `disposable_disable_mcp`) on a cron job to launch its disposable child with `--strict-mcp-config` and no `--mcp-config`, which loads zero MCP servers. Local benchmark on a warm host: claude `-p` cold start dropped from ~5–10 s real / ~2.9 s user to ~3.2–3.7 s real / ~0.6 s user (~78% CPU saved per fire).
+- Ops A/B switch: `BRIDGE_CRON_DISPOSABLE_DISABLE_MCP=1` in the runtime env forces every cron child to skip MCP regardless of per-job config; `=0` forces it on. Unset defers to per-job metadata. Use this to roll the change install-wide before annotating individual jobs.
+- Safety override: jobs with `metadata.disposableNeedsChannels=true` (channel-relay flow) keep MCP enabled even when the flag asks otherwise — the relay path still needs channel MCP servers to deliver.
+
+Operator guidance:
+
+- Tag every `*/N`-minute polling cron whose body is "fetch + summarise" with `metadata.disableMcp=true`. Reminder/scheduler families are the highest-leverage targets.
+- Leave the flag unset for any cron whose payload calls MCP tools (e.g. plugin-driven research, workspace MCP queries).
+- This addresses MCP cold-load only. The CLI binary load and session bootstrap remain per-fire; warm-pool / runtime-substitution work tracked in #263 follow-ups.

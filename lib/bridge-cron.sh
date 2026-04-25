@@ -671,16 +671,17 @@ bridge_cron_write_request() {
   local allow_channel_delivery="${27:-0}"
   local routing_mode="${28:-}"
   local disposable_needs_channels="${29:-0}"
+  local disable_mcp="${30:-0}"
 
   mkdir -p "$(dirname "$request_file")"
 
   bridge_require_python
-  python3 - "$request_file" "$run_id" "$job_id" "$job_name" "$family" "$source_agent" "$target" "$slot" "$task_id" "$created_at" "$body_file" "$payload_file" "$result_file" "$status_file" "$stdout_log" "$stderr_log" "$source_file" "$payload_kind" "$target_engine" "$target_workdir" "$target_channels" "$target_discord_state_dir" "$target_telegram_state_dir" "$job_delivery_mode" "$job_delivery_channel" "$job_delivery_target" "$allow_channel_delivery" "$routing_mode" "$disposable_needs_channels" <<'PY'
+  python3 - "$request_file" "$run_id" "$job_id" "$job_name" "$family" "$source_agent" "$target" "$slot" "$task_id" "$created_at" "$body_file" "$payload_file" "$result_file" "$status_file" "$stdout_log" "$stderr_log" "$source_file" "$payload_kind" "$target_engine" "$target_workdir" "$target_channels" "$target_discord_state_dir" "$target_telegram_state_dir" "$job_delivery_mode" "$job_delivery_channel" "$job_delivery_target" "$allow_channel_delivery" "$routing_mode" "$disposable_needs_channels" "$disable_mcp" <<'PY'
 import json
 import sys
 from pathlib import Path
 
-(request_file, run_id, job_id, job_name, family, source_agent, target, slot, task_id, created_at, body_file, payload_file, result_file, status_file, stdout_log, stderr_log, source_file, payload_kind, target_engine, target_workdir, target_channels, target_discord_state_dir, target_telegram_state_dir, job_delivery_mode, job_delivery_channel, job_delivery_target, allow_channel_delivery, routing_mode, disposable_needs_channels) = sys.argv[1:]
+(request_file, run_id, job_id, job_name, family, source_agent, target, slot, task_id, created_at, body_file, payload_file, result_file, status_file, stdout_log, stderr_log, source_file, payload_kind, target_engine, target_workdir, target_channels, target_discord_state_dir, target_telegram_state_dir, job_delivery_mode, job_delivery_channel, job_delivery_target, allow_channel_delivery, routing_mode, disposable_needs_channels, disable_mcp) = sys.argv[1:]
 
 payload = {
     "run_id": run_id,
@@ -700,6 +701,7 @@ payload = {
     "job_delivery_target": job_delivery_target,
     "allow_channel_delivery": allow_channel_delivery == "1",
     "disposable_needs_channels": disposable_needs_channels == "1",
+    "disable_mcp": disable_mcp == "1",
     "slot": slot,
     "dispatch_task_id": int(task_id),
     "created_at": created_at,

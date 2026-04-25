@@ -384,6 +384,7 @@ run_enqueue() {
   local job_delivery_target=""
   local allow_channel_delivery="0"
   local disposable_needs_channels="0"
+  local disable_mcp="0"
   local target_channels=""
   local target_discord_state_dir=""
   local target_telegram_state_dir=""
@@ -498,6 +499,7 @@ run_enqueue() {
   job_delivery_target="${CRON_JOB_JOB_DELIVERY_TARGET:-}"
   allow_channel_delivery="${CRON_JOB_ALLOW_CHANNEL_DELIVERY:-0}"
   disposable_needs_channels="${CRON_JOB_DISPOSABLE_NEEDS_CHANNELS:-0}"
+  disable_mcp="${CRON_JOB_DISABLE_MCP:-0}"
   request_rel="${request_file#$BRIDGE_HOME/}"
   result_rel="${result_file#$BRIDGE_HOME/}"
   status_rel="${status_file#$BRIDGE_HOME/}"
@@ -569,7 +571,7 @@ except Exception:
   # task_id=0 is a sentinel placeholder; real queue id is patched in below
   # via bridge_cron_update_*_task_id once the queue record exists.
   created_at="$(bridge_now_iso)"
-  bridge_cron_write_request "$request_file" "$run_id" "$CRON_JOB_ID" "$CRON_JOB_NAME" "$CRON_JOB_FAMILY" "$CRON_JOB_AGENT" "$target" "$slot" "0" "$created_at" "$body_file" "$payload_file" "$result_file" "$status_file" "$stdout_log" "$stderr_log" "$jobs_file" "$CRON_JOB_PAYLOAD_KIND" "$target_engine" "$target_workdir" "$target_channels" "$target_discord_state_dir" "$target_telegram_state_dir" "$job_delivery_mode" "$job_delivery_channel" "$job_delivery_target" "$allow_channel_delivery" "$delivery_mode" "$disposable_needs_channels"
+  bridge_cron_write_request "$request_file" "$run_id" "$CRON_JOB_ID" "$CRON_JOB_NAME" "$CRON_JOB_FAMILY" "$CRON_JOB_AGENT" "$target" "$slot" "0" "$created_at" "$body_file" "$payload_file" "$result_file" "$status_file" "$stdout_log" "$stderr_log" "$jobs_file" "$CRON_JOB_PAYLOAD_KIND" "$target_engine" "$target_workdir" "$target_channels" "$target_discord_state_dir" "$target_telegram_state_dir" "$job_delivery_mode" "$job_delivery_channel" "$job_delivery_target" "$allow_channel_delivery" "$delivery_mode" "$disposable_needs_channels" "$disable_mcp"
   bridge_cron_write_status "$status_file" "$run_id" "queued" "$target_engine" "$request_file" "$result_file" "$created_at"
   bridge_cron_write_manifest "$manifest_file" "$CRON_JOB_ID" "$CRON_JOB_NAME" "$CRON_JOB_FAMILY" "$CRON_JOB_AGENT" "$target" "$slot" "0" "$created_at" "$body_file" "$jobs_file" "$run_id" "$request_file" "$payload_file" "$result_file" "$status_file" "$stdout_log" "$stderr_log" "$job_delivery_mode" "$job_delivery_channel" "$job_delivery_target" "$allow_channel_delivery" "$delivery_mode" "$disposable_needs_channels"
   # Per-run ACL grant is best-effort under v1.3 (#219): the memory-daily

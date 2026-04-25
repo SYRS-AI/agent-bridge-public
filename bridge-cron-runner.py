@@ -179,6 +179,27 @@ def disposable_needs_channels(request: dict[str, Any]) -> bool:
     return bool_flag(request.get("disposable_needs_channels"))
 
 
+def disable_mcp_for_request(request: dict[str, Any]) -> bool:
+    """#263: decide whether the disposable child should launch with MCP disabled.
+
+    Order of precedence:
+      1. ``BRIDGE_CRON_DISPOSABLE_DISABLE_MCP`` env override (ops A/B switch).
+         Set to ``1``/``true`` to force-disable MCP for every cron child;
+         ``0``/``false`` to force-enable. Unset to defer to per-job config.
+      2. ``request['disable_mcp']`` from the job's ``metadata.disableMcp``
+         (or aliases) wired through ``bridge_cron_write_request``.
+      3. ``request['disposable_needs_channels']`` — channel relays need MCP
+         servers loaded to deliver, so we never disable in that case even if
+         the per-job flag says so. This is a safety override.
+    """
+    if disposable_needs_channels(request):
+        return False
+    override = os.environ.get("BRIDGE_CRON_DISPOSABLE_DISABLE_MCP")
+    if override is not None and override.strip():
+        return bool_flag(override)
+    return bool_flag(request.get("disable_mcp"))
+
+
 def build_prompt(request: dict[str, Any], payload_text: str) -> str:
     allow_channel_delivery = bool_flag(request.get("allow_channel_delivery"))
     child_channels_enabled = disposable_needs_channels(request)
@@ -377,6 +398,11 @@ def run_claude(request: dict[str, Any], prompt: str, timeout: int, request_file:
     ]
     if channels and disposable_needs_channels(request):
         command[2:2] = ["--channels", ",".join(channels)]
+    # #263: when MCP is opt-disabled, pass --strict-mcp-config without any
+    # --mcp-config so the child loads zero MCP servers. Cuts cold-start cost
+    # for cron payloads that do not use MCP tools (the common case).
+    if disable_mcp_for_request(request):
+        command[2:2] = ["--strict-mcp-config"]
     env = apply_channel_runtime_env(request, runner_env())
     if request_file is not None:
         env["CRON_REQUEST_DIR"] = str(request_file.parent)
