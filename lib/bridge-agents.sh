@@ -3359,12 +3359,21 @@ bridge_list_active_agents_numbered() {
       session_id="-"
     fi
 
+    # Issue #305 Track C: flag stale registrations whose workdir no longer
+    # exists on disk so a leaked smoke fixture or deleted-repo agent is
+    # visible in `agent-bridge list` without inspecting the roster file.
+    local _workdir
+    _workdir="$(bridge_agent_workdir "$agent")"
+    if [[ -n "$_workdir" && ! -d "$_workdir" ]]; then
+      _workdir="$_workdir [missing]"
+    fi
+
     printf '%d. %s | engine=%s | tmux=%s | cwd=%s | source=%s | loop=%s | inbox=%s | claimed=%s | session_id=%s\n' \
       "$index" \
       "$agent" \
       "$(bridge_agent_engine "$agent")" \
       "$(bridge_agent_session "$agent")" \
-      "$(bridge_agent_workdir "$agent")" \
+      "$_workdir" \
       "$(bridge_agent_source "$agent")" \
       "$(bridge_agent_loop "$agent")" \
       "${queue_counts[$agent]-0}" \

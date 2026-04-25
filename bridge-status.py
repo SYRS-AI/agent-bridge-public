@@ -77,6 +77,19 @@ def short_path(path: str) -> str:
     return expanded
 
 
+def workdir_display(path: str) -> str:
+    # Issue #305 Track C: surface a missing workdir at the dashboard layer so a
+    # leaked smoke-fixture roster block (or any deleted/renamed/expired
+    # registration) is visible without opening agent-roster.local.sh manually.
+    short = short_path(path)
+    if not path or short == "-":
+        return short
+    expanded = str(Path(path).expanduser())
+    if not Path(expanded).is_dir():
+        return f"{short}  [missing]"
+    return short
+
+
 def read_roster(path: str) -> list[dict[str, str]]:
     rows: list[dict[str, str]] = []
     with open(path, "r", encoding="utf-8") as handle:
@@ -351,7 +364,7 @@ def render_dashboard(args: argparse.Namespace) -> str:
             f"{channel_state:>4} "
             f"{fmt_age(int(last_nudge_ts) if last_nudge_ts else None):>5}  "
             f"{load_bar:<12}  "
-            f"{(row.get('session') or '-')[:12]:<12}  {short_path(row.get('workdir', ''))}"
+            f"{(row.get('session') or '-')[:12]:<12}  {workdir_display(row.get('workdir', ''))}"
         )
 
     if channel_warning_rows:
