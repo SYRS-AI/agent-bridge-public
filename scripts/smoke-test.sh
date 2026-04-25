@@ -4192,7 +4192,7 @@ with urllib.request.urlopen(f"http://127.0.0.1:{port}/health", timeout=1) as res
 if payload.get("ok") is not True or payload.get("channel") != "teams":
     raise SystemExit("Teams health payload mismatch")
 PY
-  assert_contains "$(cat "$TEAMS_PLUGIN_LOG")" "http://0.0.0.0:$TEAMS_SMOKE_PORT/api/messages"
+  assert_contains "$(cat "$TEAMS_PLUGIN_LOG")" "teams channel: listening on http://0.0.0.0:$TEAMS_SMOKE_PORT (/api/messages, /auth/callback)"
   TEAMS_PLUGIN_CONFLICT_LOG="$TMP_ROOT/teams-plugin-conflict.log"
   (
     cd "$REPO_ROOT/plugins/teams"
