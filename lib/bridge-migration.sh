@@ -232,7 +232,7 @@ bridge_migration_isolate() {
 bridge_migration_unisolate() {
   local agent="$1"
   local dry_run="$2"
-  local current_mode os_user workdir controller_user runtime_state_dir log_dir
+  local current_mode os_user workdir controller_user runtime_state_dir log_dir user_home
 
   bridge_migration_require_linux
   bridge_require_agent "$agent"
@@ -253,6 +253,7 @@ bridge_migration_unisolate() {
 
   workdir="$(bridge_agent_workdir "$agent")"
   controller_user="$(bridge_current_user)"
+  user_home="$(bridge_migration_user_home "$os_user" 2>/dev/null || true)"
 
   printf '[plan] unisolate %s -> shared mode\n' "$agent"
   printf '       reverting ownership from os_user=%s back to controller=%s\n' "$os_user" "$controller_user"
@@ -338,11 +339,16 @@ bridge_migration_unisolate() {
 
   # Strip plugin-share ACLs granted by bridge_linux_share_plugin_catalog.
   # Mirrors the catalog file list and per-channel install path grants, plus
-  # the traverse chain that reached up to controller_home. The isolated
-  # UID's plugins/ directory itself lives under user_home (already torn
-  # down by the workdir/state ownership reset above when applicable);
-  # what we need to strip is the u:<os_user> ACL entries we left on
-  # controller-side surfaces.
+  # the traverse chain that reached up to controller_home.
+  #
+  # Channel set source-of-truth: the persisted grant-set state file
+  # written by bridge_isolated_plugin_grants_write. Reading from the
+  # live roster is unsafe here because by the time unisolate runs the
+  # operator may have already edited BRIDGE_AGENT_CHANNELS to drop
+  # channels, and we still need to revoke the ACLs they earned.
+  # Falls back to the live roster only when the state file is missing
+  # (older agents that pre-date the grant-set persistence). (Blocking 1
+  # in PR #302 r1.)
   local controller_home_for_plugins=""
   controller_home_for_plugins="$(getent passwd "$controller_user" 2>/dev/null | cut -d: -f6 || true)"
   if [[ -n "$controller_home_for_plugins" && -d "$controller_home_for_plugins/.claude/plugins" ]]; then
@@ -360,7 +366,14 @@ bridge_migration_unisolate() {
     done
 
     local plugin_channels_csv=""
-    plugin_channels_csv="$(bridge_agent_channels_csv "$agent" 2>/dev/null || true)"
+    plugin_channels_csv="$(bridge_isolated_plugin_grants_read "$agent" 2>/dev/null || true)"
+    if [[ -z "$plugin_channels_csv" ]]; then
+      # No persisted state file (older isolate, or it was hand-removed).
+      # Fall back to the live roster's channels — better than skipping
+      # the strip entirely, even if it misses channels the operator has
+      # since dropped.
+      plugin_channels_csv="$(bridge_agent_channels_csv "$agent" 2>/dev/null || true)"
+    fi
     if [[ -n "$plugin_channels_csv" ]]; then
       local _plugin_channels=()
       local _plugin_channel=""
@@ -379,6 +392,24 @@ bridge_migration_unisolate() {
         fi
       done
     fi
+  fi
+
+  # Tear down the isolated-side artifacts (catalog symlinks, per-UID
+  # installed_plugins.json, plugins/ root if empty) that
+  # bridge_linux_share_plugin_catalog created under
+  # $user_home/.claude/plugins/. plugins/data/ is preserved on purpose.
+  # (Blocking 4 in PR #302 r1.)
+  if [[ -n "$user_home" ]]; then
+    bridge_linux_unshare_plugin_catalog "$os_user" "$user_home" "$dry_run"
+  fi
+
+  # Drop the persisted grant set last so that, on dry-run, the file
+  # survives for inspection; on a real run, by this point both the
+  # controller-side and isolated-side strips have completed.
+  if [[ "$dry_run" != "1" ]]; then
+    bridge_isolated_plugin_grants_remove "$agent"
+  else
+    bridge_migration_print_step "$dry_run" "rm $(bridge_isolated_plugin_grants_state_file "$agent") (persisted grant-set)"
   fi
 
   # Backward-compat: prior versions broadly granted u:<os_user>:r-X on the
