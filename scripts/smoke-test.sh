@@ -4736,10 +4736,25 @@ CIRCUIT_BREAKER_OUTPUT="$(
 )"
 assert_contains "$CIRCUIT_BREAKER_OUTPUT" "Circuit breaker opened."
 assert_contains "$CIRCUIT_BREAKER_OUTPUT" "agent-bridge agent safe-mode $CIRCUIT_AGENT"
+assert_contains "$CIRCUIT_BREAKER_OUTPUT" "broken launch smoke error"
 CIRCUIT_BROKEN_LAUNCH_FILE="$BRIDGE_STATE_DIR/agents/$CIRCUIT_AGENT/broken-launch"
 [[ -f "$CIRCUIT_BROKEN_LAUNCH_FILE" ]] || die "expected broken-launch state file for $CIRCUIT_AGENT"
-assert_contains "$(cat "$CIRCUIT_BROKEN_LAUNCH_FILE")" "broken launch smoke error"
-assert_contains "$(cat "$CIRCUIT_BROKEN_LAUNCH_FILE")" "agent-bridge agent safe-mode $CIRCUIT_AGENT"
+python3 - "$CIRCUIT_BROKEN_LAUNCH_FILE" "$CIRCUIT_AGENT" <<'PY'
+import json
+import sys
+
+path, agent = sys.argv[1:]
+with open(path, encoding="utf-8") as fh:
+    payload = json.load(fh)
+assert payload["agent"] == agent, payload
+assert payload["engine"] == "claude", payload
+assert payload["fail_count"] == 3, payload
+assert payload["exit_code"] == 1, payload
+assert payload["stderr_file"], payload
+assert payload["launch_cmd"], payload
+assert isinstance(payload.get("err_size_before"), int), payload
+assert payload["quarantined_at"], payload
+PY
 CIRCUIT_SHOW_JSON="$("$REPO_ROOT/agent-bridge" agent show "$CIRCUIT_AGENT" --json)"
 python3 - "$CIRCUIT_SHOW_JSON" "$CIRCUIT_BROKEN_LAUNCH_FILE" <<'PY'
 import json
