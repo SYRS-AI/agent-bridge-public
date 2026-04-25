@@ -296,6 +296,14 @@ run_suggest_case "cron logs -> cron errors report (#283 Track C)" \
 run_suggest_case "help -> --help (#283 Track C)" \
   "help" "" "agent-bridge --help"
 
+# Issue #283 Track D: bare agent-bridge / agb prints help instead of erroring.
+log "agent-bridge bare invocation prints help summary (#283 Track D)"
+BARE_HELP_OUT="$(env BRIDGE_HOME="$(mktemp -d)" "$BASH4_BIN" "$REPO_ROOT/agent-bridge" 2>&1 || true)"
+assert_contains "$BARE_HELP_OUT" "Usage:"
+assert_contains "$BARE_HELP_OUT" "agent-bridge status"
+[[ "$BARE_HELP_OUT" != *"--codex 또는 --claude 중 하나를 지정하세요"* ]] \
+  || die "bare agent-bridge should not error with engine-required message"
+
 run_dispatch_suggest_case() {
   local label="$1"
   local expected_substring="$2"
