@@ -1250,6 +1250,308 @@ bridge_write_dynamic_agent_file() {
   bridge_write_agent_state_file "$agent" "$file"
 }
 
+# bridge_agent_session_lock_file — per-agent lock that serialises mutations of
+# the persisted AGENT_SESSION_ID across the dynamic-agent env, the static
+# history env, and (when present) the linux-user-scoped agent-env.sh overlay.
+# Lives under BRIDGE_ACTIVE_AGENT_DIR/<agent>/ alongside the other per-agent
+# runtime markers; created lazily by callers that need to take it.
+bridge_agent_session_lock_file() {
+  local agent="$1"
+  printf '%s/session.lock' "$(bridge_agent_runtime_state_dir "$agent")"
+}
+
+# bridge_agent_session_id_file_paths — emit the absolute paths of every
+# authoritative state file that records AGENT_SESSION_ID for <agent>, one per
+# line. Only paths that currently exist on disk are returned. Static agents
+# normally have only the history file; a dynamic agent additionally has the
+# active state file. The linux-user agent-env.sh overlay is included when
+# present so isolated UIDs do not reload a stale id from their per-agent
+# snapshot. Used by `agent forget-session` and `agent show --json`
+# (session_source).
+bridge_agent_session_id_file_paths() {
+  local agent="$1"
+  local history_file=""
+  local active_file=""
+  local overlay_file=""
+
+  history_file="$(bridge_history_file_for_agent "$agent" 2>/dev/null || true)"
+  if [[ -n "$history_file" && -f "$history_file" ]]; then
+    printf '%s\n' "$history_file"
+  fi
+  active_file="$(bridge_dynamic_agent_file_for "$agent" 2>/dev/null || true)"
+  if [[ -n "$active_file" && -f "$active_file" ]]; then
+    printf '%s\n' "$active_file"
+  fi
+  if declare -f bridge_agent_linux_env_file >/dev/null 2>&1; then
+    overlay_file="$(bridge_agent_linux_env_file "$agent" 2>/dev/null || true)"
+    if [[ -n "$overlay_file" && -f "$overlay_file" ]]; then
+      printf '%s\n' "$overlay_file"
+    fi
+  fi
+}
+
+# bridge_agent_persisted_session_id — read the persisted AGENT_SESSION_ID for
+# <agent> directly from the authoritative state files, without trusting the
+# in-memory BRIDGE_AGENT_SESSION_ID map (which is filtered by
+# bridge_claude_session_id_exists during load and would hide a stale-but-
+# present id from the operator's view). Returns the first non-empty value
+# found, in source-of-truth precedence: history, then active, then overlay.
+bridge_agent_persisted_session_id() {
+  local agent="$1"
+  local file=""
+  local AGENT_SESSION_ID=""
+
+  while IFS= read -r file; do
+    [[ -n "$file" ]] || continue
+    AGENT_SESSION_ID=""
+    # The overlay is a roster snapshot that sets values via associative-array
+    # assignment, not flat AGENT_SESSION_ID=... keys, so a plain `source`
+    # would not populate the local. Grep the literal active-id assignment
+    # used by bridge_write_linux_agent_env_file before falling back to the
+    # env-style files.
+    if [[ "$file" == *"/agent-env.sh" ]]; then
+      AGENT_SESSION_ID="$(
+        awk -v agent="$agent" '
+          $0 ~ "BRIDGE_AGENT_SESSION_ID\\[\"" agent "\"\\]=" {
+            sub(/.*\]=/, "")
+            gsub(/^[\047"]|[\047"]$/, "")
+            print
+            exit
+          }
+        ' "$file" 2>/dev/null || true
+      )"
+    else
+      # shellcheck source=/dev/null
+      source "$file" 2>/dev/null || true
+    fi
+    if [[ -n "$AGENT_SESSION_ID" ]]; then
+      printf '%s' "$AGENT_SESSION_ID"
+      return 0
+    fi
+  done < <(bridge_agent_session_id_file_paths "$agent")
+  printf ''
+}
+
+# bridge_agent_session_source_path — return the absolute path of the file
+# whose AGENT_SESSION_ID is currently the live id. Empty when no persisted
+# id exists. This is the field exposed by `agent show --json` so an operator
+# can see which file `forget-session` would rewrite.
+bridge_agent_session_source_path() {
+  local agent="$1"
+  local file=""
+  local AGENT_SESSION_ID=""
+
+  while IFS= read -r file; do
+    [[ -n "$file" ]] || continue
+    AGENT_SESSION_ID=""
+    if [[ "$file" == *"/agent-env.sh" ]]; then
+      AGENT_SESSION_ID="$(
+        awk -v agent="$agent" '
+          $0 ~ "BRIDGE_AGENT_SESSION_ID\\[\"" agent "\"\\]=" {
+            sub(/.*\]=/, "")
+            gsub(/^[\047"]|[\047"]$/, "")
+            print
+            exit
+          }
+        ' "$file" 2>/dev/null || true
+      )"
+    else
+      # shellcheck source=/dev/null
+      source "$file" 2>/dev/null || true
+    fi
+    if [[ -n "$AGENT_SESSION_ID" ]]; then
+      printf '%s' "$file"
+      return 0
+    fi
+  done < <(bridge_agent_session_id_file_paths "$agent")
+  printf ''
+}
+
+# _bridge_rewrite_session_id_in_file — atomically clear AGENT_SESSION_ID in
+# <file>. Honours the file's existing mode by chmod'ing the new inode after
+# the rename, so 0600 overlay snapshots stay 0600. Returns 0 if the file was
+# rewritten, 1 if no rewrite was needed, 2 on hard failure.
+_bridge_rewrite_session_id_in_file() {
+  local agent="$1"
+  local file="$2"
+  local tmp=""
+  local mode=""
+
+  [[ -n "$file" && -f "$file" ]] || return 1
+
+  # `stat` flag differs between BSD (macOS) and GNU; fall back to a portable
+  # python probe so the helper works on both supported platforms.
+  if mode="$(stat -f '%Lp' "$file" 2>/dev/null)"; then
+    :
+  elif mode="$(stat -c '%a' "$file" 2>/dev/null)"; then
+    :
+  else
+    mode="$(python3 - "$file" <<'PY' 2>/dev/null || true
+import os
+import sys
+print(format(os.stat(sys.argv[1]).st_mode & 0o7777, 'o'))
+PY
+)"
+  fi
+
+  tmp="$(mktemp "${file}.XXXXXX")" || return 2
+  if [[ "$file" == *"/agent-env.sh" ]]; then
+    # Roster snapshot: rewrite the associative-array assignment inline so the
+    # rest of the file (paths, channels, isolation flags) survives untouched.
+    # awk is preferred over sed here so the agent literal can be passed
+    # without escaping concerns.
+    if ! awk -v agent="$agent" '
+      $0 ~ "^BRIDGE_AGENT_SESSION_ID\\[\"" agent "\"\\]=" {
+        printf "BRIDGE_AGENT_SESSION_ID[\"%s\"]=\"\"\n", agent
+        next
+      }
+      { print }
+    ' "$file" >"$tmp"; then
+      rm -f "$tmp"
+      return 2
+    fi
+  else
+    # Plain env file (active or history): only touch the AGENT_SESSION_ID
+    # line. Other keys (engine, workdir, history_key, timestamps) must
+    # round-trip so the next `bridge_load_roster` keeps the agent intact.
+    if ! awk '
+      /^AGENT_SESSION_ID=/ {
+        print "AGENT_SESSION_ID=\047\047"
+        next
+      }
+      { print }
+    ' "$file" >"$tmp"; then
+      rm -f "$tmp"
+      return 2
+    fi
+  fi
+
+  if [[ -n "$mode" ]]; then
+    chmod "$mode" "$tmp" 2>/dev/null || true
+  fi
+  if ! mv -f "$tmp" "$file"; then
+    rm -f "$tmp"
+    return 2
+  fi
+  return 0
+}
+
+# _bridge_clear_session_id_critical — the read-modify-write that must be
+# serialised by the per-agent session lock. Re-reads the prior id from disk
+# inside the locked block (so a concurrent caller that beat us to the write
+# observes an empty id and reports `changed=no`), rewrites every file that
+# still carries it, and prints a single line to fd 1 of the form
+# `prior_id_hash=<sha256-prefix> changed=<yes|no> cleared_files=<csv>` for
+# the caller to feed straight into the audit log.
+_bridge_clear_session_id_critical() {
+  local agent="$1"
+  local file=""
+  local -a cleared=()
+  local prior_id=""
+  local prior_id_hash=""
+  local changed="no"
+  local rc=0
+
+  prior_id="$(bridge_agent_persisted_session_id "$agent")"
+  if [[ -n "$prior_id" ]]; then
+    prior_id_hash="$(
+      python3 - "$prior_id" <<'PY' 2>/dev/null || true
+import hashlib
+import sys
+
+print(hashlib.sha256(sys.argv[1].encode("utf-8")).hexdigest())
+PY
+    )"
+    prior_id_hash="${prior_id_hash:0:12}"
+    while IFS= read -r file; do
+      [[ -n "$file" ]] || continue
+      if _bridge_rewrite_session_id_in_file "$agent" "$file"; then
+        cleared+=("$file")
+      else
+        rc=$?
+        if (( rc == 2 )); then
+          bridge_warn "failed to rewrite '$file' while clearing session id for '$agent'"
+        fi
+      fi
+    done < <(bridge_agent_session_id_file_paths "$agent")
+    if (( ${#cleared[@]} > 0 )); then
+      changed="yes"
+    fi
+  fi
+
+  local csv=""
+  local item=""
+  for item in "${cleared[@]}"; do
+    if [[ -z "$csv" ]]; then
+      csv="$item"
+    else
+      csv+=",${item}"
+    fi
+  done
+  printf 'prior_id_hash=%s changed=%s cleared_files=%s\n' \
+    "$prior_id_hash" "$changed" "$csv"
+}
+
+# bridge_clear_persisted_session_id — clear AGENT_SESSION_ID across every
+# authoritative state file for <agent>. Acquires a per-agent lock under
+# state/agents/<agent>/session.lock so concurrent callers serialise on the
+# read-modify-write; only the holder that finds a non-empty prior id
+# reports `changed=yes`. Emits one line on stdout:
+#   prior_id_hash=<sha256-prefix> changed=<yes|no> cleared_files=<csv>
+# Returns 0 always; per-file failures are logged via bridge_warn.
+bridge_clear_persisted_session_id() {
+  local agent="$1"
+  local lock_file=""
+  local lock_dir=""
+  local result_file=""
+
+  lock_file="$(bridge_agent_session_lock_file "$agent")"
+  lock_dir="$(dirname "$lock_file")"
+  mkdir -p "$lock_dir"
+  result_file="$(mktemp "${lock_file}.result.XXXXXX")"
+
+  if command -v flock >/dev/null 2>&1; then
+    {
+      # Acquire with a bounded wait so a stuck holder cannot freeze the CLI.
+      # 30s is well above any legitimate rewrite (single awk + mv per file)
+      # and matches the pattern used by other forget/recovery commands.
+      if ! flock -w 30 9; then
+        bridge_warn "session lock busy after 30s, refusing forget-session for '$agent' to avoid losing a concurrent rewrite"
+        printf 'prior_id_hash= changed=no cleared_files=\n' >"$result_file"
+      else
+        _bridge_clear_session_id_critical "$agent" >"$result_file"
+      fi
+    } 9>"$lock_file"
+  else
+    # Portable fallback when flock is missing (older macOS hosts, minimal
+    # busybox containers). `mkdir` is atomic on POSIX, so a directory-based
+    # mutex is safe; we retry with a short backoff before giving up.
+    local lock_dir_path="${lock_file}.d"
+    local attempt=0
+    while ! mkdir "$lock_dir_path" 2>/dev/null; do
+      attempt=$(( attempt + 1 ))
+      if (( attempt >= 30 )); then
+        bridge_warn "mkdir-based session lock busy after 30 retries, refusing forget-session for '$agent'"
+        printf 'prior_id_hash= changed=no cleared_files=\n' >"$result_file"
+        cat "$result_file"
+        rm -f "$result_file"
+        return 1
+      fi
+      sleep 1
+    done
+    _bridge_clear_session_id_critical "$agent" >"$result_file" || true
+    rmdir "$lock_dir_path" 2>/dev/null || true
+  fi
+
+  # Reflect the cleared id in the in-memory map so any follow-up call in the
+  # same process (e.g. `agent show` after forget-session) sees the new state
+  # without a fresh roster reload.
+  BRIDGE_AGENT_SESSION_ID["$agent"]=""
+
+  cat "$result_file"
+  rm -f "$result_file"
+}
+
 bridge_agent_idle_marker_dir() {
   local agent="$1"
   printf '%s/%s' "$BRIDGE_ACTIVE_AGENT_DIR" "$agent"

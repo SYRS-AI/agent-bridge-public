@@ -89,6 +89,18 @@ if [[ $CONTINUE_EXPLICIT -eq 1 ]]; then
   BRIDGE_AGENT_CONTINUE["$AGENT"]="$CONTINUE_MODE"
 fi
 
+# Issue #268: same warning as bridge-start.sh, repeated here because operators
+# can invoke bridge-run.sh directly (and tmux session_cmd injects --no-continue
+# without going through bridge-start.sh on FORCE_FRESH_SESSION paths). Goes to
+# stderr so dry-run callers parsing stdout for `session_id=...` keep working.
+if [[ $CONTINUE_EXPLICIT -eq 1 && "$CONTINUE_MODE" == "0" ]]; then
+  _persisted_session_id="$(bridge_agent_persisted_session_id "$AGENT")"
+  if [[ -n "$_persisted_session_id" ]]; then
+    bridge_warn "launched fresh for this run, but saved session_id=${_persisted_session_id} remains; next normal restart will resume it. Use 'agb agent forget-session $AGENT' to clear permanently."
+  fi
+  unset _persisted_session_id
+fi
+
 if [[ $SAFE_MODE -eq 1 ]]; then
   ONCE=1
 fi

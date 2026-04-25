@@ -18,6 +18,7 @@ Usage:
   $(basename "$0") safe-mode <agent> [--attach|--no-attach] [--replace] [--continue|--no-continue] [--dry-run]
   $(basename "$0") stop <agent>
   $(basename "$0") restart <agent> [--attach|--no-attach] [--continue|--no-continue] [--dry-run]
+  $(basename "$0") forget-session <agent>
   $(basename "$0") attach <agent>
 
 Options:
@@ -984,16 +985,23 @@ run_show() {
 
   output="$(bridge_agent_records_tsv "$agent")"
   if [[ $json_mode -eq 1 ]]; then
+    # session_source surfaces which authoritative state file currently
+    # supplies AGENT_SESSION_ID for this agent (issue #268). Default text
+    # output is intentionally unchanged; only --json exposes the path so
+    # operators can pipe it into recovery scripts (e.g. forget-session
+    # follow-ups) without parsing the human format.
     bridge_agent_manage_python \
       "$(emit_agent_records_json show "$output")" \
       "$(bridge_agent_channel_diagnostics_json "$agent")" \
-      "$(bridge_agent_session_health_json "$agent")" <<'PY'
+      "$(bridge_agent_session_health_json "$agent")" \
+      "$(bridge_agent_session_source_path "$agent")" <<'PY'
 import json
 import sys
 
 payload = json.loads(sys.argv[1])
 payload.setdefault("channels", {})["diagnostics"] = json.loads(sys.argv[2])
 payload["session_health"] = json.loads(sys.argv[3])
+payload["session_source"] = sys.argv[4] if len(sys.argv) > 4 and sys.argv[4] else None
 print(json.dumps(payload, ensure_ascii=False, indent=2))
 PY
     return 0
@@ -1535,6 +1543,79 @@ run_attach() {
   exec "$BRIDGE_BASH_BIN" "$SCRIPT_DIR/agent-bridge" attach "$agent"
 }
 
+# run_forget_session — clear the persisted Claude/Codex resume id for <agent>
+# from every authoritative state file (history env, dynamic active env, and
+# the linux-user agent-env.sh overlay when present), so the next normal
+# restart launches without `--resume`. The running tmux session is NOT
+# killed; an active agent must be restarted manually before the cleared id
+# takes effect. Idempotent — running it twice on an already-empty id exits
+# 0 with `changed=no`.
+#
+# This is the supported recovery path for issue #268 (stale Claude resume
+# target). The companion warning in bridge-start.sh / bridge-run.sh tells an
+# operator who used `--no-continue` that the persisted id is still there.
+run_forget_session() {
+  local agent="${1:-}"
+  local active="no"
+  local clear_output=""
+  local prior_id_hash=""
+  local changed=""
+  local cleared_csv=""
+  local token=""
+
+  shift || true
+  [[ -n "$agent" ]] || bridge_die "Usage: $(basename "$0") forget-session <agent>"
+  [[ $# -eq 0 ]] || bridge_die "지원하지 않는 agent forget-session 옵션입니다: $1"
+  bridge_require_agent "$agent"
+
+  if bridge_agent_is_active "$agent"; then
+    active="yes"
+  fi
+
+  # The lock + read-modify-write happens inside bridge_clear_persisted_session_id.
+  # When two callers race, only the holder that observes a non-empty prior id
+  # comes back with `changed=yes`; the others see `changed=no` and we record
+  # a separate `already_forgotten` audit row for them.
+  clear_output="$(bridge_clear_persisted_session_id "$agent")"
+  for token in $clear_output; do
+    case "$token" in
+      prior_id_hash=*) prior_id_hash="${token#prior_id_hash=}" ;;
+      changed=*)       changed="${token#changed=}" ;;
+      cleared_files=*) cleared_csv="${token#cleared_files=}" ;;
+    esac
+  done
+  changed="${changed:-no}"
+
+  if [[ "$changed" != "yes" ]]; then
+    bridge_audit_log daemon agent_session_forgotten "$agent" \
+      --detail cleared_files= \
+      --detail prior_id_hash= \
+      --detail active="$active" \
+      --detail changed=no \
+      --detail reason=already_forgotten >/dev/null 2>&1 || true
+    printf 'agent: %s\n' "$agent"
+    printf 'changed: no\n'
+    printf 'reason: already_forgotten\n'
+    printf 'active: %s\n' "$active"
+    return 0
+  fi
+
+  bridge_audit_log daemon agent_session_forgotten "$agent" \
+    --detail cleared_files="$cleared_csv" \
+    --detail prior_id_hash="$prior_id_hash" \
+    --detail active="$active" \
+    --detail changed=yes >/dev/null 2>&1 || true
+
+  printf 'agent: %s\n' "$agent"
+  printf 'changed: yes\n'
+  printf 'cleared_files: %s\n' "${cleared_csv:--}"
+  printf 'prior_id_hash: %s\n' "${prior_id_hash:--}"
+  printf 'active: %s\n' "$active"
+  if [[ "$active" == "yes" ]]; then
+    bridge_warn "active=yes — running tmux session must be restarted fresh to pick up cleared id; suggested next: bridge-agent.sh restart $agent --no-continue"
+  fi
+}
+
 subcommand="${1:-}"
 shift || true
 
@@ -1563,6 +1644,9 @@ case "$subcommand" in
   ack-crash)
     run_ack_crash "$@"
     ;;
+  forget-session)
+    run_forget_session "$@"
+    ;;
   attach)
     run_attach "$@"
     ;;
@@ -1572,7 +1656,7 @@ case "$subcommand" in
   *)
     # Issue #163 Phase 2: surface an intent-recovery hint before dying.
     _hint="$(bridge_suggest_subcommand "$subcommand" \
-      "create list show start safe-mode stop restart ack-crash attach")"
+      "create list show start safe-mode stop restart ack-crash forget-session attach")"
     [[ -n "$_hint" ]] && bridge_warn "$_hint"
     bridge_die "지원하지 않는 agent 명령입니다: $subcommand"
     ;;
