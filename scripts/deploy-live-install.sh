@@ -184,10 +184,12 @@ fi
 
 if [[ "$RESTART_DAEMON" == "1" ]]; then
   if [[ "$DRY_RUN" == "1" ]]; then
-    printf '[dry-run] bash %s/bridge-daemon.sh stop\n' "$TARGET_ROOT"
+    printf '[dry-run] bash %s/bridge-daemon.sh stop --force\n' "$TARGET_ROOT"
     printf '[dry-run] bash %s/bridge-daemon.sh ensure\n' "$TARGET_ROOT"
   else
-    bash "$TARGET_ROOT/bridge-daemon.sh" stop >/dev/null 2>&1 || true
+    # --force: deploy-live-install is a sanctioned daemon stop+restart path
+    # and must not be blocked by the #314/#315 active-agent guard.
+    bash "$TARGET_ROOT/bridge-daemon.sh" stop --force >/dev/null 2>&1 || true
     bash "$TARGET_ROOT/bridge-daemon.sh" ensure >/dev/null
   fi
 fi

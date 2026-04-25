@@ -9,7 +9,7 @@ source "$SCRIPT_DIR/bridge-lib.sh"
 bridge_load_roster
 
 usage() {
-  echo "Usage: bash $SCRIPT_DIR/bridge-daemon.sh [--skip-plugin-liveness] <start|ensure|run|stop|status|sync>"
+  echo "Usage: bash $SCRIPT_DIR/bridge-daemon.sh [--skip-plugin-liveness] <start|ensure|run|status|sync|stop [--force]>"
 }
 
 daemon_log_event() {
@@ -24,6 +24,11 @@ daemon_log_event() {
 daemon_info() {
   local message="$1"
   printf '[%s] [info] %s\n' "$(date '+%Y-%m-%dT%H:%M:%S%z')" "$message"
+}
+
+daemon_warn() {
+  local message="$1"
+  printf '[%s] [warn] %s\n' "$(date '+%Y-%m-%dT%H:%M:%S%z')" "$message" >&2
 }
 
 # --- Daemon exit observability (issue #193) ----------------------------------
@@ -3830,6 +3835,58 @@ cmd_stop() {
   local orphans=0
   local first_pid=""
   local is_orphan
+  local force=0
+  local arg
+
+  # Issue #314 Layer 3 / #315 Track 3 — accept --force/-f to bypass the
+  # active-agent guard below. Sanctioned callers (the upgrader, the daemon
+  # liveness watchdog, the repair-task-db / deploy-live-install scripts)
+  # must pass --force so they aren't blocked. Bare operator/admin-agent
+  # invocations get the guard.
+  for arg in "$@"; do
+    case "$arg" in
+      --force|-f)
+        force=1
+        ;;
+      *)
+        daemon_warn "stop: unknown argument: $arg"
+        return 2
+        ;;
+    esac
+  done
+
+  # Issue #314 Layer 3 / #315 Track 3 — Active-agent guard.
+  # A bare `bridge-daemon.sh stop` on a host with running always-on agents
+  # is the unsafe path documented in the #314 incident: a subsequent daemon
+  # restart picks up stale AGENT_SESSION_IDs and `claude --resume` lands on
+  # the wrong (often context-saturated) session. The sanctioned entrypoint
+  # is `agent-bridge upgrade --apply`, which orchestrates daemon stop+start
+  # internally. Refuse the bare call when active agents exist; require
+  # --force for the recovery / wedged-host case.
+  if (( force != 1 )); then
+    local active_count=0
+    active_count="$(bridge_active_agent_ids | grep -c . || true)"
+    if [[ "$active_count" =~ ^[0-9]+$ ]] && (( active_count > 0 )); then
+      daemon_warn ""
+      daemon_warn "============================================================"
+      daemon_warn "Refusing to stop the bridge daemon: $active_count active agent session(s) detected."
+      daemon_warn ""
+      daemon_warn "On a host with running agents, use the sanctioned upgrade entrypoint:"
+      daemon_warn "    agent-bridge upgrade --apply"
+      daemon_warn ""
+      daemon_warn "It handles daemon stop + restart + agent re-launch internally"
+      daemon_warn "without the cascade risks documented in issues #314 / #315."
+      daemon_warn ""
+      daemon_warn "If you really intend to stop the daemon directly (e.g. recovery"
+      daemon_warn "or wedged-host scenario), re-run with --force:"
+      daemon_warn "    bash bridge-daemon.sh stop --force"
+      daemon_warn "============================================================"
+      bridge_audit_log daemon daemon_stop_refused daemon \
+        --detail reason=active_agents_present \
+        --detail active_count="$active_count" >/dev/null 2>&1 || true
+      return 1
+    fi
+  fi
 
   # Stop the silence watchdog *before* killing the daemon so it doesn't
   # observe the stop-induced silence and race a fresh start against ours.
@@ -3920,7 +3977,8 @@ case "$CMD" in
     cmd_run_cron_worker "$@"
     ;;
   stop)
-    cmd_stop
+    shift || true
+    cmd_stop "$@"
     ;;
   status)
     cmd_status

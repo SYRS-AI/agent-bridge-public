@@ -903,7 +903,9 @@ if [[ "$SUBCOMMAND" == "rollback" ]]; then
   fi
   ROLLBACK_JSON="$(python3 "$SOURCE_ROOT/bridge-upgrade.py" "${rollback_args[@]}")"
   if [[ $RESTART_DAEMON -eq 1 && $DRY_RUN -eq 0 ]]; then
-    bash "$TARGET_ROOT/bridge-daemon.sh" stop >/dev/null 2>&1 || true
+    # --force: the upgrader is the sanctioned daemon stop+restart path
+    # (issue #314 Layer 3 / #315 Track 3). Bypass the active-agent guard.
+    bash "$TARGET_ROOT/bridge-daemon.sh" stop --force >/dev/null 2>&1 || true
     bash "$TARGET_ROOT/bridge-daemon.sh" ensure >/dev/null
   fi
   if [[ $RESTART_AGENTS -eq 1 ]]; then
@@ -1047,7 +1049,9 @@ if [[ $MIGRATE_AGENTS -eq 1 ]]; then
 fi
 
 if [[ $RESTART_DAEMON -eq 1 && $DRY_RUN -eq 0 ]]; then
-  bash "$TARGET_ROOT/bridge-daemon.sh" stop >/dev/null 2>&1 || true
+  # --force: the upgrader is the sanctioned daemon stop+restart path
+  # (issue #314 Layer 3 / #315 Track 3). Bypass the active-agent guard.
+  bash "$TARGET_ROOT/bridge-daemon.sh" stop --force >/dev/null 2>&1 || true
   bash "$TARGET_ROOT/bridge-daemon.sh" ensure >/dev/null
 fi
 
