@@ -2062,14 +2062,24 @@ bridge_daemon_all_pids() {
   # including daemons launched from a different BRIDGE_HOME path.
   # BRIDGE_DAEMON_STOP_PATTERN overrides the match pattern so isolated tests
   # do not pick up the operator's live daemons via system-wide pgrep.
+  # The `-U "$(id -u)"` scope is required because the previous narrower
+  # fallback (path-prefixed by BRIDGE_HOME) implicitly limited matches to
+  # this operator; broadening to a path-agnostic pattern without a UID
+  # filter would let `pgrep -f` return processes owned by other users
+  # (default on Linux), inflating orphan_count and risking SIGTERM to a
+  # different user's daemon if cmd_stop is ever invoked under sudo/root.
   local pattern="${BRIDGE_DAEMON_STOP_PATTERN:-bridge-daemon\\.sh run$}"
   local self_pid="${BASHPID:-$$}"
+  local self_uid
+  self_uid="$(id -u 2>/dev/null || printf '%s' "${UID:-}")"
+  local pgrep_user_args=()
+  [[ -n "$self_uid" ]] && pgrep_user_args=(-U "$self_uid")
   local candidate
   while IFS= read -r candidate; do
     [[ -n "$candidate" ]] || continue
     [[ "$candidate" == "$self_pid" ]] && continue
     printf '%s\n' "$candidate"
-  done < <(pgrep -f "$pattern" 2>/dev/null || true)
+  done < <(pgrep "${pgrep_user_args[@]}" -f "$pattern" 2>/dev/null || true)
 }
 
 bridge_write_agent_snapshot() {
