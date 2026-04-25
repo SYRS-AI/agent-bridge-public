@@ -2662,6 +2662,91 @@ CLAUDE_STATIC_CUSTOM_MARKER_FILE="$(BRIDGE_ACTIVE_AGENT_DIR="$CLAUDE_STATIC_CUST
 [[ -f "$CLAUDE_STATIC_CUSTOM_MARKER_FILE" ]] || die "session_start hook did not honour BRIDGE_ACTIVE_AGENT_DIR override — marker missing at $CLAUDE_STATIC_CUSTOM_MARKER_FILE"
 rm -f "$CLAUDE_STATIC_WORKDIR/NEXT-SESSION.md" "$CLAUDE_STATIC_CUSTOM_MARKER_FILE"
 rm -rf "$CLAUDE_STATIC_CUSTOM_ACTIVE_DIR"
+
+# Issue #314 Layer 1: SessionStart with matcher=clear must auto-clear the
+# persisted AGENT_SESSION_ID. Without this, a Claude /clear leaves the
+# agent's resume id pointing at the pre-clear session, and the next
+# `bridge-run.sh <agent> --continue` resumes the stale, context-saturated
+# session instead of the freshly forked one. The hook shells out to
+# `$BRIDGE_HOME/agent-bridge agent forget-session <agent>`. The smoke
+# `$BRIDGE_HOME` is not a copied install layout (the source CLI cannot be
+# symlinked here because it resolves SCRIPT_DIR via realpath and would
+# fail to find sibling lib/), so we install a stub shim that records its
+# invocation and performs the same persisted-id clear via the real
+# `bridge_clear_persisted_session_id`. This proves the hook is wired to
+# fork the CLI when matcher=clear and to skip it for matcher=startup.
+log "session_start hook auto-clears persisted session id on /clear matcher (#314 Layer 1)"
+SESSION_CLEAR_CLI_SHIM="$BRIDGE_HOME/agent-bridge"
+SESSION_CLEAR_SHIM_LOG="$TMP_ROOT/session-start-clear-shim.log"
+[[ -e "$SESSION_CLEAR_CLI_SHIM" ]] && SESSION_CLEAR_HAD_PRIOR_CLI=yes || SESSION_CLEAR_HAD_PRIOR_CLI=no
+cat >"$SESSION_CLEAR_CLI_SHIM" <<EOF
+#!/usr/bin/env bash
+# Stub agent-bridge CLI used only by the #314 Layer 1 smoke fixture.
+# Records every invocation and, when called as 'agent forget-session
+# <agent>', delegates to the real bridge_clear_persisted_session_id.
+printf 'invoked: %s\n' "\$*" >>"$SESSION_CLEAR_SHIM_LOG"
+if [[ "\${1:-}" == "agent" && "\${2:-}" == "forget-session" && -n "\${3:-}" ]]; then
+  source "$REPO_ROOT/bridge-lib.sh"
+  bridge_load_roster
+  bridge_clear_persisted_session_id "\$3" >/dev/null
+fi
+EOF
+chmod +x "$SESSION_CLEAR_CLI_SHIM"
+: >"$SESSION_CLEAR_SHIM_LOG"
+SESSION_CLEAR_FAKE_ID="smoke-pre-clear-id-$$"
+"$BASH4_BIN" -c '
+  source "'"$REPO_ROOT"'/bridge-lib.sh"
+  bridge_load_roster
+  BRIDGE_AGENT_SESSION_ID["claude-static"]="'"$SESSION_CLEAR_FAKE_ID"'"
+  bridge_persist_agent_state "claude-static"
+'
+SESSION_CLEAR_SEEDED_ID="$("$BASH4_BIN" -c '
+  source "'"$REPO_ROOT"'/bridge-lib.sh"
+  bridge_load_roster
+  bridge_agent_persisted_session_id "claude-static"
+')"
+[[ "$SESSION_CLEAR_SEEDED_ID" == "$SESSION_CLEAR_FAKE_ID" ]] || die "smoke seed for #314 fixture failed: persisted id=$SESSION_CLEAR_SEEDED_ID expected=$SESSION_CLEAR_FAKE_ID"
+BRIDGE_AGENT_ID="claude-static" BRIDGE_AGENT_WORKDIR="$CLAUDE_STATIC_WORKDIR" BRIDGE_AGENT_HOME_ROOT="$BRIDGE_HOME/agents" python3 "$REPO_ROOT/hooks/session_start.py" --matcher clear >/dev/null
+SESSION_CLEAR_AFTER_ID="$("$BASH4_BIN" -c '
+  source "'"$REPO_ROOT"'/bridge-lib.sh"
+  bridge_load_roster
+  bridge_agent_persisted_session_id "claude-static"
+')"
+[[ -z "$SESSION_CLEAR_AFTER_ID" ]] || die "session_start --matcher clear did not clear persisted id (still: $SESSION_CLEAR_AFTER_ID)"
+assert_contains "$(cat "$SESSION_CLEAR_SHIM_LOG")" "agent forget-session claude-static"
+# Idempotent re-run: clearing an already-empty id must not error and the
+# shim must still be invoked (forget-session itself is responsible for
+# the no-op behavior on an already-empty id).
+BRIDGE_AGENT_ID="claude-static" BRIDGE_AGENT_WORKDIR="$CLAUDE_STATIC_WORKDIR" BRIDGE_AGENT_HOME_ROOT="$BRIDGE_HOME/agents" python3 "$REPO_ROOT/hooks/session_start.py" --matcher clear >/dev/null
+SESSION_CLEAR_INVOCATIONS="$(grep -c '^invoked:' "$SESSION_CLEAR_SHIM_LOG" || true)"
+[[ "$SESSION_CLEAR_INVOCATIONS" -ge 2 ]] || die "expected at least 2 shim invocations after two --matcher clear runs, saw $SESSION_CLEAR_INVOCATIONS"
+# Regression guard: matcher=startup must NOT clear a freshly seeded id
+# and must NOT invoke the forget-session CLI.
+"$BASH4_BIN" -c '
+  source "'"$REPO_ROOT"'/bridge-lib.sh"
+  bridge_load_roster
+  BRIDGE_AGENT_SESSION_ID["claude-static"]="'"$SESSION_CLEAR_FAKE_ID"'-2"
+  bridge_persist_agent_state "claude-static"
+'
+: >"$SESSION_CLEAR_SHIM_LOG"
+BRIDGE_AGENT_ID="claude-static" BRIDGE_AGENT_WORKDIR="$CLAUDE_STATIC_WORKDIR" BRIDGE_AGENT_HOME_ROOT="$BRIDGE_HOME/agents" python3 "$REPO_ROOT/hooks/session_start.py" --matcher startup >/dev/null
+SESSION_STARTUP_AFTER_ID="$("$BASH4_BIN" -c '
+  source "'"$REPO_ROOT"'/bridge-lib.sh"
+  bridge_load_roster
+  bridge_agent_persisted_session_id "claude-static"
+')"
+[[ "$SESSION_STARTUP_AFTER_ID" == "$SESSION_CLEAR_FAKE_ID-2" ]] || die "session_start --matcher startup unexpectedly mutated persisted id (got: $SESSION_STARTUP_AFTER_ID)"
+[[ ! -s "$SESSION_CLEAR_SHIM_LOG" ]] || die "session_start --matcher startup unexpectedly forked the CLI: $(cat "$SESSION_CLEAR_SHIM_LOG")"
+# Clean up: drop the seeded id and remove the stub CLI shim so downstream
+# fixtures see the same state they did before this block.
+"$BASH4_BIN" -c '
+  source "'"$REPO_ROOT"'/bridge-lib.sh"
+  bridge_load_roster
+  bridge_clear_persisted_session_id "claude-static" >/dev/null
+'
+rm -f "$SESSION_CLEAR_SHIM_LOG"
+[[ "$SESSION_CLEAR_HAD_PRIOR_CLI" == "yes" ]] || rm -f "$SESSION_CLEAR_CLI_SHIM"
+
 CODEX_PROMPT_OUTPUT="$(BRIDGE_AGENT_ID="$SMOKE_AGENT" BRIDGE_HOME="$BRIDGE_HOME" python3 "$REPO_ROOT/hooks/prompt_timestamp.py" --format codex)"
 assert_contains "$CODEX_PROMPT_OUTPUT" "\"hookEventName\": \"UserPromptSubmit\""
 assert_contains "$CODEX_PROMPT_OUTPUT" "now:"

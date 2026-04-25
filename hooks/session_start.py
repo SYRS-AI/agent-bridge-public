@@ -3,9 +3,13 @@
 
 Matcher handling (Track 2):
 - Claude Code fires this hook with a `matcher` field when settings.json
-  uses matcher-based entries. Known values: `startup`, `resume`, `compact`.
+  uses matcher-based entries. Known values: `startup`, `resume`, `clear`,
+  `compact`.
 - The hook reads the matcher from `--matcher` first, then a JSON payload
   on stdin (Claude Code hands `{"matcher": "compact", ...}` in via stdin).
+- For `clear`, the hook auto-clears the agent's persisted AGENT_SESSION_ID
+  so the next `bridge-run.sh <agent> --continue` does not resume the stale
+  pre-clear session id (issue #314 Layer 1).
 - For `compact`, the hook appends a short note telling the session that
   it just came out of a compaction, pointing at the raw capture store.
 """
@@ -15,6 +19,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import subprocess
 import sys
 import time
 from pathlib import Path
@@ -26,7 +31,7 @@ from bridge_hook_common import (
 )
 
 
-_KNOWN_MATCHERS = {"startup", "resume", "compact"}
+_KNOWN_MATCHERS = {"startup", "resume", "clear", "compact"}
 # Compaction typically fires the SessionStart hook once, but upstream may
 # redeliver (retries, nested session-resumes). Suppress duplicate compact
 # notes that arrive within this window so the note is emitted at most once
@@ -89,13 +94,46 @@ def _compact_note_should_emit(agent: str, now_epoch: int | None = None) -> bool:
     return True
 
 
+def _forget_session_on_clear(agent: str) -> None:
+    """Auto-forget the persisted resume id when /clear forks the session.
+
+    Issue #314 Layer 1: when an operator runs /clear in a Claude session,
+    the persisted AGENT_SESSION_ID still points at the pre-clear id. A
+    later restart picks up the stale id and `claude --resume <stale>`
+    lands on the context-saturated old session instead of the live forked
+    one. Calling forget-session here keeps the persisted id in sync with
+    what the operator actually has live.
+
+    The CLI wrapper does the auditing and the lock dance; we just invoke
+    it. Best-effort — the SessionStart hook has a 3s timeout and must
+    never block the session, so we suppress all errors and fall back to
+    the manual `agb agent forget-session <agent>` recovery path.
+    """
+    bridge_home = os.environ.get("BRIDGE_HOME") or os.path.expanduser("~/.agent-bridge")
+    cli = os.path.join(bridge_home, "agent-bridge")
+    if not os.path.isfile(cli):
+        return
+    try:
+        subprocess.run(
+            [cli, "agent", "forget-session", agent],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=2,
+        )
+    except (OSError, subprocess.SubprocessError):
+        # Best-effort: if forget-session fails for any reason, the manual
+        # `agb agent forget-session <agent>` recovery path (PR #268) still
+        # works.
+        pass
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--format", choices=("text", "codex"), default="text")
     parser.add_argument(
         "--matcher",
         default="",
-        help="Claude Code matcher (startup|resume|compact); overrides stdin payload",
+        help="Claude Code matcher (startup|resume|clear|compact); overrides stdin payload",
     )
     args = parser.parse_args(argv)
 
@@ -111,6 +149,8 @@ def main(argv: list[str] | None = None) -> int:
         matcher = ""
 
     remember_session_start(agent)
+    if matcher == "clear":
+        _forget_session_on_clear(agent)
     context = session_start_context(agent)
     if matcher == "compact" and _compact_note_should_emit(agent):
         context = context + _compact_note()
