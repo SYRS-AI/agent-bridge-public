@@ -385,6 +385,15 @@ Use this guide when a task involves tmux-based agent coordination through \`${br
 - Mark a task done: \`${bridge_home}/agent-bridge done 12 --agent developer --note "재현 불가"\`
 - Hand off a task: \`${bridge_home}/agent-bridge handoff 12 --to tester --note "수정 반영 후 재확인 부탁"\`
 
+## Cron
+
+- Cron is documented in detail in the \`cron-manager\` skill (auto-linked into every static agent's skill set).
+- List jobs for an agent: \`${bridge_home}/agent-bridge cron list --agent <agent>\`
+- Inspect a job: \`${bridge_home}/agent-bridge cron show <job-name-or-id>\`
+- Failed-run report (the answer to "show me cron history / cron logs / cron status" — those do not exist): \`${bridge_home}/agent-bridge cron errors report --agent <agent>\`
+- Trigger a job ad-hoc: \`${bridge_home}/agent-bridge cron enqueue <job-name-or-id> --target <agent>\`
+- Create / update / delete: see \`cron-manager\` skill or \`${bridge_home}/agent-bridge cron --help\`.
+
 ## Urgent Interrupts
 
 - Send a direct urgent message only when interrupting is necessary: \`bash ${bridge_home}/bridge-send.sh --urgent developer "[TESTER] 프로덕션 장애 확인 필요" --wait 5\`
@@ -439,6 +448,7 @@ Use this skill when the task depends on the shared agent bridge in \`${bridge_ho
 - Prefer the live roster over guesswork when identifying active tmux sessions.
 - Treat \`${bridge_home}/state/\` and \`${bridge_home}/logs/\` as generated runtime artifacts.
 - Prefer queued tasks over direct messages so agents can pull work at task boundaries.
+- \`agb\` is a compact dispatcher for the queue/inbox subset of \`agent-bridge\` (\`agb inbox|show|claim|done|summary|create\`). Everything else (status, list, cron, watchdog, audit, urgent, action, kill, worktree, ...) is on \`agent-bridge\`. There is no \`agb help\` or \`agb status\` — only \`agb --help\` (with the dashes).
 EOF
 }
 
@@ -475,6 +485,7 @@ Use this skill when work depends on the shared agent bridge in \`${bridge_home}\
 - Do not edit generated runtime files under \`${bridge_home}/state/\` or \`${bridge_home}/logs/\`.
 - Check the static roster in \`${bridge_home}/agent-roster.sh\` before assuming an agent name or action exists.
 - Keep urgent interrupts short and move details into task queue entries or shared files.
+- \`agb\` is a compact dispatcher for the queue/inbox subset of \`agent-bridge\` (\`agb inbox|show|claim|done|summary|create\`). Everything else (status, list, cron, watchdog, audit, urgent, action, kill, worktree, ...) is on \`agent-bridge\`. There is no \`agb help\` or \`agb status\` — only \`agb --help\` (with the dashes).
 EOF
 }
 
