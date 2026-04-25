@@ -4,6 +4,77 @@ All notable changes to Agent Bridge are documented here. This project adheres
 loosely to [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and tracks
 version bumps via the `VERSION` file.
 
+## [0.6.17] — 2026-04-25
+
+### Documentation
+- `CHANGELOG.md` and `OPERATIONS.md` get an explicit "v0.6.16 upgrade /
+  migration notes" section that distinguishes operator-required steps from
+  what `bridge-upgrade.sh` does automatically. The original v0.6.16 entry
+  was complete on the per-PR change description but mixed automatic and
+  manual concerns; operators upgrading from v0.6.15 → v0.6.16 needed to
+  read each PR body to know what to run by hand. This release surfaces:
+  - **Auto** (covered by `bridge-upgrade.sh`): apply-channel-policy.sh
+    re-run (singleton + new BRIDGE_AGENT_PLUGINS overlay), daemon stop +
+    restart with the new orphan sweep + heartbeat + sibling supervisor.
+  - **Operator-required**:
+    1. (Linux) v0.6.16 daemon verify after upgrade — single
+       `bridge-daemon.sh run$` PID per user via
+       `pgrep -af 'bridge-daemon\.sh run$'`.
+    2. (Optional, recommended) per-agent plugin allowlist —
+       `BRIDGE_AGENT_PLUGINS["<agent>"]="plugin1 plugin2"` in
+       `agent-roster.local.sh` then `bash scripts/apply-channel-policy.sh
+       && agb agent restart <agent>`. Closes the ~250 MCP / ~1 GB RSS
+       scenario from #272.
+    3. (Optional, per agent) daily-note migration —
+       `bridge-memory.py migrate-canonical --home
+       ~/.agent-bridge/agents/<agent> --user default --apply
+       --i-know-this-is-live`. Default dry-run; `--apply` mandatory + the
+       new `--i-know-this-is-live` guard required when `--home` resolves
+       to the live `BRIDGE_HOME` (refused by default; the guard exists
+       because `_resolve_bridge_bin` always routes admin task creation
+       through the live binary regardless of `--home`).
+    4. (Optional, per host) liveness watcher install — NOT auto-installed
+       by upgrade; only fresh `bootstrap` adds it. Existing installs run
+       `bash scripts/install-daemon-liveness-launchagent.sh --apply --load`
+       (macOS) or `bash scripts/install-daemon-liveness-systemd.sh
+       --apply --enable` (Linux). Pair with `--skip-liveness` on bootstrap
+       if you do NOT want it installed automatically on a fresh host.
+    5. (Optional, per cron) `--strict-mcp-config` opt-in — set
+       `metadata.disableMcp=true` on individual cron jobs that don't call
+       MCP, or set `BRIDGE_CRON_DISPOSABLE_DISABLE_MCP=1` install-wide
+       in the daemon environment.
+- **Backward-compat regression note**: installs that intentionally used
+  `<home>/users/<user>/memory/` as a multi-tenant partition will see
+  `bridge-memory.py summarize-weekly --user <id>` and
+  `summarize-monthly --user <id>` no longer aggregate from that
+  partition. Migrate via the command above, or document the multi-tenant
+  intent in your local roster and continue indexing-only via
+  `collect_index_documents` (still walks both roots). See
+  `docs/agent-runtime/memory-schema.md`.
+- **Recommended upgrade order on a host with running agents**:
+  ```bash
+  # 1. Stop the daemon (sweeps any pre-#273 orphans)
+  bash ~/.agent-bridge/bridge-daemon.sh stop
+  # 2. Pull source + upgrade (auto: apply-channel-policy, restart agents)
+  agent-bridge upgrade --apply
+  # 3. (Linux) verify single daemon PID
+  pgrep -af 'bridge-daemon\.sh run$'
+  # 4. (Optional) per-agent plugin allowlist + restart specific agents
+  $EDITOR ~/.agent-bridge/agent-roster.local.sh   # add BRIDGE_AGENT_PLUGINS
+  bash ~/.agent-bridge/scripts/apply-channel-policy.sh
+  agb agent restart <agent>
+  # 5. (Optional, per agent) daily-note migration
+  bridge-memory.py migrate-canonical --home ~/.agent-bridge/agents/<agent> \
+    --user default --apply --i-know-this-is-live
+  # 6. (Optional, per host) liveness watcher install
+  bash ~/.agent-bridge/scripts/install-daemon-liveness-launchagent.sh \
+    --apply --load
+  ```
+
+This release does NOT change any code path — only `VERSION` and
+`CHANGELOG.md`. Operators on v0.6.16 do not strictly need to upgrade to
+v0.6.17; pulling latest `main` is sufficient.
+
 ## [0.6.16] — 2026-04-25
 
 ### Added
