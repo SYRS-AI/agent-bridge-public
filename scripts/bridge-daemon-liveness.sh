@@ -18,7 +18,7 @@
 #      (default 600s = 10 min), do nothing.
 #   4. If stale AND the daemon pid is recorded AND alive, AND the cooldown
 #      since the last restart attempt has elapsed, run
-#      `bridge-daemon.sh stop && bridge-daemon.sh start`. Cooldown prevents
+#      `bridge-daemon.sh stop --force && bridge-daemon.sh start`. Cooldown prevents
 #      a broken daemon from triggering a restart-loop every minute.
 #   5. If stale but the daemon is not running, do nothing — the normal
 #      start path (launchd KeepAlive / systemd Restart=always) will bring
@@ -141,7 +141,10 @@ restart_daemon() {
   # Use BRIDGE_HOME's daemon script so the watcher targets the same install
   # root the heartbeat file was observed in. The launchd plist sets
   # BRIDGE_HOME explicitly; override via env if running by hand.
-  if ! bash "$DAEMON_SH" stop >/dev/null 2>&1; then
+  # --force: the liveness watchdog only fires on a wedged daemon (heartbeat
+  # past threshold). Bypass the #314/#315 active-agent guard so a stuck
+  # daemon can still be restarted on a host with running agents.
+  if ! bash "$DAEMON_SH" stop --force >/dev/null 2>&1; then
     stop_rc=$?
   fi
   if ! bash "$DAEMON_SH" start >/dev/null 2>&1; then

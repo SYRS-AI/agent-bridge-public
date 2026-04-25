@@ -929,7 +929,10 @@ cleanup() {
   # Pin BRIDGE_HOME on the subshell explicitly so the stop command can never
   # target a live install even if some earlier code path unset or rewrote
   # the exported value. See issue #207.
-  env BRIDGE_HOME="$TMP_ROOT/bridge-home" bash "$REPO_ROOT/bridge-daemon.sh" stop >/dev/null 2>&1 || true
+  # --force: cleanup runs after the smoke fixture has spun up tmux fixture
+  # agents; without --force the #314/#315 active-agent guard would refuse
+  # the stop and leave the test daemon running.
+  env BRIDGE_HOME="$TMP_ROOT/bridge-home" bash "$REPO_ROOT/bridge-daemon.sh" stop --force >/dev/null 2>&1 || true
   # Kill every tmux session that did not exist before the smoke test started.
   if [[ -n "${SMOKE_PRE_SESSIONS_FILE:-}" && -f "$SMOKE_PRE_SESSIONS_FILE" ]]; then
     local _new_session=""
@@ -2042,6 +2045,109 @@ assert_contains "$STATUS_OUTPUT" "$SMOKE_AGENT"
 assert_contains "$STATUS_OUTPUT" "state"
 assert_contains "$STATUS_OUTPUT" "$WORKDIR"
 printf '%s\n' "$STATUS_OUTPUT" | grep -E "${SMOKE_AGENT}[[:space:]].*(idle|working)" >/dev/null || die "status should show activity state for $SMOKE_AGENT"
+
+# Issue #314 Layer 3 / #315 Track 3 — bridge-daemon.sh stop active-agent
+# guard. With $SMOKE_AGENT and $REQUESTER_AGENT active, a bare `stop` must
+# refuse with the redirect banner and leave the daemon running; `--force`
+# must bypass the guard; and a bare `stop` with no active agents must
+# succeed normally.
+log "daemon stop refuses while active agents are present (#314 Layer 3 / #315 Track 3)"
+GUARD_STDERR_FILE="$TMP_ROOT/daemon-stop-guard.stderr"
+GUARD_RC=0
+bash "$REPO_ROOT/bridge-daemon.sh" stop >/dev/null 2>"$GUARD_STDERR_FILE" || GUARD_RC=$?
+if (( GUARD_RC == 0 )); then
+  die "bare 'bridge-daemon.sh stop' should refuse with active agents present (rc=$GUARD_RC)"
+fi
+GUARD_STDERR="$(cat "$GUARD_STDERR_FILE")"
+assert_contains "$GUARD_STDERR" "Refusing to stop the bridge daemon"
+assert_contains "$GUARD_STDERR" "agent-bridge upgrade --apply"
+assert_contains "$GUARD_STDERR" "stop --force"
+GUARD_STATUS="$(bash "$REPO_ROOT/bridge-daemon.sh" status || true)"
+assert_contains "$GUARD_STATUS" "running pid="
+
+log "daemon stop --force bypasses the active-agent guard"
+FORCE_RC=0
+bash "$REPO_ROOT/bridge-daemon.sh" stop --force >/dev/null 2>&1 || FORCE_RC=$?
+if (( FORCE_RC != 0 )); then
+  die "'bridge-daemon.sh stop --force' should succeed despite active agents (rc=$FORCE_RC)"
+fi
+FORCE_STATUS=""
+for _ in {1..20}; do
+  FORCE_STATUS="$(bash "$REPO_ROOT/bridge-daemon.sh" status || true)"
+  [[ "$FORCE_STATUS" == "stopped" ]] && break
+  sleep 0.2
+done
+assert_contains "$FORCE_STATUS" "stopped"
+
+log "daemon stop without --force succeeds when no agents are active"
+# Use a completely empty isolated BRIDGE_HOME so no roster always-on agents
+# auto-start during ensure. The smoke fixture's roster registers several
+# always-on agents (claude-static, ALWAYS_ON_AGENT, etc.) that the daemon
+# would respawn during sync, polluting the "no active agents" precondition
+# for this test. We must use `env -i` to also strip the smoke fixture's
+# many BRIDGE_* path exports (BRIDGE_STATE_DIR, BRIDGE_ACTIVE_AGENT_DIR,
+# BRIDGE_ROSTER_LOCAL_FILE, etc.) — those have absolute paths that would
+# otherwise pull the smoke roster back in.
+GUARD_EMPTY_HOME="$TMP_ROOT/guard-empty-home"
+GUARD_EMPTY_ROSTER="$TMP_ROOT/guard-empty-roster.sh"
+GUARD_EMPTY_LOCAL_ROSTER="$TMP_ROOT/guard-empty-roster.local.sh"
+mkdir -p "$GUARD_EMPTY_HOME"
+: >"$GUARD_EMPTY_ROSTER"
+: >"$GUARD_EMPTY_LOCAL_ROSTER"
+GUARD_BARE_RC=0
+GUARD_BARE_OUT="$(env -i HOME="$HOME" PATH="$PATH" \
+  BRIDGE_HOME="$GUARD_EMPTY_HOME" \
+  BRIDGE_ROSTER_FILE="$GUARD_EMPTY_ROSTER" \
+  BRIDGE_ROSTER_LOCAL_FILE="$GUARD_EMPTY_LOCAL_ROSTER" \
+  BRIDGE_SKIP_PLUGIN_LIVENESS=1 \
+  bash "$REPO_ROOT/bridge-daemon.sh" ensure 2>&1)" || true
+for _ in {1..20}; do
+  GUARD_EMPTY_STATUS="$(env -i HOME="$HOME" PATH="$PATH" \
+    BRIDGE_HOME="$GUARD_EMPTY_HOME" \
+    BRIDGE_ROSTER_FILE="$GUARD_EMPTY_ROSTER" \
+    BRIDGE_ROSTER_LOCAL_FILE="$GUARD_EMPTY_LOCAL_ROSTER" \
+    BRIDGE_SKIP_PLUGIN_LIVENESS=1 \
+    bash "$REPO_ROOT/bridge-daemon.sh" status 2>/dev/null || true)"
+  [[ "$GUARD_EMPTY_STATUS" == *"running pid="* ]] && break
+  sleep 0.2
+done
+assert_contains "$GUARD_EMPTY_STATUS" "running pid="
+env -i HOME="$HOME" PATH="$PATH" \
+  BRIDGE_HOME="$GUARD_EMPTY_HOME" \
+  BRIDGE_ROSTER_FILE="$GUARD_EMPTY_ROSTER" \
+  BRIDGE_ROSTER_LOCAL_FILE="$GUARD_EMPTY_LOCAL_ROSTER" \
+  BRIDGE_SKIP_PLUGIN_LIVENESS=1 \
+  bash "$REPO_ROOT/bridge-daemon.sh" stop >/dev/null 2>&1 || GUARD_BARE_RC=$?
+if (( GUARD_BARE_RC != 0 )); then
+  die "bare 'bridge-daemon.sh stop' should succeed when no agents are active (rc=$GUARD_BARE_RC, ensure_out=$GUARD_BARE_OUT)"
+fi
+GUARD_EMPTY_STOPPED=""
+for _ in {1..20}; do
+  GUARD_EMPTY_STOPPED="$(env -i HOME="$HOME" PATH="$PATH" \
+    BRIDGE_HOME="$GUARD_EMPTY_HOME" \
+    BRIDGE_ROSTER_FILE="$GUARD_EMPTY_ROSTER" \
+    BRIDGE_ROSTER_LOCAL_FILE="$GUARD_EMPTY_LOCAL_ROSTER" \
+    BRIDGE_SKIP_PLUGIN_LIVENESS=1 \
+    bash "$REPO_ROOT/bridge-daemon.sh" status 2>/dev/null || true)"
+  [[ "$GUARD_EMPTY_STOPPED" == "stopped" ]] && break
+  sleep 0.2
+done
+assert_contains "$GUARD_EMPTY_STOPPED" "stopped"
+
+# Restore the smoke fixture: daemon running, both agent sessions up, so the
+# rest of the suite sees the same precondition it had before this block.
+bash "$REPO_ROOT/bridge-daemon.sh" ensure >/dev/null
+for _ in {1..20}; do
+  RESTORED_DAEMON="$(bash "$REPO_ROOT/bridge-daemon.sh" status || true)"
+  [[ "$RESTORED_DAEMON" == *"running pid="* ]] && break
+  sleep 0.2
+done
+assert_contains "$RESTORED_DAEMON" "running pid="
+bash "$REPO_ROOT/bridge-start.sh" "$SMOKE_AGENT" >/dev/null
+bash "$REPO_ROOT/bridge-start.sh" "$REQUESTER_AGENT" >/dev/null
+wait_for_tmux_session "$SESSION_NAME" up 20 0.2 || die "smoke tmux session did not restart after guard tests"
+wait_for_tmux_session "$REQUESTER_SESSION" up 20 0.2 || die "requester tmux session did not restart after guard tests"
+bash "$REPO_ROOT/bridge-daemon.sh" sync >/dev/null
 
 RELAY_ROWS="$("$BASH4_BIN" -c '
   source "'"$REPO_ROOT"'/bridge-lib.sh"
@@ -6911,7 +7017,9 @@ assert all("memory-daily busy" not in line for line in output)
 PY
 
 log "stopping background daemon before deterministic cron-dispatch tail"
-env BRIDGE_HOME="$BRIDGE_HOME" bash "$REPO_ROOT/bridge-daemon.sh" stop >/dev/null
+# --force: smoke fixture may have active agents at this point; the
+# #314/#315 active-agent guard would block a bare stop.
+env BRIDGE_HOME="$BRIDGE_HOME" bash "$REPO_ROOT/bridge-daemon.sh" stop --force >/dev/null
 
 log "processing one queued cron-dispatch task through the daemon"
 RUN_ID="smoke-job-1234--2026-04-05T10-00-00Z"

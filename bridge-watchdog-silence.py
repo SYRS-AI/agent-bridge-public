@@ -241,20 +241,22 @@ def emit_audit(action: str, detail: dict) -> None:
         log.error("audit write failed for %s: %s", action, exc)
 
 
-def run_daemon_command(verb: str) -> tuple[int, str]:
-    """Run `bash bridge-daemon.sh <verb>` with a hard timeout. Returns
+def run_daemon_command(*verb_args: str) -> tuple[int, str]:
+    """Run `bash bridge-daemon.sh <verb_args>` with a hard timeout. Returns
     (exit_code, last-line-of-output) so the audit row can record why a
     restart attempt failed."""
     bash = os.environ.get("BRIDGE_BASH_BIN", "bash")
+    cmd = [bash, str(DAEMON_SCRIPT), *verb_args]
+    label = " ".join(verb_args)
     try:
         result = subprocess.run(
-            [bash, str(DAEMON_SCRIPT), verb],
+            cmd,
             capture_output=True, text=True, timeout=RESTART_TIMEOUT,
         )
     except subprocess.TimeoutExpired:
-        return 124, f"bridge-daemon.sh {verb} timed out after {RESTART_TIMEOUT}s"
+        return 124, f"bridge-daemon.sh {label} timed out after {RESTART_TIMEOUT}s"
     except OSError as exc:
-        return 127, f"bridge-daemon.sh {verb} spawn failed: {exc}"
+        return 127, f"bridge-daemon.sh {label} spawn failed: {exc}"
     output = (result.stdout or "") + (result.stderr or "")
     last = output.strip().splitlines()[-1] if output.strip() else ""
     return result.returncode, last
@@ -265,7 +267,10 @@ def attempt_restart(reason_detail: dict) -> None:
     emit_audit("daemon_silence_detected", reason_detail)
     log.warning("daemon silence detected — %s", reason_detail)
 
-    stop_code, stop_msg = run_daemon_command("stop")
+    # --force: the silence watchdog only fires on a wedged/silent daemon.
+    # Bypass the issue #314/#315 active-agent guard so a stuck daemon can
+    # still be restarted on a host with running agents.
+    stop_code, stop_msg = run_daemon_command("stop", "--force")
     if stop_code != 0:
         emit_audit(
             "daemon_silence_restart_attempted",

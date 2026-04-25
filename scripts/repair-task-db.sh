@@ -93,9 +93,11 @@ SOURCE_BACKUP="${SOURCE_DB}.snapshot-${TIMESTAMP}"
 
 if [[ "$RESTART_DAEMON" == "1" ]]; then
   if [[ "$DRY_RUN" == "1" ]]; then
-    printf '[dry-run] bash %s/bridge-daemon.sh stop\n' "$DAEMON_HOME"
+    printf '[dry-run] bash %s/bridge-daemon.sh stop --force\n' "$DAEMON_HOME"
   else
-    bash "$DAEMON_HOME/bridge-daemon.sh" stop >/dev/null 2>&1 || true
+    # --force: repair-task-db is a sanctioned recovery script and must not
+    # be blocked by the #314/#315 active-agent guard.
+    bash "$DAEMON_HOME/bridge-daemon.sh" stop --force >/dev/null 2>&1 || true
   fi
 fi
 

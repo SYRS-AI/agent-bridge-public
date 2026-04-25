@@ -261,6 +261,19 @@ Stop the daemon:
 agb daemon stop
 ```
 
+**Active-agent guard** (issues #314 / #315): `bridge-daemon.sh stop` refuses
+to stop the daemon when active bridge agents are running on the host, and
+prints a banner pointing at the sanctioned upgrade entrypoint. To stop the
+daemon during a recovery scenario, pass `--force`:
+
+```bash
+bash ~/.agent-bridge/bridge-daemon.sh stop --force
+```
+
+For a routine upgrade, prefer `agent-bridge upgrade --apply` — it handles
+daemon stop + restart + agent re-launch internally and does not need
+`--force`.
+
 Remove only runtime artifacts if you need a clean local reset:
 
 ```bash
