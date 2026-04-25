@@ -350,6 +350,46 @@ run_suggest_case "cron logs -> cron errors report (#283 Track C)" \
 run_suggest_case "help -> --help (#283 Track C)" \
   "help" "" "agent-bridge --help"
 
+# Issue #283 Track A: skill content is now derived from the live CLI surface
+# via two helpers in lib/bridge-core.sh. The four checks below mirror the
+# verification matrix in the Track A brief: helper returns Usage lines for a
+# real subcommand, returns empty for an unknown subcommand, and the rendered
+# bridge-commands.md contains both the new auto-discovered section and every
+# existing intent-grouped section (regression guard).
+log "CLI-help-driven skill reference (#283 Track A)"
+TRACK_A_OUT="$("$BASH4_BIN" -c '
+  source "'"$REPO_ROOT"'/bridge-lib.sh"
+  bridge_cli_subcommand_help_summary cron "'"$REPO_ROOT"'/agent-bridge"
+')"
+assert_contains "$TRACK_A_OUT" "cron list"
+assert_contains "$TRACK_A_OUT" "cron create"
+assert_contains "$TRACK_A_OUT" "cron errors report"
+log "  [ok] bridge_cli_subcommand_help_summary cron returns live CLI surface"
+
+TRACK_A_EMPTY="$("$BASH4_BIN" -c '
+  source "'"$REPO_ROOT"'/bridge-lib.sh"
+  bridge_cli_subcommand_help_summary nonexistent-subcommand "'"$REPO_ROOT"'/agent-bridge"
+')"
+[[ -z "$TRACK_A_EMPTY" ]] \
+  || die "expected empty summary for nonexistent subcommand, got: $TRACK_A_EMPTY"
+log "  [ok] bridge_cli_subcommand_help_summary returns empty for unknown subcommand"
+
+TRACK_A_RENDER="$("$BASH4_BIN" -c '
+  source "'"$REPO_ROOT"'/bridge-lib.sh"
+  bridge_render_project_bridge_reference /tmp/test-bridge-home
+')"
+assert_contains "$TRACK_A_RENDER" "## Full Subcommand Reference"
+assert_contains "$TRACK_A_RENDER" "### cron"
+assert_contains "$TRACK_A_RENDER" "### task"
+log "  [ok] bridge-commands.md renders auto-discovered Full Subcommand Reference"
+
+for _track_a_hdr in "## Roster" "## Start Or Resume Agents" "## Task Queue" \
+                    "## Cron" "## Urgent Interrupts" "## Stop Sessions" \
+                    "## Share Larger Files"; do
+  assert_contains "$TRACK_A_RENDER" "$_track_a_hdr"
+done
+log "  [ok] intent-grouped sections preserved (Roster/Start/Task Queue/Cron/Urgent/Stop/Share)"
+
 # Issue #283 Track D: bare agent-bridge / agb prints help instead of erroring.
 log "agent-bridge bare invocation prints help summary (#283 Track D)"
 BARE_HELP_OUT="$(env BRIDGE_HOME="$(mktemp -d)" "$BASH4_BIN" "$REPO_ROOT/agent-bridge" 2>&1 || true)"
