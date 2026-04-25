@@ -206,6 +206,18 @@ elif [[ $CONTINUE_EXPLICIT -eq 1 ]]; then
   EFFECTIVE_CONTINUE_MODE="$CONTINUE_MODE"
 fi
 
+# Issue #268: warn the operator when --no-continue is launching fresh but a
+# stale resume id is still persisted. Without this, an operator who used
+# --no-continue to escape a broken `claude --resume` does not realise the
+# next normal restart will pick the bad id back up.
+if [[ $CONTINUE_EXPLICIT -eq 1 && "$CONTINUE_MODE" == "0" ]]; then
+  _persisted_session_id="$(bridge_agent_persisted_session_id "$AGENT")"
+  if [[ -n "$_persisted_session_id" ]]; then
+    bridge_warn "launched fresh for this run, but saved session_id=${_persisted_session_id} remains; next normal restart will resume it. Use 'agb agent forget-session $AGENT' to clear permanently."
+  fi
+  unset _persisted_session_id
+fi
+
 if [[ "$ENGINE" == "claude" && $SAFE_MODE -eq 0 ]]; then
   CHANNEL_REASON="$(bridge_agent_channel_status_reason "$AGENT")"
   if [[ -n "$CHANNEL_REASON" ]]; then
