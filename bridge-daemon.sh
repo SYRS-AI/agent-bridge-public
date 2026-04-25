@@ -544,6 +544,7 @@ process_usage_monitor() {
   local source=""
   local body_file=""
 
+  [[ "${BRIDGE_USAGE_MONITOR_ENABLED:-1}" == "1" ]] || return 1
   [[ -n "$admin_agent" ]] || return 1
   bridge_agent_exists "$admin_agent" || return 1
   bridge_usage_due || return 1
@@ -2671,6 +2672,7 @@ process_memory_daily_refresh_requests() {
 process_channel_health() {
   local agent
 
+  [[ "${BRIDGE_CHANNEL_HEALTH_ENABLED:-1}" == "1" ]] || return 1
   for agent in "${BRIDGE_AGENT_IDS[@]}"; do
     [[ -z "$agent" ]] && continue
     bridge_report_channel_health_miss "$agent" || true
