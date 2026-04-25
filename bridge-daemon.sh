@@ -3608,11 +3608,91 @@ cmd_sync_cycle() {
   bridge_dashboard_post_if_changed "$summary_output" || true
 }
 
+# --- Silence-watchdog sibling (issue #265 proposal C) ----------------------
+# A second-line defence against new daemon-hang vectors that slip past the
+# proposal A per-call timeout layer. The Python sibling tails audit.jsonl
+# for the `daemon_tick` heartbeats from PR #274 and restarts the daemon if
+# none has landed within BRIDGE_DAEMON_SILENCE_THRESHOLD_SECONDS. Lifecycle
+# mirrors the cron-sync child PID-file pattern: cmd_start spawns it after
+# the daemon is confirmed running, cmd_stop sweeps it after the daemon
+# pids. The supervisor itself is a `python3 bridge-watchdog-silence.py run`
+# process so `bridge_daemon_all_pids` (matches `bridge-daemon.sh run$`)
+# never confuses it with the daemon proper.
+
+bridge_silence_watchdog_pid_file() {
+  printf '%s/silence-watchdog.pid' "$BRIDGE_STATE_DIR"
+}
+
+bridge_silence_watchdog_enabled() {
+  local interval="${BRIDGE_DAEMON_HEARTBEAT_SECONDS:-60}"
+  [[ "$interval" =~ ^[0-9]+$ ]] || interval=60
+  if (( interval == 0 )); then
+    return 1
+  fi
+  if [[ "${BRIDGE_DAEMON_SILENCE_WATCHDOG_DISABLED:-0}" == "1" ]]; then
+    return 1
+  fi
+  [[ -f "$SCRIPT_DIR/bridge-watchdog-silence.py" ]] || return 1
+  return 0
+}
+
+bridge_start_silence_watchdog() {
+  bridge_silence_watchdog_enabled || return 0
+
+  local pid_file
+  pid_file="$(bridge_silence_watchdog_pid_file)"
+
+  # Reap stale pid file from a prior run that exited without cleanup.
+  if [[ -f "$pid_file" ]]; then
+    local prev_pid
+    prev_pid="$(<"$pid_file")"
+    if [[ -n "$prev_pid" ]] && kill -0 "$prev_pid" 2>/dev/null; then
+      daemon_info "silence watchdog already running (pid=$prev_pid)"
+      return 0
+    fi
+    rm -f "$pid_file"
+  fi
+
+  mkdir -p "$BRIDGE_STATE_DIR" "$BRIDGE_LOG_DIR"
+  local log_file="$BRIDGE_LOG_DIR/silence-watchdog.log"
+  # Run detached so it survives the parent shell exiting after `start`.
+  if [[ "$(uname -s)" != "Darwin" ]] && command -v setsid >/dev/null 2>&1; then
+    setsid python3 "$SCRIPT_DIR/bridge-watchdog-silence.py" run </dev/null >>"$log_file" 2>&1 &
+  else
+    nohup python3 "$SCRIPT_DIR/bridge-watchdog-silence.py" run </dev/null >>"$log_file" 2>&1 &
+    disown || true
+  fi
+  local watchdog_pid=$!
+  echo "$watchdog_pid" >"$pid_file"
+  bridge_audit_log daemon daemon_silence_watchdog_started daemon \
+    --detail pid="$watchdog_pid" \
+    --detail threshold_seconds="${BRIDGE_DAEMON_SILENCE_THRESHOLD_SECONDS:-600}"
+  daemon_info "silence watchdog started (pid=$watchdog_pid)"
+}
+
+bridge_stop_silence_watchdog() {
+  local pid_file
+  pid_file="$(bridge_silence_watchdog_pid_file)"
+  [[ -f "$pid_file" ]] || return 0
+
+  local pid
+  pid="$(<"$pid_file")"
+  rm -f "$pid_file"
+  [[ -n "$pid" ]] || return 0
+  if kill -0 "$pid" 2>/dev/null; then
+    kill "$pid" 2>/dev/null || true
+    bridge_audit_log daemon daemon_silence_watchdog_stopped daemon \
+      --detail pid="$pid" || true
+    daemon_info "silence watchdog stopped (pid=$pid)"
+  fi
+}
+
 cmd_start() {
   local start_deadline
 
   if bridge_daemon_is_running; then
     daemon_info "bridge daemon already running (pid=$(bridge_daemon_pid))"
+    bridge_start_silence_watchdog || true
     return 0
   fi
 
@@ -3631,6 +3711,7 @@ cmd_start() {
         --detail pid="$(bridge_daemon_pid)" \
         --detail interval_seconds="$BRIDGE_DAEMON_INTERVAL"
       daemon_info "bridge daemon started (pid=$(bridge_daemon_pid))"
+      bridge_start_silence_watchdog || true
       return 0
     fi
     sleep 0.1
@@ -3704,6 +3785,10 @@ cmd_stop() {
   local orphans=0
   local first_pid=""
   local is_orphan
+
+  # Stop the silence watchdog *before* killing the daemon so it doesn't
+  # observe the stop-induced silence and race a fresh start against ours.
+  bridge_stop_silence_watchdog || true
 
   recorded_pid="$(bridge_daemon_recorded_pid)"
   while IFS= read -r entry; do
