@@ -83,12 +83,24 @@ AGENT_GLYPH_PREFIXES = ("❯", ">", "›", "⏺", "⎿", "✢", "✻", "✱", "�
 
 
 def looks_like_agent_output(stripped: str) -> bool:
-    # Issue #264: previously also matched PATTERN_GROUPS regexes, which made
-    # any agent reply containing "429" / "rate limit" / etc. read as agent UI
-    # and re-enter capture. classify() then re-matched the same pattern and
-    # fired a fresh stall against the agent's own narration. Glyph prefixes
-    # alone are the agent-output signal; pattern matching belongs in classify.
-    return bool(stripped) and stripped.startswith(AGENT_GLYPH_PREFIXES)
+    # Re-enter capture after an [Agent Bridge] nudge as soon as we see either
+    # a Claude UI glyph (the agent narrating) or a raw provider error line
+    # (a fresh failure right after the nudge). The classify() pass below
+    # ignores glyph-prefixed lines so the agent narrating a past error does
+    # not re-fire a stall against itself (#264). We deliberately keep the
+    # PATTERN_GROUPS detector here so glyph-less raw provider errors that
+    # land immediately after a nudge — e.g. `Error: 429 Too Many Requests`
+    # with no UI prefix — still resume capture and reach classify.
+    if not stripped:
+        return False
+    if stripped.startswith(AGENT_GLYPH_PREFIXES):
+        return True
+    lowered = stripped.lower()
+    for _classification, patterns in PATTERN_GROUPS:
+        for pattern in patterns:
+            if re.search(pattern, lowered, flags=re.IGNORECASE):
+                return True
+    return False
 
 
 def read_capture(path: str | None) -> str:
