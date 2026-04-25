@@ -473,3 +473,246 @@ p.write_text(json.dumps(plan["payload"], indent=2, sort_keys=True) + "\n")
     fi
   done
 fi
+
+# -- Per-agent plugin allowlist (closes #272) --
+#
+# The singleton policy above only handles telegram/discord. For the broader
+# "every agent inherits every globally-installed plugin" problem, an operator
+# can declare a per-agent allowlist via the roster:
+#
+#   BRIDGE_AGENT_PLUGINS["mailbot"]="syrs-gmail@syrs-local syrs-gcal@syrs-local"
+#
+# When set, every globally-installed plugin (per
+# `~/.claude/plugins/installed_plugins.json`) that is NOT in the allowlist
+# (and is NOT already declared as a channel via `BRIDGE_AGENT_CHANNELS`) is
+# disabled in the agent's per-agent `settings.local.json` overlay so the
+# Claude session does not spawn its MCP server. Plugins in the allowlist or
+# in BRIDGE_AGENT_CHANNELS are explicitly re-enabled.
+#
+# Agents without `BRIDGE_AGENT_PLUGINS` set keep the legacy global behaviour
+# (no overlay written for the allowlist policy), so existing rosters do not
+# regress. The previously-applied singleton policy still owns telegram and
+# discord for those agents.
+#
+# Discovery of "globally installed plugins" reads
+# `${BRIDGE_CLAUDE_INSTALLED_PLUGINS_FILE:-~/.claude/plugins/installed_plugins.json}`.
+# If unreadable, this section is a no-op (no destructive default). The
+# settings.local.json write path is durable across `agb agent restart`
+# because Claude Code's settings merge prefers local overlays over the
+# project settings.json that the bridge regenerates on restart.
+
+INSTALLED_PLUGINS_FILE="${BRIDGE_CLAUDE_INSTALLED_PLUGINS_FILE:-$HOME/.claude/plugins/installed_plugins.json}"
+
+if [[ ! -r "$INSTALLED_PLUGINS_FILE" ]]; then
+  [[ $QUIET -eq 1 ]] || echo "[apply-channel-policy] no installed_plugins registry at $INSTALLED_PLUGINS_FILE; per-agent allowlist policy skipped"
+elif (( ${#roster_files[@]} == 0 )); then
+  [[ $QUIET -eq 1 ]] || echo "[apply-channel-policy] no roster file found; per-agent allowlist policy skipped"
+else
+  allowlist_json="$("$BRIDGE_PYTHON" - "$INSTALLED_PLUGINS_FILE" "${roster_files[@]}" <<'PY'
+import json
+import re
+import sys
+from pathlib import Path
+
+argv = sys.argv[1:]
+installed_plugins_path = Path(argv[0])
+roster_files = argv[1:]
+
+# Load the global plugin registry (whichever plugins Claude would auto-spawn
+# in every session if no per-agent overlay disabled them).
+try:
+    registry = json.loads(installed_plugins_path.read_text(encoding="utf-8"))
+except Exception as exc:
+    raise SystemExit(f"installed_plugins registry unreadable: {installed_plugins_path}: {exc}")
+installed = list((registry.get("plugins") or {}).keys())
+
+# Both arrays use the same agent-id charset as bridge_validate_agent_name
+# (lib/bridge-core.sh): `[A-Za-z0-9._-]+`. Dotted ids like `foo.bar` must
+# parse correctly — see #255 r1 finding 1.
+plugins_line = re.compile(
+    r'^\s*(?:export\s+)?BRIDGE_AGENT_PLUGINS\[\s*["\']?([A-Za-z0-9._\-]+)["\']?\s*\]\s*='
+    r'\s*["\']([^"\']*)["\']\s*(?:#.*)?$'
+)
+channels_line = re.compile(
+    r'^\s*(?:export\s+)?BRIDGE_AGENT_CHANNELS\[\s*["\']?([A-Za-z0-9._\-]+)["\']?\s*\]\s*='
+    r'\s*["\']([^"\']*)["\']\s*(?:#.*)?$'
+)
+
+agent_allowlist: dict[str, str] = {}
+agent_channels: dict[str, str] = {}
+for path_str in roster_files:
+    try:
+        text = Path(path_str).read_text(errors="replace")
+    except OSError:
+        continue
+    for raw in text.splitlines():
+        m = plugins_line.match(raw)
+        if m:
+            agent, value = m.group(1), m.group(2)
+            # First-read wins (local roster overrides tracked roster).
+            if agent not in agent_allowlist:
+                agent_allowlist[agent] = value
+            continue
+        m = channels_line.match(raw)
+        if m:
+            agent, value = m.group(1), m.group(2)
+            if agent not in agent_channels:
+                agent_channels[agent] = value
+
+
+def normalize_plugin_token(token: str) -> str:
+    token = token.strip()
+    # Allow either `plugin:foo@bar` (channel-style) or raw `foo@bar`.
+    if token.startswith("plugin:"):
+        token = token[len("plugin:"):]
+    return token
+
+
+# Build per-agent enable/disable plan.
+#
+# Allowlist tokens may be either fully-qualified (`syrs-gmail@syrs-local`) or
+# short names (`syrs-gmail`). A short name matches every installed plugin
+# whose id starts with `<token>@` (i.e. `syrs-gmail` matches
+# `syrs-gmail@syrs-local` and `syrs-gmail@some-other-marketplace`). The
+# operator-friendly short form is what the issue body uses (`"discord
+# syrs-gmail syrs-judgeme ..."`), so we accept it here without forcing the
+# operator to spell out the marketplace suffix on every line.
+agent_plan: dict[str, dict[str, bool]] = {}
+installed_set = set(installed)
+for agent, allowlist_raw in agent_allowlist.items():
+    raw_tokens: set[str] = set()
+    for chunk in re.split(r"[\s,]+", allowlist_raw):
+        norm = normalize_plugin_token(chunk)
+        if norm:
+            raw_tokens.add(norm)
+
+    # Channel tokens (always re-enabled — operator declared them as a
+    # required transport, so honouring channels regardless of allowlist
+    # avoids breaking a channel by an oversight in the allowlist itself).
+    channels_raw = agent_channels.get(agent, "")
+    for tok in re.split(r"[\s,]+", channels_raw):
+        norm = normalize_plugin_token(tok)
+        if norm:
+            raw_tokens.add(norm)
+
+    # Resolve short names to installed-plugin ids; keep fully-qualified
+    # tokens as-is. `unresolved` tracks tokens that did not match any
+    # installed plugin; we surface them as a warning so the operator can
+    # either install the plugin or trim the roster line.
+    resolved: set[str] = set()
+    unresolved: set[str] = set()
+    for token in raw_tokens:
+        if "@" in token:
+            if token in installed_set:
+                resolved.add(token)
+            else:
+                unresolved.add(token)
+            continue
+        # Short name: include every installed plugin whose id starts with
+        # `<token>@`. We use prefix-with-`@` rather than bare prefix so a
+        # short name like `syrs-gmail` does not accidentally match
+        # `syrs-gmail-extras@…`.
+        prefix = token + "@"
+        matches = [pid for pid in installed if pid.startswith(prefix)]
+        if matches:
+            resolved.update(matches)
+        else:
+            unresolved.add(token)
+
+    plan: dict[str, bool] = {}
+    for plugin_id in installed:
+        plan[plugin_id] = plugin_id in resolved
+    agent_plan[agent] = plan
+
+    if unresolved:
+        print(
+            f"[apply-channel-policy] WARNING: agent '{agent}' allowlist references "
+            f"plugins not in {installed_plugins_path}: {', '.join(sorted(unresolved))}",
+            file=sys.stderr,
+        )
+
+print(json.dumps({"agent_plan": agent_plan, "installed_count": len(installed)}))
+PY
+)"
+
+  installed_count="$(printf '%s' "$allowlist_json" | "$BRIDGE_PYTHON" -c 'import json,sys;print(json.loads(sys.stdin.read())["installed_count"])')"
+  [[ $QUIET -eq 1 ]] || echo "[apply-channel-policy] per-agent allowlist policy enumerated $installed_count installed plugins"
+
+  "$BRIDGE_PYTHON" -c '
+import json, sys
+plan = json.loads(sys.stdin.read())["agent_plan"]
+for agent, mapping in plan.items():
+    enables = [pid for pid, val in mapping.items() if val]
+    disables = [pid for pid, val in mapping.items() if not val]
+    print(agent + "\t" + ",".join(sorted(enables)) + "\t" + ",".join(sorted(disables)))
+' <<<"$allowlist_json" | \
+  while IFS=$'\t' read -r allow_agent_id allow_enables_csv allow_disables_csv; do
+    [[ -z "$allow_agent_id" ]] && continue
+    ALLOW_HOME="$BRIDGE_AGENT_HOME_ROOT/$allow_agent_id"
+    ALLOW_LOCAL="$ALLOW_HOME/.claude/settings.local.json"
+    if [[ ! -d "$ALLOW_HOME" ]]; then
+      [[ $QUIET -eq 1 ]] || echo "[apply-channel-policy] skip allowlist overlay: '$allow_agent_id' home not present under $BRIDGE_AGENT_HOME_ROOT"
+      continue
+    fi
+
+    allow_plan="$("$BRIDGE_PYTHON" - "$ALLOW_LOCAL" "$allow_enables_csv" "$allow_disables_csv" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+overlay_path = Path(sys.argv[1])
+enables_csv = sys.argv[2]
+disables_csv = sys.argv[3]
+to_enable = [tok for tok in enables_csv.split(",") if tok]
+to_disable = [tok for tok in disables_csv.split(",") if tok]
+
+if overlay_path.exists():
+    try:
+        payload = json.loads(overlay_path.read_text() or "{}")
+    except json.JSONDecodeError as exc:
+        raise SystemExit(f"allowlist overlay is not valid JSON: {overlay_path}: {exc}")
+else:
+    payload = {}
+
+if not isinstance(payload, dict):
+    raise SystemExit(f"allowlist overlay root must be a JSON object: {overlay_path}")
+
+enabled = payload.get("enabledPlugins")
+if not isinstance(enabled, dict):
+    enabled = {}
+
+changed = False
+for plugin_id in to_enable:
+    if enabled.get(plugin_id) is not True:
+        enabled[plugin_id] = True
+        changed = True
+for plugin_id in to_disable:
+    if enabled.get(plugin_id) is not False:
+        enabled[plugin_id] = False
+        changed = True
+
+payload["enabledPlugins"] = enabled
+print(json.dumps({"changed": changed, "payload": payload}))
+PY
+)"
+
+    allow_changed="$(printf '%s' "$allow_plan" | "$BRIDGE_PYTHON" -c 'import json,sys;print(json.loads(sys.stdin.read())["changed"])')"
+
+    if [[ "$allow_changed" == "True" ]]; then
+      if [[ $DRY_RUN -eq 1 ]]; then
+        [[ $QUIET -eq 1 ]] || echo "[apply-channel-policy] would write $ALLOW_LOCAL (allowlist overlay for '$allow_agent_id')"
+      else
+        printf '%s' "$allow_plan" | "$BRIDGE_PYTHON" -c '
+import json,sys,pathlib
+plan=json.loads(sys.stdin.read())
+p=pathlib.Path(sys.argv[1])
+p.parent.mkdir(parents=True, exist_ok=True)
+p.write_text(json.dumps(plan["payload"], indent=2, sort_keys=True) + "\n")
+' "$ALLOW_LOCAL"
+        [[ $QUIET -eq 1 ]] || echo "[apply-channel-policy] wrote $ALLOW_LOCAL (allowlist overlay for '$allow_agent_id')"
+      fi
+    else
+      [[ $QUIET -eq 1 ]] || echo "[apply-channel-policy] allowlist overlay for '$allow_agent_id' already matches policy (no change)"
+    fi
+  done
+fi

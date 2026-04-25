@@ -1766,6 +1766,76 @@ NOADMIN_OVERLAY="$CHANNEL_POLICY_NOADMIN_HOME/agents/dev_discord/.claude/setting
 [[ -f "$NOADMIN_OVERLAY" ]] || die "apply-channel-policy.sh skipped non-admin owner when roster has no admin id"
 assert_contains "$(cat "$NOADMIN_OVERLAY")" "\"discord@claude-plugins-official\": true"
 
+log "apply-channel-policy.sh enforces per-agent BRIDGE_AGENT_PLUGINS allowlist (closes #272)"
+PLUGIN_ALLOW_HOME="$TMP_ROOT/channel-policy-allowlist-home"
+mkdir -p \
+  "$PLUGIN_ALLOW_HOME/agents/.claude" \
+  "$PLUGIN_ALLOW_HOME/agents/admin_owner/.claude" \
+  "$PLUGIN_ALLOW_HOME/agents/mailbot/.claude" \
+  "$PLUGIN_ALLOW_HOME/agents/legacy_agent/.claude"
+printf '{}' > "$PLUGIN_ALLOW_HOME/agents/.claude/settings.json"
+cat > "$PLUGIN_ALLOW_HOME/installed_plugins.json" <<'EOF'
+{
+  "version": 2,
+  "plugins": {
+    "syrs-gmail@syrs-local": [{"scope":"user"}],
+    "syrs-shopify@syrs-local": [{"scope":"user"}],
+    "syrs-tracx@syrs-local": [{"scope":"user"}],
+    "telegram@claude-plugins-official": [{"scope":"user"}],
+    "discord@claude-plugins-official": [{"scope":"user"}],
+    "superpowers@claude-plugins-official": [{"scope":"user"}]
+  }
+}
+EOF
+cat > "$PLUGIN_ALLOW_HOME/agent-roster.local.sh" <<'ROSTER'
+BRIDGE_ADMIN_AGENT_ID="admin_owner"
+BRIDGE_AGENT_CHANNELS["mailbot"]="plugin:discord@claude-plugins-official"
+BRIDGE_AGENT_PLUGINS["mailbot"]="syrs-gmail superpowers"
+ROSTER
+env -u BRIDGE_AGENT_HOME_ROOT -u BRIDGE_ADMIN_AGENT_ID \
+  BRIDGE_HOME="$PLUGIN_ALLOW_HOME" \
+  BRIDGE_CLAUDE_INSTALLED_PLUGINS_FILE="$PLUGIN_ALLOW_HOME/installed_plugins.json" \
+  bash "$REPO_ROOT/scripts/apply-channel-policy.sh" >/dev/null
+PLUGIN_ALLOW_OVERLAY="$PLUGIN_ALLOW_HOME/agents/mailbot/.claude/settings.local.json"
+[[ -f "$PLUGIN_ALLOW_OVERLAY" ]] || die "apply-channel-policy.sh did not write allowlist overlay for mailbot"
+# Allowlisted plugins are enabled (short names match `<token>@<marketplace>`).
+assert_contains "$(cat "$PLUGIN_ALLOW_OVERLAY")" "\"syrs-gmail@syrs-local\": true"
+assert_contains "$(cat "$PLUGIN_ALLOW_OVERLAY")" "\"superpowers@claude-plugins-official\": true"
+# Channel plugins are auto-enabled even though not in BRIDGE_AGENT_PLUGINS.
+assert_contains "$(cat "$PLUGIN_ALLOW_OVERLAY")" "\"discord@claude-plugins-official\": true"
+# Non-allowlisted globally-installed plugins are explicitly disabled.
+assert_contains "$(cat "$PLUGIN_ALLOW_OVERLAY")" "\"syrs-shopify@syrs-local\": false"
+assert_contains "$(cat "$PLUGIN_ALLOW_OVERLAY")" "\"syrs-tracx@syrs-local\": false"
+assert_contains "$(cat "$PLUGIN_ALLOW_OVERLAY")" "\"telegram@claude-plugins-official\": false"
+# Agent without BRIDGE_AGENT_PLUGINS gets no allowlist overlay (back-compat).
+[[ ! -e "$PLUGIN_ALLOW_HOME/agents/legacy_agent/.claude/settings.local.json" ]] \
+  || die "apply-channel-policy.sh wrote allowlist overlay for legacy agent without BRIDGE_AGENT_PLUGINS key"
+# Idempotency.
+PLUGIN_ALLOW_FIRST="$(cat "$PLUGIN_ALLOW_OVERLAY")"
+env -u BRIDGE_AGENT_HOME_ROOT -u BRIDGE_ADMIN_AGENT_ID \
+  BRIDGE_HOME="$PLUGIN_ALLOW_HOME" \
+  BRIDGE_CLAUDE_INSTALLED_PLUGINS_FILE="$PLUGIN_ALLOW_HOME/installed_plugins.json" \
+  bash "$REPO_ROOT/scripts/apply-channel-policy.sh" >/dev/null
+[[ "$(cat "$PLUGIN_ALLOW_OVERLAY")" == "$PLUGIN_ALLOW_FIRST" ]] \
+  || die "apply-channel-policy.sh allowlist overlay was not idempotent"
+
+log "apply-channel-policy.sh skips per-agent allowlist policy when installed_plugins.json is missing (#272)"
+PLUGIN_ALLOW_NOREG_HOME="$TMP_ROOT/channel-policy-allowlist-noreg-home"
+mkdir -p \
+  "$PLUGIN_ALLOW_NOREG_HOME/agents/.claude" \
+  "$PLUGIN_ALLOW_NOREG_HOME/agents/mailbot/.claude"
+printf '{}' > "$PLUGIN_ALLOW_NOREG_HOME/agents/.claude/settings.json"
+cat > "$PLUGIN_ALLOW_NOREG_HOME/agent-roster.local.sh" <<'ROSTER'
+BRIDGE_AGENT_PLUGINS["mailbot"]="syrs-gmail"
+ROSTER
+env -u BRIDGE_AGENT_HOME_ROOT -u BRIDGE_ADMIN_AGENT_ID \
+  BRIDGE_HOME="$PLUGIN_ALLOW_NOREG_HOME" \
+  BRIDGE_CLAUDE_INSTALLED_PLUGINS_FILE="$PLUGIN_ALLOW_NOREG_HOME/missing-plugins.json" \
+  bash "$REPO_ROOT/scripts/apply-channel-policy.sh" >/dev/null \
+  || die "apply-channel-policy.sh aborted when installed_plugins.json was missing"
+[[ ! -e "$PLUGIN_ALLOW_NOREG_HOME/agents/mailbot/.claude/settings.local.json" ]] \
+  || die "apply-channel-policy.sh wrote allowlist overlay despite missing installed_plugins registry"
+
 log "bootstrap-memory-system.sh memory_daily_gate_on handles hyphenated agent ids (task #886 regression)"
 GATE_FN="$(awk '/^memory_daily_gate_on\(\) \{$/,/^\}$/' "$REPO_ROOT/bootstrap-memory-system.sh")"
 [[ -n "$GATE_FN" ]] || die "could not extract memory_daily_gate_on from bootstrap-memory-system.sh"

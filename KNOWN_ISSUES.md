@@ -201,3 +201,21 @@ Operator guidance:
 - Tag every `*/N`-minute polling cron whose body is "fetch + summarise" with `metadata.disableMcp=true`. Reminder/scheduler families are the highest-leverage targets.
 - Leave the flag unset for any cron whose payload calls MCP tools (e.g. plugin-driven research, workspace MCP queries).
 - This addresses MCP cold-load only. The CLI binary load and session bootstrap remain per-fire; warm-pool / runtime-substitution work tracked in #263 follow-ups.
+## 13. Globally-installed Claude plugins spawn MCP servers in every agent session unless per-agent allowlist is set
+
+Current behavior:
+
+- Every Claude session inherits the user-scoped `~/.claude/plugins/installed_plugins.json` registry, so every plugin's MCP server spawns in every agent. On hosts with 11+ agents and 23+ installed plugins this means ~250 MCP processes and ~1 GB RSS — most of them irrelevant to any given agent's role (see #272).
+- Editing `enabledPlugins` directly in `agents/<agent>/.claude/settings.json` does not survive `agb agent restart`: the bridge regenerates that file from the shared effective settings.
+
+Fix (applied by default from #272):
+
+- `scripts/apply-channel-policy.sh` learns a per-agent allowlist key, `BRIDGE_AGENT_PLUGINS["<agent>"]="plugin1 plugin2"` (space- or comma-separated). When set, the script writes `agents/<agent>/.claude/settings.local.json` with `enabledPlugins` set to `false` for every globally-installed plugin not in the allowlist, and `true` for each plugin in the allowlist. The `settings.local.json` overlay survives `agb agent restart` because Claude Code's settings merge prefers it over `settings.json`.
+- Plugins declared as channels (`BRIDGE_AGENT_CHANNELS`) are auto-included in the agent's effective allowlist so an oversight in the allowlist does not silently disable a required transport.
+- Agents without `BRIDGE_AGENT_PLUGINS` set keep the legacy "all installed plugins enabled" behaviour. Existing rosters do not regress.
+
+Operator guidance:
+
+- Declare an allowlist for each long-lived agent role. Start by listing the plugins the agent actually uses (channel transports, role-specific MCP servers like `syrs-gmail`, etc.) and re-run `bash scripts/apply-channel-policy.sh`.
+- Restart the agent to pick up the overlay (`agb agent restart <agent>`).
+- The allowlist is enforced at MCP-spawn time via `enabledPlugins=false`, not via `--strict-mcp-config`. A `--strict-mcp-config` track is feasible as a follow-up if `enabledPlugins` is found insufficient on a given Claude Code release; today the overlay is the lowest-risk path because the same machinery already enforces the singleton channel policy.
