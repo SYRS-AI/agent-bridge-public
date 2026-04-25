@@ -76,11 +76,24 @@ IGNORED_LINES = {
     "The current task appears stalled. Check the current state, summarize what is blocking progress, and continue if work can proceed.",
 }
 
+# Claude Code UI glyphs used to mark agent-authored output lines (prompt
+# carets, tool-call markers, status pips, etc.). Any line beginning with
+# one of these is the agent narrating — never raw provider error output.
+AGENT_GLYPH_PREFIXES = ("❯", ">", "›", "⏺", "⎿", "✢", "✻", "✱", "ℹ", "✓", "✗")
+
 
 def looks_like_agent_output(stripped: str) -> bool:
+    # Re-enter capture after an [Agent Bridge] nudge as soon as we see either
+    # a Claude UI glyph (the agent narrating) or a raw provider error line
+    # (a fresh failure right after the nudge). The classify() pass below
+    # ignores glyph-prefixed lines so the agent narrating a past error does
+    # not re-fire a stall against itself (#264). We deliberately keep the
+    # PATTERN_GROUPS detector here so glyph-less raw provider errors that
+    # land immediately after a nudge — e.g. `Error: 429 Too Many Requests`
+    # with no UI prefix — still resume capture and reach classify.
     if not stripped:
         return False
-    if stripped.startswith(("❯", ">", "›")):
+    if stripped.startswith(AGENT_GLYPH_PREFIXES):
         return True
     lowered = stripped.lower()
     for _classification, patterns in PATTERN_GROUPS:
@@ -125,10 +138,22 @@ def normalize_excerpt(text: str, max_bytes: int) -> str:
 
 
 def classify(normalized: str) -> tuple[str, str]:
-    lowered = normalized.lower()
+    # Issue #264: skip agent-authored lines so the classifier never matches
+    # the agent narrating a previous error (e.g. "⏺ inbox empty, no 429
+    # reoccurrence"). Without this, agent replies referencing past errors
+    # become a self-sustaining stall loop.
+    candidate_lines: list[str] = []
+    for raw in normalized.splitlines():
+        stripped = raw.strip()
+        if not stripped or stripped.startswith(AGENT_GLYPH_PREFIXES):
+            continue
+        candidate_lines.append(stripped.lower())
+    if not candidate_lines:
+        return "", ""
+    haystack = "\n".join(candidate_lines)
     for classification, patterns in PATTERN_GROUPS:
         for pattern in patterns:
-            if re.search(pattern, lowered, flags=re.IGNORECASE):
+            if re.search(pattern, haystack, flags=re.IGNORECASE):
                 return classification, pattern
     return "", ""
 
