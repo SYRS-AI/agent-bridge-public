@@ -1009,6 +1009,10 @@ bridge_linux_prepare_agent_isolation() {
   history_file="$(bridge_history_file_for_agent "$agent")"
   request_dir="$(bridge_queue_gateway_requests_dir "$agent")"
   response_dir="$(bridge_queue_gateway_responses_dir "$agent")"
+  local queue_gateway_root=""
+  local queue_gateway_agent_dir=""
+  queue_gateway_root="$(bridge_queue_gateway_root)"
+  queue_gateway_agent_dir="$(bridge_queue_gateway_agent_dir "$agent")"
 
   bridge_linux_ensure_os_user "$os_user" "$user_home"
   bridge_linux_ensure_user_home "$os_user" "$user_home"
@@ -1022,7 +1026,7 @@ bridge_linux_prepare_agent_isolation() {
   [[ -d "$BRIDGE_HOME/scripts" ]] && recursive_read_paths+=("$BRIDGE_HOME/scripts")
   [[ -d "$BRIDGE_AGENT_HOME_ROOT/.claude" ]] && recursive_read_paths+=("$BRIDGE_AGENT_HOME_ROOT/.claude")
   bridge_linux_acl_remove_recursive "u:${os_user}" "$BRIDGE_STATE_DIR" "$BRIDGE_LOG_DIR"
-  bridge_linux_sudo_root mkdir -p "$runtime_state_dir" "$log_dir" "$request_dir" "$response_dir" "$(dirname "$history_file")"
+  bridge_linux_sudo_root mkdir -p "$runtime_state_dir" "$log_dir" "$queue_gateway_root" "$queue_gateway_agent_dir" "$request_dir" "$response_dir" "$(dirname "$history_file")"
   bridge_linux_sudo_root touch "$audit_file" "$history_file"
 
   # memory-daily state trees for the harvester (issue #219):
@@ -1049,7 +1053,14 @@ bridge_linux_prepare_agent_isolation() {
     fi
   done
 
-  recursive_write_paths+=("$workdir" "$runtime_state_dir" "$log_dir" "$request_dir" "$response_dir" "$memory_daily_agent_dir" "$memory_daily_shared_aggregate_dir")
+  recursive_write_paths+=("$workdir" "$runtime_state_dir" "$log_dir" "$queue_gateway_agent_dir" "$request_dir" "$response_dir" "$memory_daily_agent_dir" "$memory_daily_shared_aggregate_dir")
+  # Issue: per-agent queue-gateway dir was missing isolated/controller ACLs
+  # because only its children (requests/, responses/) were granted. The
+  # daemon's controller-side glob of the queue-gateway root and the
+  # isolated UID's own inbox traversal both fail without these grants.
+  # Root traverse-only on the gateway root for the isolated UID prevents
+  # cross-agent dir-name enumeration while keeping its own subtree reachable.
+  bridge_linux_acl_add "u:${os_user}:--x" "$queue_gateway_root" >/dev/null 2>&1 || true
   hidden_paths+=("$BRIDGE_ROSTER_FILE" "$BRIDGE_ROSTER_LOCAL_FILE" "$BRIDGE_RUNTIME_CREDENTIALS_DIR" "$BRIDGE_RUNTIME_SECRETS_DIR" "$BRIDGE_RUNTIME_CONFIG_FILE" "$BRIDGE_TASK_DB" "${BRIDGE_LOG_DIR}/audit.jsonl")
 
   # Issue #233: every traverse_chain call used to climb unconditionally
@@ -1097,7 +1108,7 @@ bridge_linux_prepare_agent_isolation() {
   bridge_linux_grant_claude_credentials_access "$os_user" "$user_home" "$controller_user" "$(bridge_agent_engine "$agent")"
   bridge_linux_acl_add_recursive "u:${os_user}:r-X" "${recursive_read_paths[@]}"
   bridge_linux_acl_add_recursive "u:${os_user}:rwX" "${recursive_write_paths[@]}"
-  bridge_linux_acl_add_default_dirs_recursive "u:${os_user}:rwX" "$runtime_state_dir" "$log_dir" "$request_dir" "$response_dir" "$memory_daily_agent_dir" "$memory_daily_shared_aggregate_dir"
+  bridge_linux_acl_add_default_dirs_recursive "u:${os_user}:rwX" "$runtime_state_dir" "$log_dir" "$queue_gateway_agent_dir" "$request_dir" "$response_dir" "$memory_daily_agent_dir" "$memory_daily_shared_aggregate_dir"
   bridge_linux_acl_add "u:${os_user}:rw-" "$history_file"
 
   for other in "${BRIDGE_AGENT_IDS[@]}"; do
@@ -1120,7 +1131,14 @@ bridge_linux_prepare_agent_isolation() {
   bridge_linux_sudo_root chown "$os_user" "$audit_file" "$history_file"
   bridge_linux_acl_add_recursive "u:${controller_user}:rwX" "$workdir"
   bridge_linux_acl_add_default_dirs_recursive "u:${controller_user}:rwX" "$workdir"
-  bridge_linux_acl_add_recursive "u:${controller_user}:rwX" "$runtime_state_dir" "$log_dir" "$request_dir" "$response_dir" "$memory_daily_agent_dir" "$memory_daily_shared_aggregate_dir"
+  # Controller (daemon) needs to glob the queue-gateway root to find
+  # per-agent requests; r-x on the root + rwX on the agent dir + default
+  # ACLs on both keep the daemon's pathlib glob working without exposing
+  # other agents' dir contents to isolated UIDs.
+  bridge_linux_acl_add "u:${controller_user}:r-x" "$queue_gateway_root"
+  bridge_linux_sudo_root setfacl -d -m "u:${controller_user}:r-X" "$queue_gateway_root" >/dev/null 2>&1 || true
+  bridge_linux_acl_add_recursive "u:${controller_user}:rwX" "$runtime_state_dir" "$log_dir" "$queue_gateway_agent_dir" "$request_dir" "$response_dir" "$memory_daily_agent_dir" "$memory_daily_shared_aggregate_dir"
+  bridge_linux_acl_add_default_dirs_recursive "u:${controller_user}:rwX" "$queue_gateway_agent_dir" "$request_dir" "$response_dir"
 
   # memory-daily transcripts read-access (issue #219 v1.3): grant the
   # controller user r-X on the isolated user's ~/.claude/projects/ so the
