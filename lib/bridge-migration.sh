@@ -285,8 +285,12 @@ bridge_migration_unisolate() {
   # $log_dir, so the chown -R above misses them, leaving the operator
   # unable to start the agent post-rollback (issue #112).
   local audit_file history_file request_dir response_dir
+  local queue_gateway_root=""
+  local queue_gateway_agent_dir=""
   audit_file="$(bridge_agent_audit_log_file "$agent" 2>/dev/null || true)"
   history_file="$(bridge_history_file_for_agent "$agent" 2>/dev/null || true)"
+  queue_gateway_root="$(bridge_queue_gateway_root 2>/dev/null || true)"
+  queue_gateway_agent_dir="$(bridge_queue_gateway_agent_dir "$agent" 2>/dev/null || true)"
   request_dir="$(bridge_queue_gateway_requests_dir "$agent" 2>/dev/null || true)"
   response_dir="$(bridge_queue_gateway_responses_dir "$agent" 2>/dev/null || true)"
 
@@ -312,6 +316,23 @@ bridge_migration_unisolate() {
     bridge_migration_print_step "$dry_run" "chown -R $controller_user $response_dir"
     if [[ "$dry_run" != "1" ]]; then
       bridge_linux_sudo_root chown -R "$controller_user" "$response_dir" || true
+    fi
+  fi
+  if [[ -n "$queue_gateway_agent_dir" && -d "$queue_gateway_agent_dir" ]]; then
+    bridge_migration_print_step "$dry_run" "chown -R $controller_user $queue_gateway_agent_dir"
+    if [[ "$dry_run" != "1" ]]; then
+      bridge_linux_sudo_root chown -R "$controller_user" "$queue_gateway_agent_dir" || true
+    fi
+  fi
+  # Strip the target os_user from the queue-gateway root (preserve the
+  # controller r-x and any other agents' ACLs). The OS user itself is
+  # intentionally preserved after rollback, so without this the stale
+  # u:<os_user>:--x entry would survive on the shared root.
+  if [[ -n "$queue_gateway_root" && -d "$queue_gateway_root" ]]; then
+    bridge_migration_print_step "$dry_run" "setfacl -x u:${os_user} $queue_gateway_root"
+    if [[ "$dry_run" != "1" ]]; then
+      bridge_linux_sudo_root setfacl -x "u:${os_user}" "$queue_gateway_root" >/dev/null 2>&1 || true
+      bridge_linux_sudo_root setfacl -d -x "u:${os_user}" "$queue_gateway_root" >/dev/null 2>&1 || true
     fi
   fi
 
@@ -394,6 +415,7 @@ bridge_migration_unisolate() {
   [[ -n "$workdir" && -d "$workdir" ]] && acl_strip_paths_recursive+=("$workdir")
   [[ -n "$runtime_state_dir" && -d "$runtime_state_dir" ]] && acl_strip_paths_recursive+=("$runtime_state_dir")
   [[ -n "$log_dir" && -d "$log_dir" ]] && acl_strip_paths_recursive+=("$log_dir")
+  [[ -n "$queue_gateway_agent_dir" && -d "$queue_gateway_agent_dir" ]] && acl_strip_paths_recursive+=("$queue_gateway_agent_dir")
   [[ -n "$request_dir" && -d "$request_dir" ]] && acl_strip_paths_recursive+=("$request_dir")
   [[ -n "$response_dir" && -d "$response_dir" ]] && acl_strip_paths_recursive+=("$response_dir")
   [[ -n "$memory_daily_agent_dir" && -d "$memory_daily_agent_dir" ]] && acl_strip_paths_recursive+=("$memory_daily_agent_dir")
