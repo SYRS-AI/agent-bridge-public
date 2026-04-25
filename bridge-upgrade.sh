@@ -114,6 +114,57 @@ bridge_upgrade_version_at_ref() {
   fi
 }
 
+bridge_upgrade_with_target_env() {
+  local target_root="$1"
+  shift
+
+  env -i \
+    HOME="${HOME:-}" \
+    PATH="${PATH:-/usr/bin:/bin}" \
+    TMPDIR="${TMPDIR:-/tmp}" \
+    USER="${USER:-}" \
+    SHELL="${SHELL:-}" \
+    TERM="${TERM:-dumb}" \
+    BRIDGE_HOME="$target_root" \
+    BRIDGE_ROSTER_FILE="$target_root/agent-roster.sh" \
+    BRIDGE_ROSTER_LOCAL_FILE="$target_root/agent-roster.local.sh" \
+    BRIDGE_STATE_DIR="$target_root/state" \
+    BRIDGE_ACTIVE_AGENT_DIR="$target_root/state/agents" \
+    BRIDGE_HISTORY_DIR="$target_root/state/history" \
+    BRIDGE_WORKTREE_META_DIR="$target_root/state/worktrees" \
+    BRIDGE_ACTIVE_ROSTER_TSV="$target_root/state/active-roster.tsv" \
+    BRIDGE_ACTIVE_ROSTER_MD="$target_root/state/active-roster.md" \
+    BRIDGE_DAEMON_PID_FILE="$target_root/state/daemon.pid" \
+    BRIDGE_DAEMON_LOG="$target_root/state/daemon.log" \
+    BRIDGE_DAEMON_CRASH_LOG="$target_root/state/daemon-crash.log" \
+    BRIDGE_TASK_DB="$target_root/state/tasks.db" \
+    BRIDGE_PROFILE_STATE_DIR="$target_root/state/profiles" \
+    BRIDGE_CRON_STATE_DIR="$target_root/state/cron" \
+    BRIDGE_CRON_HOME_DIR="$target_root/cron" \
+    BRIDGE_NATIVE_CRON_JOBS_FILE="$target_root/cron/jobs.json" \
+    BRIDGE_CRON_DISPATCH_WORKER_DIR="$target_root/state/cron/workers" \
+    BRIDGE_WORKTREE_ROOT="$target_root/worktrees" \
+    BRIDGE_AGENT_HOME_ROOT="$target_root/agents" \
+    BRIDGE_RUNTIME_ROOT="$target_root/runtime" \
+    BRIDGE_RUNTIME_SCRIPTS_DIR="$target_root/runtime/scripts" \
+    BRIDGE_RUNTIME_SKILLS_DIR="$target_root/runtime/skills" \
+    BRIDGE_RUNTIME_SHARED_DIR="$target_root/runtime/shared" \
+    BRIDGE_RUNTIME_SHARED_TOOLS_DIR="$target_root/runtime/shared/tools" \
+    BRIDGE_RUNTIME_SHARED_REFERENCES_DIR="$target_root/runtime/shared/references" \
+    BRIDGE_RUNTIME_MEMORY_DIR="$target_root/runtime/memory" \
+    BRIDGE_RUNTIME_CREDENTIALS_DIR="$target_root/runtime/credentials" \
+    BRIDGE_RUNTIME_SECRETS_DIR="$target_root/runtime/secrets" \
+    BRIDGE_RUNTIME_CONFIG_FILE="$target_root/runtime/bridge-config.json" \
+    BRIDGE_HOOKS_DIR="$target_root/hooks" \
+    BRIDGE_LOG_DIR="$target_root/logs" \
+    BRIDGE_AUDIT_LOG="$target_root/logs/audit.jsonl" \
+    BRIDGE_SHARED_DIR="$target_root/shared" \
+    BRIDGE_TASK_NOTE_DIR="$target_root/shared/tasks" \
+    BRIDGE_DASHBOARD_STATE_FILE="$target_root/state/dashboard.json" \
+    BRIDGE_DISCORD_RELAY_STATE_FILE="$target_root/state/discord-relay.json" \
+    "$@"
+}
+
 bridge_upgrade_collect_agent_restart_report() {
   local target_root="$1"
   local dry_run="${2:-0}"
@@ -130,12 +181,11 @@ bridge_upgrade_collect_agent_restart_report() {
   #   is empty (the silent-exit common case). Base64 keeps newlines from
   #   breaking the tab framing. Empty when status != "failed" or the
   #   agent has no log directory yet. See `bridge_agent_log_dir`.
-  "$BRIDGE_BASH_BIN" -lc '
+  bridge_upgrade_with_target_env "$target_root" "$BRIDGE_BASH_BIN" -lc '
     set -euo pipefail
     target_root="$1"
     dry_run="$2"
     source_root="$3"
-    export BRIDGE_HOME="$target_root"
     source "$source_root/bridge-lib.sh"
     bridge_load_roster
 
@@ -365,11 +415,10 @@ bridge_upgrade_channel_guard_report() {
   local source_root="$1"
   local target_root="$2"
 
-  "$BRIDGE_BASH_BIN" -s -- "$source_root" "$target_root" <<'EOF'
+  bridge_upgrade_with_target_env "$target_root" "$BRIDGE_BASH_BIN" -s -- "$source_root" "$target_root" <<'EOF'
 set -euo pipefail
 source_root="$1"
 target_root="$2"
-export BRIDGE_HOME="$target_root"
 source "$source_root/bridge-lib.sh"
 bridge_load_roster
 
@@ -888,13 +937,12 @@ PY
 fi
 
 if [[ -f "$TARGET_ROOT/agent-roster.local.sh" ]]; then
-  if ADMIN_AGENT_ID="$("$BRIDGE_BASH_BIN" -lc '
+  if ADMIN_AGENT_ID="$(bridge_upgrade_with_target_env "$TARGET_ROOT" "$BRIDGE_BASH_BIN" -lc '
     set -euo pipefail
-    export BRIDGE_HOME="$1"
-    source "$2/bridge-lib.sh"
+    source "$1/bridge-lib.sh"
     bridge_load_roster
     printf "%s" "${BRIDGE_ADMIN_AGENT_ID:-}"
-  ' -- "$TARGET_ROOT" "$SOURCE_ROOT" 2>/dev/null)"; then
+  ' -- "$SOURCE_ROOT" 2>/dev/null)"; then
     :
   else
     ADMIN_AGENT_ID=""
@@ -945,17 +993,16 @@ if [[ $MIGRATE_AGENTS -eq 1 ]]; then
   else
     MIGRATION_JSON="$(python3 "$SOURCE_ROOT/bridge-upgrade.py" migrate-agents --source-root "$SOURCE_ROOT" --target-root "$TARGET_ROOT" --admin-agent "$ADMIN_AGENT_ID")"
   fi
-  "$BRIDGE_BASH_BIN" -lc '
+  bridge_upgrade_with_target_env "$TARGET_ROOT" "$BRIDGE_BASH_BIN" -lc '
     set -euo pipefail
-    export BRIDGE_HOME="$1"
-    source "$2/bridge-lib.sh"
+    source "$1/bridge-lib.sh"
     bridge_load_roster
-    dry_run="$3"
+    dry_run="$2"
     for agent in "${BRIDGE_AGENT_IDS[@]}"; do
       [[ "$(bridge_agent_engine "$agent")" == "claude" ]] || continue
       bridge_sync_claude_runtime_skills "$agent" "$(bridge_agent_workdir "$agent")" "$dry_run" >/dev/null 2>&1 || true
     done
-  ' -- "$TARGET_ROOT" "$SOURCE_ROOT" "$DRY_RUN"
+  ' -- "$SOURCE_ROOT" "$DRY_RUN"
 
   # Also propagate per-agent doc sync (bridge-docs.py apply) so
   # MEMORY-SCHEMA.md / SKILLS.md / CLAUDE.md managed blocks track the
@@ -972,14 +1019,16 @@ if [[ $MIGRATE_AGENTS -eq 1 ]]; then
   # instead of restoring the pre-upgrade content. See codex review
   # of the v0.3.8 -> v0.4.0 diff.
   if [[ $DRY_RUN -eq 0 ]]; then
-    DOCS_PREVIEW_JSON="$(python3 "$SOURCE_ROOT/bridge-docs.py" apply --all --dry-run --json \
+    DOCS_PREVIEW_JSON="$(bridge_upgrade_with_target_env "$TARGET_ROOT" \
+      python3 "$SOURCE_ROOT/bridge-docs.py" apply --all --dry-run --json \
       --bridge-home "$TARGET_ROOT" \
       --target-root "$TARGET_ROOT/agents" 2>/dev/null || printf '{"changed_paths":[]}')"
     python3 "$SOURCE_ROOT/bridge-upgrade.py" backup-extend-live \
       --target-root "$TARGET_ROOT" \
       --backup-root "$BACKUP_ROOT" \
       --paths-json "$DOCS_PREVIEW_JSON" >/dev/null 2>&1 || true
-    python3 "$SOURCE_ROOT/bridge-docs.py" apply --all \
+    bridge_upgrade_with_target_env "$TARGET_ROOT" \
+      python3 "$SOURCE_ROOT/bridge-docs.py" apply --all \
       --bridge-home "$TARGET_ROOT" \
       --target-root "$TARGET_ROOT/agents" >/dev/null 2>&1 || true
   fi
@@ -992,7 +1041,7 @@ if [[ $MIGRATE_AGENTS -eq 1 ]]; then
   if [[ $DRY_RUN -eq 1 ]]; then
     policy_args+=(--dry-run)
   fi
-  BRIDGE_HOME="$TARGET_ROOT" \
+  bridge_upgrade_with_target_env "$TARGET_ROOT" \
     "$BRIDGE_BASH_BIN" "$SOURCE_ROOT/scripts/apply-channel-policy.sh" "${policy_args[@]}" \
     >/dev/null 2>&1 || true
 fi
@@ -1019,11 +1068,11 @@ fi
 # first run self-announcing. Skipped on dry-runs and when no admin
 # agent is configured.
 if [[ $DRY_RUN -eq 0 ]]; then
-  # Resolve admin id: env override → grep the roster → skip.
+  # Resolve admin id: explicit upgrade override → grep the target roster → skip.
   # We grep instead of sourcing because the roster files reference
   # bridge-lib arrays/functions that are not loaded in this scope;
   # `source` would error out and leave _post_admin empty.
-  _post_admin="${BRIDGE_ADMIN_AGENT:-${BRIDGE_ADMIN_AGENT_ID:-}}"
+  _post_admin="${BRIDGE_ADMIN_AGENT:-}"
   if [[ -z "$_post_admin" ]]; then
     for _roster in "$TARGET_ROOT/agent-roster.local.sh" "$TARGET_ROOT/agent-roster.sh"; do
       if [[ -r "$_roster" ]]; then
@@ -1171,7 +1220,7 @@ POST_EOF
     _post_body_persist="$_post_body_persist_dir/upgrade-complete-$(date -u +%Y%m%dT%H%M%SZ).md"
     cp "$_post_body" "$_post_body_persist"
     _post_task_log="$(mktemp -t bridge-upgrade-post-task.XXXXXX.log)"
-    if "$TARGET_ROOT/agent-bridge" task create \
+    if bridge_upgrade_with_target_env "$TARGET_ROOT" "$TARGET_ROOT/agent-bridge" task create \
         --to "$_post_admin" --priority normal --from "$_post_admin" \
         --title "[upgrade-complete] Agent Bridge $SOURCE_VERSION — run bootstrap" \
         --body-file "$_post_body_persist" >"$_post_task_log" 2>&1; then
