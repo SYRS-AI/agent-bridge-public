@@ -1508,49 +1508,6 @@ CRASH_REPORTED_AT=$(printf '%q' "$(bridge_now_iso)")
 EOF
 }
 
-bridge_agent_write_broken_launch_state() {
-  local agent="$1"
-  local engine="$2"
-  local fail_count="$3"
-  local exit_code="$4"
-  local stderr_file="$5"
-  local launch_cmd="$6"
-  local stderr_offset="${7:-0}"
-  local state_file=""
-  local tail_file=""
-  local recovery_cmd=""
-
-  state_file="$(bridge_agent_broken_launch_file "$agent")"
-  tail_file="$(bridge_agent_crash_tail_file "$agent")"
-  recovery_cmd="agent-bridge agent safe-mode $agent"
-
-  mkdir -p "$(dirname "$state_file")" "$(dirname "$tail_file")"
-  if [[ -f "$stderr_file" ]]; then
-    if [[ "$stderr_offset" =~ ^[0-9]+$ ]] && (( stderr_offset > 0 )); then
-      tail -c +"$((stderr_offset + 1))" "$stderr_file" 2>/dev/null | tail -n 50 >"$tail_file" 2>/dev/null || true
-    else
-      tail -n 50 "$stderr_file" >"$tail_file" 2>/dev/null || true
-    fi
-  else
-    : >"$tail_file"
-  fi
-
-  cat >"$state_file" <<EOF
-BROKEN_AGENT=$(printf '%q' "$agent")
-BROKEN_ENGINE=$(printf '%q' "$engine")
-BROKEN_FAIL_COUNT=$(printf '%q' "$fail_count")
-BROKEN_EXIT_CODE=$(printf '%q' "$exit_code")
-BROKEN_STDERR_FILE=$(printf '%q' "$stderr_file")
-BROKEN_TAIL_FILE=$(printf '%q' "$tail_file")
-BROKEN_LAUNCH_CMD=$(printf '%q' "$launch_cmd")
-BROKEN_RECOVERY_CMD=$(printf '%q' "$recovery_cmd")
-BROKEN_REPORTED_AT=$(printf '%q' "$(bridge_now_iso)")
-# recovery: $recovery_cmd
-# stderr_tail:
-EOF
-  sed 's/^/# /' "$tail_file" >>"$state_file" 2>/dev/null || true
-}
-
 bridge_agent_clear_crash_report() {
   local agent="$1"
   rm -f \
