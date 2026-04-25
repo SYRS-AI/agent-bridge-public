@@ -3635,6 +3635,18 @@ cmd_run() {
   BRIDGE_DAEMON_LAST_STEP="startup"
   echo "$$" >"$BRIDGE_DAEMON_PID_FILE"
 
+  # Issue #265: emit a periodic audit `daemon_tick` so external monitoring
+  # (and bridge-supervisor) can detect a hung main loop. Without this, a
+  # blocked subprocess (the canonical example: tmux send-keys hanging on a
+  # closed Discord SSL pipe) leaves the daemon process alive but silent for
+  # tens of hours — every operator-facing health check still reports
+  # "running" and no cron fires. The tick is throttled (default 60s) so the
+  # audit log doesn't grow by 1 line per BRIDGE_DAEMON_INTERVAL second.
+  local heartbeat_interval="${BRIDGE_DAEMON_HEARTBEAT_SECONDS:-60}"
+  [[ "$heartbeat_interval" =~ ^[0-9]+$ ]] || heartbeat_interval=60
+  local last_heartbeat_ts=0
+  local now_ts
+
   while true; do
     BRIDGE_DAEMON_LAST_STEP="sync_cycle"
     if cmd_sync_cycle; then
@@ -3643,18 +3655,37 @@ cmd_run() {
       cycle_status=$?
       daemon_log_event "sync cycle failed with exit=$cycle_status"
     fi
+    now_ts="$(date +%s)"
+    if (( heartbeat_interval > 0 )) && (( now_ts - last_heartbeat_ts >= heartbeat_interval )); then
+      bridge_audit_log daemon daemon_tick daemon \
+        --detail loop_step="$BRIDGE_DAEMON_LAST_STEP" \
+        --detail interval_seconds="$BRIDGE_DAEMON_INTERVAL" \
+        --detail heartbeat_interval_seconds="$heartbeat_interval" \
+        2>/dev/null || true
+      last_heartbeat_ts="$now_ts"
+    fi
     BRIDGE_DAEMON_LAST_STEP="idle_sleep"
     sleep "$BRIDGE_DAEMON_INTERVAL"
   done
 }
 
 cmd_stop() {
-  local pid
   local recorded_pid
+  local entry
+  local -a pids=()
+  local killed=0
+  local failed=0
+  local orphans=0
+  local first_pid=""
+  local is_orphan
 
-  pid="$(bridge_daemon_pid)"
   recorded_pid="$(bridge_daemon_recorded_pid)"
-  if [[ -z "$pid" ]]; then
+  while IFS= read -r entry; do
+    [[ -n "$entry" ]] || continue
+    pids+=("$entry")
+  done < <(bridge_daemon_all_pids)
+
+  if (( ${#pids[@]} == 0 )); then
     if [[ -n "$recorded_pid" ]]; then
       rm -f "$BRIDGE_DAEMON_PID_FILE"
       daemon_info "stale bridge daemon pid removed"
@@ -3664,16 +3695,37 @@ cmd_stop() {
     return 0
   fi
 
-  if kill -0 "$pid" 2>/dev/null; then
-    kill "$pid"
-    rm -f "$BRIDGE_DAEMON_PID_FILE"
-    bridge_audit_log daemon daemon_stopped daemon --detail pid="$pid"
-    daemon_info "bridge daemon stopped"
-    return 0
-  fi
+  first_pid="${pids[0]}"
+  for entry in "${pids[@]}"; do
+    is_orphan=1
+    if [[ -n "$recorded_pid" && "$entry" == "$recorded_pid" ]]; then
+      is_orphan=0
+    fi
+    if (( is_orphan == 1 )); then
+      orphans=$(( orphans + 1 ))
+    fi
+    if kill -0 "$entry" 2>/dev/null; then
+      if kill "$entry" 2>/dev/null; then
+        killed=$(( killed + 1 ))
+      else
+        failed=$(( failed + 1 ))
+      fi
+    fi
+  done
 
   rm -f "$BRIDGE_DAEMON_PID_FILE"
-  daemon_info "stale bridge daemon pid removed"
+  bridge_audit_log daemon daemon_stopped daemon \
+    --detail pid="$first_pid" \
+    --detail killed_count="$killed" \
+    --detail failed_count="$failed" \
+    --detail orphan_count="$orphans" \
+    --detail recorded_pid="${recorded_pid:-}"
+
+  if (( orphans > 0 )); then
+    daemon_info "bridge daemon stopped (killed=$killed, swept $orphans orphan(s) outside pid-file)"
+  else
+    daemon_info "bridge daemon stopped (pid=$first_pid)"
+  fi
 }
 
 cmd_status() {
