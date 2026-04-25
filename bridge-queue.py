@@ -1565,10 +1565,35 @@ def cmd_daemon_step(args: argparse.Namespace) -> int:
             job_name = m.group(1) if m else row["title"]
             key = (str(row["assigned_to"]), job_name)
             _cron_groups.setdefault(key, []).append(row)
+        # Issue #266: in recovery scenarios (worker pool backlog, daemon hang
+        # recovery), the newest slot itself often has not been fired by the
+        # time the next cron tick adds a still-newer slot. The previous logic
+        # cancelled every non-newest open slot, which meant a high-frequency
+        # cron with worker latency > cron interval never actually ran — every
+        # fresh slot got superseded by the next before a worker could claim it
+        # (cs-line-poll-5m: zero successful runs across 144 slots in 36h).
+        # Two layered guards: (1) preserve any sibling that is still inside
+        # the grace window (worker may still pick it up); (2) if the newest
+        # slot has not itself been fired yet, leave older un-claimed siblings
+        # in place so the worker can pick whichever it reaches first instead
+        # of seeing an empty queue while a stuck cron quietly drops fires.
+        try:
+            _supersede_grace = int(os.environ.get("BRIDGE_CRON_SUPERSEDE_GRACE_SECONDS", "60"))
+        except (TypeError, ValueError):
+            _supersede_grace = 60
+        if _supersede_grace < 0:
+            _supersede_grace = 0
         for _key, group in _cron_groups.items():
             if len(group) < 2:
                 continue
+            newest = group[0]
+            newest_fired = bool(newest["claimed_by"]) or newest["status"] == "claimed"
             for row in group[1:]:
+                created_ts = row["created_ts"] or 0
+                if (current_ts - created_ts) < _supersede_grace and not row["claimed_by"]:
+                    continue
+                if not newest_fired and not row["claimed_by"]:
+                    continue
                 conn.execute(
                     """
                     UPDATE tasks
