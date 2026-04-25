@@ -690,9 +690,21 @@ export BRIDGE_NATIVE_CRON_JOBS_FILE="$BRIDGE_CRON_HOME_DIR/jobs.json"
 export BRIDGE_CRON_DISPATCH_WORKER_DIR="$BRIDGE_CRON_STATE_DIR/workers"
 export BRIDGE_OPENCLAW_CRON_JOBS_FILE="$TMP_ROOT/openclaw-jobs.json"
 export BRIDGE_DAEMON_INTERVAL=1
+export BRIDGE_CRON_SYNC_ENABLED=0
 export BRIDGE_CRON_DISPATCH_MAX_PARALLEL=1
 export BRIDGE_DISCORD_RELAY_ENABLED=0
-export BRIDGE_STALL_SCAN_ENABLED=1
+# Reduce daemon side-work by default; per-block targeted tests re-enable the
+# specific scanners they exercise. This keeps the smoke daemon syncs cheap and
+# avoids cross-block noise (PR #239 bullet 11). The CHANNEL_HEALTH and
+# USAGE_MONITOR gates are intentionally not exported here — their daemon-side
+# guards land in a follow-up split alongside this smoke wave.
+export BRIDGE_DAILY_BACKUP_ENABLED=0
+export BRIDGE_HEARTBEAT_INTERVAL_SECONDS=0
+export BRIDGE_WATCHDOG_ENABLED=0
+export BRIDGE_SKIP_PLUGIN_LIVENESS=1
+export BRIDGE_RELEASE_CHECK_ENABLED=0
+export BRIDGE_STALL_SCAN_ENABLED=0
+export BRIDGE_CONTEXT_PRESSURE_SCAN_ENABLED=0
 export BRIDGE_ROSTER_FILE="$REPO_ROOT/agent-roster.sh"
 export BRIDGE_ROSTER_LOCAL_FILE="$BRIDGE_HOME/agent-roster.local.sh"
 export BRIDGE_AGENT_HOME_ROOT="$BRIDGE_HOME/agents"
@@ -911,6 +923,17 @@ JSON
 EOF
 chmod +x "$FAKE_BIN/codex"
 cp "$FAKE_BIN/codex" "$TMP_ROOT/codex-cron-fake"
+
+# Init preflight (`agent-bridge init --dry-run --json`, exercised below)
+# resolves a `claude` binary on PATH; without one, CI hosts fail before any
+# fixture work runs. Stub a minimal binary that prints a prompt and sleeps so
+# the preflight succeeds without a real Claude CLI install (PR #239 bullet 3).
+cat >"$FAKE_BIN/claude" <<'EOF'
+#!/usr/bin/env bash
+printf '❯ \n'
+sleep 30
+EOF
+chmod +x "$FAKE_BIN/claude"
 
 cat >"$BRIDGE_ROSTER_LOCAL_FILE" <<EOF
 #!/usr/bin/env bash
@@ -3914,7 +3937,10 @@ assert payload["channels"]["required"] == "plugin:telegram@claude-plugins-offici
 PY
 
 log "bootstrapping a manager role with bootstrap"
-BOOTSTRAP_DRY_RUN_JSON="$("$REPO_ROOT/agent-bridge" bootstrap --admin "$BOOTSTRAP_AGENT" --engine claude --session "$BOOTSTRAP_SESSION" --channels plugin:telegram --allow-from 123456789 --default-chat 123456789 --channel-account smoke --runtime-config "$TMP_ROOT/openclaw.json" --api-base-url "$FAKE_TELEGRAM_API_BASE" --rcfile "$BOOTSTRAP_RCFILE" --skip-daemon --skip-launchagent --dry-run --json 2>&1)" || die "bootstrap dry-run failed: $BOOTSTRAP_DRY_RUN_JSON"
+# Pin `--shell zsh` and `--skip-systemd` so this generic bootstrap block runs
+# the same way on macOS and Linux CI; systemd-specific coverage lives in the
+# dedicated systemd block below (PR #239 bullet 4).
+BOOTSTRAP_DRY_RUN_JSON="$("$REPO_ROOT/agent-bridge" bootstrap --shell zsh --admin "$BOOTSTRAP_AGENT" --engine claude --session "$BOOTSTRAP_SESSION" --channels plugin:telegram --allow-from 123456789 --default-chat 123456789 --channel-account smoke --runtime-config "$TMP_ROOT/openclaw.json" --api-base-url "$FAKE_TELEGRAM_API_BASE" --rcfile "$BOOTSTRAP_RCFILE" --skip-daemon --skip-launchagent --skip-systemd --dry-run --json 2>&1)" || die "bootstrap dry-run failed: $BOOTSTRAP_DRY_RUN_JSON"
 python3 - "$BOOTSTRAP_DRY_RUN_JSON" "$BOOTSTRAP_AGENT" "$BOOTSTRAP_SESSION" "$BOOTSTRAP_RCFILE" <<'PY'
 import json
 import sys
@@ -3930,7 +3956,7 @@ assert payload["shell_integration"]["shell"] == "zsh"
 assert payload["shell_integration"]["rcfile"] == rcfile
 assert payload["daemon"]["status"] == "skipped"
 assert payload["launchagent"]["status"] == "skipped"
-assert payload["systemd"]["status"] == "unsupported"
+assert payload["systemd"]["status"] == "skipped"
 assert payload["next_command"] == "agb admin"
 assert payload["init"]["admin"] == agent
 assert payload["init"]["session"] == session
@@ -3938,13 +3964,13 @@ assert payload["init"]["dry_run"] is True
 assert payload["handoff_steps"], "bootstrap handoff steps should not be empty"
 assert any("agb admin" in step for step in payload["handoff_steps"])
 PY
-BOOTSTRAP_OUTPUT="$("$REPO_ROOT/agent-bridge" bootstrap --admin "$BOOTSTRAP_AGENT" --engine claude --session "$BOOTSTRAP_SESSION" --channels plugin:telegram --allow-from 123456789 --default-chat 123456789 --channel-account smoke --runtime-config "$TMP_ROOT/openclaw.json" --api-base-url "$FAKE_TELEGRAM_API_BASE" --rcfile "$BOOTSTRAP_RCFILE" --skip-daemon --skip-launchagent 2>&1)" || die "bootstrap actual failed: $BOOTSTRAP_OUTPUT"
+BOOTSTRAP_OUTPUT="$("$REPO_ROOT/agent-bridge" bootstrap --shell zsh --admin "$BOOTSTRAP_AGENT" --engine claude --session "$BOOTSTRAP_SESSION" --channels plugin:telegram --allow-from 123456789 --default-chat 123456789 --channel-account smoke --runtime-config "$TMP_ROOT/openclaw.json" --api-base-url "$FAKE_TELEGRAM_API_BASE" --rcfile "$BOOTSTRAP_RCFILE" --skip-daemon --skip-launchagent --skip-systemd 2>&1)" || die "bootstrap actual failed: $BOOTSTRAP_OUTPUT"
 assert_contains "$BOOTSTRAP_OUTPUT" "== Agent Bridge bootstrap =="
 assert_contains "$BOOTSTRAP_OUTPUT" "admin_agent: $BOOTSTRAP_AGENT"
 assert_contains "$BOOTSTRAP_OUTPUT" "shell_integration: applied"
 assert_contains "$BOOTSTRAP_OUTPUT" "daemon: skipped"
 assert_contains "$BOOTSTRAP_OUTPUT" "launchagent: skipped"
-assert_contains "$BOOTSTRAP_OUTPUT" "systemd: unsupported"
+assert_contains "$BOOTSTRAP_OUTPUT" "systemd: skipped"
 assert_contains "$BOOTSTRAP_OUTPUT" "3. Run: agb admin"
 [[ -f "$BOOTSTRAP_RCFILE" ]] || die "bootstrap did not create shell rc file"
 assert_contains "$(cat "$BOOTSTRAP_RCFILE")" "source \"$REPO_ROOT/shell/agent-bridge.zsh\""
@@ -6602,8 +6628,15 @@ PLUGIN_WATCH_OUTPUT="$("$BASH4_BIN" -lc '
   } >"$tmp_daemon"
   source "$tmp_daemon"
   bridge_agent_channel_status() { printf "ok"; }
-  bridge_agent_missing_plugin_mcp_channels_csv() { printf "plugin:telegram@claude-plugins-official"; }
+  # Scope the missing-channels stub to PLUGIN_WATCH_AGENT only; the broader
+  # smoke daemon now defaults to BRIDGE_SKIP_PLUGIN_LIVENESS=1, so the
+  # liveness scanner must be re-enabled here, and the stub must not pretend
+  # every other agent is also missing a plugin (PR #239 bullet 13).
+  bridge_agent_missing_plugin_mcp_channels_csv() {
+    [[ "$1" == "'"$PLUGIN_WATCH_AGENT"'" ]] && printf "plugin:telegram@claude-plugins-official"
+  }
   bridge_tmux_session_attached_count() { printf "0\n"; }
+  BRIDGE_SKIP_PLUGIN_LIVENESS=0
   BRIDGE_PLUGIN_LIVENESS_RESTART_COOLDOWN_SECONDS=60
   process_plugin_liveness || true
   process_plugin_liveness || true
@@ -6639,8 +6672,15 @@ PLUGIN_WATCH_FAIL_OUTPUT="$("$BASH4_BIN" -lc '
   } >"$tmp_daemon"
   source "$tmp_daemon"
   bridge_agent_channel_status() { printf "ok"; }
-  bridge_agent_missing_plugin_mcp_channels_csv() { printf "plugin:telegram@claude-plugins-official"; }
+  # Same agent-scoping as the success block above; additionally clear any
+  # cooldown state the prior block wrote so this restart-failure path is
+  # not skipped by a stale cooldown timestamp (PR #239 bullet 13).
+  bridge_agent_missing_plugin_mcp_channels_csv() {
+    [[ "$1" == "'"$PLUGIN_WATCH_AGENT"'" ]] && printf "plugin:telegram@claude-plugins-official"
+  }
   bridge_tmux_session_attached_count() { printf "0\n"; }
+  rm -f "$(bridge_plugin_liveness_state_file "'"$PLUGIN_WATCH_AGENT"'")"
+  BRIDGE_SKIP_PLUGIN_LIVENESS=0
   BRIDGE_PLUGIN_LIVENESS_RESTART_COOLDOWN_SECONDS=60
   process_plugin_liveness || true
 ')"
@@ -6648,12 +6688,12 @@ assert_contains "$PLUGIN_WATCH_FAIL_OUTPUT" "plugin_mcp_liveness_restart_failed"
 assert_contains "$PLUGIN_WATCH_FAIL_OUTPUT" "restart_error=restart failed: sentinel stderr"
 
 log "deduping identical watchdog drift reports"
-BRIDGE_WATCHDOG_INTERVAL_SECONDS=1 BRIDGE_WATCHDOG_COOLDOWN_SECONDS=3600 bash "$REPO_ROOT/bridge-daemon.sh" sync >/dev/null
+BRIDGE_WATCHDOG_ENABLED=1 BRIDGE_WATCHDOG_INTERVAL_SECONDS=1 BRIDGE_WATCHDOG_COOLDOWN_SECONDS=3600 bash "$REPO_ROOT/bridge-daemon.sh" sync >/dev/null
 WATCHDOG_OPEN_ID="$(python3 "$REPO_ROOT/bridge-queue.py" find-open --agent "$SMOKE_AGENT" --title-prefix "[watchdog] " 2>/dev/null || true)"
 [[ "$WATCHDOG_OPEN_ID" =~ ^[0-9]+$ ]] || die "expected watchdog task for drift report"
 bash "$REPO_ROOT/bridge-task.sh" done "$WATCHDOG_OPEN_ID" --agent "$SMOKE_AGENT" --note "watchdog handled" >/dev/null
 sleep 1
-BRIDGE_WATCHDOG_INTERVAL_SECONDS=1 BRIDGE_WATCHDOG_COOLDOWN_SECONDS=3600 bash "$REPO_ROOT/bridge-daemon.sh" sync >/dev/null
+BRIDGE_WATCHDOG_ENABLED=1 BRIDGE_WATCHDOG_INTERVAL_SECONDS=1 BRIDGE_WATCHDOG_COOLDOWN_SECONDS=3600 bash "$REPO_ROOT/bridge-daemon.sh" sync >/dev/null
 WATCHDOG_OPEN_ID_AGAIN="$(python3 "$REPO_ROOT/bridge-queue.py" find-open --agent "$SMOKE_AGENT" --title-prefix "[watchdog] " 2>/dev/null || true)"
 [[ -z "$WATCHDOG_OPEN_ID_AGAIN" ]] || die "watchdog alert should be deduped while drift hash is unchanged"
 
@@ -7038,12 +7078,14 @@ STALL_RATE_CREATE_OUTPUT="$("$REPO_ROOT/agent-bridge" task create --to "$STALL_R
 STALL_RATE_TASK_ID="$(printf '%s\n' "$STALL_RATE_CREATE_OUTPUT" | sed -n 's/^created task #\([0-9][0-9]*\).*/\1/p' | head -n1)"
 [[ "$STALL_RATE_TASK_ID" =~ ^[0-9]+$ ]] || die "expected rate stall task id"
 python3 "$REPO_ROOT/bridge-queue.py" claim "$STALL_RATE_TASK_ID" --agent "$STALL_RATE_AGENT" >/dev/null
+BRIDGE_STALL_SCAN_ENABLED=1 \
 BRIDGE_STALL_SCAN_INTERVAL_SECONDS=0 \
 BRIDGE_STALL_EXPLICIT_IDLE_SECONDS=0 \
 BRIDGE_STALL_RATE_LIMIT_RETRY_SECONDS=0 \
 BRIDGE_STALL_ESCALATE_AFTER_SECONDS=0 \
 BRIDGE_STALL_MAX_NUDGES=2 \
 bash "$REPO_ROOT/bridge-daemon.sh" sync >/dev/null
+BRIDGE_STALL_SCAN_ENABLED=1 \
 BRIDGE_STALL_SCAN_INTERVAL_SECONDS=0 \
 BRIDGE_STALL_EXPLICIT_IDLE_SECONDS=0 \
 BRIDGE_STALL_RATE_LIMIT_RETRY_SECONDS=0 \
@@ -7052,6 +7094,7 @@ BRIDGE_STALL_MAX_NUDGES=2 \
 bash "$REPO_ROOT/bridge-daemon.sh" sync >/dev/null
 RATE_LIMIT_STALL_TASK_ID="$(python3 "$REPO_ROOT/bridge-queue.py" find-open --agent "$SMOKE_AGENT" --title-prefix "[STALL/RATE_LIMIT] $STALL_RATE_AGENT " 2>/dev/null || true)"
 [[ "$RATE_LIMIT_STALL_TASK_ID" =~ ^[0-9]+$ ]] || die "expected rate-limit stall escalation"
+BRIDGE_STALL_SCAN_ENABLED=1 \
 BRIDGE_STALL_SCAN_INTERVAL_SECONDS=0 \
 BRIDGE_STALL_EXPLICIT_IDLE_SECONDS=0 \
 BRIDGE_STALL_RATE_LIMIT_RETRY_SECONDS=0 \
@@ -7076,6 +7119,7 @@ STALL_AUTH_CREATE_OUTPUT="$("$REPO_ROOT/agent-bridge" task create --to "$STALL_A
 STALL_AUTH_TASK_ID="$(printf '%s\n' "$STALL_AUTH_CREATE_OUTPUT" | sed -n 's/^created task #\([0-9][0-9]*\).*/\1/p' | head -n1)"
 [[ "$STALL_AUTH_TASK_ID" =~ ^[0-9]+$ ]] || die "expected auth stall task id"
 python3 "$REPO_ROOT/bridge-queue.py" claim "$STALL_AUTH_TASK_ID" --agent "$STALL_AUTH_AGENT" >/dev/null
+BRIDGE_STALL_SCAN_ENABLED=1 \
 BRIDGE_STALL_SCAN_INTERVAL_SECONDS=0 \
 BRIDGE_STALL_EXPLICIT_IDLE_SECONDS=0 \
 bash "$REPO_ROOT/bridge-daemon.sh" sync >/dev/null
@@ -7086,12 +7130,14 @@ STALL_UNKNOWN_CREATE_OUTPUT="$("$REPO_ROOT/agent-bridge" task create --to "$STAL
 STALL_UNKNOWN_TASK_ID="$(printf '%s\n' "$STALL_UNKNOWN_CREATE_OUTPUT" | sed -n 's/^created task #\([0-9][0-9]*\).*/\1/p' | head -n1)"
 [[ "$STALL_UNKNOWN_TASK_ID" =~ ^[0-9]+$ ]] || die "expected unknown stall task id"
 python3 "$REPO_ROOT/bridge-queue.py" claim "$STALL_UNKNOWN_TASK_ID" --agent "$STALL_UNKNOWN_AGENT" >/dev/null
+BRIDGE_STALL_SCAN_ENABLED=1 \
 BRIDGE_STALL_SCAN_INTERVAL_SECONDS=0 \
 BRIDGE_STALL_UNKNOWN_IDLE_SECONDS=0 \
 BRIDGE_STALL_UNKNOWN_RETRY_SECONDS=0 \
 BRIDGE_STALL_UNKNOWN_ESCALATE_SECONDS=0 \
 BRIDGE_STALL_MAX_NUDGES=2 \
 bash "$REPO_ROOT/bridge-daemon.sh" sync >/dev/null
+BRIDGE_STALL_SCAN_ENABLED=1 \
 BRIDGE_STALL_SCAN_INTERVAL_SECONDS=0 \
 BRIDGE_STALL_UNKNOWN_IDLE_SECONDS=0 \
 BRIDGE_STALL_UNKNOWN_RETRY_SECONDS=0 \
@@ -7102,6 +7148,7 @@ UNKNOWN_STALL_TASK_ID="$(python3 "$REPO_ROOT/bridge-queue.py" find-open --agent 
 [[ "$UNKNOWN_STALL_TASK_ID" =~ ^[0-9]+$ ]] || die "expected unknown stall escalation"
 
 tmux_kill_session_exact "$STALL_RATE_AGENT" || true
+BRIDGE_STALL_SCAN_ENABLED=1 \
 BRIDGE_STALL_SCAN_INTERVAL_SECONDS=0 \
 BRIDGE_STALL_EXPLICIT_IDLE_SECONDS=0 \
 bash "$REPO_ROOT/bridge-daemon.sh" sync >/dev/null
@@ -7144,6 +7191,7 @@ chmod +x "$CONTEXT_PRESSURE_SCRIPT"
 tmux new-session -d -s "$CONTEXT_PRESSURE_AGENT" "$CONTEXT_PRESSURE_SCRIPT '$CONTEXT_PRESSURE_INPUT_LOG'"
 sleep 1
 bash "$REPO_ROOT/bridge-sync.sh" >/dev/null
+BRIDGE_CONTEXT_PRESSURE_SCAN_ENABLED=1 \
 BRIDGE_CONTEXT_PRESSURE_SCAN_INTERVAL_SECONDS=0 \
 bash "$REPO_ROOT/bridge-daemon.sh" sync >/dev/null
 CONTEXT_PRESSURE_TASK_ID="$(python3 "$REPO_ROOT/bridge-queue.py" find-open --agent "$SMOKE_AGENT" --title-prefix "[context-pressure] $CONTEXT_PRESSURE_AGENT " 2>/dev/null || true)"
@@ -7155,12 +7203,14 @@ assert_contains "$CONTEXT_PRESSURE_BODY" "# Context Pressure Report"
 assert_contains "$CONTEXT_PRESSURE_BODY" "severity: warning"
 assert_contains "$CONTEXT_PRESSURE_BODY" "Context remaining 8%"
 [[ ! -s "$CONTEXT_PRESSURE_INPUT_LOG" ]] || die "context pressure scanner must not inject messages into the active session"
+BRIDGE_CONTEXT_PRESSURE_SCAN_ENABLED=1 \
 BRIDGE_CONTEXT_PRESSURE_SCAN_INTERVAL_SECONDS=0 \
 bash "$REPO_ROOT/bridge-daemon.sh" sync >/dev/null
 CONTEXT_PRESSURE_TASK_ID_AGAIN="$(python3 "$REPO_ROOT/bridge-queue.py" find-open --agent "$SMOKE_AGENT" --title-prefix "[context-pressure] $CONTEXT_PRESSURE_AGENT " 2>/dev/null || true)"
 [[ "$CONTEXT_PRESSURE_TASK_ID_AGAIN" == "$CONTEXT_PRESSURE_TASK_ID" ]] || die "expected deduped context-pressure report"
 tmux_kill_session_exact "$CONTEXT_PRESSURE_AGENT" || true
 "$BASH4_BIN" -lc "source \"$REPO_ROOT/bridge-lib.sh\"; bridge_load_roster; bridge_agent_mark_manual_stop \"$CONTEXT_PRESSURE_AGENT\""
+BRIDGE_CONTEXT_PRESSURE_SCAN_ENABLED=1 \
 BRIDGE_CONTEXT_PRESSURE_SCAN_INTERVAL_SECONDS=0 \
 bash "$REPO_ROOT/bridge-daemon.sh" sync >/dev/null
 CONTEXT_RECOVERED_JSON="$("$REPO_ROOT/agent-bridge" audit --action context_pressure_recovered --limit 20 --json)"
