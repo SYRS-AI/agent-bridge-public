@@ -5448,6 +5448,40 @@ assert_not_contains "$UPGRADE_DRY_RUN_TEXT" "agent_restart_would_restart:"
 assert_not_contains "$UPGRADE_DRY_RUN_TEXT" "agent_restart_would_agents:"
 assert_not_contains "$UPGRADE_DRY_RUN_TEXT" "agent_restart_restarted:"
 
+log "isolating upgrade restart analysis from caller BRIDGE env"
+UPGRADE_ENV_LIVE_HOME="$TMP_ROOT/upgrade-env-live"
+UPGRADE_ENV_TARGET_HOME="$TMP_ROOT/upgrade-env-target"
+mkdir -p "$UPGRADE_ENV_LIVE_HOME" "$UPGRADE_ENV_TARGET_HOME" "$UPGRADE_ENV_LIVE_HOME/agents/live-leak-agent"
+cat >"$UPGRADE_ENV_LIVE_HOME/agent-roster.sh" <<EOF
+bridge_add_agent_id_if_missing "live-leak-agent"
+BRIDGE_AGENT_DESC["live-leak-agent"]="Live env leak sentinel"
+BRIDGE_AGENT_ENGINE["live-leak-agent"]="codex"
+BRIDGE_AGENT_SESSION["live-leak-agent"]="live-leak-session"
+BRIDGE_AGENT_WORKDIR["live-leak-agent"]="$UPGRADE_ENV_LIVE_HOME/agents/live-leak-agent"
+BRIDGE_AGENT_LAUNCH_CMD["live-leak-agent"]='sleep 30'
+EOF
+UPGRADE_ENV_JSON="$(
+  BRIDGE_HOME="$UPGRADE_ENV_LIVE_HOME" \
+  BRIDGE_ROSTER_FILE="$UPGRADE_ENV_LIVE_HOME/agent-roster.sh" \
+  BRIDGE_ROSTER_LOCAL_FILE="$UPGRADE_ENV_LIVE_HOME/agent-roster.local.sh" \
+  BRIDGE_STATE_DIR="$UPGRADE_ENV_LIVE_HOME/state" \
+  BRIDGE_TASK_DB="$UPGRADE_ENV_LIVE_HOME/state/tasks.db" \
+  BRIDGE_AGENT_HOME_ROOT="$UPGRADE_ENV_LIVE_HOME/agents" \
+  "$REPO_ROOT/agent-bridge" upgrade --source "$REPO_ROOT" --target "$UPGRADE_ENV_TARGET_HOME" \
+    --channel current --no-pull --allow-dirty --dry-run --json --restart-agents
+)"
+python3 - "$UPGRADE_ENV_JSON" <<'PY'
+import json
+import sys
+
+payload = json.loads(sys.argv[1])
+restart = payload["agent_restart"]
+assert restart["enabled"] is True, restart
+assert restart["considered"] == 0, restart
+assert "live-leak-agent" not in restart.get("restart_eligible_agents", []), restart
+assert "live-leak-agent" not in restart.get("restart_attempted_ok_agents", []), restart
+PY
+
 log "rolling back from an upgrade backup snapshot"
 ROLLBACK_ROOT="$TMP_ROOT/rollback-root"
 mkdir -p "$ROLLBACK_ROOT"
