@@ -4,6 +4,44 @@ All notable changes to Agent Bridge are documented here. This project adheres
 loosely to [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and tracks
 version bumps via the `VERSION` file.
 
+## [0.6.16] — 2026-04-25
+
+### Fixed
+- Daily-note canonical path is now unified at `<agent-home>/memory/<date>.md`
+  for every user, including `default` (issue #220). Closes the
+  `_daily_notes_base` split that PR #218 only papered over with a
+  read-only legacy probe in the harvester. The actual writer
+  (`bridge-memory.py daily-append`) has always taken no `user`
+  argument and landed in `<home>/memory/`; the summarizer's `--user`
+  flag previously redirected reads into a separate
+  `<home>/users/<user>/memory/` tree that no writer ever populated,
+  so split-brain symptoms (missed daily notes after PR #218 in
+  rebuild-index, monthly cascades reading the wrong tree) are
+  resolved by aligning the resolver. Multi-tenant
+  `users/<user>/memory/` partitions remain an indexed escape hatch
+  (`collect_index_documents` still walks them) but are no longer the
+  bridge writer's target — see `docs/agent-runtime/memory-schema.md`.
+
+### Added
+- `bridge-memory.py migrate-canonical --home <home> [--user <id>] [--apply]`
+  folds legacy `<home>/users/<user>/memory/*.md` into the unified
+  `<home>/memory/` root (issue #220). Default mode is dry-run; pass
+  `--apply` to perform an atomic move and write
+  `<home>/memory/_migration_log.json` (schema
+  `memory-canonical-migration-v1`). Idempotent — a second `--apply`
+  on a converged install reports `moved: 0`. Collisions (the same
+  `<date>.md` exists in both roots) are renamed to
+  `<date>.legacy.md` in the canonical root and an admin task is
+  filed best-effort via `agent-bridge task create --to patch`. The
+  manifest accumulates a `runs[]` history so multi-pass migrations
+  retain provenance.
+- `BRIDGE_MEMORY_LEGACY_PROBE` env var now gates the harvester's
+  legacy `<home>/users/default/memory/<date>.md` read-only probe.
+  Defaults to `1` for one release so partially-migrated installs
+  don't see false-positive backfills; set to `0` after running
+  `migrate-canonical --apply` everywhere. Probe removal target:
+  v0.7.
+
 ## [0.6.15] — 2026-04-25
 
 ### Added

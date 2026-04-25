@@ -1603,16 +1603,20 @@ def _iso_week_range(year: int, week: int) -> tuple[datetime, datetime]:
 
 
 def _daily_notes_base(home: Path, user: str) -> Path:
-    """Resolve the daily-notes root for a user.
+    """Resolve the daily-notes root.
 
-    Contract:
-    - `default` (or empty) user → `<home>/memory` is the canonical root.
-    - Non-default user → `<home>/users/<user>/memory` only. No silent fallback to
-      the shared root; absent directory = zero notes.
+    Contract (issue #220): the canonical daily-note root is `<home>/memory`
+    for every user, including `default`. There is no per-user variant — the
+    actual writer (`_daily_note_path` / `cmd_daily_append`) takes no `user`
+    argument and always lands in `<home>/memory/<date>.md`. The `user`
+    parameter is retained on the read-side summarizer API for backwards
+    compatibility but it no longer changes the resolved path. A
+    multi-tenant install that has manually staged daily notes under
+    `<home>/users/<user>/memory/` should run `bridge-memory.py
+    migrate-canonical --user <user>` to fold them into the shared root.
     """
-    if not user or user == "default":
-        return home / "memory"
-    return home / "users" / user / "memory"
+    del user  # unified path; argument retained for API stability
+    return home / "memory"
 
 
 def _collect_daily_notes(home: Path, user: str, start: datetime, end: datetime) -> list[Path]:
@@ -2018,6 +2022,219 @@ def cmd_reconcile(args: argparse.Namespace) -> int:
             print("task: created")
     return 0 if not conflicts else 2
 
+
+# ---------------------------------------------------------------------------
+# migrate-canonical (issue #220) — fold legacy `<home>/users/<user>/memory/`
+# daily notes into the unified `<home>/memory/` root. Idempotent. Default is
+# dry-run; --apply performs the move and writes a `_migration_log.json`
+# manifest under `<home>/memory/`.
+# ---------------------------------------------------------------------------
+
+
+_MIGRATION_LOG_NAME = "_migration_log.json"
+
+
+def _migration_legacy_root(home: Path, user: str) -> Path:
+    user_id = user or "default"
+    return home / "users" / user_id / "memory"
+
+
+def _migration_collect_candidates(legacy_root: Path) -> list[Path]:
+    """Return *.md files in the legacy root, excluding the manifest itself."""
+    if not legacy_root.exists() or not legacy_root.is_dir():
+        return []
+    out: list[Path] = []
+    for path in sorted(legacy_root.glob("*.md")):
+        if path.name == _MIGRATION_LOG_NAME:
+            continue
+        out.append(path)
+    return out
+
+
+def _migration_collision_target(canonical_root: Path, source: Path) -> Path:
+    """Return `<date>.legacy.md` in the canonical root, suffixed if needed."""
+    stem = source.stem
+    base = canonical_root / f"{stem}.legacy.md"
+    if not base.exists():
+        return base
+    counter = 1
+    while True:
+        candidate = canonical_root / f"{stem}.legacy.{counter}.md"
+        if not candidate.exists():
+            return candidate
+        counter += 1
+
+
+def cmd_migrate_canonical(args: argparse.Namespace) -> int:
+    """Migrate legacy `<home>/users/<user>/memory/*.md` → `<home>/memory/*.md`.
+
+    Default mode is dry-run (no `--apply`). Idempotent: a second run on a
+    converged install reports `moved=[]`. On collision (the same date note
+    exists in both roots) the legacy file is renamed to
+    `<date>.legacy.md` in the canonical root and an admin task is filed
+    best-effort. The migration manifest lands at
+    `<home>/memory/_migration_log.json` on `--apply`.
+    """
+    home = Path(args.home).expanduser()
+    user = args.user or "default"
+    apply = bool(args.apply)
+
+    # Issue #220 follow-up safeguard (codex review of PR #296): _resolve_bridge_bin
+    # always routes admin task creation through the LIVE BRIDGE_HOME's binary,
+    # so an --apply against a non-live --home will still file collision tasks
+    # in the live queue (the fixer accidentally triggered task #1373 this way).
+    # Refuse --apply when --home looks like the live install unless the operator
+    # explicitly asserts they meant it via --i-know-this-is-live.
+    if apply and not bool(getattr(args, "i_know_this_is_live", False)):
+        live_home_env = os.environ.get("BRIDGE_HOME")
+        live_home = Path(live_home_env).expanduser().resolve() if live_home_env else (Path.home() / ".agent-bridge").resolve()
+        if home.resolve() == live_home:
+            sys.stderr.write(
+                f"[migrate-canonical] refusing --apply against live BRIDGE_HOME ({live_home}); "
+                f"pass --i-know-this-is-live to override.\n"
+            )
+            return 2
+
+    legacy_root = _migration_legacy_root(home, user)
+    canonical_root = home / "memory"
+
+    candidates = _migration_collect_candidates(legacy_root)
+    moved: list[dict] = []
+    collisions: list[dict] = []
+    skipped: list[dict] = []
+
+    if apply:
+        canonical_root.mkdir(parents=True, exist_ok=True)
+
+    for src in candidates:
+        target = canonical_root / src.name
+        try:
+            size = src.stat().st_size
+        except OSError:
+            size = 0
+        if target.exists():
+            collision_target = _migration_collision_target(canonical_root, src)
+            collisions.append({
+                "from": str(src),
+                "to": str(collision_target),
+                "reason": "canonical_exists",
+            })
+            if apply:
+                try:
+                    os.replace(src, collision_target)
+                except OSError as exc:
+                    skipped.append({"path": str(src), "reason": f"rename_failed: {exc}"})
+        else:
+            moved.append({"from": str(src), "to": str(target), "bytes": size})
+            if apply:
+                try:
+                    os.replace(src, target)
+                except OSError as exc:
+                    # Roll back the moved-list entry: the file did not actually move.
+                    moved.pop()
+                    skipped.append({"path": str(src), "reason": f"rename_failed: {exc}"})
+
+    manifest = {
+        "schema": "memory-canonical-migration-v1",
+        "home": str(home),
+        "user": user,
+        "legacy_root": str(legacy_root),
+        "canonical_root": str(canonical_root),
+        "ran_at": datetime.now().astimezone().isoformat(timespec="seconds"),
+        "dry_run": not apply,
+        "moved": moved,
+        "collisions": collisions,
+        "skipped": skipped,
+    }
+
+    manifest_path: Path | None = None
+    if apply:
+        canonical_root.mkdir(parents=True, exist_ok=True)
+        manifest_path = canonical_root / _MIGRATION_LOG_NAME
+        # Merge with prior manifest so multi-run history survives.
+        prior_runs: list[dict] = []
+        if manifest_path.exists():
+            try:
+                prior = json.loads(manifest_path.read_text(encoding="utf-8"))
+                if isinstance(prior, dict):
+                    prior_runs = list(prior.get("runs") or [])
+                    # Single-run legacy file → fold the prior single record into runs[].
+                    if not prior_runs and prior.get("schema") == manifest["schema"]:
+                        prior_runs = [prior]
+            except (OSError, json.JSONDecodeError):
+                prior_runs = []
+        manifest["runs"] = prior_runs + [{
+            "ran_at": manifest["ran_at"],
+            "moved": moved,
+            "collisions": collisions,
+            "skipped": skipped,
+        }]
+        tmp = manifest_path.with_suffix(manifest_path.suffix + f".tmp.{os.getpid()}")
+        tmp.write_text(json.dumps(manifest, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        os.replace(tmp, manifest_path)
+
+    # Best-effort admin task on collisions (apply only).
+    task_created = False
+    task_skipped_reason: str | None = None
+    if apply and collisions:
+        binary = _resolve_bridge_bin()
+        if binary is None:
+            task_skipped_reason = "agent-bridge binary not found"
+        else:
+            try:
+                completed = subprocess.run(
+                    [
+                        str(binary),
+                        "task", "create",
+                        "--to", "patch",
+                        "--priority", "normal",
+                        "--title",
+                        f"[memory-canonical] {len(collisions)} collision(s) under {home.name}",
+                        "--body",
+                        f"Migration manifest: {manifest_path}\n"
+                        f"Legacy root: {legacy_root}\n"
+                        f"Collisions: {len(collisions)} (legacy renamed to <date>.legacy.md)",
+                    ],
+                    check=False,
+                    timeout=15,
+                    capture_output=True,
+                    text=True,
+                )
+                if completed.returncode == 0:
+                    task_created = True
+                else:
+                    task_skipped_reason = (
+                        f"task create exited with rc={completed.returncode}: "
+                        f"{(completed.stderr or completed.stdout or '').strip()[:200]}"
+                    )
+            except (OSError, subprocess.TimeoutExpired) as exc:
+                task_skipped_reason = f"task create failed: {exc}"
+
+    payload = dict(manifest)
+    payload["manifest_path"] = str(manifest_path) if manifest_path else ""
+    payload["task_created"] = task_created
+    if task_skipped_reason:
+        payload["task_skipped_reason"] = task_skipped_reason
+
+    if args.json:
+        print(json.dumps(payload, ensure_ascii=False, indent=2))
+    else:
+        mode = "apply" if apply else "dry-run"
+        print(f"mode: {mode}")
+        print(f"legacy_root: {legacy_root}")
+        print(f"canonical_root: {canonical_root}")
+        print(f"moved: {len(moved)}")
+        print(f"collisions: {len(collisions)}")
+        print(f"skipped: {len(skipped)}")
+        if manifest_path:
+            print(f"manifest: {manifest_path}")
+        if task_skipped_reason:
+            print(f"task: skipped ({task_skipped_reason})")
+        elif task_created:
+            print("task: created")
+
+    # Exit code: 0 on clean, 2 on collisions (so cron / CI can flag).
+    return 0 if not collisions else 2
 
 
 DAILY_META_MARKER = "<!-- bridge-daily-meta: "
@@ -2525,6 +2742,18 @@ def _probe_daily_note(home: Path, date: str) -> dict:
 
 
 def _probe_legacy(home: Path, date: str) -> tuple[bool, list[dict]]:
+    """Probe the legacy `<home>/users/default/memory/<date>.md` path.
+
+    Issue #220: the canonical write target is unified at `<home>/memory/`.
+    The legacy probe stays around for one release so the harvester does not
+    file false-positive backfill tasks on installs that were partially
+    migrated. Set `BRIDGE_MEMORY_LEGACY_PROBE=0` to disable it once the
+    migrate-canonical sweep is known to have run; defaults to enabled
+    for backwards compatibility (target removal: v0.7).
+    """
+    enabled = os.environ.get("BRIDGE_MEMORY_LEGACY_PROBE", "1").strip().lower()
+    if enabled in ("0", "false", "no", "off"):
+        return False, []
     candidate = home / "users" / "default" / "memory" / f"{date}.md"
     checked: list[dict] = []
     present = False
@@ -3552,6 +3781,25 @@ def build_parser() -> argparse.ArgumentParser:
     reconcile_parser.add_argument("--dry-run", action="store_true")
     reconcile_parser.add_argument("--json", action="store_true")
     reconcile_parser.set_defaults(func=cmd_reconcile)
+
+    migrate_parser = subparsers.add_parser(
+        "migrate-canonical",
+        help=(
+            "fold legacy <home>/users/<user>/memory/*.md into <home>/memory/ "
+            "(issue #220); default is dry-run, pass --apply to move"
+        ),
+    )
+    migrate_parser.add_argument("--home", required=True, help="agent home root, e.g. ~/.agent-bridge/agents/<agent>")
+    migrate_parser.add_argument("--user", default="default", help="legacy user partition (default: default)")
+    migrate_parser.add_argument("--apply", action="store_true", help="actually move files (default is dry-run)")
+    migrate_parser.add_argument(
+        "--i-know-this-is-live",
+        dest="i_know_this_is_live",
+        action="store_true",
+        help="permit --apply against the live BRIDGE_HOME (refused by default to prevent accidental admin-task fires)",
+    )
+    migrate_parser.add_argument("--json", action="store_true")
+    migrate_parser.set_defaults(func=cmd_migrate_canonical)
 
     csi_parser = subparsers.add_parser(
         "current-session-id",

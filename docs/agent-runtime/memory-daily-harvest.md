@@ -158,7 +158,11 @@ Notes:
   writer_mix dict).
 - `writer_mix` is a `{session: int, cron: int}` count map.
 - `legacy_note_present` exists for the transitional period; canonical path
-  alignment (`users/default/memory` vs `<home>/memory`) is tracked separately.
+  unification landed in issue #220 (canonical = `<home>/memory/<date>.md`
+  for every user). The probe is gated by `BRIDGE_MEMORY_LEGACY_PROBE`
+  (default `1`); set it to `0` once `bridge-memory.py migrate-canonical
+  --apply` has been run on every install. The probe is scheduled for
+  removal in v0.7.
 - Atomic write: `<file>.tmp.<pid>` → `os.replace` (see `_atomic_write_json`).
 
 ## 5. State machine
@@ -384,9 +388,15 @@ invocation.
 
 ## 11. Known limits
 
-- Canonical path alignment (`users/default/memory` vs `<home>/memory`) is a
-  separate issue. The harvester probes the legacy path read-only to suppress
-  false-positive backfills; it does not migrate.
+- Canonical path unification (`users/default/memory` → `<home>/memory`) is
+  resolved by issue #220. Use `bridge-memory.py migrate-canonical --home
+  <home> [--user <id>] [--apply]` to fold any leftover legacy notes;
+  default is dry-run, `--apply` performs an atomic move and writes
+  `<home>/memory/_migration_log.json`. The harvester still probes the
+  legacy path read-only to suppress false-positive backfills during the
+  one-release transition window; set `BRIDGE_MEMORY_LEGACY_PROBE=0` to
+  disable the probe once migration has run on every install. Probe
+  removal target: v0.7.
 - The primary daily-note writer is session `/wrap-up`, tracked in
   [`auto-memory-isolation.md`](auto-memory-isolation.md). This harvester does
   not write notes — only queues backfill tasks.

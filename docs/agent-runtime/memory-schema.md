@@ -50,6 +50,7 @@ Deprecated and removed in PR 1/2:
 ### Daily note
 
 - One file per day. Append-only during the day. Sections: `## Morning handoff`, `## Work log`, `## Decisions`, `## Followup`.
+- **Canonical path is `<agent-home>/memory/<date>.md` for every user**, including `default` (issue #220). The legacy split where the `default` user wrote to `<home>/memory/` and other users wrote to `<home>/users/<user>/memory/` is retired; the actual writer (`bridge-memory.py daily-append`) takes no user argument and always lands in the shared root. Pre-220 installs that have leftover notes under `<home>/users/default/memory/` should run `bridge-memory.py migrate-canonical --home <home> --apply` once. The `users/<user>/memory/` directory remains a multi-tenant escape hatch for hand-staged notes (still indexed by `rebuild-index`), but is not the bridge writer's target.
 - Do **not** anchor cross-agent knowledge here — put team-wide facts into `memory/research/` or promote to wiki.
 - Cross-refs at the bottom follow the wiki graph rules: `## Related (auto-wiki)` with entities/concepts/decisions/people only. No tree edges (`[[<agent>-weekly]]`, `[[agents#<self>]]`). See [`wiki-graph-rules.md`](wiki-graph-rules.md).
 
