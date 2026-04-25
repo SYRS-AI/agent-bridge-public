@@ -7359,10 +7359,12 @@ log "detecting and recovering stalled sessions"
 STALL_RATE_AGENT="stall-rate-$SESSION_NAME"
 STALL_AUTH_AGENT="stall-auth-$SESSION_NAME"
 STALL_UNKNOWN_AGENT="stall-unknown-$SESSION_NAME"
+STALL_PICKER_AGENT="stall-picker-$SESSION_NAME"
 STALL_RATE_WORKDIR="$TMP_ROOT/$STALL_RATE_AGENT"
 STALL_AUTH_WORKDIR="$TMP_ROOT/$STALL_AUTH_AGENT"
 STALL_UNKNOWN_WORKDIR="$TMP_ROOT/$STALL_UNKNOWN_AGENT"
-mkdir -p "$STALL_RATE_WORKDIR" "$STALL_AUTH_WORKDIR" "$STALL_UNKNOWN_WORKDIR"
+STALL_PICKER_WORKDIR="$TMP_ROOT/$STALL_PICKER_AGENT"
+mkdir -p "$STALL_RATE_WORKDIR" "$STALL_AUTH_WORKDIR" "$STALL_UNKNOWN_WORKDIR" "$STALL_PICKER_WORKDIR"
 cat >>"$BRIDGE_ROSTER_LOCAL_FILE" <<EOF
 
 bridge_add_agent_id_if_missing "$STALL_RATE_AGENT"
@@ -7385,6 +7387,13 @@ BRIDGE_AGENT_ENGINE["$STALL_UNKNOWN_AGENT"]="claude"
 BRIDGE_AGENT_SESSION["$STALL_UNKNOWN_AGENT"]="$STALL_UNKNOWN_AGENT"
 BRIDGE_AGENT_WORKDIR["$STALL_UNKNOWN_AGENT"]="$STALL_UNKNOWN_WORKDIR"
 BRIDGE_AGENT_LAUNCH_CMD["$STALL_UNKNOWN_AGENT"]='claude --dangerously-skip-permissions'
+
+bridge_add_agent_id_if_missing "$STALL_PICKER_AGENT"
+BRIDGE_AGENT_DESC["$STALL_PICKER_AGENT"]="Stall interactive picker role"
+BRIDGE_AGENT_ENGINE["$STALL_PICKER_AGENT"]="claude"
+BRIDGE_AGENT_SESSION["$STALL_PICKER_AGENT"]="$STALL_PICKER_AGENT"
+BRIDGE_AGENT_WORKDIR["$STALL_PICKER_AGENT"]="$STALL_PICKER_WORKDIR"
+BRIDGE_AGENT_LAUNCH_CMD["$STALL_PICKER_AGENT"]='claude --dangerously-skip-permissions'
 EOF
 
 STALL_RATE_SCRIPT="$TMP_ROOT/stall-rate.py"
@@ -7417,10 +7426,31 @@ sys.stdout.flush()
 for _ in sys.stdin:
     pass
 PY
-chmod +x "$STALL_RATE_SCRIPT" "$STALL_AUTH_SCRIPT" "$STALL_UNKNOWN_SCRIPT"
+STALL_PICKER_SCRIPT="$TMP_ROOT/stall-picker.py"
+cat >"$STALL_PICKER_SCRIPT" <<'PY'
+#!/usr/bin/env python3
+# Simulates the Claude Code /rate-limit-options picker. Mixed-pane case
+# (rate_limit phrase + picker text) — first-match-wins must classify the
+# pane as interactive_picker so the daemon escalates instead of nudging.
+import sys
+print("You've hit your limit · resets in 1h")
+print("")
+print("What do you want to do?")
+print("")
+print("❯ 1. Stop and wait for limit to reset")
+print("  2. Switch to extra usage")
+print("  3. Switch to Team plan")
+print("")
+print("Enter to confirm · Esc to cancel")
+sys.stdout.flush()
+for _ in sys.stdin:
+    pass
+PY
+chmod +x "$STALL_RATE_SCRIPT" "$STALL_AUTH_SCRIPT" "$STALL_UNKNOWN_SCRIPT" "$STALL_PICKER_SCRIPT"
 tmux new-session -d -s "$STALL_RATE_AGENT" "$STALL_RATE_SCRIPT"
 tmux new-session -d -s "$STALL_AUTH_AGENT" "$STALL_AUTH_SCRIPT"
 tmux new-session -d -s "$STALL_UNKNOWN_AGENT" "$STALL_UNKNOWN_SCRIPT"
+tmux new-session -d -s "$STALL_PICKER_AGENT" "$STALL_PICKER_SCRIPT"
 sleep 1
 bash "$REPO_ROOT/bridge-sync.sh" >/dev/null
 
@@ -7497,7 +7527,42 @@ bash "$REPO_ROOT/bridge-daemon.sh" sync >/dev/null
 UNKNOWN_STALL_TASK_ID="$(python3 "$REPO_ROOT/bridge-queue.py" find-open --agent "$SMOKE_AGENT" --title-prefix "[STALL/UNKNOWN] $STALL_UNKNOWN_AGENT " 2>/dev/null || true)"
 [[ "$UNKNOWN_STALL_TASK_ID" =~ ^[0-9]+$ ]] || die "expected unknown stall escalation"
 
+STALL_PICKER_CREATE_OUTPUT="$("$REPO_ROOT/agent-bridge" task create --to "$STALL_PICKER_AGENT" --title "stall picker" --body "smoke" --from smoke)"
+STALL_PICKER_TASK_ID="$(printf '%s\n' "$STALL_PICKER_CREATE_OUTPUT" | sed -n 's/^created task #\([0-9][0-9]*\).*/\1/p' | head -n1)"
+[[ "$STALL_PICKER_TASK_ID" =~ ^[0-9]+$ ]] || die "expected picker stall task id"
+python3 "$REPO_ROOT/bridge-queue.py" claim "$STALL_PICKER_TASK_ID" --agent "$STALL_PICKER_AGENT" >/dev/null
+BRIDGE_STALL_SCAN_ENABLED=1 \
+BRIDGE_STALL_SCAN_INTERVAL_SECONDS=0 \
+BRIDGE_STALL_EXPLICIT_IDLE_SECONDS=0 \
+bash "$REPO_ROOT/bridge-daemon.sh" sync >/dev/null
+PICKER_STALL_TASK_ID="$(python3 "$REPO_ROOT/bridge-queue.py" find-open --agent "$SMOKE_AGENT" --title-prefix "[STALL/PICKER] $STALL_PICKER_AGENT " 2>/dev/null || true)"
+[[ "$PICKER_STALL_TASK_ID" =~ ^[0-9]+$ ]] || die "expected picker stall escalation"
+BRIDGE_STALL_SCAN_ENABLED=1 \
+BRIDGE_STALL_SCAN_INTERVAL_SECONDS=0 \
+BRIDGE_STALL_EXPLICIT_IDLE_SECONDS=0 \
+bash "$REPO_ROOT/bridge-daemon.sh" sync >/dev/null
+# Use --all so dedupe is proven by *count* of open tasks, not just by the
+# first match (which would be stable even if a duplicate were also created).
+PICKER_OPEN_COUNT="$(python3 "$REPO_ROOT/bridge-queue.py" find-open --agent "$SMOKE_AGENT" --title-prefix "[STALL/PICKER] $STALL_PICKER_AGENT " --all --format json 2>/dev/null | python3 -c 'import json,sys; print(len(json.load(sys.stdin)))')"
+[[ "$PICKER_OPEN_COUNT" == "1" ]] || die "expected exactly one open [STALL/PICKER] task after second sync (got $PICKER_OPEN_COUNT)"
+PICKER_STALL_TASK_ID_AGAIN="$(python3 "$REPO_ROOT/bridge-queue.py" find-open --agent "$SMOKE_AGENT" --title-prefix "[STALL/PICKER] $STALL_PICKER_AGENT " 2>/dev/null || true)"
+[[ "$PICKER_STALL_TASK_ID_AGAIN" == "$PICKER_STALL_TASK_ID" ]] || die "expected deduped picker stall escalation, got '$PICKER_STALL_TASK_ID_AGAIN' vs '$PICKER_STALL_TASK_ID'"
+PICKER_NUDGE_COUNT="$(python3 - "$BRIDGE_HOME/logs/audit.jsonl" "$STALL_PICKER_AGENT" <<'PY'
+import json, sys
+count = 0
+for raw in open(sys.argv[1], encoding="utf-8"):
+    item = json.loads(raw)
+    if item.get("action") == "stall_nudge_sent" and item.get("target") == sys.argv[2]:
+        count += 1
+print(count)
+PY
+)"
+[[ "$PICKER_NUDGE_COUNT" == "0" ]] || die "expected zero stall nudges for picker stall, got '$PICKER_NUDGE_COUNT'"
+
 tmux_kill_session_exact "$STALL_RATE_AGENT" || true
+tmux_kill_session_exact "$STALL_AUTH_AGENT" || true
+tmux_kill_session_exact "$STALL_UNKNOWN_AGENT" || true
+tmux_kill_session_exact "$STALL_PICKER_AGENT" || true
 BRIDGE_STALL_SCAN_ENABLED=1 \
 BRIDGE_STALL_SCAN_INTERVAL_SECONDS=0 \
 BRIDGE_STALL_EXPLICIT_IDLE_SECONDS=0 \

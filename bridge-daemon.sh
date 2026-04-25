@@ -759,6 +759,12 @@ bridge_stall_retry_seconds() {
     network)
       printf '%s' "${BRIDGE_STALL_NETWORK_RETRY_SECONDS:-60}"
       ;;
+    interactive_picker)
+      # Pickers expect a single keystroke (Enter / 1 / n), not a text nudge.
+      # Daemon does not retry; the main loop routes the picker straight to
+      # the admin escalation branch, so any retry value would be dead config.
+      printf '%s' "0"
+      ;;
     unknown)
       printf '%s' "${BRIDGE_STALL_UNKNOWN_RETRY_SECONDS:-300}"
       ;;
@@ -772,6 +778,14 @@ bridge_stall_escalate_after_seconds() {
   local classification="$1"
   case "$classification" in
     auth)
+      printf '%s' "0"
+      ;;
+    interactive_picker)
+      # Picker stalls block all forward progress on the affected agent
+      # and require a deliberate keypress decision; escalate immediately
+      # like auth. The main loop hardwires this path and ignores any
+      # configured delay, so we hardcode 0 instead of reading an env var
+      # the daemon would silently disregard.
       printf '%s' "0"
       ;;
     network)
@@ -789,7 +803,15 @@ bridge_stall_escalate_after_seconds() {
 bridge_stall_title_prefix() {
   local classification="$1"
   local agent="$2"
-  printf '[STALL/%s] %s ' "${classification^^}" "$agent"
+  case "$classification" in
+    interactive_picker)
+      # Short alias keeps the dedupe prefix in sync with bridge_stall_title.
+      printf '[STALL/PICKER] %s ' "$agent"
+      ;;
+    *)
+      printf '[STALL/%s] %s ' "${classification^^}" "$agent"
+      ;;
+  esac
 }
 
 bridge_stall_title() {
@@ -804,6 +826,9 @@ bridge_stall_title() {
       ;;
     network)
       printf '[STALL/NETWORK] %s retry failed' "$agent"
+      ;;
+    interactive_picker)
+      printf '[STALL/PICKER] %s blocked on interactive picker' "$agent"
       ;;
     *)
       printf '[STALL/UNKNOWN] %s appears stuck' "$agent"
@@ -820,6 +845,11 @@ bridge_stall_nudge_message() {
     network)
       printf '%s' "A transient network or provider error was detected. Retry the current task and continue if the connection is healthy now."
       ;;
+    interactive_picker)
+      # Never typed into the pane (picker would treat it as a stray keypress);
+      # surfaces only in audit/report context strings.
+      printf '%s' "An interactive picker is blocking the session. Routing to the admin agent for a keypress decision."
+      ;;
     *)
       printf '%s' "The current task appears stalled. Check the current state, summarize what is blocking progress, and continue if work can proceed."
       ;;
@@ -832,6 +862,7 @@ bridge_stall_reason_label() {
     rate_limit) printf '%s' "rate-limit/capacity" ;;
     auth) printf '%s' "authentication/session" ;;
     network) printf '%s' "network/provider" ;;
+    interactive_picker) printf '%s' "interactive-picker" ;;
     *) printf '%s' "unknown" ;;
   esac
 }
@@ -1183,15 +1214,21 @@ process_stall_reports() {
     escalate_after="$(bridge_stall_escalate_after_seconds "$classification")"
     [[ "$escalate_after" =~ ^[0-9]+$ ]] || escalate_after=0
 
-    if [[ "$classification" == "auth" ]]; then
+    if [[ "$classification" == "auth" || "$classification" == "interactive_picker" ]]; then
       if (( escalated_ts == 0 )); then
         title="$(bridge_stall_title "$classification" "$agent")"
         title_prefix="$(bridge_stall_title_prefix "$classification" "$agent")"
-        recommended="Manual repair is required. Re-authenticate the agent and restart the session once credentials are healthy."
+        if [[ "$classification" == "interactive_picker" ]]; then
+          recommended="An interactive picker is blocking the agent's tmux pane. Inspect the captured output, choose a key for the safe default (Enter selects the first option — usually 'Stop and wait for limit to reset' or 'Resume from summary'), and send it via tmux send-keys. Escalate to the operator before choosing options that change billing or plan ('Switch to extra usage', 'Switch to Team plan')."
+          notify_summary="Interactive picker is blocking ${agent}. The admin agent must choose a keypress (Enter for default) or escalate to the operator before any billing-impact option."
+        else
+          recommended="Manual repair is required. Re-authenticate the agent and restart the session once credentials are healthy."
+          notify_summary="Authentication/session stall detected for ${agent}. Manual re-login is required."
+        fi
         body_file="$(bridge_agent_stall_report_file "$agent" "$classification")"
         bridge_write_stall_report_body "$agent" "$session" "$classification" "$idle" "$claimed" "$nudge_count" "$first_detected_ts" "$matched_pattern" "$excerpt" "$body_file" "$recommended"
         if [[ "$agent" == "$admin_agent" ]] && bridge_agent_has_notify_transport "$admin_agent"; then
-          bridge_notify_send "$admin_agent" "$title" "Authentication/session stall detected for ${agent}. Manual re-login is required." "" urgent "${BRIDGE_DAEMON_NOTIFY_DRY_RUN:-0}" >/dev/null 2>&1 || true
+          bridge_notify_send "$admin_agent" "$title" "$notify_summary" "" urgent "${BRIDGE_DAEMON_NOTIFY_DRY_RUN:-0}" >/dev/null 2>&1 || true
           escalated_ts="$now_ts"
           bridge_audit_log daemon stall_escalated "$admin_agent" \
             --detail agent="$agent" \
