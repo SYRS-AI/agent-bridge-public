@@ -22,7 +22,7 @@ version bumps via the `VERSION` file.
   `AGENT_GLYPH_PREFIXES` documents the Claude UI markers that the
   layered classify-pass excludes (`❯`, `>`, `›`, `⏺`, `⎿`, `✢`, `✻`,
   `✱`, `ℹ`, `✓`, `✗`).
-- `bridge-daemon.sh` cron-dispatch dedup now preserves fresh and
+- `bridge-queue.py` cron-dispatch dedup now preserves fresh and
   pre-fire sibling slots so high-frequency crons survive worker-pool
   backlog (issue #266, PR #275). The previous dedup cancelled every
   non-newest open slot regardless of whether the newest had been
