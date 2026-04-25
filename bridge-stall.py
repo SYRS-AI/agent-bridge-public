@@ -14,6 +14,29 @@ from pathlib import Path
 ANSI_RE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
 
 PATTERN_GROUPS: list[tuple[str, list[str]]] = [
+    # interactive_picker comes first: when a session shows the rate-limit
+    # picker the pane also contains "hit your limit" (rate_limit), but the
+    # correct action is to escalate to the admin agent for a keypress
+    # decision — not to retry-nudge the picker, which would type generic
+    # text into the picker prompt and be ignored. first-match-wins routes
+    # mixed-pane cases to the picker handler.
+    (
+        "interactive_picker",
+        # Each pattern is line-anchored with re.MULTILINE so that prose like
+        # "if billing permits, switch to extra usage for this job" cannot
+        # classify as a picker. Real Claude Code pickers render each option
+        # on its own line as "<glyph or whitespace> <number>. <option text>",
+        # and the prompt tail is the verbatim "Enter to confirm · Esc to
+        # cancel" line.
+        [
+            r"(?m)^[ \t❯>]*\d+\.\s+Stop and wait for limit to reset\s*$",
+            r"(?m)^[ \t❯>]*\d+\.\s+Switch to extra usage\s*$",
+            r"(?m)^[ \t❯>]*\d+\.\s+Switch to Team plan\s*$",
+            r"(?m)^[ \t❯>]*\d+\.\s+Resume from summary \(recommended\)\s*$",
+            r"(?m)^[ \t❯>]*\d+\.\s+Resume full session as-is\s*$",
+            r"(?m)^Enter to confirm · Esc to cancel\s*$",
+        ],
+    ),
     (
         "rate_limit",
         [
