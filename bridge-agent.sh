@@ -1380,13 +1380,6 @@ run_restart() {
   local agent="${1:-}"
   local session=""
   local start_args=()
-  # #256 Gap 2: explicit operator restart clears the rapid-fail
-  # quarantine marker so the daemon's autostart gate lets the agent
-  # come back up. If the agent is still crashing, `bridge-run.sh` will
-  # trip the circuit breaker again and re-write the marker.
-  if [[ -n "$agent" ]]; then
-    bridge_agent_clear_broken_launch "$agent" 2>/dev/null || true
-  fi
   local attach_mode=0
   local dry_run_mode=0
   local engine=""
@@ -1446,6 +1439,14 @@ run_restart() {
   if [[ -n "$preflight_reason" ]]; then
     bridge_die "$(bridge_agent_restart_preflight_guidance "$agent" "$preflight_reason")"
   fi
+
+  # #256 Gap 2: clear the rapid-fail quarantine marker only after the
+  # dry-run short-circuit (handled above) and the preflight guidance
+  # check have both allowed the restart to proceed. An aborted restart
+  # must not silently unquarantine the agent — the daemon would then
+  # resume auto-starting it and recreate the crash loop before
+  # `bridge-run.sh` had a chance to re-trip the circuit breaker.
+  bridge_agent_clear_broken_launch "$agent" 2>/dev/null || true
 
   if bridge_tmux_session_exists "$session"; then
     bridge_kill_agent_session "$agent"

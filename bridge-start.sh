@@ -93,12 +93,6 @@ fi
 
 bridge_require_agent "$AGENT"
 bridge_agent_clear_manual_stop "$AGENT"
-# #256 Gap 2: an explicit start/safe-mode from the operator is the
-# documented way out of a rapid-fail quarantine. Clear the broken-launch
-# marker so the daemon's autostart gate stops blocking this agent. If
-# the underlying cause is still present, `bridge-run.sh` will trip the
-# circuit breaker again and re-write the marker.
-bridge_agent_clear_broken_launch "$AGENT"
 
 SESSION="$(bridge_agent_session "$AGENT")"
 WORK_DIR="$(bridge_agent_workdir "$AGENT")"
@@ -322,6 +316,16 @@ if [[ "$ENGINE" == "claude" && $SAFE_MODE -eq 0 ]]; then
 fi
 
 bridge_agent_clear_idle_marker "$AGENT"
+
+# #256 Gap 2: an explicit operator start/safe-mode here is the documented
+# way out of a rapid-fail quarantine. Clear the broken-launch marker only
+# once we are past dry-run short-circuits, workdir validation, and the
+# channel-plugin preflight — so a `--dry-run` inspect or a failed-start
+# (missing workdir / channel setup error) does not silently unquarantine
+# the agent before any relaunch actually runs. If the underlying cause
+# is still present, `bridge-run.sh` will trip the circuit breaker again
+# and re-write the marker on the first post-unblock failure cycle.
+bridge_agent_clear_broken_launch "$AGENT"
 
 # Refresh the launch window so a new session id can be detected for this run.
 # shellcheck disable=SC2034

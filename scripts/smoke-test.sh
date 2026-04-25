@@ -1477,6 +1477,85 @@ BRIDGE_STATE_DIR="$BROKEN_LAUNCH_HOME/state" "$BASH4_BIN" -lc '
 [[ ! -e "$BROKEN_FILE" ]] || die "bridge_agent_clear_broken_launch did not remove the quarantine file"
 rm -rf "$BROKEN_LAUNCH_HOME"
 
+log "bridge-start.sh / bridge-agent.sh guard broken-launch clear behind dry-run + preflight (#256 Gap 2 r2)"
+python3 - "$REPO_ROOT/bridge-start.sh" "$REPO_ROOT/bridge-agent.sh" <<'PY'
+"""Regression test for PR #262 round-1 finding.
+
+The quarantine marker must survive:
+  * A `--dry-run` invocation (bridge-start.sh should exit before clearing).
+  * A preflight failure (bridge-agent.sh::run_restart must call the preflight
+    guard before clearing).
+
+Static line-order check — executes on every smoke run, catches a reorder even
+when the integration path is not available in the current fixture.
+"""
+import sys
+from pathlib import Path
+
+start_src = Path(sys.argv[1]).read_text().splitlines()
+agent_src = Path(sys.argv[2]).read_text().splitlines()
+
+clear_calls = [i for i, line in enumerate(start_src) if "bridge_agent_clear_broken_launch" in line]
+assert clear_calls, "bridge-start.sh must call bridge_agent_clear_broken_launch (broken after r1 -> r2 rewrite?)"
+first_clear = clear_calls[0]
+
+# Find the DRY_RUN block's terminating `exit 0`.
+in_dry = False
+dry_exit = None
+for i, line in enumerate(start_src):
+    if "if [[ $DRY_RUN -eq 1 ]]; then" in line:
+        in_dry = True
+    elif in_dry and line.strip() == "exit 0":
+        dry_exit = i
+        break
+assert dry_exit is not None, "bridge-start.sh no longer has a DRY_RUN exit 0 block"
+assert first_clear > dry_exit, (
+    f"bridge-start.sh clears broken-launch at line {first_clear + 1}, "
+    f"which is before the DRY_RUN exit at line {dry_exit + 1}. "
+    "That lets a --dry-run silently unquarantine an agent — see PR #262 round-1."
+)
+
+# run_restart must guard the clear behind bridge_agent_restart_preflight_reason.
+restart_start = next(
+    (i for i, l in enumerate(agent_src) if l.startswith("run_restart() {")),
+    None,
+)
+assert restart_start is not None, "run_restart() not found in bridge-agent.sh"
+# Function end: walk forward until a line that is exactly '}' at column 0.
+restart_end = None
+for i in range(restart_start + 1, len(agent_src)):
+    if agent_src[i] == "}":
+        restart_end = i
+        break
+assert restart_end is not None, "run_restart end `}` not found"
+
+preflight_idx = None
+clear_idx_agent = None
+dry_run_idx_agent = None
+for i in range(restart_start, restart_end + 1):
+    line = agent_src[i]
+    if "bridge_agent_restart_preflight_reason" in line and preflight_idx is None:
+        preflight_idx = i
+    if "bridge_agent_clear_broken_launch" in line:
+        clear_idx_agent = i
+    if "if [[ $dry_run_mode -eq 1 ]]; then" in line and dry_run_idx_agent is None:
+        dry_run_idx_agent = i
+assert preflight_idx is not None, "run_restart no longer calls bridge_agent_restart_preflight_reason"
+assert clear_idx_agent is not None, "run_restart must call bridge_agent_clear_broken_launch"
+assert dry_run_idx_agent is not None, "run_restart no longer branches on dry_run_mode"
+assert clear_idx_agent > preflight_idx, (
+    f"run_restart clears broken-launch at line {clear_idx_agent + 1}, "
+    f"which is before the preflight guard at line {preflight_idx + 1}. "
+    "That lets a preflight-blocked restart silently unquarantine an agent."
+)
+assert clear_idx_agent > dry_run_idx_agent, (
+    f"run_restart clears broken-launch at line {clear_idx_agent + 1}, "
+    f"which is before the dry-run branch at line {dry_run_idx_agent + 1}. "
+    "That lets `agent restart --dry-run` silently unquarantine an agent."
+)
+print("[ok] broken-launch clear guarded behind dry-run + preflight in both entry points")
+PY
+
 log "diagnose acl reports clean on macOS (non-Linux host)"
 DIAGNOSE_OUTPUT="$("$REPO_ROOT/agent-bridge" diagnose acl)"
 if [[ "$(uname -s)" == "Linux" ]]; then
