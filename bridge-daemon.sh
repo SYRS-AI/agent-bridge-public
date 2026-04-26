@@ -1376,7 +1376,17 @@ process_permission_task_timeout_fanout() {
   [[ "$timeout_seconds" =~ ^[0-9]+$ ]] || timeout_seconds=1800
   (( timeout_seconds > 0 )) || return 1
 
-  bridge_agent_has_notify_transport "$admin_agent" || return 1
+  # Issue #345 Track B (instance #5): the requesting agent's own
+  # notify-target is the primary surface for permission decisions, since
+  # the operator who owns the decision is closer to that agent than to
+  # admin. Admin's notify is now a fallback used only when the requester
+  # has no working transport. We therefore drop the prior "admin must
+  # have transport" early gate — the per-row branch below decides which
+  # surface (or both) gets the notify.
+  local admin_has_notify=0
+  if bridge_agent_has_notify_transport "$admin_agent"; then
+    admin_has_notify=1
+  fi
 
   local tasks_json
   tasks_json="$(bridge_queue_cli find-open --agent "$admin_agent" --title-prefix '[PERMISSION] ' --all --format json 2>/dev/null || true)"
@@ -1417,6 +1427,7 @@ PY
   [[ -n "$expired_rows" ]] || return 1
 
   local task_id age_seconds created_by status title marker age_minutes body_text
+  local primary="" notify_target_agent="" requester_has_notify
   while IFS=$'\t' read -r task_id age_seconds created_by status title; do
     [[ "$task_id" =~ ^[0-9]+$ ]] || continue
     marker="$(bridge_permission_escalation_marker_file "$task_id")"
@@ -1425,9 +1436,27 @@ PY
     fi
 
     age_minutes=$(( age_seconds / 60 ))
-    body_text="[PERMISSION] task #${task_id} unclaimed for ${age_minutes}m — admin ${admin_agent} has not responded. Requested by ${created_by:-unknown}. Status: ${status}. Title: ${title}"
+    body_text="[PERMISSION] task #${task_id} unclaimed for ${age_minutes}m — awaiting operator decision. Requested by ${created_by:-unknown}. Status: ${status}. Title: ${title}"
 
-    bridge_notify_send "$admin_agent" "Permission request timed out" "$body_text" "$task_id" urgent "${BRIDGE_DAEMON_NOTIFY_DRY_RUN:-0}" >/dev/null 2>&1 || true
+    # Primary path: requester's own notify-target. Falls back to admin
+    # notify only when the requester has none (or is the admin itself).
+    primary=""
+    notify_target_agent=""
+    requester_has_notify=0
+    if [[ -n "$created_by" && "$created_by" != "$admin_agent" ]] \
+        && bridge_agent_exists "$created_by" \
+        && bridge_agent_has_notify_transport "$created_by"; then
+      requester_has_notify=1
+      primary="requester"
+      notify_target_agent="$created_by"
+    elif (( admin_has_notify == 1 )); then
+      primary="admin"
+      notify_target_agent="$admin_agent"
+    fi
+
+    if [[ -n "$notify_target_agent" ]]; then
+      bridge_notify_send "$notify_target_agent" "Permission request timed out" "$body_text" "$task_id" urgent "${BRIDGE_DAEMON_NOTIFY_DRY_RUN:-0}" >/dev/null 2>&1 || true
+    fi
 
     bridge_queue_cli update "$task_id" --actor daemon \
       --note "daemon-timeout-escalated (awaiting human) after ${age_minutes}m" >/dev/null 2>&1 || true
@@ -1436,7 +1465,14 @@ PY
       --detail task_id="$task_id" \
       --detail age_seconds="$age_seconds" \
       --detail requested_by="${created_by:-unknown}" \
-      --detail timeout_seconds="$timeout_seconds"
+      --detail timeout_seconds="$timeout_seconds" \
+      --detail primary="${primary:-none}"
+
+    bridge_audit_log daemon permission_fanout "${created_by:-unknown}" \
+      --detail task_id="$task_id" \
+      --detail primary="${primary:-none}" \
+      --detail requester_has_notify="$requester_has_notify" \
+      --detail admin_has_notify="$admin_has_notify"
 
     printf '%s\n' "$now_ts" >"$marker"
     changed=0
@@ -2099,6 +2135,30 @@ process_crash_reports() {
           --detail error_hash="$error_hash"
         reported=1
       fi
+    elif bridge_agent_has_notify_transport "$agent"; then
+      # Issue #345 Track B (instance #2): the affected agent's operator-attached
+      # surface is closer to the human than admin's queue. Push the crash
+      # report to the affected agent's own notify-target with one re-prod,
+      # then idle. The admin agent has no special authority to repair a
+      # per-agent crash, so the legacy admin-queue path is reserved for the
+      # admin == affected case above (no other surface available) and for
+      # affected agents with no notify transport (handled in the else branch).
+      if [[ "$error_hash" != "$last_hash" || $(( now_ts - last_report_ts )) -ge "$cooldown" ]]; then
+        body="Crash loop detected for ${agent}: ${fail_count} failures (exit ${exit_code}). Inspect the session and repair the root cause before relaunch."
+        bridge_notify_send "$agent" "Crash loop detected" "$body" "" urgent "${BRIDGE_DAEMON_NOTIFY_DRY_RUN:-0}" >/dev/null 2>&1 || true
+        bridge_audit_log daemon crash_notified_origin "$agent" \
+          --detail target=affected-notify \
+          --detail engine="$engine" \
+          --detail fail_count="$fail_count" \
+          --detail exit_code="$exit_code" \
+          --detail error_hash="$error_hash"
+        reported=1
+      else
+        bridge_audit_log daemon crash_notified_origin_suppressed "$agent" \
+          --detail reason=cooldown \
+          --detail fail_count="$fail_count" \
+          --detail error_hash="$error_hash"
+      fi
     else
       title="[crash-loop] ${agent} (${fail_count} failures)"
       title_prefix="[crash-loop] ${agent} "
@@ -2515,12 +2575,11 @@ bridge_report_channel_health_miss() {
   local now_ts=""
   local state_file=""
   local body_file=""
-  local title=""
-  local title_prefix=""
-  local existing_id=""
-  local create_output=""
   local last_key=""
   local last_report_ts=0
+  local cooldown="${BRIDGE_CHANNEL_HEALTH_REPORT_COOLDOWN_SECONDS:-1800}"
+  local fallback_used=0
+  local notify_body=""
 
   [[ -n "$admin_agent" ]] || return 0
   bridge_agent_exists "$admin_agent" || return 0
@@ -2538,8 +2597,6 @@ bridge_report_channel_health_miss() {
   now_ts="$(date +%s)"
   state_file="$(bridge_channel_health_state_file "$agent")"
   body_file="$(bridge_channel_health_body_file "$agent")"
-  title="[channel-health] ${agent} (miss)"
-  title_prefix="[channel-health] ${agent} "
 
   if [[ -f "$state_file" ]]; then
     # shellcheck source=/dev/null
@@ -2547,29 +2604,39 @@ bridge_report_channel_health_miss() {
     last_key="${LAST_KEY:-}"
     last_report_ts="${LAST_REPORT_TS:-0}"
   fi
+  [[ "$last_report_ts" =~ ^[0-9]+$ ]] || last_report_ts=0
+  [[ "$cooldown" =~ ^[0-9]+$ ]] || cooldown=1800
+
+  # Issue #345 Track B (instance #3): channel-health miss is a per-agent
+  # surface problem. The admin agent has no authority over the affected
+  # agent's tokens or channel binding, so dumping a task into admin's queue
+  # only generates noise. Try to surface to the affected agent's own
+  # notify transport when available (fallback path); otherwise emit an
+  # audit row + dashboard flag and let `agent-bridge status` carry the
+  # config-drift counter. Never enqueue an admin task for this case.
+  if [[ "$key" == "$last_key" && $(( now_ts - last_report_ts )) -lt "$cooldown" ]]; then
+    return 0
+  fi
 
   bridge_write_channel_health_body "$agent" "$body_file"
-  existing_id="$(bridge_queue_cli find-open --agent "$admin_agent" --title-prefix "$title_prefix" 2>/dev/null || true)"
-  if [[ "$existing_id" =~ ^[0-9]+$ ]]; then
-    bridge_queue_cli update "$existing_id" --actor "daemon" --title "$title" --priority urgent --body-file "$body_file" >/dev/null 2>&1 || true
-    bridge_audit_log daemon channel_health_report "$agent" \
-      --detail admin_agent="$admin_agent" \
-      --detail mode=refresh \
-      --detail body_file="$body_file" \
-      --detail reason="$reason"
-  elif [[ "$key" != "$last_key" || $(( now_ts - last_report_ts )) -ge ${BRIDGE_CHANNEL_HEALTH_REPORT_COOLDOWN_SECONDS:-1800} ]]; then
-    create_output="$(bridge_queue_cli create --to "$admin_agent" --title "$title" --from daemon --priority urgent --body-file "$body_file" 2>/dev/null || true)"
-    if [[ "$create_output" =~ created\ task\ \#([0-9]+) ]]; then
-      bridge_audit_log daemon channel_health_report "$agent" \
-        --detail admin_agent="$admin_agent" \
-        --detail mode=create \
-        --detail task_id="${BASH_REMATCH[1]}" \
-        --detail body_file="$body_file" \
-        --detail reason="$reason"
-      daemon_info "reported channel-health miss for ${agent} -> ${admin_agent} (#${BASH_REMATCH[1]})"
-    fi
+
+  if bridge_agent_has_notify_transport "$agent"; then
+    notify_body="Channel health mismatch detected for ${agent}: ${reason}. Repair the affected channel binding and rerun \`agent-bridge agent show ${agent}\` to confirm."
+    bridge_notify_send "$agent" "Channel health mismatch" "$notify_body" "" urgent "${BRIDGE_DAEMON_NOTIFY_DRY_RUN:-0}" >/dev/null 2>&1 || true
+    fallback_used=1
+  fi
+
+  bridge_audit_log daemon channel_health_miss "$agent" \
+    --detail surface="$(bridge_agent_channels_csv "$agent")" \
+    --detail reason="$reason" \
+    --detail body_file="$body_file" \
+    --detail fallback_used="$fallback_used" \
+    --detail dashboard_flag=1
+
+  if (( fallback_used == 1 )); then
+    daemon_info "channel-health miss for ${agent} surfaced via affected-notify (reason=${reason})"
   else
-    return 0
+    daemon_info "channel-health miss for ${agent} recorded as audit + dashboard flag (reason=${reason})"
   fi
 
   mkdir -p "$(dirname "$state_file")"
@@ -2987,6 +3054,7 @@ cmd_run_cron_worker() {
   local CRON_STDERR_LOG=""
   local CRON_PROMPT_FILE=""
   local CRON_NEEDS_HUMAN_FOLLOWUP=""
+  local CRON_FAILURE_CLASS=""
 
   [[ "$task_id" =~ ^[0-9]+$ ]] || bridge_die "Usage: bash $SCRIPT_DIR/bridge-daemon.sh run-cron-worker <task-id>"
 
@@ -3111,6 +3179,32 @@ cmd_run_cron_worker() {
     followup_actor="cron:${CRON_JOB_NAME:-$run_id}"
     followup_title="[cron-followup] ${CRON_JOB_NAME:-$run_id} (${CRON_SLOT:-$run_id})"
     followup_title_prefix="[cron-followup] ${CRON_JOB_NAME:-$run_id} ("
+    # Issue #345 Track B (instance #4): split cron-followup destinations by
+    # failure class. `human-config` failures (config drift, binding
+    # mismatch, retired-agent cleanup) cannot be closed by admin acting on a
+    # queue task; they require operator attention. Surface those via a
+    # `cron_human_config_drift` audit row that the dashboard config-drift
+    # counter (Track C) reads for the rolling 7d window. Only
+    # `admin-resolvable` failures (the default) flow into admin's queue.
+    if [[ "$CRON_FAILURE_CLASS" == "human-config" ]]; then
+      bridge_audit_log daemon cron_human_config_drift "$TASK_ASSIGNED_TO" \
+        --detail run_id="$run_id" \
+        --detail job_name="${CRON_JOB_NAME:-$run_id}" \
+        --detail family="${CRON_FAMILY:-}" \
+        --detail slot="${CRON_SLOT:-}" \
+        --detail body_file="$followup_body_file" \
+        --detail dashboard_flag=1
+      daemon_info "cron-followup human-config drift recorded for ${CRON_JOB_NAME:-$run_id} (no admin task created)"
+      # Reset burst counter so a follow-up admin-resolvable failure does
+      # not trip the threshold against accumulated drift counts.
+      if (( _has_flock == 1 )); then
+        { flock -x 9
+          rm -f "$fail_burst_file" 2>/dev/null || true
+        } 9>"$fail_burst_lock"
+      else
+        rm -f "$fail_burst_file" 2>/dev/null || true
+      fi
+    else
     existing_followup_id="$(bridge_queue_cli find-open --agent "$TASK_ASSIGNED_TO" --title-prefix "$followup_title_prefix" 2>/dev/null || true)"
     if [[ "$existing_followup_id" =~ ^[0-9]+$ ]]; then
       bridge_queue_cli update "$existing_followup_id" --actor "$followup_actor" --title "$followup_title" --priority "$followup_priority" --body-file "$followup_body_file" >/dev/null 2>&1 || true
@@ -3143,6 +3237,7 @@ cmd_run_cron_worker() {
         --detail fail_burst_count="$fail_burst_count" \
         --detail fail_burst_threshold="$fail_burst_threshold" \
         --detail reason=below_threshold
+    fi
     fi
   fi
 

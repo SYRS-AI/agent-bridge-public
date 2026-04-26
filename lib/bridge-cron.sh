@@ -320,6 +320,17 @@ fields = {
     "CRON_STDERR_LOG": request.get("stderr_log", ""),
     "CRON_PROMPT_FILE": str(request_file.parent / "prompt.txt"),
     "CRON_NEEDS_HUMAN_FOLLOWUP": "1" if result.get("needs_human_followup") else "0",
+    # Issue #345 Track B (instance #4): cron failures split into
+    # admin-resolvable (close/refresh/retry) and human-config (config drift,
+    # binding mismatch, retired-agent cleanup). Subagents may set
+    # `failure_class` in result.json; jobs may carry a static
+    # `failure_class` in request.json. Default `admin-resolvable` keeps
+    # the legacy admin-queue path for unclassified failures.
+    "CRON_FAILURE_CLASS": str(
+        result.get("failure_class")
+        or request.get("failure_class")
+        or "admin-resolvable"
+    ).strip().lower() or "admin-resolvable",
 }
 
 for key, value in fields.items():

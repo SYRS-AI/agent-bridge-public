@@ -240,6 +240,57 @@ def context_pressure_fp_rate(audit_log: str, window_days: int = 7) -> tuple[int,
     return (fp_count, len(critical_task_ids))
 
 
+def config_drift_count(audit_log: str, window_days: int = 7) -> int:
+    """Count `cron_human_config_drift` and `channel_health_miss` audit rows
+    over the last `window_days`. Renders as the `config-drift` line on the
+    `agent-bridge status` dashboard (issue #345 Track C). The audit actions
+    are emitted by bridge-daemon's cron-followup classifier and the
+    channel-health-miss helper when a per-agent surface problem cannot be
+    resolved by admin acting on a queue task; surfacing the count on the
+    dashboard moves human-config drift out of admin's noisy inbox.
+    """
+    if not audit_log:
+        return 0
+    base = Path(audit_log).expanduser()
+    files = _audit_input_files(base)
+    if not files:
+        return 0
+    cutoff = datetime.now(timezone.utc) - timedelta(days=max(1, int(window_days)))
+    drift_actions = {"cron_human_config_drift", "channel_health_miss"}
+    count = 0
+    for path in files:
+        try:
+            with path.open("r", encoding="utf-8") as fh:
+                for raw in fh:
+                    line = raw.strip()
+                    if not line:
+                        continue
+                    try:
+                        record = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+                    if not isinstance(record, dict):
+                        continue
+                    if record.get("action") not in drift_actions:
+                        continue
+                    ts_raw = record.get("ts")
+                    if not isinstance(ts_raw, str):
+                        continue
+                    try:
+                        ts_str = ts_raw[:-1] + "+00:00" if ts_raw.endswith("Z") else ts_raw
+                        ts = datetime.fromisoformat(ts_str)
+                    except ValueError:
+                        continue
+                    if ts.tzinfo is None:
+                        ts = ts.replace(tzinfo=timezone.utc)
+                    if ts < cutoff:
+                        continue
+                    count += 1
+        except OSError:
+            continue
+    return count
+
+
 def fetch_agent_metrics(conn: sqlite3.Connection) -> dict[str, dict[str, int | str | None]]:
     agent_state_columns = table_columns(conn, "agent_state")
     nudge_fail_expr = (
@@ -448,6 +499,16 @@ def render_dashboard(args: argparse.Namespace) -> str:
             f"context-pressure FP rate ({fp_window_days}d): "
             f"{fp_count}/{critical_count} ({pct}%)"
         )
+    # Issue #345 Track C — config-drift counter. Aggregates
+    # `cron_human_config_drift` and `channel_health_miss` audit rows over
+    # the rolling `--config-drift-window-days` window so operators see
+    # human-config drift without it polluting admin's queue.
+    drift_window_days = max(1, int(args.config_drift_window_days))
+    drift_count = config_drift_count(args.audit_log, drift_window_days)
+    if drift_count > 0:
+        lines.append(
+            f"config-drift ({drift_window_days}d): {drift_count}"
+        )
     lines.append("")
     lines.append("Agents")
     lines.append("  #  agent           eng     src     loop on  state    q   c   b   garden  idle  stale wake chan  nudge  load        session        workdir")
@@ -541,6 +602,12 @@ def main() -> int:
         type=int,
         default=7,
         help="Rolling window for the context-pressure FP-rate dashboard line (#338 Track C).",
+    )
+    parser.add_argument(
+        "--config-drift-window-days",
+        type=int,
+        default=7,
+        help="Rolling window for the config-drift dashboard line (#345 Track C).",
     )
     parser.add_argument("--version", default="")
     parser.add_argument("--open-limit", type=int, default=8)

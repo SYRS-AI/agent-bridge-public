@@ -7911,7 +7911,7 @@ task_id = sys.argv[2]
 assert any(str(row.get("detail", {}).get("task_id")) == task_id for row in rows), rows
 PY
 
-log "reporting channel health misses to the admin role"
+log "channel health miss surfaces via audit + dashboard flag (no admin queue task — issue #345 Track B)"
 cat >>"$BRIDGE_ROSTER_LOCAL_FILE" <<EOF
 
 bridge_add_agent_id_if_missing "$BROKEN_CHANNEL_AGENT"
@@ -7924,10 +7924,12 @@ BRIDGE_AGENT_CHANNELS["$BROKEN_CHANNEL_AGENT"]="plugin:discord"
 EOF
 
 bash "$REPO_ROOT/bridge-daemon.sh" sync >/dev/null
-CHANNEL_HEALTH_INBOX="$(bash "$REPO_ROOT/bridge-task.sh" inbox "$SMOKE_AGENT" --all)"
-assert_contains "$CHANNEL_HEALTH_INBOX" "[channel-health] $BROKEN_CHANNEL_AGENT (miss)"
+# Issue #345 Track B (instance #3): channel-health miss must NOT enqueue an
+# admin task. Admin has no authority over the affected agent's tokens or
+# channel binding. The new contract is audit row + dashboard flag, with a
+# fallback notify to the affected agent's own surface when available.
 CHANNEL_HEALTH_OPEN_ID="$(python3 "$REPO_ROOT/bridge-queue.py" find-open --agent "$SMOKE_AGENT" --title-prefix "[channel-health] $BROKEN_CHANNEL_AGENT " 2>/dev/null || true)"
-[[ "$CHANNEL_HEALTH_OPEN_ID" =~ ^[0-9]+$ ]] || die "expected channel-health task for $BROKEN_CHANNEL_AGENT"
+[[ -z "$CHANNEL_HEALTH_OPEN_ID" ]] || die "channel-health miss must not create admin task; got #$CHANNEL_HEALTH_OPEN_ID"
 CHANNEL_HEALTH_BODY_FILE="$BRIDGE_SHARED_DIR/channel-health/$BROKEN_CHANNEL_AGENT.md"
 [[ -f "$CHANNEL_HEALTH_BODY_FILE" ]] || die "expected channel-health body file"
 CHANNEL_HEALTH_BODY="$(cat "$CHANNEL_HEALTH_BODY_FILE")"
@@ -7937,9 +7939,13 @@ assert_contains "$CHANNEL_HEALTH_BODY" "runtime: state_dir=missing access=missin
 assert_contains "$CHANNEL_HEALTH_BODY" "## Session Health"
 assert_contains "$CHANNEL_HEALTH_BODY" "detach_to_shell: Ctrl-b then d"
 assert_not_contains "$CHANNEL_HEALTH_BODY" "smoke-token"
+CHANNEL_HEALTH_AUDIT_OUTPUT="$("$REPO_ROOT/agent-bridge" audit --agent "$BROKEN_CHANNEL_AGENT" --action channel_health_miss --limit 5 --json 2>/dev/null || true)"
+[[ -n "$CHANNEL_HEALTH_AUDIT_OUTPUT" ]] || die "expected channel_health_miss audit row for $BROKEN_CHANNEL_AGENT"
+assert_contains "$CHANNEL_HEALTH_AUDIT_OUTPUT" "channel_health_miss"
+assert_contains "$CHANNEL_HEALTH_AUDIT_OUTPUT" "\"dashboard_flag\": \"1\""
 bash "$REPO_ROOT/bridge-daemon.sh" sync >/dev/null
 CHANNEL_HEALTH_OPEN_ID_AGAIN="$(python3 "$REPO_ROOT/bridge-queue.py" find-open --agent "$SMOKE_AGENT" --title-prefix "[channel-health] $BROKEN_CHANNEL_AGENT " 2>/dev/null || true)"
-[[ "$CHANNEL_HEALTH_OPEN_ID_AGAIN" == "$CHANNEL_HEALTH_OPEN_ID" ]] || die "channel-health alert should be deduped"
+[[ -z "$CHANNEL_HEALTH_OPEN_ID_AGAIN" ]] || die "second sync must not create admin channel-health task either"
 
 log "detecting plugin MCP descendants and watchdog-restarting static Claude roles"
 PLUGIN_TREE_SCRIPT="$TMP_ROOT/fake-plugin-tree.sh"
