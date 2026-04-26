@@ -408,9 +408,18 @@ bridge_tmux_session_inject_busy() {
 bridge_tmux_claude_advance_blocker() {
   local session="$1"
   local allow_devchannels="${2:-0}"
+  local expected_state="${3:-}"
   local state=""
 
   state="$(bridge_tmux_claude_blocker_state "$session")"
+  # If the caller specified an expected state and the live state has
+  # diverged (e.g. devchannels picker cleared and trust prompt appeared
+  # in the same poll), refuse to advance — the caller's counter would
+  # otherwise mis-attribute the action and widen the budget cap that
+  # belongs to the new state.
+  if [[ -n "$expected_state" && "$state" != "$expected_state" ]]; then
+    return 1
+  fi
   case "$state" in
     trust|summary)
       bridge_tmux_send_keys_with_timeout "tmux_send_advance_blocker_${state}" \
@@ -471,7 +480,7 @@ bridge_tmux_wait_for_prompt() {
       state="$(bridge_tmux_claude_blocker_state "$session" 2>/dev/null || printf 'none')"
       case "$state" in
         trust|summary)
-          if bridge_tmux_claude_advance_blocker "$session" 0; then
+          if bridge_tmux_claude_advance_blocker "$session" 0 "$state"; then
             trust_summary_actions=$((trust_summary_actions + 1))
             # Re-check prompt before declaring failure; the just-sent C-m
             # may have cleared the blocker.
@@ -488,7 +497,7 @@ bridge_tmux_wait_for_prompt() {
           ;;
         devchannels)
           if [[ "$allow_devchannels" == "1" ]]; then
-            if bridge_tmux_claude_advance_blocker "$session" 1; then
+            if bridge_tmux_claude_advance_blocker "$session" 1 devchannels; then
               devchannels_actions=$((devchannels_actions + 1))
               # Re-check prompt before failing — the picker often clears
               # on the final allowed Enter and we don't want to declare
