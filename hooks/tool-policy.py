@@ -196,7 +196,167 @@ ROSTER_LOCAL_DENY_REASON = (
 )
 
 
-def protected_path_reason(path: Path, agent: str) -> str | None:
+# Read-intent Bash command names. The protected-path gate is about
+# preserving the #341 write-audit chain; reads do not mutate state and
+# should not be denied regardless of agent identity (issue #383).
+#
+# A command is treated as read-intent when ALL pipeline stages start
+# with one of these tokens. A single write-intent (or unknown) leading
+# command anywhere disqualifies the whole invocation — that keeps the
+# bar at "this command provably does not mutate the protected path"
+# rather than at "this command might be safe".
+_READ_INTENT_BASH_COMMANDS = frozenset(
+    {
+        "cat",
+        "grep",
+        "egrep",
+        "fgrep",
+        "rg",
+        "head",
+        "tail",
+        "less",
+        "more",
+        "view",
+        "wc",
+        "stat",
+        "file",
+        "md5sum",
+        "sha256sum",
+        "sha1sum",
+        "xxd",
+        "od",
+        "diff",
+        "cmp",
+        "ls",
+        "find",
+        "awk",
+        "cut",
+        "sort",
+        "uniq",
+        "tr",
+        "column",
+        "jq",
+        "yq",
+        "tac",
+        "nl",
+        "readlink",
+        "realpath",
+        "basename",
+        "dirname",
+    }
+)
+
+
+def _stage_first_token(stage: str) -> str:
+    """Return the leading command word of a single pipeline stage.
+
+    Strips a leading ``env`` invocation and any ``VAR=value`` assignment
+    prefix so e.g. ``LC_ALL=C grep …`` still classifies as ``grep``.
+    Returns ``""`` for an empty stage (which the caller skips).
+    """
+    parts = stage.strip().split()
+    i = 0
+    while i < len(parts):
+        token = parts[i]
+        if not token:
+            i += 1
+            continue
+        # Strip leading-env style prefixes: `env`, `VAR=value`.
+        if token == "env":
+            i += 1
+            continue
+        if "=" in token and not token.startswith("-") and "/" not in token.split("=", 1)[0]:
+            # Looks like `VAR=value`; skip.
+            i += 1
+            continue
+        return token
+    return ""
+
+
+def _is_read_intent_bash(command: str) -> bool:
+    """Return True iff *command* is purely read-intent.
+
+    Splits on shell command separators (``|``, ``||``, ``&&``, ``;``,
+    newline) and requires every non-empty stage's leading command to be
+    in :data:`_READ_INTENT_BASH_COMMANDS`. ``agent-bridge config get``
+    (and the ``agb`` shorthand) is also recognised as read-intent.
+
+    Conservative on purpose:
+
+    - Any output redirection (``>``, ``>>``, ``&>``, ``2>``) appears as
+      a token starting with that prefix and disqualifies the pipeline,
+      even if the leading command is otherwise a read tool. ``cat >x``
+      writes to *x* — the destination path could be the protected one.
+    - Input redirection (``<``) is fine; it only opens the file for
+      reading.
+    - A single write-intent or unknown leading command anywhere in the
+      pipeline disqualifies the whole thing. The bar is "this command
+      provably does not mutate state".
+    """
+    if not command.strip():
+        return False
+    for stage in _COMMAND_OPERATOR_RE.split(command):
+        stage_stripped = stage.strip()
+        if not stage_stripped:
+            continue
+        # Reject output-redirection anywhere in the stage. Input redir
+        # (`<file`) is fine; write redir (`>`, `>>`, `&>`, `2>`) is not.
+        for tok in stage_stripped.split():
+            for prefix in ("&>", "2>", ">>", ">"):
+                if tok.startswith(prefix):
+                    return False
+        first = _stage_first_token(stage_stripped)
+        if not first:
+            continue
+        # Strip any path component so `/usr/bin/cat` classifies as `cat`.
+        leaf = first.rsplit("/", 1)[-1]
+        if leaf in _READ_INTENT_BASH_COMMANDS:
+            # Reject the in-place / write-mode flag forms even for tools
+            # that are normally read-only (e.g. `sed -i`, `awk -i inplace`).
+            stage_tokens = stage_stripped.split()
+            if leaf == "sed" and any(t == "-i" or t.startswith("-i") for t in stage_tokens[1:]):
+                return False
+            if leaf == "awk" and "-i" in stage_tokens[1:]:
+                return False
+            continue
+        # `agent-bridge config get …` / `agb config get …` are read-intent.
+        if leaf in {"agent-bridge", "agb"}:
+            stage_tokens = stage_stripped.split()
+            try:
+                cfg_idx = stage_tokens.index("config")
+            except ValueError:
+                return False
+            if (
+                len(stage_tokens) > cfg_idx + 1
+                and stage_tokens[cfg_idx + 1] in {"get", "list-protected"}
+            ):
+                continue
+            return False
+        return False
+    return True
+
+
+def _is_read_intent_tool(tool_name: str, tool_input: dict[str, Any]) -> bool:
+    """Return True iff a tool call is read-intent against any path.
+
+    - Read / Glob / Grep / NotebookRead are read-intent.
+    - Bash defers to :func:`_is_read_intent_bash`.
+    - Edit / Write / MultiEdit / NotebookEdit and unknown tools are
+      treated as write-intent (the safe default for novel surfaces).
+    """
+    if tool_name in {"Read", "Glob", "Grep", "NotebookRead"}:
+        return True
+    if tool_name == "Bash":
+        return _is_read_intent_bash(str(tool_input.get("command") or ""))
+    return False
+
+
+def protected_path_reason(
+    path: Path,
+    agent: str,
+    *,
+    read_intent: bool = False,
+) -> str | None:
     admin = is_admin_agent(agent)
     # Order matters: keep the more-specific error messages (roster
     # secrets / queue DB) ahead of the generic system-config deny so
@@ -210,17 +370,29 @@ def protected_path_reason(path: Path, agent: str) -> str | None:
     # mutation surface even for admin. The wrapper itself runs from
     # operator-TUI, so legitimate operator workflows still succeed —
     # only direct Edit/Write attempts are blocked.
+    #
+    # Issue #383: read-intent calls (Read tool, cat/grep/etc., `agent-
+    # bridge config get`) bypass the protected-path block-all branch.
+    # #341's audit chain is about WRITES; reads do not mutate state and
+    # should not be denied regardless of agent identity. The queue DB
+    # is the one exception — its block message points at `agb` queue
+    # commands (the structured-read surface) rather than raw sqlite, so
+    # we keep blocking direct reads of the DB to preserve the queue
+    # contract.
     if path == roster_local_path():
+        if read_intent:
+            return None
         if admin:
             return ROSTER_LOCAL_DENY_REASON
         return "shared roster secrets are not available inside Claude tool calls"
     if path == task_db_path():
         return "direct queue DB access is blocked; use `agb` queue commands instead"
     # Issue #341: remaining system-config paths must flow through the
-    # wrapper. Even admin agents are denied at the hook level — the
-    # wrapper layers the operator-source check on top, so a hook bypass
-    # would defeat that check entirely.
+    # wrapper for writes. Read-intent is allowed for all agents — the
+    # wrapper layers an operator-source check on top of writes only.
     if is_protected_path(path):
+        if read_intent:
+            return None
         return SYSTEM_CONFIG_DENY_REASON
     if admin:
         return None
@@ -473,7 +645,18 @@ def protected_alias_reason(text: str, agent: str) -> str | None:
     # Order mirrors `protected_path_reason`: narrow roster / queue DB
     # messages first so existing smoke tests find their specific wording,
     # then the issue #341 generic system-config gate.
+    #
+    # Issue #383: classify the whole pipeline once. Read-intent (cat /
+    # grep / head / tail / `agent-bridge config get` / etc.) bypasses
+    # the roster + system-config gates; #341's audit chain only
+    # protects WRITES, so a read should never be denied. The queue DB
+    # gate stays unconditional — `agb` queue commands are the
+    # structured-read surface and direct sqlite reads still bypass that
+    # contract.
+    read_intent = _is_read_intent_bash(text)
     if _bash_argv_references_path(text, roster_local_path()):
+        if read_intent:
+            return None
         # Admin no longer bypasses the roster path (codex r1 #341 CP2);
         # mutations route through `agent-bridge config set`.
         if admin:
@@ -482,9 +665,11 @@ def protected_alias_reason(text: str, agent: str) -> str | None:
     if _bash_argv_references_path(text, task_db_path()):
         return "direct queue DB access is blocked; use `agb` queue commands instead"
     # Issue #341: system-config paths get the same argv-based check; the
-    # wrapper command is the only normal mutation surface. Applies to
-    # admin too — wrapper enforces the operator-source layer.
+    # wrapper command is the only normal mutation surface for writes.
+    # Read-intent is allowed for all agents — see #383.
     if _bash_argv_references_system_config(text):
+        if read_intent:
+            return None
         return SYSTEM_CONFIG_DENY_REASON
     if admin:
         return None
@@ -681,6 +866,10 @@ def handle_pretool(payload: dict[str, Any], agent: str) -> int:
     if tool_name == "Bash":
         reason = protected_alias_reason(str(tool_input.get("command") or ""), agent)
     else:
+        # Issue #383: Read / Glob / Grep / NotebookRead tools get the
+        # read-intent allowance on protected paths. Edit / Write /
+        # NotebookEdit and unknown tools stay write-intent.
+        read_intent = _is_read_intent_tool(tool_name, tool_input)
         for key in ("file_path", "path"):
             raw = str(tool_input.get(key) or "").strip()
             if not raw:
@@ -689,7 +878,7 @@ def handle_pretool(payload: dict[str, Any], agent: str) -> int:
                 candidate = Path(raw).expanduser()
             except Exception:
                 continue
-            reason = protected_path_reason(candidate, agent)
+            reason = protected_path_reason(candidate, agent, read_intent=read_intent)
             if reason:
                 break
 
