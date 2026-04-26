@@ -299,6 +299,54 @@ run_cp_case "codex + 'must compact before continuing' banner -> critical" \
   $'must compact before continuing before the next turn\n' \
   "codex"
 
+# Issue #338 Track A — anchor the HUD-pct extractor so it only matches the
+# canonical "Context <bar block> NN%" line, not free-floating numerics
+# elsewhere in the captured pane (cron summaries, stash prefixes,
+# [Agent Bridge] task bodies, codex placeholder strings, prose that
+# mentions "Context" alongside an unrelated percentage).
+# Positive: realistic HUD shapes at 36% (admin reproducer), 70%, 95%.
+run_cp_case "338 A+: HUD 36% (admin reproducer) -> warning silenced (below 60)" \
+  "" "hud:context_pct=36" \
+  $'Context ███░░░░░░░ 36%\n'
+run_cp_case "338 A+: HUD 70% on canonical bar shape -> warning" \
+  "warning" "hud:context_pct=70" \
+  $'Context ███████░░░ 70%\n'
+run_cp_case "338 A+: HUD 95% on canonical bar shape -> critical" \
+  "critical" "hud:context_pct=95" \
+  $'Context █████████░ 95%\n'
+# Negative: wrong-window matches the issue called out as the false-positive
+# sources. None should produce hud:context_pct=… and Claude (no engine
+# override) must fall through to the prose pattern groups, which also do
+# not match these strings, so SEVERITY stays empty.
+run_cp_case "338 A-: bare '100% complete' (no HUD prefix)" \
+  "" "" \
+  $'100% complete\n'
+run_cp_case "338 A-: 'cron job exit code 100' (numeric scrollback)" \
+  "" "" \
+  $'cron job exit code 100\n'
+run_cp_case "338 A-: '[Agent Bridge] body mentioning 100% as the previous threshold'" \
+  "" "" \
+  $'[Agent Bridge] body mentioning 100% as the previous threshold\n'
+run_cp_case "338 A-: git stash prefix '+100 lines' scrollback" \
+  "" "" \
+  $'+100 lines (ctrl+o to expand)\n'
+run_cp_case "338 A-: codex 'Working (100s · esc to interrupt)' placeholder" \
+  "" "" \
+  $'Working (100s · esc to interrupt)\n' \
+  "codex"
+# Issue #338 Track B — when a fresh-session marker (Welcome to Claude Code)
+# appears after a stale HUD line in the captured pane, the HUD line is
+# scrollback from the pre-/clear session and must not drive classification.
+run_cp_case "338 B1: stale 100% HUD followed by /clear + Welcome banner -> silent" \
+  "" "" \
+  $'Context ███████████ 100%\n> /clear\n\nWelcome to Claude Code!\n\nHuman: hi\n'
+run_cp_case "338 B1: only Welcome banner, no HUD line -> silent" \
+  "" "" \
+  $'Welcome to Claude Code!\n\n  Tip: try /help to see commands\n\n> '
+run_cp_case "338 B1: Welcome banner above a fresh 36% HUD -> warning silenced (below 60)" \
+  "" "hud:context_pct=36" \
+  $'Welcome to Claude Code!\n\n> hi\n\nContext ███░░░░░░░ 36%\n'
+
 log "stall-detector rate_limit/auth regex narrowing (#329 Track A)"
 # Self-contained classifier checks for the bare `\b429\b` / `\bunauthorized\b`
 # narrowing. Mirrors the #161 timeout fix: bare numerics/keywords now require

@@ -16,19 +16,34 @@ ANSI_RE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
 
 # Claude HUD renders a live context meter like:
 #   Context ████████░░ 40%
-# We require the word "Context" followed within a short window by one of the
-# bar glyphs (█ ░ ▓ ▒ ■), then a 1-3 digit percent. The glyph requirement is
-# what distinguishes the authoritative HUD from prose text such as
-# "Context remaining 8%" that happens to live in post-/compact scrollback
-# after --continue/--resume (issue #126).
+# We anchor on "Context" at the start of a line (leading whitespace is
+# tolerated for the indent prefix Claude renders before the meter), then
+# require an immediate run of bar-block glyphs (█ ░ ▒ ▓ ■), then the
+# trailing percent. Only whitespace is allowed between "Context" and the
+# first bar glyph; this preserves the #126 distinction from prose like
+# "Context remaining 8%" while also rejecting the wrong-window false-
+# positives flagged in #338 Track A — sentences such as
+# "In this Context we should ████████ 100% of …" no longer match because
+# arbitrary words between "Context" and the bar block are excluded.
 #
 # Defense in depth against pane wrapping: the daemon's capture-pane call
 # passes tmux -J (see lib/bridge-tmux.sh bridge_capture_recent "join"), but
-# we also tolerate a single newline inside the short glyph-neighborhood so
-# captures from non-joined callers (or older recordings used in tests) still
-# match when the HUD wraps on a narrow terminal.
+# the whitespace tolerance (\s+ includes \n) still lets the HUD match when
+# it wraps across "Context" and the bar block on a narrow terminal.
 HUD_RE = re.compile(
-    r"Context[\s\S]{0,60}?[\u2588\u2591\u2592\u2593\u25A0][\u2588\u2591\u2592\u2593\u25A0\s]{0,40}?(\d{1,3})\s*%",
+    r"(?m)^\s*Context\s+[\u2588\u2591\u2592\u2593\u25A0][\u2588\u2591\u2592\u2593\u25A0\s]*?\s*(\d{1,3})\s*%",
+)
+
+# Fresh-session markers — when one of these appears in the captured pane
+# *after* the latest HUD-line match, the HUD line is stale scrollback from
+# the pre-reset session and must not drive classification (issue #338
+# Track B). The post-/clear and post-/new banners both render the literal
+# "Welcome to Claude Code" / "Welcome to Codex" string verbatim. The B1
+# strategy keeps the analyzer purely text-based — no daemon-side state
+# coordination is needed because the captured pane buffer carries both the
+# stale HUD and the fresh-session banner side-by-side.
+RESET_MARKER_RE = re.compile(
+    r"Welcome to (?:Claude Code|Codex)",
     re.IGNORECASE,
 )
 
@@ -117,12 +132,25 @@ def _env_threshold(name: str, default: int) -> int:
 
 
 def hud_context_pct(normalized: str) -> int | None:
-    """Return the latest HUD context percentage, or None if no HUD line seen."""
+    """Return the latest HUD context percentage, or None if no HUD line seen.
+
+    Issue #338 Track B: if a fresh-session marker (post-/clear or post-/new
+    "Welcome to …" banner) appears *after* the latest HUD-line match in the
+    captured pane, the HUD line is stale scrollback from the pre-reset
+    session. Treat it the same as "no HUD seen" so the analyzer does not
+    cache a critical reading from a session the operator has already
+    cleared. The captured pane buffer carries both lines simultaneously,
+    so the reset detection happens here in the extractor without any
+    daemon-side state coordination.
+    """
     matches = list(HUD_RE.finditer(normalized))
     if not matches:
         return None
+    last_match = matches[-1]
+    if RESET_MARKER_RE.search(normalized, last_match.end()):
+        return None
     try:
-        pct = int(matches[-1].group(1))
+        pct = int(last_match.group(1))
     except (TypeError, ValueError):
         return None
     if pct < 0 or pct > 100:
