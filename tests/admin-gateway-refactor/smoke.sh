@@ -480,7 +480,10 @@ STATUS_OUTPUT="$(python3 "$REPO_ROOT/bridge-status.py" \
   --config-drift-window-days 7)" \
   || die "bridge-status.py render failed"
 
-echo "$STATUS_OUTPUT" | grep -Eq '^config-drift \(7d\): [1-9][0-9]*$' \
-  || die "expected config-drift line in status output: $STATUS_OUTPUT"
+expected_drift="$(audit_count_action cron_human_config_drift)"
+[[ "$expected_drift" -ge 1 ]] \
+  || die "fixture invariant broken: cron_human_config_drift audit count is $expected_drift, expected >=1"
+echo "$STATUS_OUTPUT" | grep -Eq "^config-drift \(7d\): ${expected_drift}\$" \
+  || die "config-drift counter mismatch: status=\"$(echo "$STATUS_OUTPUT" | grep '^config-drift')\", expected count=${expected_drift}"
 
 log "all steps passed"
