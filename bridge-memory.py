@@ -3250,13 +3250,30 @@ def _build_result_payload(
     }
 
 
-def _parse_harvest_date_arg(value: str) -> "datetime":
+def _parse_harvest_date_arg(value: str, *, arg_name: str = "date") -> "datetime":
     """Parse a YYYY-MM-DD argument used by harvest-daily flags.
 
     Returns a naive ``datetime`` at midnight (callers compare via .date()).
-    Raises ValueError on malformed input — caller surfaces via stderr.
+    Raises ``ValueError`` on malformed input — caller surfaces via stderr.
+
+    The strict round-trip check rejects non-zero-padded forms (e.g.
+    ``2026-4-5``) that Python's ``strptime`` would otherwise accept
+    silently. Keeps the parse symmetric with the watermark file format and
+    downstream lex compares (issue #322 r1 deferred finding).
     """
-    return datetime.strptime(value, "%Y-%m-%d")
+    try:
+        parsed = datetime.strptime(value, "%Y-%m-%d")
+    except ValueError:
+        raise ValueError(
+            f"{arg_name}: date must be strict YYYY-MM-DD with zero-padded "
+            f"month and day, got {value!r}"
+        ) from None
+    if value != parsed.date().isoformat():
+        raise ValueError(
+            f"{arg_name}: date must be strict YYYY-MM-DD with zero-padded "
+            f"month and day, got {value!r}"
+        )
+    return parsed
 
 
 def cmd_harvest_daily(args: argparse.Namespace) -> int:
@@ -3290,16 +3307,16 @@ def cmd_harvest_daily(args: argparse.Namespace) -> int:
 
     if date_from:
         try:
-            from_dt = _parse_harvest_date_arg(date_from)
-        except ValueError:
-            sys.stderr.write(f"harvest-daily: --from {date_from!r} is not YYYY-MM-DD\n")
+            from_dt = _parse_harvest_date_arg(date_from, arg_name="--from")
+        except ValueError as exc:
+            sys.stderr.write(f"harvest-daily: {exc}\n")
             return 2
         today_dt = datetime.strptime(_today_date_str(tz_name), "%Y-%m-%d")
         if date_to:
             try:
-                to_dt = _parse_harvest_date_arg(date_to)
-            except ValueError:
-                sys.stderr.write(f"harvest-daily: --to {date_to!r} is not YYYY-MM-DD\n")
+                to_dt = _parse_harvest_date_arg(date_to, arg_name="--to")
+            except ValueError as exc:
+                sys.stderr.write(f"harvest-daily: {exc}\n")
                 return 2
         else:
             to_dt = today_dt
@@ -3383,7 +3400,16 @@ def cmd_harvest_daily(args: argparse.Namespace) -> int:
     # with the range path). When the manifest already exists, skip the harvest
     # run and exit 0 with a stderr breadcrumb. This lets operators run
     # `harvest-daily --date YYYY-MM-DD --missing-only` opportunistically.
-    single_date = args.date or _harvest_default_date(tz_name)
+    if args.date:
+        try:
+            single_date = _parse_harvest_date_arg(
+                args.date, arg_name="--date"
+            ).date().isoformat()
+        except ValueError as exc:
+            sys.stderr.write(f"harvest-daily: {exc}\n")
+            return 2
+    else:
+        single_date = _harvest_default_date(tz_name)
     if missing_only and _manifest_path(state_dir, agent, single_date).exists():
         sys.stderr.write(
             f"[bridge-memory] harvest-daily date={single_date} already harvested "
