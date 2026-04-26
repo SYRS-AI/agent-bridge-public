@@ -4,6 +4,270 @@ All notable changes to Agent Bridge are documented here. This project adheres
 loosely to [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and tracks
 version bumps via the `VERSION` file.
 
+## [0.6.18] — 2026-04-27
+
+### Highlights — production isolation runtime stability
+
+The unblock target for installs stuck on v0.6.17 with linux-user isolation:
+
+- **Teams + MS365 plugin spawn under isolated UID** (#357). Splits chmod
+  from env-file read so `chmod` EPERM on a setfacl-grant-owned `.env`
+  no longer aborts plugin startup. `bun --no-install` direct path for
+  the isolated MCP spawn while the package.json `start` script keeps the
+  install-then-run shape for shared-mode operators.
+- **Channel state symlinks auto-created at isolation prepare** (#363).
+  For each declared `plugin:<id>` channel, a root-owned symlink at
+  `~/<isolated>/.claude/channels/<id>` → `$workdir/.<id>/` is planted
+  so inbound webhooks from controller-side dispatcher reach the plugin
+  reading from `~/.<channel>/`. Closes the silent webhook-disappearance
+  symptom on Teams / Discord / Telegram / MS365.
+- **Dev-channels picker auto-accept hardened** (#364). Per-state advance
+  budget (4-action trust/summary preserved; new env-overridable
+  devchannels budget defaults to 12) + caller passes the expected state
+  into the advance helper so a state transition (devchannels → trust
+  mid-loop) cannot debit the wrong counter and bypass the trust
+  fail-fast budget.
+- **POSIX ACL mask drift preflight repair** (#366). Daemon-side helper
+  (gated on `bridge_agent_linux_user_isolation_requested` + Linux host)
+  re-applies `m::rwX` mask + controller named-user ACL on channel
+  state `.env` files before `bridge_agent_channel_status` is computed,
+  so mask-drift-only failures self-heal silently. Real credential
+  problems still flow through to the existing `[channel-health] (miss)`
+  task, with a new `## ACL state` diagnostics section embedded in the
+  task body. Non-fatal sudo guard at helper entry — daemon never
+  exits via `bridge_die` from this preflight even if sudo is missing.
+- **Marketplace symlink ACL fail-loud** (#369, #362). The
+  `bridge_linux_share_plugin_catalog` marketplace block already had two
+  of three required ACL calls but unguarded; PR adds the missing
+  `bridge_linux_acl_add_default_dirs_recursive` and promotes all three
+  to `|| bridge_die` so a partially-applied ACL chain no longer leaves
+  a planted-but-unusable symlink. Plus a `bridge_warn` when a
+  marketplace is in `known_marketplaces.json` but the on-disk tree is
+  missing — operators get a diagnostic instead of silent plugin drop.
+- **Peer A2A through gateway with explicit proxy signal** (#327).
+  Scoped per-agent `agent-env.sh` carries peer ids + non-secret metadata
+  + `BRIDGE_AGENT_PROXY=1` so isolated agents enumerate peers correctly
+  and the queue-gateway routes A2A submissions without the controller's
+  roster file ever being read by the isolated UID.
+- **Per-UID `installed_plugins.json` honors `BRIDGE_AGENT_PLUGINS`**
+  (#348, #346 r2 #347). The bridge writes a manifest filtered to the
+  per-agent plugin allowlist (declared channels auto-included) so an
+  isolated session only spawns the MCP servers the operator declared,
+  closing the v0.6.17 plugin-fan-out regression that triggered preflight
+  install loops on third-party marketplaces.
+
+### Stall watchdog quieting on idle admin
+
+- **stall scan skipped for loop=1 + claimed=0 + refresh_pending=0**
+  (#374). The stall watchdog was re-firing `[Agent Bridge]: stall
+  detected` every 20-30 minutes against `loop=1` admin agents drained
+  to `claimed=0 inbox=empty` because `process_stall_reports`'
+  decision-to-scan condition included `loop_mode == "1"` unconditionally.
+  Classifier then false-positived on benign Claude UI text. The new
+  guard skips the per-agent scan for the genuinely-idle state.
+
+### Memory-daily source-class hygiene
+
+- **memory-daily cron + harvester filter on static source class**
+  (#376 Tracks A+C). `bootstrap-memory-system.sh` step 3b now uses a new
+  `list_active_static_claude_agents` helper to register the
+  `memory-daily-<agent>` cron, so dynamic claude agents (operator-
+  attached TUI, no `~/.agent-bridge/agents/<name>/` home) never get the
+  cron in the first place. `scripts/memory-daily-harvest.sh` adds a
+  defense-in-depth source-class refusal that exits 0 (no
+  `[cron-followup]` generated) when invoked against a dynamic agent.
+  Tracks B (apply-time migration cleanup of existing dynamic-agent
+  crons) and D (docs) deferred to follow-up PRs.
+
+### Daemon, escalation, hooks
+
+- **admin-gateway escalation routing to the affected agent's surface**
+  (#367, #345 Track B). `bridge_escalate` for an agent whose
+  notification target is unreachable now routes to that agent's own
+  TUI (dynamic) or notify-target (static) rather than admin's queue —
+  preserves the contract documented in #345 §"admin is not a router".
+- **codex composer state-machine + type_and_submit fallback** (#368,
+  #331 Track B). The tmux composer for codex agents tracks composer
+  state explicitly and falls back to type-then-submit when paste-only
+  submission fails on the first try.
+- **system-config mutation gated behind admin + operator wrapper**
+  (#341). Hooks now refuse `agent-bridge config set` writes from
+  non-admin sessions and surface a structured operator-confirmation
+  prompt for the admin path.
+- **escalate skips admin relay for dynamic agents** (#343, #351).
+  Aligns with #345 — dynamic agents are operator-attached, so
+  `agent-bridge escalate question` for a dynamic agent goes straight
+  to the operator's TUI instead of through admin's inbox.
+- **session_nudge_sent uses queue state as delivery oracle** (#337,
+  #331 Track A).
+- **stall: `matched_line_hash` dedup key for nudge cap** (#355,
+  #329 Track D). Stall nudges deduplicate on a stable hash of the
+  matched substring instead of full transcript so a re-render of the
+  same UI text doesn't compound the cap counter.
+- **stall regex narrowed to transport-qualified forms** (#336,
+  #329 Track A). Reduces false-positives on benign rate_limit / auth
+  vocabulary in user transcripts.
+- **context-pressure HUD anchoring + 7-day FP-rate counter** (#338,
+  #344, #353).
+- **daemon refuses 'stop' when active agents present** (#319,
+  #314 Layer 3 + #315 Track 3). `--force` flag required to override.
+- **SessionStart auto-clears `AGENT_SESSION_ID` on `/clear` matcher**
+  (#318, #314 Layer 1). Operator no longer has to manually clear the
+  per-session env after a `/clear`.
+
+### Memory / wiki / cron
+
+- **harvest-daily `--from`/`--to` range + `--missing-only`** (#322,
+  #335). Re-PR after #332 revert.
+- **wiki-daily-ingest watermark + smoke fixture for strand-recovery /
+  clamp / failure gate** (#321, #334). Re-PR after #332 revert.
+- **cron weekly wiki-copy-full-backfill catch-all + same-slot
+  regression guard** (#320, #354).
+- **cron pre-flight memory guard defers dispatch on pressured hosts**
+  (#330, #263 Track B).
+- **cron stagger wiki-daily-ingest to 06:00 to avoid memory-daily
+  race** (#333, #320 Track A).
+- **bootstrap-memory: opt-in `--backfill-history N` for first-run
+  harvest gap** (#322 Track C, #356).
+- **harvest-daily strict YYYY-MM-DD parser** (#340, #322 r1 deferred).
+
+### Admin role + docs
+
+- **admin role boundary + Self-Cleanup of Own Queue +
+  Static-vs-Dynamic** (#306, #303-A, #304-A; admin runtime wire #326).
+- **status: `garden` column for admin's stale blocked tasks** (#328,
+  #303 Track C).
+- **agent compact + handoff primitives for autonomous static-agent
+  maintenance** (#360, #304).
+- **upgrade docs: lead with `upgrade --apply`** (#316, #315).
+- **bidirectional channel routing rule in Task Processing Protocol
+  template** (#359, #342).
+- **admin role spec — admin is not a human-channel gateway** (#349,
+  #345 Track A).
+
+### CLI surface
+
+- **bare `agent-bridge` prints help summary** (#310, #283 Track D).
+- **`bridge_suggest_subcommand` curated aliases for cron + help**
+  (#309, #283 Track C).
+- **`bridge-commands.md` auto-discovers subcommand reference from
+  CLI help** (#313, #283 Track A).
+- **status + list flag agents whose workdir no longer exists**
+  (#312, #305 Track C).
+- **smoke + cli: fixture cleanup + project-root helper silence**
+  (#311, #305 A+B).
+- **skill template heredocs: Cron section + agb dispatcher note**
+  (#308, #283 Track B follow-up).
+- **skill template — expand cron-manager + agent-bridge CLI surface**
+  (#307, #283 Track B).
+
+### Isolate-v2 redesign foundation (opt-in, default off)
+
+The v2 isolation contract replaces named-ACL grants with a POSIX group
++ setgid + umask model. PR-A (primitives) and PR-B (shared read-only
+asset relocation, dual-mode resolver) ship in v0.6.18 **gated behind
+`BRIDGE_LAYOUT=v2`** (default `legacy`). Legacy installs see no behavior
+change. PR-C (per-agent private root + secret extraction), PR-D
+(migration tool + dry-run/apply/rollback), PR-E (legacy ACL helper
+gate), and PR-F (default flip) are upcoming releases.
+
+- **PR-A: layout primitives + group/umask helpers** (#370). New module
+  `lib/bridge-isolation-v2.sh` adds path variables (`BRIDGE_DATA_ROOT`,
+  `BRIDGE_SHARED_ROOT`, `BRIDGE_AGENT_ROOT_V2`,
+  `BRIDGE_CONTROLLER_STATE_ROOT`), opt-in flag (`BRIDGE_LAYOUT=v2`),
+  group helpers (idempotent `groupadd`/`usermod` with `rc=9` success
+  treatment), `chgrp_setgid_recursive` using `find -type d|f -exec`
+  for cross-platform symlink safety, errexit-safe umask wrappers using
+  `trap "umask $saved" RETURN`, and group-name input sanitization for
+  Linux 32-char + `[a-z_][a-z0-9_-]*` limits.
+- **PR-B: shared read-only asset relocation (dual-mode resolver)**
+  (#371). Resolver in `bridge_linux_share_plugin_catalog`,
+  `bridge_resolve_plugin_install_path`, and
+  `bridge_known_marketplaces_lookup` consults a new
+  `bridge_isolation_v2_shared_plugins_root` helper that returns the
+  v2 path (`$BRIDGE_DATA_ROOT/shared/plugins-cache/`) when populated
+  (`installed_plugins.json` present), else falls back to legacy
+  `$controller_home/.claude/plugins`. Migrated installs that have
+  moved controller-managed plugin state to `/srv/agent-bridge/shared/`
+  and have no `~/.claude/plugins` directory are now correctly served
+  by the share helper.
+
+### Wave orchestration plugin (Phase 1.1, new subcommand)
+
+- **`agent-bridge wave` CLI skeleton + state JSON + brief writer**
+  (#373, design doc #365). First sub-phase of the wave-orchestration
+  plugin per the operator-decided design (PR #365). Ships the
+  `wave dispatch|list|show|templates|close-issue` surface, durable
+  per-wave state at `state/waves/<wave-id>.json`, README mirror at
+  `shared/waves/<wave-id>/README.md`, and a generated 11-section brief
+  skeleton per member with the close-keyword footgun warning. Members
+  start `pending` — Phase 1.2 will wire worker startup + queue task
+  creation; Phases 1.3-1.6 add codex adapter, PR automation, main-agent
+  feedback loop, and full close-issue validation. New subcommand only
+  — no impact on existing CLI behavior.
+
+### Reverts
+
+- **wave: PRs #323/#324/#325 merged without pair-review** (#332).
+  Reverted; the same content shipped in re-PRs #333 / #334 / #335
+  with codex pair-review.
+
+### v0.6.18 upgrade / migration notes
+
+#### Auto (covered by `bridge-upgrade.sh`)
+
+- v0.6.17 → v0.6.18 binary upgrade is straightforward — no schema or
+  state-file shape changes. The five isolation runtime fixes (#357,
+  #363, #364, #366, #369) take effect on the next agent restart;
+  operator does not need to run `setfacl` or `apply-channel-policy`
+  by hand.
+- The stall watchdog gate (#374) and memory-daily source-class filter
+  (#376 Tracks A+C) take effect on the next daemon cycle / next
+  `bootstrap-memory-system.sh` apply respectively.
+
+#### Operator-required
+
+1. **(Optional, recommended) memory-daily cron cleanup for already-
+   polluted installs**: operators whose installs were bootstrapped
+   before v0.6.18 will already have `memory-daily-<agent>` crons
+   registered for dynamic agents. These will silently no-op after
+   v0.6.18 (Track C harvester refusal exits 0), but they remain dead
+   weight on the cron board until removed. To clean up:
+
+   ```bash
+   ./agent-bridge cron list --pattern 'memory-daily-' --json \
+     | python3 -c '
+   import json, sys
+   for c in json.load(sys.stdin):
+     print(c["id"], c["agent"])
+   ' \
+     | while read id agent; do
+         src="$(./agent-bridge agent show "$agent" --json 2>/dev/null \
+           | python3 -c "import json,sys; print(json.load(sys.stdin).get(\"source\") or \"\")")"
+         if [[ "$src" == "dynamic" ]]; then
+           ./agent-bridge cron delete "$id"
+         fi
+       done
+   ```
+
+   Track B (apply-time migration) will land in a follow-up PR; until
+   then this one-off cleanup is recommended.
+
+2. **(Optional, isolate-v2 opt-in)** `BRIDGE_LAYOUT=v2` is **default
+   off** in v0.6.18. Operators wishing to evaluate the v2 layout on a
+   non-production install can set `BRIDGE_LAYOUT=v2` +
+   `BRIDGE_DATA_ROOT=/srv/agent-bridge` (or any preferred path) and
+   populate `$BRIDGE_DATA_ROOT/shared/plugins-cache/installed_plugins.json`
+   from the controller's `~/.claude/plugins/` tree. PR-B's dual-mode
+   resolver picks up the v2 root automatically once populated. Do
+   NOT enable on production — PR-C/D/E/F (per-agent private root,
+   migration tool, ACL helper gate, default flip) are still upcoming.
+
+3. **(Optional)** `agent-bridge wave` is a new subcommand with no
+   impact on existing flows. Run `agent-bridge wave templates` to see
+   the Phase 1.1 surface; full multi-PR wave dispatch (worker
+   startup, queue tasks, codex review) lands in Phases 1.2-1.5.
+
 ## [0.6.17] — 2026-04-25
 
 ### Documentation
