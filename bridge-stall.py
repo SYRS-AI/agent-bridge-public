@@ -46,7 +46,15 @@ PATTERN_GROUPS: list[tuple[str, list[str]]] = [
             r"rate limit exceeded",
             r"rate_limit_exceeded",
             r"too many requests",
-            r"\b429\b",
+            # Issue #329 Track A: bare `\b429\b` matched non-glyph scrollback
+            # like A2A task bodies, [cron-dispatch] payloads, vendor incident
+            # transcripts, and meta-text quoting the regex itself — producing
+            # repeated rate-limit nudges to idle agents because excerpt_hash
+            # changed each scan and the max_nudges cap never tripped. Mirror
+            # the #161 timeout narrowing: require an HTTP/status/error/code
+            # transport qualifier adjacent to the bare 429.
+            r"(?:http[\s/]?|status[\s:=]+|error[\s:=]+|code[\s:=]+|api_error_status[\s:=]?)\s*\b429\b",
+            r"\b429\b\s*(?:too many|rate|throttl)",
             r"please wait before trying",
             r"try a different model",
             r"quota exceeded",
@@ -56,7 +64,13 @@ PATTERN_GROUPS: list[tuple[str, list[str]]] = [
         "auth",
         [
             r"session expired",
-            r"unauthorized",
+            # Issue #329 Track A: bare `unauthorized` matched non-glyph
+            # scrollback (A2A bodies, cron-dispatch payloads, CJK prose
+            # quoting the term). Require a transport qualifier adjacent to
+            # the bare keyword/numeric, mirroring the rate_limit narrowing.
+            r"(?:http[\s/]?|status[\s:=]+|error[\s:=]+|code[\s:=]+)\s*\b40[13]\b",
+            r"\bunauthorized\b\s*(?:request|access\s+denied|401|api_error)",
+            r"\b40[13]\b\s*unauthorized",
             r"login required",
             r"authentication failed",
             r"token expired",
