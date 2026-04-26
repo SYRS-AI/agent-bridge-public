@@ -4,6 +4,54 @@ All notable changes to Agent Bridge are documented here. This project adheres
 loosely to [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and tracks
 version bumps via the `VERSION` file.
 
+## [0.6.20] — 2026-04-27
+
+Operator-experience hotfix release. Two issues filed against v0.6.19 that
+materially impact how operators interact with the runtime — neither is a
+production isolation bug, but both block routine workflows.
+
+### Operator-visible fixes
+
+- **`tool-policy.py` allows read-intent on protected paths** (#383, PR #386).
+  v0.6.19's `[upgrade-complete]` bootstrap task instructs admin to inspect
+  `agent-roster.local.sh` for workarounds — but the post-#341 hook denied all
+  access (Read tool, `cat`/`grep`/`head`/`tail`, even `agent-bridge config get`)
+  and pointed users at `config set` as a substitute. `set` is the write path
+  that should stay gated. PR-#386 distinguishes read-intent (Read / Glob /
+  Grep / NotebookRead tools, ~32 read-only Bash commands, `agent-bridge config
+  get` / `list-protected`) from write-intent (Edit / Write / NotebookEdit,
+  output redirection, `sed -i`, `awk -i inplace`, `agent-bridge config set`).
+  Read-intent bypasses the protected-path block-all branch for ALL agents.
+  Write-intent stays gated by the existing #341 admin + operator-wrapper
+  contract. The queue DB stays unconditionally blocked (the `agb` queue
+  commands are the structured-read surface). Smoke matrix updated.
+
+- **`agent-bridge upgrade` aborts on dirty source for tag / release/\* targets**
+  (#380, PR #384). The upgrader was silently using the source-checkout's
+  current working tree as the merge source — when a maintainer had
+  uncommitted edits or was on a feature branch, those changes got folded
+  into the upgrade and produced surprise conflicts on core files even though
+  the released tag itself was clean. PR-#384 adds a pre-flight: when
+  `target_ref` matches `^v[0-9]` or `release/*`, runs `git status --porcelain`
+  in the source checkout and aborts with a structured message (exit 64) if
+  non-empty. The message offers three resolution paths: (1) stash, (2) point
+  `AGENT_BRIDGE_SOURCE_DIR` at a clean checkout, (3) explicit
+  `--allow-dirty-source` opt-in for maintainers testing release candidates.
+  Pre-flight runs for both `--dry-run` and `--apply` so the abort surfaces
+  before any merge attempt.
+
+### v0.6.20 upgrade / migration notes
+
+#### Auto
+
+- v0.6.19 → v0.6.20 binary upgrade is straightforward — no schema or
+  state-file shape changes. Both fixes activate immediately on the next
+  daemon cycle / next `agent-bridge upgrade` invocation.
+
+#### Operator-required
+
+None. Both fixes are runtime-behavior changes that take effect automatically.
+
 ## [0.6.19] — 2026-04-27
 
 ### Highlights — isolate-v2 PR-C: per-agent private root + secret-env split
