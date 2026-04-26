@@ -1,0 +1,233 @@
+#!/usr/bin/env bash
+# tests/isolation-v2-primitives/smoke.sh
+#
+# PR-A acceptance test for the v2 isolation primitives in
+# lib/bridge-isolation-v2.sh. Verifies, without root and without
+# touching the live install:
+#
+#   1. Legacy default (BRIDGE_LAYOUT unset / "legacy") leaves all v2
+#      helpers in no-op state.
+#   2. With BRIDGE_LAYOUT=v2 + BRIDGE_DATA_ROOT set, layout_summary
+#      reports the v2 fields and the path variables derive correctly.
+#   3. bridge_with_private_umask runs the wrapped command under umask
+#      007 and restores the saved umask on success AND on failure.
+#   4. bridge_with_shared_umask runs under umask 027 and restores
+#      similarly.
+#   5. bridge_isolation_v2_chgrp_setgid_recursive sets dir-mode (with
+#      setgid) and file-mode on a tempdir tree, when run with the
+#      caller's own primary group (which doesn't need root).
+#   6. agent_group_name composition.
+#   7. group_exists / user_in_group helpers do not error out and
+#      return non-zero for non-existent group/user pairs.
+#
+# Skipped when bash<4, getfacl/setfacl based assumptions, or when the
+# operator's primary group cannot be exercised.
+
+set -uo pipefail
+
+SCRIPT_DIR="$(cd -P "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
+REPO_ROOT="$(cd -P "$SCRIPT_DIR/../.." && pwd -P)"
+
+log() { printf '[isolation-v2] %s\n' "$*"; }
+die() { printf '[isolation-v2][error] %s\n' "$*" >&2; exit 1; }
+skip() { printf '[isolation-v2][skip] %s\n' "$*"; exit 0; }
+ok() { printf '[isolation-v2] ok: %s\n' "$*"; }
+
+if (( BASH_VERSINFO[0] < 4 )); then
+  skip "bash 4+ required (have ${BASH_VERSION})"
+fi
+
+TMP_ROOT="$(mktemp -d -t isolation-v2-primitives.XXXXXX)"
+trap 'rm -rf "$TMP_ROOT" >/dev/null 2>&1 || true' EXIT
+
+# Source the v2 module standalone — no full bridge-lib.sh sourcing so
+# we don't pull in roster/agents state that PR-A is not supposed to
+# touch yet.
+# shellcheck source=/dev/null
+source "$REPO_ROOT/lib/bridge-isolation-v2.sh" \
+  || die "failed to source lib/bridge-isolation-v2.sh"
+
+# bridge_warn comes from bridge-core.sh; provide a stub so this test
+# runs without sourcing the rest of the lib.
+bridge_warn() { printf '[bridge_warn] %s\n' "$*" >&2; }
+
+# ---------------------------------------------------------------------------
+# 1. legacy default: helpers no-op
+# ---------------------------------------------------------------------------
+
+unset BRIDGE_LAYOUT BRIDGE_DATA_ROOT BRIDGE_SHARED_ROOT BRIDGE_AGENT_ROOT_V2
+unset BRIDGE_CONTROLLER_STATE_ROOT
+# shellcheck source=/dev/null
+source "$REPO_ROOT/lib/bridge-isolation-v2.sh"
+
+if bridge_isolation_v2_active; then
+  die "v2 should be inactive when BRIDGE_LAYOUT and BRIDGE_DATA_ROOT are unset"
+fi
+ok "legacy default: bridge_isolation_v2_active returns non-zero"
+
+summary_legacy="$(bridge_isolation_v2_layout_summary)"
+[[ "$summary_legacy" == "layout=legacy" ]] \
+  || die "legacy layout_summary unexpected: $summary_legacy"
+ok "legacy default: layout_summary reports legacy"
+
+# ---------------------------------------------------------------------------
+# 2. v2 active: derived path variables + summary
+# ---------------------------------------------------------------------------
+
+export BRIDGE_LAYOUT=v2
+export BRIDGE_DATA_ROOT="$TMP_ROOT/srv-agent-bridge"
+unset BRIDGE_SHARED_ROOT BRIDGE_AGENT_ROOT_V2 BRIDGE_CONTROLLER_STATE_ROOT
+# shellcheck source=/dev/null
+source "$REPO_ROOT/lib/bridge-isolation-v2.sh"
+
+bridge_isolation_v2_active \
+  || die "v2 should be active with BRIDGE_LAYOUT=v2 + BRIDGE_DATA_ROOT set"
+ok "v2 active: bridge_isolation_v2_active returns 0"
+
+[[ "$BRIDGE_SHARED_ROOT" == "$BRIDGE_DATA_ROOT/shared" ]] \
+  || die "shared root mismatch: $BRIDGE_SHARED_ROOT"
+[[ "$BRIDGE_AGENT_ROOT_V2" == "$BRIDGE_DATA_ROOT/agents" ]] \
+  || die "agent root mismatch: $BRIDGE_AGENT_ROOT_V2"
+[[ "$BRIDGE_CONTROLLER_STATE_ROOT" == "$BRIDGE_DATA_ROOT/state" ]] \
+  || die "controller state root mismatch: $BRIDGE_CONTROLLER_STATE_ROOT"
+ok "v2 active: derived path variables resolve correctly"
+
+summary_v2="$(bridge_isolation_v2_layout_summary)"
+[[ "$summary_v2" == *"layout=v2"* ]] \
+  || die "v2 layout_summary missing layout=v2: $summary_v2"
+[[ "$summary_v2" == *"data_root=$BRIDGE_DATA_ROOT"* ]] \
+  || die "v2 layout_summary missing data_root: $summary_v2"
+ok "v2 active: layout_summary reports v2 fields"
+
+# ---------------------------------------------------------------------------
+# 3. bridge_with_private_umask: success + failure restore
+# ---------------------------------------------------------------------------
+
+saved_before_private="$(umask)"
+
+# Success path.
+captured=""
+captured="$(bridge_with_private_umask bash -c 'umask')"
+[[ "$captured" == "0007" ]] || die "private umask body did not see 007 (got $captured)"
+[[ "$(umask)" == "$saved_before_private" ]] \
+  || die "private umask not restored after success (now $(umask))"
+ok "bridge_with_private_umask: applies 007 + restores on success"
+
+# Failure path: wrapped command exits non-zero.
+set +e
+bridge_with_private_umask bash -c 'umask; exit 7'
+rc=$?
+set -e
+[[ "$rc" == 7 ]] || die "private umask failure rc not propagated (got $rc)"
+[[ "$(umask)" == "$saved_before_private" ]] \
+  || die "private umask not restored after failure (now $(umask))"
+ok "bridge_with_private_umask: restores umask on failure path"
+
+# ---------------------------------------------------------------------------
+# 4. bridge_with_shared_umask: success + failure restore
+# ---------------------------------------------------------------------------
+
+saved_before_shared="$(umask)"
+
+captured="$(bridge_with_shared_umask bash -c 'umask')"
+[[ "$captured" == "0027" ]] || die "shared umask body did not see 027 (got $captured)"
+[[ "$(umask)" == "$saved_before_shared" ]] \
+  || die "shared umask not restored after success (now $(umask))"
+ok "bridge_with_shared_umask: applies 027 + restores on success"
+
+set +e
+bridge_with_shared_umask bash -c 'umask; exit 13'
+rc=$?
+set -e
+[[ "$rc" == 13 ]] || die "shared umask failure rc not propagated (got $rc)"
+[[ "$(umask)" == "$saved_before_shared" ]] \
+  || die "shared umask not restored after failure (now $(umask))"
+ok "bridge_with_shared_umask: restores umask on failure path"
+
+# ---------------------------------------------------------------------------
+# 5. chgrp_setgid_recursive — uses caller's primary group (no root needed)
+# ---------------------------------------------------------------------------
+
+caller_group="$(id -gn 2>/dev/null || true)"
+if [[ -n "$caller_group" ]]; then
+  tree_root="$TMP_ROOT/setgid-tree"
+  mkdir -p "$tree_root/sub"
+  : > "$tree_root/file.txt"
+  : > "$tree_root/sub/inner.txt"
+
+  bridge_isolation_v2_chgrp_setgid_recursive \
+    "$caller_group" 2750 0640 "$tree_root" \
+    || die "chgrp_setgid_recursive failed against caller's primary group"
+
+  # Dir mode (sticky bit + group rwx). On most Linuxes octal 2750 is
+  # rendered as `2750`; macOS may differ slightly. Accept any 4-digit
+  # mode where the second digit is 7 (group rwx) and the leading digit
+  # is 2 (setgid).
+  root_mode="$(stat -c '%a' "$tree_root" 2>/dev/null || stat -f '%Lp' "$tree_root" 2>/dev/null)"
+  case "$root_mode" in
+    2750|02750) ok "chgrp_setgid_recursive: root dir mode 2750" ;;
+    *) die "chgrp_setgid_recursive: dir mode unexpected: $root_mode" ;;
+  esac
+
+  file_mode="$(stat -c '%a' "$tree_root/file.txt" 2>/dev/null || stat -f '%Lp' "$tree_root/file.txt" 2>/dev/null)"
+  case "$file_mode" in
+    640|0640) ok "chgrp_setgid_recursive: file mode 0640" ;;
+    *) die "chgrp_setgid_recursive: file mode unexpected: $file_mode" ;;
+  esac
+
+  inner_mode="$(stat -c '%a' "$tree_root/sub" 2>/dev/null || stat -f '%Lp' "$tree_root/sub" 2>/dev/null)"
+  case "$inner_mode" in
+    2750|02750) ok "chgrp_setgid_recursive: nested dir mode 2750" ;;
+    *) die "chgrp_setgid_recursive: nested dir mode unexpected: $inner_mode" ;;
+  esac
+else
+  log "skipping chgrp_setgid_recursive test: cannot determine caller's primary group"
+fi
+
+# ---------------------------------------------------------------------------
+# 6. agent_group_name composition
+# ---------------------------------------------------------------------------
+
+name="$(bridge_isolation_v2_agent_group_name "sales_sean")"
+[[ "$name" == "ab-agent-sales_sean" ]] \
+  || die "agent_group_name composition unexpected: $name"
+ok "agent_group_name: composes ab-agent-<name>"
+
+# Override prefix.
+BRIDGE_AGENT_GROUP_PREFIX="custom-agent-" \
+  name2="$(bridge_isolation_v2_agent_group_name "x")"
+[[ "$name2" == "custom-agent-x" ]] \
+  || die "agent_group_name prefix override failed: $name2"
+ok "agent_group_name: respects prefix override"
+
+# ---------------------------------------------------------------------------
+# 7. group_exists + user_in_group: graceful negatives
+# ---------------------------------------------------------------------------
+
+bogus_group="bogus-bridge-group-$$-$(date +%s)"
+if bridge_isolation_v2_group_exists "$bogus_group"; then
+  die "group_exists returned 0 for nonexistent group $bogus_group"
+fi
+ok "group_exists: returns non-zero for nonexistent group"
+
+bogus_user="bogus-bridge-user-$$-$(date +%s)"
+if bridge_isolation_v2_user_in_group "$bogus_user" "$bogus_group"; then
+  die "user_in_group returned 0 for bogus user/group pair"
+fi
+ok "user_in_group: returns non-zero for bogus user/group"
+
+# ---------------------------------------------------------------------------
+# 8. legacy regression — sourcing module does not change BRIDGE_HOME
+# ---------------------------------------------------------------------------
+
+# This is a very thin smoke check: BRIDGE_HOME is not set or modified
+# by the v2 module. The full bridge-lib.sh sets a default for it, but
+# the v2 module itself MUST NOT.
+unset BRIDGE_HOME
+# shellcheck source=/dev/null
+source "$REPO_ROOT/lib/bridge-isolation-v2.sh"
+[[ -z "${BRIDGE_HOME:-}" ]] \
+  || die "v2 module unexpectedly set BRIDGE_HOME: $BRIDGE_HOME"
+ok "legacy regression: v2 module does not set BRIDGE_HOME"
+
+log "all PR-A acceptance checks passed"
