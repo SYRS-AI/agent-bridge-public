@@ -173,8 +173,8 @@ Trade-offs: state files plus audit rows duplicate some information, but they ser
 
 1. Resolve `<issue>` and discover all wave members tagged with that issue (`state/waves/*.json` index).
 2. **Validation step (automatic)**:
-   - Every member with `issue=<N>` must have `state=complete` and a merged PR (`gh pr view <pr> --json state` returns `MERGED`).
-   - If the issue body declares tracks (e.g. via `## Track A`/`## Track B` headings), every declared track must be covered by at least one merged member.
+   - Every wave member tagged with `issue=<N>` must have `state=complete` and a merged PR (`gh pr view <pr> --json state` returns `MERGED`).
+   - The wave's recorded `--tracks` list (captured at dispatch time and stored in `state/waves/<wave-id>.json`) must be fully covered: every track listed at dispatch has at least one merged member with a matching `track` tag. (Issue body is **not** parsed for track names — same as §2 dispatch contract. Coverage is checked against the operator's explicit `--tracks` list, not against issue prose.)
    - No outstanding `wave_codex_review_needs_more` audit rows in the last 24 hours for any wave member targeting this issue.
 3. **On validation pass**: `gh issue close <N>` with a structured body summarizing the merged PRs, audit row `wave_close_invoked`.
 4. **On validation fail**: do **not** close. Emit audit row `wave_close_blocked` with the failed reasons. Escalate to the main agent's own surface (TUI or notify-target — never admin's queue, per #345 contract). Body: "Issue #N close blocked: <reason>. Open tracks: <list>. Run `agent-bridge wave close-issue <N>` again after addressing."
