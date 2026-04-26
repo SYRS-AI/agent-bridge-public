@@ -1480,9 +1480,32 @@ bridge_linux_share_plugin_catalog() {
   if [[ -z "$controller_home" ]]; then
     controller_home="$(getent passwd "$controller_user" 2>/dev/null | cut -d: -f6 || true)"
   fi
-  [[ -n "$controller_home" && -d "$controller_home/.claude/plugins" ]] || return 0
 
-  local controller_plugins="$controller_home/.claude/plugins"
+  # Resolve the canonical Claude plugins root for this share pass:
+  #   1. v2 layout (BRIDGE_LAYOUT=v2 + populated BRIDGE_SHARED_ROOT/plugins-cache)
+  #      takes precedence — migrated installs may have no controller_home/.claude/plugins
+  #      directory at all, so the legacy-only guard would silently no-op the
+  #      whole isolated-share pipeline (manifest write, marketplace symlinks,
+  #      per-plugin grants) and the agent would start with no MCP servers.
+  #   2. Legacy controller_home/.claude/plugins as fallback.
+  #   3. Neither present → no-op (return 0).
+  #
+  # The v2 root contract is encapsulated in
+  # `bridge_isolation_v2_shared_plugins_root` (see lib/bridge-isolation-v2.sh).
+  # This function consumes that helper directly so the path lives in one
+  # place. controller_home is still recorded for the traverse-chain helper
+  # below — for v2 paths that live outside controller_home the traverse
+  # walk no-ops, which is intentional (group-mediated access takes over
+  # from named-ACL traversal once the operator migrates).
+  local controller_plugins=""
+  if controller_plugins="$(bridge_isolation_v2_shared_plugins_root 2>/dev/null)"; then
+    :
+  elif [[ -n "$controller_home" && -d "$controller_home/.claude/plugins" ]]; then
+    controller_plugins="$controller_home/.claude/plugins"
+  else
+    return 0
+  fi
+
   local isolated_plugins="$user_home/.claude/plugins"
 
   # 1. plugins/ root: root-owned, isolated UID r-x.
