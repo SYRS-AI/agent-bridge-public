@@ -3709,6 +3709,8 @@ bridge_agent_channel_status() {
 bridge_claude_plugin_status() {
   local plugin_spec="$1"
   local registry="${BRIDGE_CLAUDE_INSTALLED_PLUGINS_FILE:-}"
+  local default_manifest=""
+  local manifest_owner=""
   local output=""
 
   if [[ -n "$registry" && -f "$registry" ]]; then
@@ -3730,6 +3732,47 @@ plugins = payload.get("plugins") or {}
 print("enabled" if spec in plugins else "missing")
 PY
     return 0
+  fi
+
+  # #346 isolate: when bridge-run.sh executes under an isolated linux-user
+  # UID and the per-UID installed_plugins.json is root-owned, that file
+  # was written by bridge_write_isolated_installed_plugins_manifest as the
+  # authoritative declared-plugin-only catalog. Trusting it here lets a
+  # third-party marketplace plugin (whose marketplace metadata is not
+  # exposed inside the isolated home) pass preflight without an install
+  # attempt that would otherwise crash bridge-run.sh and trigger a tmux
+  # respawn loop. Controller (non-root) UIDs do not match the
+  # owner==root guard, so the existing claude-plugin-list fallback
+  # remains in effect for the controller side.
+  default_manifest="${HOME:-}/.claude/plugins/installed_plugins.json"
+  if [[ -n "${HOME:-}" && "$(id -u 2>/dev/null || echo 0)" != "0" && -f "$default_manifest" ]]; then
+    manifest_owner="$(stat -c '%u' "$default_manifest" 2>/dev/null || echo -1)"
+    if [[ "$manifest_owner" == "0" ]]; then
+      bridge_require_python
+      python3 - "$default_manifest" "$plugin_spec" <<'PY'
+import json
+import os
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+spec = sys.argv[2]
+try:
+    payload = json.loads(path.read_text(encoding="utf-8"))
+except Exception:
+    print("missing")
+    raise SystemExit(0)
+
+entries = (payload.get("plugins") or {}).get(spec) or []
+for entry in entries:
+    install_path = entry.get("installPath", "")
+    if install_path and os.access(install_path, os.R_OK | os.X_OK):
+        print("enabled")
+        raise SystemExit(0)
+print("missing")
+PY
+      return 0
+    fi
   fi
 
   if ! command -v claude >/dev/null 2>&1; then
