@@ -939,9 +939,11 @@ bridge_known_marketplaces_lookup() {
   #   present:other       — registered with another source kind (http, etc.)
   #   missing             — not registered (caller should silently skip)
   #   unparseable         — JSON missing / unreadable / not an object
-  #                         (caller should warn-and-skip the whole 5b'
-  #                          block; this helper has already logged the
-  #                          warning to stderr).
+  #                         (caller should skip the whole 5b' block;
+  #                          this helper stays silent because the
+  #                          manifest writer at :1183 already emitted
+  #                          the canonical warning earlier in the same
+  #                          share pass — see #348 r3).
   #
   # The `<source-kind>` half of `present:*` is informational — current
   # callers symlink `<plugins_root>/marketplaces/<mkt>` regardless of
@@ -961,10 +963,6 @@ marketplace_id = sys.argv[1]
 marketplaces_path = sys.argv[2]
 
 
-def warn(msg):
-    sys.stderr.write("[bridge-isolate] " + msg + "\n")
-
-
 if not os.path.isfile(marketplaces_path):
     # Treat missing as unparseable for caller-side simplicity: the
     # whole 5b' block is a no-op without it. Mirrors the manifest
@@ -978,14 +976,18 @@ try:
         markets = json.load(f)
     if not isinstance(markets, dict):
         raise ValueError("expected JSON object at root, got %r" % type(markets).__name__)
-except (OSError, ValueError) as exc:
-    # Mirror the manifest writer's :1092 pattern: log once and let
-    # the caller skip the marketplace symlink path entirely. This
-    # is informational, not fatal — isolation refresh continues.
-    warn(
-        "controller known_marketplaces.json unparseable (%s): %s — marketplace symlinks disabled this pass"
-        % (type(exc).__name__, marketplaces_path)
-    )
+except (OSError, ValueError):
+    # Stay silent on the corrupt-JSON branch: the manifest writer
+    # (`bridge_write_isolated_installed_plugins_manifest`, step 4 of
+    # bridge_linux_share_plugin_catalog) always runs before this
+    # helper (step 5b') and already emitted the canonical
+    # `[bridge-isolate] controller known_marketplaces.json unparseable …`
+    # warning at :1183-1186 for the same file. Re-emitting here would
+    # log the same condition twice (once per share pass, plus once per
+    # `_mkt_id` iteration before the 5b' loop short-circuits on
+    # `unparseable`). Returning `unparseable` is sufficient — the
+    # caller's `case` arm sets `_mkt_block_disabled=1` and skips the
+    # symlink path silently. (#348 r3.)
     print("unparseable")
     sys.exit(0)
 
@@ -1488,9 +1490,11 @@ bridge_linux_share_plugin_catalog() {
     esac
     _mkt_seen="${_mkt_seen}${_seen_marker}${_mkt_id}${_seen_marker}"
     # Source-of-truth gate: marketplace must be registered in
-    # known_marketplaces.json. The helper warns once (and we abandon
-    # the whole 5b' block) when the JSON is missing/unparseable —
-    # same shape the manifest writer uses at :1092.
+    # known_marketplaces.json. On `unparseable` we abandon the whole
+    # 5b' block; the manifest writer at :1183-1186 already logged the
+    # canonical warning earlier in the same share pass, so the helper
+    # itself stays silent (no duplicate stderr line per share pass —
+    # #348 r3).
     _mkt_lookup="$(bridge_known_marketplaces_lookup "$_mkt_id" "$controller_plugins")"
     case "$_mkt_lookup" in
       unparseable)
