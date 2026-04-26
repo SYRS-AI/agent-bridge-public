@@ -329,6 +329,14 @@ CRON_SPECS=(
   # (issue #320 Track A). Existing 0.6.17 installs that already have this
   # cron at "0 3 * * *" are migrated to "0 6 * * *" by step_cron_one below.
   "wiki-daily-ingest|0 6 * * *|Asia/Seoul|wiki-daily-ingest.sh"
+  # Weekly Lane A catch-all (issue #320 Track B). The daily wiki-daily-ingest
+  # advances a watermark per #321; an agent that never processes its backfill
+  # task in time can leave a daily note stranded. wiki-daily-copy.py --all
+  # walks every date present under each agent's memory/ and re-copies any
+  # missing wiki replica. Hash idempotency (wiki-daily-copy.py:93) keeps the
+  # pass cheap on subsequent runs. Sundays 07:00 KST = one hour after the
+  # 06:00 daily stagger so the two never overlap on the same wall minute.
+  "wiki-copy-full-backfill|0 7 * * 0|Asia/Seoul|wiki-copy-full-backfill.sh"
   # L1 observation scanner. Populates shared/wiki/_index/mentions.db and
   # the distribution-report snapshot. Offset :17 misses top-of-hour cluster.
   "wiki-mention-scan|17 * * * *|Asia/Seoul|wiki-mention-scan.sh"
@@ -690,7 +698,7 @@ bootstrap_install_scripts() {
   local changed=0
   for f in _common.sh wiki-weekly-summarize.sh wiki-monthly-summarize.sh \
            wiki-repair-links.sh wiki-v2-rebuild.sh wiki-dedup-weekly.sh \
-           wiki-daily-ingest.sh wiki-daily-copy.py \
+           wiki-daily-ingest.sh wiki-daily-copy.py wiki-copy-full-backfill.sh \
            wiki-mention-scan.py wiki-mention-scan.sh \
            wiki-hub-audit.py wiki-hub-audit.sh \
            sync-memory-schema.py \
