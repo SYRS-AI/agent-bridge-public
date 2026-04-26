@@ -80,6 +80,12 @@ source "$SCRIPT_DIR/scripts/_common.sh"
 MODE="apply"
 INDEX_STALE_DAYS=7
 TARGET_AGENT=""
+# Issue #322 Track C: opt-in historical backfill of memory-daily harvests.
+# Default empty = OFF. When set, must be a strict integer in [1, 90].
+# Active only in --apply mode; ignored under --dry-run / --check (those modes
+# already report what apply would do; the backfill is purely an apply-time
+# side-effect that piggy-backs on `harvest-daily --missing-only`).
+BACKFILL_HISTORY_DAYS=""
 while (( $# > 0 )); do
   case "$1" in
     --dry-run) MODE="dry-run" ;;
@@ -87,9 +93,13 @@ while (( $# > 0 )); do
     --apply)   MODE="apply" ;;
     --agent)   TARGET_AGENT="${2:-}"; shift ;;
     --stale-days) INDEX_STALE_DAYS="${2:-7}"; shift ;;
+    --backfill-history)
+      BACKFILL_HISTORY_DAYS="${2:-}"
+      shift
+      ;;
     -h|--help)
       cat <<EOF
-usage: $(basename "$0") [--apply|--dry-run|--check] [--agent <name>] [--stale-days N]
+usage: $(basename "$0") [--apply|--dry-run|--check] [--agent <name>] [--stale-days N] [--backfill-history N]
 
 Steps:
   1. PreCompact hook per active claude agent.
@@ -97,6 +107,12 @@ Steps:
   3. Ensure the dynamic 'librarian' agent is provisioned.
   4. Register the wiki-* + librarian-watchdog cron set on the admin
      agent (default: 'patch'; override with BRIDGE_ADMIN_AGENT env).
+  5. (apply only, opt-in) When --backfill-history N is supplied, run
+     \`bridge-memory.py harvest-daily --from \$(today-N) --to \$(today-1)
+     --agent <agent> --missing-only\` for each registered claude agent.
+     N is an integer in [1, 90]; default is OFF (no historical backfill).
+     Re-running with the same N is a no-op because --missing-only skips
+     dates that already have a sidecar manifest. Issue #322 Track C.
 
 JSON report written to \$BRIDGE_STATE_ROOT/bootstrap-memory/report-<stamp>.json
 EOF
@@ -106,6 +122,20 @@ EOF
   esac
   shift
 done
+
+# Validate --backfill-history once, up-front, so a bad value fails fast
+# before any provisioning side-effects. Empty (unset) is the default; only
+# values that survive validation participate in the backfill loop.
+if [[ -n "$BACKFILL_HISTORY_DAYS" ]]; then
+  if ! [[ "$BACKFILL_HISTORY_DAYS" =~ ^[0-9]+$ ]]; then
+    echo "bootstrap-memory: --backfill-history requires a non-negative integer (got: $BACKFILL_HISTORY_DAYS)" >&2
+    exit 2
+  fi
+  if (( BACKFILL_HISTORY_DAYS < 1 || BACKFILL_HISTORY_DAYS > 90 )); then
+    echo "bootstrap-memory: --backfill-history must be in [1, 90] days (got: $BACKFILL_HISTORY_DAYS); 0 is treated as OFF — omit the flag instead" >&2
+    exit 2
+  fi
+fi
 
 # -----------------------------------------------------------------------------
 # output / report setup
@@ -848,6 +878,92 @@ bootstrap_migrate_memory_daily_aggregate() {
 }
 
 # -----------------------------------------------------------------------------
+# step 4: opt-in historical backfill of memory-daily harvests (issue #322 Track C)
+# -----------------------------------------------------------------------------
+# When the operator passes `--backfill-history N`, fan harvest-daily out across
+# the [today-N, today-1] window for every active claude agent in the bootstrap
+# scope, with `--missing-only` so re-runs are no-ops. The flag is OFF by
+# default — opt-in is the contract because a real backfill of N=14 days across
+# 5 agents queues up to 70 [memory-daily-backfill] tasks at once. Tracks A+B
+# (PR #335 + PR #340) shipped the range mode and --missing-only filter that
+# this loop drives; this step is the post-install ergonomic that prevents
+# the pre-cron-registration coverage gap from going unnoticed.
+step_backfill_history_one() {
+  local agent="$1" home="$2" from_date="$3" to_date="$4"
+  local rc=0
+  local stderr_log="$REPORT_DIR/.backfill-history-$agent-$STAMP.stderr"
+  if "$BRIDGE_PYTHON" "$BRIDGE_HOME/bridge-memory.py" harvest-daily \
+        --agent "$agent" \
+        --home "$home" \
+        --workdir "$home" \
+        --from "$from_date" --to "$to_date" \
+        --tz Asia/Seoul \
+        --missing-only \
+        >/dev/null 2>"$stderr_log"; then
+    record "$agent" "backfill-history" "ok" \
+      "from=$from_date to=$to_date days=$BACKFILL_HISTORY_DAYS missing-only"
+    return 0
+  fi
+  rc=$?
+  # Per-agent failures must NOT abort the loop — tracked in the JSON report
+  # with the stderr tail so the operator can triage one agent without losing
+  # the rest.
+  local stderr_tail
+  stderr_tail="$(tr '\n' ' ' <"$stderr_log" 2>/dev/null | head -c 200)"
+  record "$agent" "backfill-history" "failed" \
+    "rc=$rc from=$from_date to=$to_date stderr=$stderr_tail"
+  return 1
+}
+
+run_backfill_history() {
+  # Caller guarantees BACKFILL_HISTORY_DAYS is a validated [1, 90] integer
+  # and MODE == "apply".
+  local n="$BACKFILL_HISTORY_DAYS"
+  local from_date to_date
+  # `date -v-Nd` is BSD/macOS; `date -d "N days ago"` is GNU. Try both so the
+  # bootstrap stays portable across the same OS matrix the rest of the bridge
+  # supports (Bash 4+, macOS + Linux).
+  from_date="$(date -v-"${n}"d +%Y-%m-%d 2>/dev/null \
+            || date -d "${n} days ago" +%Y-%m-%d 2>/dev/null \
+            || true)"
+  to_date="$(date -v-1d +%Y-%m-%d 2>/dev/null \
+          || date -d 'yesterday' +%Y-%m-%d 2>/dev/null \
+          || true)"
+  if [[ -z "$from_date" || -z "$to_date" ]]; then
+    record "$BRIDGE_ADMIN_AGENT" "backfill-history" "skip-date-resolve-failed" \
+      "n=$n from=$from_date to=$to_date"
+    note_drift
+    return 0
+  fi
+
+  if [[ "$AGENT_COUNT" -eq 0 ]]; then
+    record "$BRIDGE_ADMIN_AGENT" "backfill-history" "skip-no-agents" \
+      "n=$n from=$from_date to=$to_date"
+    return 0
+  fi
+
+  # Resolve agent (name, home) pairs from the cached snapshot taken at script
+  # start. We can't re-run list_active_claude_agents here without paying for
+  # another `agb agent list --json` round-trip; the snapshot is fresh enough
+  # for a single bootstrap run.
+  local ok_count=0 fail_count=0
+  while IFS=$'\t' read -r agent home; do
+    [[ -z "$agent" || -z "$home" ]] && continue
+    if step_backfill_history_one "$agent" "$home" "$from_date" "$to_date"; then
+      ok_count=$((ok_count + 1))
+    else
+      fail_count=$((fail_count + 1))
+    fi
+  done < "$AGENT_LIST_TMP"
+
+  record "$BRIDGE_ADMIN_AGENT" "backfill-history-summary" "complete" \
+    "n=$n from=$from_date to=$to_date agents=$AGENT_COUNT ok=$ok_count fail=$fail_count"
+  if (( fail_count > 0 )); then
+    note_drift
+  fi
+}
+
+# -----------------------------------------------------------------------------
 # run all steps
 # -----------------------------------------------------------------------------
 bootstrap_install_scripts
@@ -865,6 +981,18 @@ for spec in "${CRON_SPECS[@]}"; do
   IFS='|' read -r title sched tz script <<<"$spec"
   step_cron_one "$title" "$sched" "$tz" "$script"
 done
+
+# Issue #322 Track C — opt-in, apply-only. Runs after cron registration so a
+# fresh install ends with both forward (cron-driven) and backward (this loop)
+# coverage. dry-run / check skip the loop entirely; the harvester itself is
+# the SSOT for "what would be queued", and exposing a synthetic dry-run here
+# would double-code that decision logic.
+if [[ "$MODE" == "apply" && -n "$BACKFILL_HISTORY_DAYS" ]]; then
+  run_backfill_history
+elif [[ -n "$BACKFILL_HISTORY_DAYS" ]]; then
+  record "$BRIDGE_ADMIN_AGENT" "backfill-history" "skip-non-apply-mode" \
+    "mode=$MODE n=$BACKFILL_HISTORY_DAYS"
+fi
 
 rm -f "$EXISTING_CRONS_JSON" "$AGENT_LIST_TMP"
 
