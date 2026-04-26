@@ -69,6 +69,8 @@ cmd_question() {
   local wait_seconds=""
   local dry_run=0
   local json_mode=0
+  local force_admin_relay=0
+  local agent_source=""
   local admin_agent=""
   local title=""
   local now_iso=""
@@ -122,6 +124,13 @@ cmd_question() {
         json_mode=1
         shift
         ;;
+      --force-admin-relay)
+        # Explicit opt-in: relay through admin even when the calling agent is
+        # dynamic. Default off so a dynamic agent whose operator is in its TUI
+        # does not produce a wasted admin nudge (#343 Track A).
+        force_admin_relay=1
+        shift
+        ;;
       -h|--help)
         usage
         exit 0
@@ -135,6 +144,17 @@ cmd_question() {
   [[ -n "$agent" ]] || bridge_die "--agent는 필수입니다."
   [[ -n "$question" ]] || bridge_die "--question은 필수입니다."
   bridge_require_agent "$agent"
+
+  agent_source="$(bridge_agent_source "$agent")"
+  if [[ "$agent_source" == "dynamic" && "$force_admin_relay" -ne 1 ]]; then
+    # Dynamic agents have direct operator attachment in their own TUI; the
+    # agent's own conversation is the human-facing channel for this question.
+    # Refuse to escalate (exit 0 — the call succeeded by deciding "no
+    # escalation needed"). Use --force-admin-relay to override.
+    printf 'agent-bridge: skipping admin escalation — "%s" is a dynamic agent. The operator should answer in the agent'\''s TUI directly. No queue task created. Use --force-admin-relay to override.\n' "$agent" >&2
+    exit 0
+  fi
+
   admin_agent="$(bridge_require_admin_agent)"
   [[ "$admin_agent" != "$agent" ]] || bridge_die "질문 에스컬레이션은 관리자 자신이 아닌 다른 에이전트에서만 사용하세요."
   [[ -n "$session" ]] || session="$(bridge_agent_session "$agent")"
