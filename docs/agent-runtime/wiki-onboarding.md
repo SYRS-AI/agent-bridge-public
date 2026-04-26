@@ -50,7 +50,11 @@ This does five things, all idempotent:
     - `wiki-repair-links` (Sat 05:00 KST)
     - `wiki-v2-rebuild` (Sat 06:00 KST)
     - `wiki-dedup-weekly` (Sun 04:00 KST)
-    - `wiki-daily-ingest` (03:00 KST daily)
+    - `wiki-daily-ingest` (06:00 KST daily — staggered 3h after the
+      03:00 `memory-daily-*` fan-out so Lane A sees the day's notes
+      before copying)
+    - `wiki-copy-full-backfill` (Sun 07:00 KST — weekly Lane A catch-all
+      via `wiki-daily-copy.py --all`; hash idempotency makes it cheap)
     - `wiki-mention-scan` (hourly :17)
     - `librarian-watchdog` (*/10 min)
     - `wiki-hub-audit` (Thu 23:00 KST)
