@@ -159,10 +159,32 @@ bridge_isolation_v2_ensure_user_in_group() {
 # 4. mode / chgrp / setgid helpers
 # ---------------------------------------------------------------------------
 
+_bridge_isolation_v2_run_root_or_sudo() {
+  # Run the given command directly when permitted (root, or POSIX
+  # permits the operation for the caller — e.g. owner changing to
+  # their own primary group), otherwise fall back to passwordless
+  # sudo.
+  #
+  # Direct-first matters for rootless cases: a non-root user can
+  # `chgrp` to one of their own groups and `chmod` files they own
+  # without sudo. Forcing `sudo -n` would block both the regression
+  # smoke (caller's primary group on a tempdir tree) and any
+  # non-root operator workflow when sudo is intentionally absent.
+  if "$@" 2>/dev/null; then
+    return 0
+  fi
+  if [[ "$(id -u)" -ne 0 ]] && command -v sudo >/dev/null 2>&1; then
+    sudo -n "$@" 2>/dev/null && return 0
+  fi
+  return 1
+}
+
 bridge_isolation_v2_chgrp_setgid_dir() {
   # Apply group ownership + setgid bit + mode to a single directory.
   # Idempotent. Honors mode argument (e.g. 2750 for shared, 2770 for
-  # per-agent private).
+  # per-agent private). Direct-first (POSIX-permitted operation by
+  # caller) before falling back to sudo, so the rootless primary-
+  # group regression path works without sudo.
   local group="$1"
   local mode="$2"
   local dir="$3"
@@ -174,13 +196,8 @@ bridge_isolation_v2_chgrp_setgid_dir() {
     bridge_warn "chgrp_setgid_dir: not a directory: $dir"
     return 1
   }
-  if [[ "$(id -u)" -eq 0 ]]; then
-    chgrp "$group" "$dir" || return 1
-    chmod "$mode" "$dir" || return 1
-  else
-    sudo -n chgrp "$group" "$dir" 2>/dev/null || return 1
-    sudo -n chmod "$mode" "$dir" 2>/dev/null || return 1
-  fi
+  _bridge_isolation_v2_run_root_or_sudo chgrp "$group" "$dir" || return 1
+  _bridge_isolation_v2_run_root_or_sudo chmod "$mode" "$dir" || return 1
 }
 
 bridge_isolation_v2_chgrp_setgid_recursive() {
@@ -188,6 +205,9 @@ bridge_isolation_v2_chgrp_setgid_recursive() {
   # setgid bit), files get the file-mode (without setgid). The dir-mode
   # MUST include the setgid bit (e.g. 2750, 2770) so newly-created
   # children inherit the group automatically.
+  #
+  # Direct-first like chgrp_setgid_dir; the regression smoke validates
+  # the rootless primary-group path without sudo.
   local group="$1"
   local dir_mode="$2"
   local file_mode="$3"
@@ -200,13 +220,9 @@ bridge_isolation_v2_chgrp_setgid_recursive() {
     bridge_warn "chgrp_setgid_recursive: not a directory: $root"
     return 1
   }
-  local sudo_prefix=()
-  if [[ "$(id -u)" -ne 0 ]]; then
-    sudo_prefix=(sudo -n)
-  fi
-  "${sudo_prefix[@]}" chgrp -R "$group" "$root" || return 1
-  "${sudo_prefix[@]}" find "$root" -type d -exec chmod "$dir_mode" {} + || return 1
-  "${sudo_prefix[@]}" find "$root" -type f -exec chmod "$file_mode" {} + || return 1
+  _bridge_isolation_v2_run_root_or_sudo chgrp -R "$group" "$root" || return 1
+  _bridge_isolation_v2_run_root_or_sudo find "$root" -type d -exec chmod "$dir_mode" {} + || return 1
+  _bridge_isolation_v2_run_root_or_sudo find "$root" -type f -exec chmod "$file_mode" {} + || return 1
 }
 
 # ---------------------------------------------------------------------------

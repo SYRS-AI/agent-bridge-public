@@ -115,10 +115,12 @@ ok "bridge_with_private_umask: applies 007 + restores on success"
 
 # Failure path: wrapped command exits non-zero.
 set +e
-bridge_with_private_umask bash -c 'umask; exit 7'
+captured_failed_private="$(bridge_with_private_umask bash -c 'umask; exit 7')"
 rc=$?
 set -e
 [[ "$rc" == 7 ]] || die "private umask failure rc not propagated (got $rc)"
+[[ "$captured_failed_private" == "0007" ]] \
+  || die "private umask body did not see 007 on failure path (got $captured_failed_private)"
 [[ "$(umask)" == "$saved_before_private" ]] \
   || die "private umask not restored after failure (now $(umask))"
 ok "bridge_with_private_umask: restores umask on failure path"
@@ -136,10 +138,12 @@ captured="$(bridge_with_shared_umask bash -c 'umask')"
 ok "bridge_with_shared_umask: applies 027 + restores on success"
 
 set +e
-bridge_with_shared_umask bash -c 'umask; exit 13'
+captured_failed_shared="$(bridge_with_shared_umask bash -c 'umask; exit 13')"
 rc=$?
 set -e
 [[ "$rc" == 13 ]] || die "shared umask failure rc not propagated (got $rc)"
+[[ "$captured_failed_shared" == "0027" ]] \
+  || die "shared umask body did not see 027 on failure path (got $captured_failed_shared)"
 [[ "$(umask)" == "$saved_before_shared" ]] \
   || die "shared umask not restored after failure (now $(umask))"
 ok "bridge_with_shared_umask: restores umask on failure path"
@@ -155,9 +159,17 @@ if [[ -n "$caller_group" ]]; then
   : > "$tree_root/file.txt"
   : > "$tree_root/sub/inner.txt"
 
-  bridge_isolation_v2_chgrp_setgid_recursive \
-    "$caller_group" 2750 0640 "$tree_root" \
-    || die "chgrp_setgid_recursive failed against caller's primary group"
+  # Regression for r1 review #1: when changing to the caller's own
+  # primary group on a tempdir tree the caller owns, POSIX permits the
+  # operation directly. Run this WITHOUT relying on sudo by stubbing
+  # out `sudo` to fail; a passing run proves the helper goes through
+  # the direct path first and does not silently require sudo.
+  (
+    sudo() { return 127; }
+    export -f sudo
+    bridge_isolation_v2_chgrp_setgid_recursive \
+      "$caller_group" 2750 0640 "$tree_root"
+  ) || die "chgrp_setgid_recursive: rootless primary-group path required sudo (regression r1#1)"
 
   # Dir mode (sticky bit + group rwx). On most Linuxes octal 2750 is
   # rendered as `2750`; macOS may differ slightly. Accept any 4-digit
