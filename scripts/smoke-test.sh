@@ -6992,6 +6992,55 @@ assert filtered_error_jobs == 0, (
 print("inventory aggregate excludes deferred job OK")
 PY
 
+# #263 Track B r4: negative regression — a real errored job must still
+# count in inventory.totals.error_jobs even when a deferred job is also
+# present. Without this assertion, a future change that accidentally
+# silenced the entire error-counting path would still pass smoke as long
+# as the deferred-only assertion above held.
+log "  [ok] inventory: real errored job alongside deferred still counts as error_jobs=1"
+CRON_DEFERRED_JOBS_FILE="$CRON_DEFERRED_JOBS_FILE" \
+REPO_ROOT="$REPO_ROOT" \
+python3 - <<'PY'
+import json, os, subprocess, sys
+from pathlib import Path
+
+repo_root = Path(os.environ["REPO_ROOT"])
+jobs_file = os.environ["CRON_DEFERRED_JOBS_FILE"]
+
+payload = json.loads(open(jobs_file, encoding="utf-8").read())
+payload["jobs"].append({
+    "id": "errored-smoke-job",
+    "name": "errored-smoke",
+    "agentId": "tester",
+    "enabled": True,
+    "schedule": {"kind": "cron", "expr": "*/5 * * * *", "tz": "UTC"},
+    "payload": {"kind": "text", "text": "ping"},
+    "state": {
+        "consecutiveErrors": 3,
+        "lastStatus": "error",
+        "lastError": "stale failure",
+        "nextRunAtMs": 0,
+    },
+})
+open(jobs_file, "w", encoding="utf-8").write(json.dumps(payload, indent=2) + "\n")
+
+inventory_proc = subprocess.run(
+    [sys.executable, str(repo_root / "bridge-cron.py"),
+     "inventory", "--jobs-file", jobs_file, "--json"],
+    capture_output=True, text=True, check=True,
+)
+inventory = json.loads(inventory_proc.stdout)
+totals = inventory.get("totals") or {}
+error_jobs = int(totals.get("error_jobs") or 0)
+assert error_jobs == 1, (
+    f"mixed deferred+errored should count error_jobs=1, got {error_jobs}; "
+    f"a real errored row alongside a deferred row must still increment "
+    f"the operator-visible error aggregate"
+)
+
+print("inventory aggregate counts errored job alongside deferred OK")
+PY
+
 log "rendering typed channel relay blocks into cron follow-up bodies"
 CRON_RELAY_RUN_ID="relay-smoke--2026-04-16T13-20"
 CRON_RELAY_RUN_DIR="$BRIDGE_CRON_STATE_DIR/runs/$CRON_RELAY_RUN_ID"
