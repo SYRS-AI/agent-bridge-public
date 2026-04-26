@@ -147,6 +147,7 @@ EOF
     "$issue_or_brief" \
     "$main_agent" \
     "$worker_engine" \
+    "$reviewer" \
     "$tracks" \
     "$state_file" \
     "$brief_relpath" \

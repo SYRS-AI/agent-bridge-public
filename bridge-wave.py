@@ -74,15 +74,23 @@ def cmd_member_id_generate(args: list[str]) -> int:
 
 
 def cmd_state_init(args: list[str]) -> int:
-    if len(args) < 6:
+    if len(args) < 7:
         print(
             "usage: state-init <wave-id> <issue-or-brief> <main-agent> "
-            "<worker-engine> <tracks-csv> <state-file> [<brief-file>]",
+            "<worker-engine> <reviewer-policy> <tracks-csv> <state-file> [<brief-file>]",
             file=sys.stderr,
         )
         return 2
-    wave_id, issue_or_brief, main_agent, worker_engine, tracks_csv, state_file = args[:6]
-    brief_file = args[6] if len(args) > 6 else ""
+    (
+        wave_id,
+        issue_or_brief,
+        main_agent,
+        worker_engine,
+        reviewer_policy,
+        tracks_csv,
+        state_file,
+    ) = args[:7]
+    brief_file = args[7] if len(args) > 7 else ""
 
     tracks = [t.strip() for t in tracks_csv.split(",") if t.strip()]
     if not tracks:
@@ -90,9 +98,13 @@ def cmd_state_init(args: list[str]) -> int:
 
     members = []
     for t in tracks:
+        # Generate the member id ONCE per member; reusing the helper for the
+        # brief_path would mint a new random suffix and disagree with
+        # member_id (codex r1 finding on PR #373).
+        member_id = _member_id_for(wave_id, t)
         members.append(
             {
-                "member_id": _member_id_for(wave_id, t),
+                "member_id": member_id,
                 "track": t,
                 "branch": None,
                 "worktree_root": None,
@@ -103,7 +115,7 @@ def cmd_state_init(args: list[str]) -> int:
                 "codex_review_status": None,
                 "verification_status": None,
                 "cleanup_status": None,
-                "brief_path": f"waves/{wave_id}/{_member_id_for(wave_id, t)}/brief.md",
+                "brief_path": f"waves/{wave_id}/{member_id}/brief.md",
             }
         )
 
@@ -114,7 +126,7 @@ def cmd_state_init(args: list[str]) -> int:
         "brief_file": brief_file or None,
         "main_agent": main_agent,
         "worker_engine": worker_engine,
-        "reviewer_policy": "codex-rescue",
+        "reviewer_policy": reviewer_policy or "codex-rescue",
         "tracks": tracks,
         "created_at": _now_iso(),
         "updated_at": _now_iso(),

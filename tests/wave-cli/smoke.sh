@@ -134,6 +134,7 @@ assert s["wave_id"], "wave_id missing"
 assert s["issue"] == "276", f"issue mismatch: {s['issue']!r}"
 assert s["main_agent"] == "ws-smoke", f"main_agent mismatch: {s['main_agent']!r}"
 assert s["worker_engine"] == "claude", f"default worker engine mismatch: {s['worker_engine']!r}"
+assert s["reviewer_policy"] == "codex-rescue", f"default reviewer mismatch: {s['reviewer_policy']!r}"
 assert sorted(s["tracks"]) == ["A", "B"], f"tracks mismatch: {s['tracks']!r}"
 assert len(s["members"]) == 2, f"members count mismatch: {len(s['members'])}"
 for m in s["members"]:
@@ -141,8 +142,27 @@ for m in s["members"]:
     assert m["task_id"] is None, "phase 1.1 must not set task_id"
     assert m["pr_url"] is None, "phase 1.1 must not set pr_url"
     assert m["worktree_root"] is None, "phase 1.1 must not set worktree_root"
+    # Codex r1 finding on PR #373: the member_id in state and the path
+    # used by the bash brief writer must agree. Verify brief_path
+    # contains the same member_id.
+    expected_path_suffix = f"/{m['member_id']}/brief.md"
+    assert m["brief_path"].endswith(expected_path_suffix), (
+        f"brief_path ({m['brief_path']!r}) does not match member_id ({m['member_id']!r})"
+    )
 PY
-ok "state JSON shape and pending-state invariants hold"
+ok "state JSON shape and pending-state invariants hold (incl. member_id consistency)"
+
+# Cross-check: every member's brief_path resolves to an existing brief file.
+# This catches the codex r1 regression where state and writer disagreed.
+python3 - "$state_file" "$BRIDGE_SHARED_DIR" <<'PY' || die "brief_path actually-on-disk check failed"
+import json, sys, os
+s = json.loads(open(sys.argv[1]).read())
+shared = sys.argv[2]
+for m in s["members"]:
+    full = os.path.join(shared, m["brief_path"])
+    assert os.path.isfile(full), f"member {m['member_id']}: brief not at {full}"
+PY
+ok "every member's brief_path resolves to an existing brief on disk"
 
 # ---------------------------------------------------------------------------
 # 4. wave list / show
@@ -206,5 +226,21 @@ brief_wave_id="$(printf '%s\n' "$brief_dispatch" | awk '/^wave dispatched: /{pri
 [[ -r "$BRIDGE_SHARED_DIR/waves/$brief_wave_id/source-brief.md" ]] \
   || die "brief-file dispatch did not copy source-brief.md"
 ok "wave dispatch <brief-file> mirrors the brief into shared/waves/<id>/source-brief.md"
+
+# ---------------------------------------------------------------------------
+# 7. --reviewer override is plumbed through (codex r1 finding on PR #373)
+# ---------------------------------------------------------------------------
+
+reviewer_dispatch="$("$AB" wave dispatch 999 --tracks A --main-agent ws-smoke --reviewer custom-reviewer 2>&1)"
+reviewer_wave_id="$(printf '%s\n' "$reviewer_dispatch" | awk '/^wave dispatched: /{print $3}')"
+reviewer_state="$BRIDGE_STATE_DIR/waves/${reviewer_wave_id}.json"
+python3 - "$reviewer_state" <<'PY' || die "--reviewer override not plumbed to state JSON"
+import json, sys
+s = json.loads(open(sys.argv[1]).read())
+assert s["reviewer_policy"] == "custom-reviewer", (
+    f"reviewer_policy override lost: {s['reviewer_policy']!r}"
+)
+PY
+ok "--reviewer override is plumbed to state JSON"
 
 log "all Phase 1.1 acceptance checks passed"
