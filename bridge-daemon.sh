@@ -1162,7 +1162,18 @@ process_stall_reports() {
       attached="$(bridge_tmux_session_attached_count "$session" 2>/dev/null || printf '0')"
       [[ "$attached" =~ ^[0-9]+$ ]] || attached=0
       if (( attached == 0 )) && [[ "$engine" == "claude" || "$engine" == "codex" ]]; then
-        if (( claimed > 0 || refresh_pending == 1 )) || [[ "$loop_mode" == "1" ]]; then
+        # Issue #374: a loop=1 agent with no claimed work and no pending
+        # refresh is genuinely idle -- there is nothing to be stalled on.
+        # Skip the per-agent stall scan in this state to avoid classifier
+        # false-positives on benign Claude UI text (transcript snippets,
+        # tool-call results, system-reminder echoes, etc.) which were
+        # repeatedly firing `[Agent Bridge]: stall detected` nudges every
+        # 20-30 minutes against admin agents drained to inbox=empty.
+        # Non-loop agents and loop agents with active work are unaffected;
+        # the trigger_stall==0 cleanup path below still clears stale state.
+        if [[ "$loop_mode" == "1" ]] && (( claimed == 0 && refresh_pending == 0 )); then
+          :  # fall through to trigger_stall==0 handling
+        elif (( claimed > 0 || refresh_pending == 1 )) || [[ "$loop_mode" == "1" ]]; then
           # Issue #264 r3: pass `join` so tmux capture-pane runs with `-J`.
           # Without -J, a long agent reply wraps onto multiple physical lines
           # and only the first carries the glyph prefix; classify() then
