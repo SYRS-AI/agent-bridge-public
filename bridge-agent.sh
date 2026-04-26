@@ -1710,6 +1710,35 @@ Operator note: $note"
     --detail label="$task_label" \
     --detail stamp="$stamp" >/dev/null 2>&1 || true
 
+  # Issue #304 r2 (codex review): handoff requires post-completion verification
+  # of <agent-home>/NEXT-SESSION.md. We don't synchronously block here (fire-
+  # and-forget is intentional — keeps the primitive cheap), but we DO enqueue
+  # a follow-up verify task to admin's own inbox so the check is observable
+  # rather than silent. Admin processes it after the static agent has had time
+  # to write the handoff; if the file is missing the admin emits an
+  # `admin_handoff_failed` audit row + re-dispatches with a different note.
+  if [[ "$kind" == "handoff" ]]; then
+    local agent_home=""
+    agent_home="$(bridge_agent_home "$agent" 2>/dev/null || true)"
+    local verify_title="[admin-handoff-verify] $stamp"
+    local verify_body="Verify the static-agent handoff for '$agent'.
+Expected file: ${agent_home:-<agent-home>}/NEXT-SESSION.md (the only path
+SessionStart hook auto-consumes).
+Pass criteria: file exists, non-empty, contains the structured handoff
+fields (open queue items, blockers, current focus, last known good
+state).
+On pass: close this task with note 'verified: NEXT-SESSION.md ok'.
+On fail (missing/empty/malformed): audit admin_handoff_failed and
+re-dispatch \`agent-bridge agent handoff $agent --note 'handoff retry'\`
+with the missing fields in the operator note. (#304 Track B verify path)"
+    "$BRIDGE_BASH_BIN" "$SCRIPT_DIR/bridge-task.sh" create \
+      --to "$actor" \
+      --from "$actor" \
+      --priority normal \
+      --title "$verify_title" \
+      --body "$verify_body" >/dev/null 2>&1 || true
+  fi
+
   printf 'agent: %s\n' "$agent"
   printf 'kind: %s\n' "$kind"
   printf 'task_title: %s\n' "$title"

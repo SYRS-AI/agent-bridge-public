@@ -183,6 +183,35 @@ echo "$handoff_body" | grep -q "<agent-home>/NEXT-SESSION.md" \
 echo "$handoff_body" | grep -q "context critical" \
   || die "[admin-handoff] body missing operator note"
 
+log "step 3 — verifying [admin-handoff-verify] follow-up task landed in admin queue (#304 r2)"
+verify_body="$(sqlite3 "$BRIDGE_TASK_DB" \
+  "SELECT body_text FROM tasks WHERE assigned_to='$ADMIN_AGENT' AND title LIKE '[admin-handoff-verify]%' ORDER BY id DESC LIMIT 1")"
+[[ -n "$verify_body" ]] || die "[admin-handoff-verify] follow-up task not enqueued in admin queue"
+echo "$verify_body" | grep -q "NEXT-SESSION.md" \
+  || die "[admin-handoff-verify] body missing NEXT-SESSION.md path reference"
+echo "$verify_body" | grep -q "admin_handoff_failed" \
+  || die "[admin-handoff-verify] body missing admin_handoff_failed audit instruction"
+
+# ---------------------------------------------------------------------------
+# Step 3b: agent handoff <dynamic> rejects (#304 r2 — symmetric to step 2)
+# ---------------------------------------------------------------------------
+
+log "step 3b — agent handoff <dynamic> must reject with non-zero exit"
+set +e
+handoff_dyn_output="$("$REPO_ROOT/agent-bridge" agent handoff "$DYNAMIC_AGENT" 2>&1)"
+handoff_dyn_rc=$?
+set -e
+[[ "$handoff_dyn_rc" -ne 0 ]] \
+  || die "agent handoff <dynamic> should fail; got rc=0 output=$handoff_dyn_output"
+echo "$handoff_dyn_output" | grep -q "dynamic" \
+  || die "agent handoff <dynamic> stderr should mention 'dynamic'; got: $handoff_dyn_output"
+echo "$handoff_dyn_output" | grep -qi "operator-managed" \
+  || die "agent handoff <dynamic> stderr should mention 'operator-managed'; got: $handoff_dyn_output"
+no_dyn_handoff_task="$(sqlite3 "$BRIDGE_TASK_DB" \
+  "SELECT COUNT(*) FROM tasks WHERE assigned_to='$DYNAMIC_AGENT' AND title LIKE '[admin-handoff]%'")"
+[[ "$no_dyn_handoff_task" == "0" ]] \
+  || die "agent handoff <dynamic> created a queue task ($no_dyn_handoff_task) — must NOT enqueue when rejected"
+
 # ---------------------------------------------------------------------------
 # Step 4: Track C — daemon body builder emits role-aware conditional block
 # ---------------------------------------------------------------------------
