@@ -926,3 +926,73 @@ for job in data.get("jobs", []):
 print("0")
 PY
 }
+
+# bridge_check_memory_pressure — issue #263 Track B.
+#
+# Defense-in-depth pre-flight probe for the cron disposable child spawn site.
+# A pressured host cold-loads the Claude CLI + MCP stack into swap, which is
+# the failure mode behind the observed `event-reminder-30min` 1800s timeouts.
+# Returns:
+#   0 — host appears healthy; the caller should proceed with dispatch.
+#   1 — host is pressured; the caller should defer +15 min instead of spawning.
+#
+# Probes:
+#   Darwin → `sysctl vm.swapusage`. If `used / total >= BRIDGE_CRON_SWAP_PCT_LIMIT`
+#            (default 80) percent, return 1.
+#   Linux  → `/proc/meminfo` MemAvailable. If below `BRIDGE_CRON_MIN_AVAIL_MB`
+#            kilobytes (default 512 MB), return 1.
+#   Other  → return 0 (we don't model BSD/Windows; assume healthy).
+#
+# The probe fails open: if any read fails (sysctl unavailable, /proc not
+# mounted, malformed output), we return 0 so a probe glitch never blocks
+# scheduled work. The pressure case is a *strict* yes — only triggered when
+# we have positive evidence the host is constrained.
+bridge_check_memory_pressure() {
+  local kind
+  kind="$(uname -s 2>/dev/null || true)"
+
+  case "$kind" in
+    Darwin)
+      local usage_line used_raw total_raw used_int total_int pct
+      local limit="${BRIDGE_CRON_SWAP_PCT_LIMIT:-80}"
+      [[ "$limit" =~ ^[0-9]+$ ]] || limit=80
+
+      usage_line="$(sysctl -n vm.swapusage 2>/dev/null || true)"
+      [[ -n "$usage_line" ]] || return 0
+
+      # Format: total = 4096.00M  used = 3500.00M  free = 596.00M  (encrypted)
+      used_raw="$(awk '{ for (i=1; i<=NF; i++) if ($i == "used") print $(i+2) }' <<<"$usage_line")"
+      total_raw="$(awk '{ for (i=1; i<=NF; i++) if ($i == "total") print $(i+2) }' <<<"$usage_line")"
+      used_raw="${used_raw%M}"
+      total_raw="${total_raw%M}"
+      [[ -n "$used_raw" && -n "$total_raw" ]] || return 0
+
+      # Strip the decimal portion in pure bash so we don't depend on python
+      # for a probe that runs on every dispatch. `2400.00` → `2400`.
+      used_int="${used_raw%%.*}"
+      total_int="${total_raw%%.*}"
+      [[ "$used_int" =~ ^[0-9]+$ && "$total_int" =~ ^[0-9]+$ ]] || return 0
+      (( total_int > 0 )) || return 0
+
+      pct=$(( used_int * 100 / total_int ))
+      (( pct >= limit )) && return 1
+      return 0
+      ;;
+    Linux)
+      local avail_kb threshold_mb threshold_kb
+      threshold_mb="${BRIDGE_CRON_MIN_AVAIL_MB:-512}"
+      [[ "$threshold_mb" =~ ^[0-9]+$ ]] || threshold_mb=512
+      threshold_kb=$(( threshold_mb * 1024 ))
+
+      [[ -r /proc/meminfo ]] || return 0
+      avail_kb="$(awk '/^MemAvailable:/ { print $2; exit }' /proc/meminfo 2>/dev/null || true)"
+      [[ "$avail_kb" =~ ^[0-9]+$ ]] || return 0
+
+      (( avail_kb < threshold_kb )) && return 1
+      return 0
+      ;;
+    *)
+      return 0
+      ;;
+  esac
+}

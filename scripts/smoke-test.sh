@@ -6915,6 +6915,410 @@ finally:
 print("disable_mcp wire-through OK")
 PY
 
+log "pre-flight memory guard defers cron dispatch on pressured hosts (#263 Track B)"
+# Mock check_memory_pressure to return a pressured probe and assert that
+# cmd_run skips the engine spawn, writes a deferred status, and surfaces the
+# probe metadata. Then mock the probe to clear and confirm the engine spawn
+# path executes normally.
+CRON_PREFLIGHT_RUN_DIR="$TMP_ROOT/cron-preflight-run"
+mkdir -p "$CRON_PREFLIGHT_RUN_DIR"
+CRON_PREFLIGHT_REQUEST_FILE="$CRON_PREFLIGHT_RUN_DIR/request.json"
+python3 - "$CRON_PREFLIGHT_REQUEST_FILE" "$CRON_PREFLIGHT_RUN_DIR" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+request_path = Path(sys.argv[1])
+run_dir = Path(sys.argv[2])
+request_path.write_text(
+    json.dumps(
+        {
+            "run_id": "preflight-smoke",
+            "job_name": "preflight-smoke-job",
+            "family": "preflight-smoke",
+            "slot": "2026-04-26T00:00",
+            "target_agent": "tester",
+            "target_engine": "claude",
+            "target_workdir": str(run_dir),
+            "target_channels": "",
+            "allow_channel_delivery": False,
+            "disposable_needs_channels": False,
+            "payload_file": str(run_dir / "payload.txt"),
+            "result_file": str(run_dir / "result.json"),
+            "status_file": str(run_dir / "status.json"),
+            "stdout_log": str(run_dir / "stdout.log"),
+            "stderr_log": str(run_dir / "stderr.log"),
+        },
+        ensure_ascii=True,
+        indent=2,
+    )
+    + "\n",
+    encoding="utf-8",
+)
+(run_dir / "payload.txt").write_text("ping\n", encoding="utf-8")
+PY
+
+CRON_PREFLIGHT_REQUEST_FILE="$CRON_PREFLIGHT_REQUEST_FILE" \
+CRON_PREFLIGHT_RUN_DIR="$CRON_PREFLIGHT_RUN_DIR" \
+python3 - <<'PY'
+import argparse
+import importlib.util
+import json
+import os
+import subprocess
+from pathlib import Path
+
+path = Path("bridge-cron-runner.py").resolve()
+spec = importlib.util.spec_from_file_location("bridge_cron_runner", path)
+module = importlib.util.module_from_spec(spec)
+assert spec.loader is not None
+spec.loader.exec_module(module)
+
+request_file = os.environ["CRON_PREFLIGHT_REQUEST_FILE"]
+run_dir = Path(os.environ["CRON_PREFLIGHT_RUN_DIR"])
+status_file = run_dir / "status.json"
+
+# --- Pressured path -----------------------------------------------------
+spawn_calls = []
+real_run = subprocess.run
+
+def fake_run(cmd, **kw):
+    spawn_calls.append(list(cmd))
+    return subprocess.CompletedProcess(cmd, 0, "{}", "")
+
+pressure_probe = {
+    "reason": "memory_pressure",
+    "kind": "darwin",
+    "metric": "swap_pct",
+    "value": 92,
+    "limit": 80,
+    "swap_used_mb": 3700,
+    "swap_total_mb": 4096,
+}
+module.check_memory_pressure = lambda: dict(pressure_probe)
+audit_calls = []
+notify_calls = []
+module.emit_pressure_audit = lambda run_id, target, probe: audit_calls.append((run_id, target, dict(probe)))
+module.notify_admin_pressure_defer = lambda run_id, job, probe: notify_calls.append((run_id, job, dict(probe)))
+subprocess.run = fake_run
+try:
+    args = argparse.Namespace(request_file=request_file, dry_run=False)
+    rc = module.cmd_run(args)
+finally:
+    subprocess.run = real_run
+
+assert rc == 0, f"deferred cmd_run should return 0, got {rc}"
+status = json.loads(status_file.read_text(encoding="utf-8"))
+assert status.get("state") == "deferred", f"expected deferred state, got {status!r}"
+assert status.get("deferred_reason") == "memory_pressure", status
+assert status.get("deferred_seconds") == module.PRESSURE_DEFER_SECONDS, status
+assert status.get("memory_probe", {}).get("metric") == "swap_pct", status
+assert status.get("memory_probe", {}).get("value") == 92, status
+# No engine spawn should have happened on the pressured path.
+spawn_bins = [cmd[0] for cmd in spawn_calls if cmd]
+assert not any("claude" in os.path.basename(b) for b in spawn_bins), (
+    f"expected no Claude spawn on pressured host, got {spawn_calls!r}"
+)
+assert not any("codex" in os.path.basename(b) for b in spawn_bins), (
+    f"expected no Codex spawn on pressured host, got {spawn_calls!r}"
+)
+assert audit_calls, "expected emit_pressure_audit to be called"
+assert audit_calls[0][2]["reason"] == "memory_pressure"
+assert notify_calls, "expected notify_admin_pressure_defer to be called"
+
+# Reset for the healthy-path probe.
+status_file.unlink(missing_ok=True)
+
+# --- Healthy path -------------------------------------------------------
+# Probe returns None → cmd_run continues into the engine spawn. Stub the
+# Claude binary spawn so we don't need a real CLI on PATH.
+module.check_memory_pressure = lambda: None
+module.resolve_binary = lambda name, env_var: f"/fake/{name}"
+
+healthy_spawn_calls = []
+healthy_completed_payload = json.dumps(
+    {
+        "structured_output": {
+            "status": "completed",
+            "summary": "ok",
+            "findings": [],
+            "actions_taken": [],
+            "needs_human_followup": False,
+            "recommended_next_steps": [],
+            "artifacts": [],
+            "confidence": "high",
+        }
+    },
+    ensure_ascii=True,
+)
+
+def healthy_fake_run(cmd, **kw):
+    healthy_spawn_calls.append(list(cmd))
+    return subprocess.CompletedProcess(cmd, 0, healthy_completed_payload, "")
+
+subprocess.run = healthy_fake_run
+try:
+    args = argparse.Namespace(request_file=request_file, dry_run=False)
+    rc = module.cmd_run(args)
+finally:
+    subprocess.run = real_run
+
+assert rc == 0, f"healthy cmd_run should return 0 on success, got {rc}"
+final_status = json.loads(status_file.read_text(encoding="utf-8"))
+assert final_status.get("state") == "success", f"expected success state on healthy host, got {final_status!r}"
+assert healthy_spawn_calls, "expected the healthy path to spawn the engine"
+assert any("claude" in os.path.basename(cmd[0]) for cmd in healthy_spawn_calls), (
+    f"expected Claude spawn on healthy path, got {healthy_spawn_calls!r}"
+)
+
+# --- Probe knob handling ------------------------------------------------
+# Default Darwin limit is 80, default Linux threshold is 512MB. Confirm
+# the env knobs are honoured.
+os.environ["BRIDGE_CRON_SWAP_PCT_LIMIT"] = "55"
+assert module._swap_pct_limit() == 55
+os.environ["BRIDGE_CRON_SWAP_PCT_LIMIT"] = "not-a-number"
+assert module._swap_pct_limit() == module.DEFAULT_SWAP_PCT_LIMIT
+del os.environ["BRIDGE_CRON_SWAP_PCT_LIMIT"]
+assert module._swap_pct_limit() == module.DEFAULT_SWAP_PCT_LIMIT
+
+os.environ["BRIDGE_CRON_MIN_AVAIL_MB"] = "1024"
+assert module._min_avail_mb() == 1024
+os.environ["BRIDGE_CRON_MIN_AVAIL_MB"] = "garbage"
+assert module._min_avail_mb() == module.DEFAULT_MIN_AVAIL_MB
+del os.environ["BRIDGE_CRON_MIN_AVAIL_MB"]
+assert module._min_avail_mb() == module.DEFAULT_MIN_AVAIL_MB
+
+print("pre-flight memory guard OK")
+PY
+
+log "bridge_check_memory_pressure bash helper handles probe failure as healthy"
+"$BASH4_BIN" -lc "
+  set -euo pipefail
+  source \"$REPO_ROOT/bridge-lib.sh\"
+  # Probe runs cleanly on the smoke host. Whatever the local memory state
+  # is, the helper must terminate without erroring; on a non-pressured
+  # smoke host it should return 0.
+  if bridge_check_memory_pressure; then
+    rc=0
+  else
+    rc=\$?
+  fi
+  case \"\$rc\" in
+    0|1) ;;
+    *) echo \"unexpected return code from bridge_check_memory_pressure: \$rc\" >&2; exit 1 ;;
+  esac
+"
+
+log "native-finalize-run treats deferred state as +deferred_seconds reschedule, not error (#263 Track B)"
+# Regression guard for PR #330 round-1 finding 5: the runner writes
+# state="deferred" and deferred_seconds into status.json, but finalize used
+# to collapse anything non-success into the error branch — clearing
+# nextRunAtMs and incrementing consecutiveErrors. Build a minimal jobs.json
+# + status.json + request.json fixture and verify finalize bumps
+# nextRunAtMs forward by ≥895s and leaves the error counter alone.
+CRON_DEFERRED_DIR="$TMP_ROOT/cron-deferred-finalize"
+CRON_DEFERRED_RUN_DIR="$CRON_DEFERRED_DIR/run"
+CRON_DEFERRED_JOBS_FILE="$CRON_DEFERRED_DIR/jobs.json"
+CRON_DEFERRED_REQUEST_FILE="$CRON_DEFERRED_RUN_DIR/request.json"
+CRON_DEFERRED_RESULT_FILE="$CRON_DEFERRED_RUN_DIR/result.json"
+CRON_DEFERRED_STATUS_FILE="$CRON_DEFERRED_RUN_DIR/status.json"
+mkdir -p "$CRON_DEFERRED_RUN_DIR"
+
+CRON_DEFERRED_JOBS_FILE="$CRON_DEFERRED_JOBS_FILE" \
+CRON_DEFERRED_REQUEST_FILE="$CRON_DEFERRED_REQUEST_FILE" \
+CRON_DEFERRED_RESULT_FILE="$CRON_DEFERRED_RESULT_FILE" \
+CRON_DEFERRED_STATUS_FILE="$CRON_DEFERRED_STATUS_FILE" \
+python3 - <<'PY'
+import json, os
+from pathlib import Path
+
+jobs_file = Path(os.environ["CRON_DEFERRED_JOBS_FILE"])
+request_file = Path(os.environ["CRON_DEFERRED_REQUEST_FILE"])
+result_file = Path(os.environ["CRON_DEFERRED_RESULT_FILE"])
+status_file = Path(os.environ["CRON_DEFERRED_STATUS_FILE"])
+
+jobs_file.write_text(json.dumps({
+    "format": "agent-bridge-cron-v1",
+    "updatedAt": "2026-04-26T00:00:00+00:00",
+    "jobs": [
+        {
+            "id": "deferred-smoke-job",
+            "name": "deferred-smoke",
+            "agentId": "tester",
+            "enabled": True,
+            "schedule": {"kind": "cron", "expr": "*/5 * * * *", "tz": "UTC"},
+            "payload": {"kind": "text", "text": "ping"},
+            "state": {
+                "consecutiveErrors": 0,
+                "lastStatus": "ok",
+                "nextRunAtMs": 0,
+            },
+        }
+    ],
+}, indent=2) + "\n", encoding="utf-8")
+
+# Runner-style status.json from a pressure-defer run.
+status_file.write_text(json.dumps({
+    "run_id": "deferred-smoke-run",
+    "state": "deferred",
+    "engine": "claude",
+    "deferred_reason": "memory_pressure",
+    "deferred_seconds": 900,
+    "memory_probe": {"reason": "memory_pressure", "metric": "swap_pct", "value": 92, "limit": 80},
+}, indent=2) + "\n", encoding="utf-8")
+
+# Empty result is fine; deferred runs do not produce a result payload.
+result_file.write_text("{}\n", encoding="utf-8")
+
+request_file.write_text(json.dumps({
+    "run_id": "deferred-smoke-run",
+    "job_id": "deferred-smoke-job",
+    "source_file": str(jobs_file.resolve()),
+    "result_file": str(result_file.resolve()),
+    "status_file": str(status_file.resolve()),
+}, indent=2) + "\n", encoding="utf-8")
+PY
+
+CRON_DEFERRED_BEFORE_MS="$(python3 -c 'import time; print(int(time.time()*1000))')"
+python3 "$REPO_ROOT/bridge-cron.py" native-finalize-run \
+    --jobs-file "$CRON_DEFERRED_JOBS_FILE" \
+    --request-file "$CRON_DEFERRED_REQUEST_FILE" \
+    --json >"$CRON_DEFERRED_DIR/finalize-output.json"
+
+CRON_DEFERRED_JOBS_FILE="$CRON_DEFERRED_JOBS_FILE" \
+CRON_DEFERRED_BEFORE_MS="$CRON_DEFERRED_BEFORE_MS" \
+python3 - <<'PY'
+import json, os, sys
+
+jobs_file = os.environ["CRON_DEFERRED_JOBS_FILE"]
+before_ms = int(os.environ["CRON_DEFERRED_BEFORE_MS"])
+
+payload = json.loads(open(jobs_file, encoding="utf-8").read())
+job = next(j for j in payload["jobs"] if j["id"] == "deferred-smoke-job")
+state = job.get("state") or {}
+
+next_run_at_ms = int(state.get("nextRunAtMs") or 0)
+last_status = state.get("lastStatus")
+last_run_status = state.get("lastRunStatus")
+consecutive_errors = int(state.get("consecutiveErrors") or 0)
+last_error = state.get("lastError")
+last_error_at_ms = state.get("lastErrorAtMs")
+
+# nextRunAtMs must be bumped by at least 895_000 ms past finalize-call time
+# (deferred_seconds=900, allowing 5s slack for execution overhead).
+expected_min = before_ms + 895_000
+assert next_run_at_ms >= expected_min, (
+    f"deferred finalize did not bump nextRunAtMs by +15min "
+    f"(before_ms={before_ms}, nextRunAtMs={next_run_at_ms}, expected ≥ {expected_min})"
+)
+
+# Error counter MUST NOT advance for a deferred run.
+assert consecutive_errors == 0, (
+    f"deferred finalize incorrectly incremented consecutiveErrors "
+    f"(expected 0, got {consecutive_errors})"
+)
+assert last_error is None, f"deferred finalize wrote lastError={last_error!r}"
+assert last_error_at_ms is None, f"deferred finalize wrote lastErrorAtMs={last_error_at_ms!r}"
+
+# lastStatus / lastRunStatus must reflect the deferred branch so dashboards
+# and errors-report do not flag the job.
+assert last_status == "deferred", f"expected lastStatus=deferred, got {last_status!r}"
+assert last_run_status == "deferred", f"expected lastRunStatus=deferred, got {last_run_status!r}"
+
+# Job must remain enabled so the scheduler re-fires the next slot.
+assert job.get("enabled") is True, f"deferred finalize disabled the job: {job!r}"
+
+print("native-finalize-run deferred branch OK")
+PY
+
+# #263 Track B r3: a deferred job MUST NOT inflate the operator-visible
+# inventory error_jobs aggregate. The previous fixture only checked the
+# row-level consecutiveErrors counter; this guards summarize() against
+# regressing to its inline whitelist that did not recognize "deferred".
+CRON_DEFERRED_JOBS_FILE="$CRON_DEFERRED_JOBS_FILE" \
+REPO_ROOT="$REPO_ROOT" \
+python3 - <<'PY'
+import json, os, subprocess, sys
+from pathlib import Path
+
+repo_root = Path(os.environ["REPO_ROOT"])
+jobs_file = os.environ["CRON_DEFERRED_JOBS_FILE"]
+
+inventory_proc = subprocess.run(
+    [sys.executable, str(repo_root / "bridge-cron.py"),
+     "inventory", "--jobs-file", jobs_file, "--json"],
+    capture_output=True, text=True, check=True,
+)
+inventory = json.loads(inventory_proc.stdout)
+totals = inventory.get("totals") or {}
+error_jobs = int(totals.get("error_jobs") or 0)
+assert error_jobs == 0, (
+    f"deferred run incorrectly counted in inventory.totals.error_jobs "
+    f"(expected 0, got {error_jobs}); summarize() may not be deferring to "
+    f"is_error_record()"
+)
+
+# filtered_totals is computed from the same predicate; double-check it too so
+# any future divergence between the two summaries is caught.
+filtered_totals = inventory.get("filtered_totals") or {}
+filtered_error_jobs = int(filtered_totals.get("error_jobs") or 0)
+assert filtered_error_jobs == 0, (
+    f"deferred run incorrectly counted in inventory.filtered_totals.error_jobs "
+    f"(expected 0, got {filtered_error_jobs})"
+)
+
+print("inventory aggregate excludes deferred job OK")
+PY
+
+# #263 Track B r4: negative regression — a real errored job must still
+# count in inventory.totals.error_jobs even when a deferred job is also
+# present. Without this assertion, a future change that accidentally
+# silenced the entire error-counting path would still pass smoke as long
+# as the deferred-only assertion above held.
+log "  [ok] inventory: real errored job alongside deferred still counts as error_jobs=1"
+CRON_DEFERRED_JOBS_FILE="$CRON_DEFERRED_JOBS_FILE" \
+REPO_ROOT="$REPO_ROOT" \
+python3 - <<'PY'
+import json, os, subprocess, sys
+from pathlib import Path
+
+repo_root = Path(os.environ["REPO_ROOT"])
+jobs_file = os.environ["CRON_DEFERRED_JOBS_FILE"]
+
+payload = json.loads(open(jobs_file, encoding="utf-8").read())
+payload["jobs"].append({
+    "id": "errored-smoke-job",
+    "name": "errored-smoke",
+    "agentId": "tester",
+    "enabled": True,
+    "schedule": {"kind": "cron", "expr": "*/5 * * * *", "tz": "UTC"},
+    "payload": {"kind": "text", "text": "ping"},
+    "state": {
+        "consecutiveErrors": 3,
+        "lastStatus": "error",
+        "lastError": "stale failure",
+        "nextRunAtMs": 0,
+    },
+})
+open(jobs_file, "w", encoding="utf-8").write(json.dumps(payload, indent=2) + "\n")
+
+inventory_proc = subprocess.run(
+    [sys.executable, str(repo_root / "bridge-cron.py"),
+     "inventory", "--jobs-file", jobs_file, "--json"],
+    capture_output=True, text=True, check=True,
+)
+inventory = json.loads(inventory_proc.stdout)
+totals = inventory.get("totals") or {}
+error_jobs = int(totals.get("error_jobs") or 0)
+assert error_jobs == 1, (
+    f"mixed deferred+errored should count error_jobs=1, got {error_jobs}; "
+    f"a real errored row alongside a deferred row must still increment "
+    f"the operator-visible error aggregate"
+)
+
+print("inventory aggregate counts errored job alongside deferred OK")
+PY
+
 log "rendering typed channel relay blocks into cron follow-up bodies"
 CRON_RELAY_RUN_ID="relay-smoke--2026-04-16T13-20"
 CRON_RELAY_RUN_DIR="$BRIDGE_CRON_STATE_DIR/runs/$CRON_RELAY_RUN_ID"

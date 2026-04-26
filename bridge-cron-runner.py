@@ -179,6 +179,197 @@ def disposable_needs_channels(request: dict[str, Any]) -> bool:
     return bool_flag(request.get("disposable_needs_channels"))
 
 
+# Issue #263 Track B — pre-flight memory guard for the disposable child spawn.
+# The actual subprocess.run() of the Claude CLI cold-loads the binary plus
+# every wired MCP server. On a pressured host that cold-load is what tips
+# `event-reminder-30min` past its 1800s timeout. We probe vm.swapusage on
+# Darwin and /proc/meminfo MemAvailable on Linux, returning True only when
+# we have positive evidence the host is constrained. Any probe glitch is
+# treated as "healthy" so a scheduling pass never wedges on a transient.
+DEFAULT_SWAP_PCT_LIMIT = 80
+DEFAULT_MIN_AVAIL_MB = 512
+PRESSURE_DEFER_SECONDS = 900  # +15 min
+
+
+def _swap_pct_limit() -> int:
+    raw = os.environ.get("BRIDGE_CRON_SWAP_PCT_LIMIT", "").strip()
+    if not raw:
+        return DEFAULT_SWAP_PCT_LIMIT
+    try:
+        value = int(raw)
+    except ValueError:
+        return DEFAULT_SWAP_PCT_LIMIT
+    return value if value > 0 else DEFAULT_SWAP_PCT_LIMIT
+
+
+def _min_avail_mb() -> int:
+    raw = os.environ.get("BRIDGE_CRON_MIN_AVAIL_MB", "").strip()
+    if not raw:
+        return DEFAULT_MIN_AVAIL_MB
+    try:
+        value = int(raw)
+    except ValueError:
+        return DEFAULT_MIN_AVAIL_MB
+    return value if value > 0 else DEFAULT_MIN_AVAIL_MB
+
+
+def check_memory_pressure() -> dict[str, Any] | None:
+    """Return a probe dict when the host is pressured, else None.
+
+    The dict is shaped for direct merge into audit / status / notify payloads:
+      {"reason": "memory_pressure", "kind": "darwin"|"linux",
+       "metric": "<name>", "value": <int>, "limit": <int>}
+    """
+    kind = "unknown"
+    try:
+        kind = (subprocess.check_output(["uname", "-s"], text=True) or "").strip().lower()
+    except (OSError, subprocess.SubprocessError):
+        return None
+
+    if kind == "darwin":
+        try:
+            usage_line = subprocess.check_output(
+                ["sysctl", "-n", "vm.swapusage"], text=True, timeout=5
+            ).strip()
+        except (OSError, subprocess.SubprocessError):
+            return None
+        if not usage_line:
+            return None
+        # Format: "total = 4096.00M  used = 3500.00M  free = 596.00M  (encrypted)"
+        tokens = usage_line.split()
+        used_raw = total_raw = None
+        for idx, token in enumerate(tokens):
+            if token == "used" and idx + 2 < len(tokens):
+                used_raw = tokens[idx + 2]
+            elif token == "total" and idx + 2 < len(tokens):
+                total_raw = tokens[idx + 2]
+        if not used_raw or not total_raw:
+            return None
+        try:
+            used_mb = float(used_raw.rstrip("M"))
+            total_mb = float(total_raw.rstrip("M"))
+        except ValueError:
+            return None
+        if total_mb <= 0:
+            return None
+        pct = int(used_mb * 100 / total_mb)
+        limit = _swap_pct_limit()
+        if pct >= limit:
+            return {
+                "reason": "memory_pressure",
+                "kind": "darwin",
+                "metric": "swap_pct",
+                "value": pct,
+                "limit": limit,
+                "swap_used_mb": int(used_mb),
+                "swap_total_mb": int(total_mb),
+            }
+        return None
+
+    if kind == "linux":
+        meminfo_path = Path("/proc/meminfo")
+        if not meminfo_path.is_file():
+            return None
+        try:
+            text = meminfo_path.read_text(encoding="utf-8")
+        except OSError:
+            return None
+        avail_kb: int | None = None
+        for line in text.splitlines():
+            if line.startswith("MemAvailable:"):
+                parts = line.split()
+                if len(parts) >= 2 and parts[1].isdigit():
+                    avail_kb = int(parts[1])
+                break
+        if avail_kb is None:
+            return None
+        threshold_mb = _min_avail_mb()
+        threshold_kb = threshold_mb * 1024
+        if avail_kb < threshold_kb:
+            return {
+                "reason": "memory_pressure",
+                "kind": "linux",
+                "metric": "available_mb",
+                "value": avail_kb // 1024,
+                "limit": threshold_mb,
+            }
+        return None
+
+    # Other platforms: no probe; assume healthy.
+    return None
+
+
+def emit_pressure_audit(run_id: str, target_agent: str, probe: dict[str, Any]) -> None:
+    """Best-effort audit row for a deferred dispatch. Failure is non-fatal."""
+    audit_log = os.environ.get("BRIDGE_AUDIT_LOG")
+    if not audit_log:
+        return
+    audit_script = Path(__file__).resolve().parent / "bridge-audit.py"
+    if not audit_script.is_file():
+        return
+    cmd = [
+        sys.executable,
+        str(audit_script),
+        "write",
+        "--file",
+        audit_log,
+        "--actor",
+        "daemon",
+        "--action",
+        "cron_dispatch_deferred",
+        "--target",
+        target_agent or "daemon",
+        "--detail",
+        f"run_id={run_id}",
+    ]
+    for key, value in probe.items():
+        cmd.extend(["--detail", f"{key}={value}"])
+    try:
+        subprocess.run(cmd, capture_output=True, text=True, timeout=10, check=False)
+    except (OSError, subprocess.SubprocessError):
+        pass
+
+
+def notify_admin_pressure_defer(run_id: str, job_name: str, probe: dict[str, Any]) -> None:
+    """Best-effort admin task creation. Failure is non-fatal — the deferred
+    status file is the durable record; this is the surfacing layer."""
+    admin_agent = os.environ.get("BRIDGE_ADMIN_AGENT_ID", "").strip()
+    if not admin_agent:
+        return
+    task_script = Path(__file__).resolve().parent / "bridge-task.sh"
+    if not task_script.is_file():
+        return
+    bash_bin = os.environ.get("BRIDGE_BASH_BIN") or os.environ.get("BASH") or "bash"
+    title = f"[cron-deferred] {job_name or run_id} memory pressure"
+    detail_lines = [f"- {key}: {value}" for key, value in probe.items()]
+    body = (
+        f"Cron dispatch deferred +{PRESSURE_DEFER_SECONDS // 60} min by pre-flight memory guard.\n\n"
+        f"- run_id: {run_id}\n"
+        f"- job_name: {job_name}\n"
+        + "\n".join(detail_lines)
+        + "\n\nThe disposable child was not spawned. The next scheduler tick will re-fire the slot.\n"
+    )
+    cmd = [
+        bash_bin,
+        str(task_script),
+        "create",
+        "--to",
+        admin_agent,
+        "--from",
+        "daemon",
+        "--priority",
+        "normal",
+        "--title",
+        title,
+        "--body",
+        body,
+    ]
+    try:
+        subprocess.run(cmd, capture_output=True, text=True, timeout=10, check=False)
+    except (OSError, subprocess.SubprocessError):
+        pass
+
+
 def disable_mcp_for_request(request: dict[str, Any]) -> bool:
     """#263: decide whether the disposable child should launch with MCP disabled.
 
@@ -551,6 +742,43 @@ def cmd_run(args: argparse.Namespace) -> int:
         print(f"status_file: {rel_for_output(str(status_file))}")
         print(f"stdout_log: {rel_for_output(str(stdout_log))}")
         print(f"stderr_log: {rel_for_output(str(stderr_log))}")
+        return 0
+
+    # Issue #263 Track B — pre-flight memory guard.
+    # Probe BEFORE materialising prompt artifacts or spawning the child. On a
+    # pressured host the child cold-load is what tips the disposable run past
+    # its timeout (see issue body for the event-reminder-30min stall). We skip
+    # the spawn, mark the run deferred, audit the decision, and ping admin.
+    # The next scheduler tick re-fires the slot once memory recovers.
+    pressure = check_memory_pressure()
+    if pressure is not None:
+        deferred_at = now_iso()
+        target_agent = str(request.get("target_agent") or "")
+        job_name = str(request.get("job_name") or "")
+        deferred_payload: dict[str, Any] = {
+            "run_id": run_id,
+            "state": "deferred",
+            "engine": engine,
+            "updated_at": deferred_at,
+            "request_file": str(request_file),
+            "result_file": str(result_file),
+            "deferred_at": deferred_at,
+            "deferred_reason": "memory_pressure",
+            "deferred_seconds": PRESSURE_DEFER_SECONDS,
+            "memory_probe": pressure,
+        }
+        write_json(status_file, deferred_payload)
+        emit_pressure_audit(run_id, target_agent, pressure)
+        notify_admin_pressure_defer(run_id, job_name, pressure)
+        print(f"status: deferred")
+        print(f"run_id: {run_id}")
+        print(f"engine: {engine}")
+        print(f"reason: memory_pressure")
+        for key, value in pressure.items():
+            print(f"{key}: {value}")
+        # Return 0: this is an intentional defer, not a failure. The cron
+        # worker that invoked us closes the queue task with a deferred note;
+        # the scheduler enqueues the next slot on its next pass.
         return 0
 
     payload_text = payload_file.read_text(encoding="utf-8")

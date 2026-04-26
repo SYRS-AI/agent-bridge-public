@@ -238,6 +238,14 @@ Legacy variables `BRIDGE_LEGACY_CRON_SYNC_ENABLED` and
 compatibility; any of the three explicitly set to `0` disables automatic
 enqueue.
 
+A pre-flight memory guard (#263 Track B) probes host memory before spawning
+the cron disposable child. On Darwin the probe rejects dispatch when swap
+usage meets or exceeds `BRIDGE_CRON_SWAP_PCT_LIMIT` (default `80`). On Linux
+it rejects when `MemAvailable` drops below `BRIDGE_CRON_MIN_AVAIL_MB`
+megabytes (default `512`). A deferred run writes `state=deferred` to the run's
+`status.json`, emits a `cron_dispatch_deferred` audit row, and pings the
+admin agent; the next scheduler tick re-fires the slot.
+
 Inspect runtime state directly when needed:
 
 ```bash
