@@ -3261,7 +3261,13 @@ def _parse_harvest_date_arg(value: str, *, arg_name: str = "date") -> "datetime"
     silently. Keeps the parse symmetric with the watermark file format and
     downstream lex compares (issue #322 r1 deferred finding).
     """
-    parsed = datetime.strptime(value, "%Y-%m-%d")
+    try:
+        parsed = datetime.strptime(value, "%Y-%m-%d")
+    except ValueError:
+        raise ValueError(
+            f"{arg_name}: date must be strict YYYY-MM-DD with zero-padded "
+            f"month and day, got {value!r}"
+        ) from None
     if value != parsed.date().isoformat():
         raise ValueError(
             f"{arg_name}: date must be strict YYYY-MM-DD with zero-padded "
