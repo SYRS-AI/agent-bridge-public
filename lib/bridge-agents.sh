@@ -2166,9 +2166,24 @@ bridge_linux_install_isolated_channel_symlink() {
     return 1
   fi
 
-  bridge_linux_sudo_root mkdir -p "$channels_root"
-  bridge_linux_sudo_root chown root:root "$channels_root"
-  bridge_linux_sudo_root chmod 0755 "$channels_root"
+  # Critical install steps explicitly propagate non-zero. The caller
+  # (bridge_linux_prepare_agent_isolation) is invoked under `||`-disabled
+  # errexit on the migration/reapply path, so silent `|| true` suffixes
+  # would cause the helper to report success while a stale or partial
+  # symlink remains. ACL add is best-effort because earlier helpers
+  # (recursive_read_paths/recursive_write_paths) already cover access.
+  bridge_linux_sudo_root mkdir -p "$channels_root" || {
+    bridge_warn "isolation channel symlink: mkdir $channels_root failed"
+    return 1
+  }
+  bridge_linux_sudo_root chown root:root "$channels_root" || {
+    bridge_warn "isolation channel symlink: chown $channels_root failed"
+    return 1
+  }
+  bridge_linux_sudo_root chmod 0755 "$channels_root" || {
+    bridge_warn "isolation channel symlink: chmod $channels_root failed"
+    return 1
+  }
   bridge_linux_acl_add "u:${os_user}:r-x" "$channels_root" >/dev/null 2>&1 || true
 
   # Target dir: create on demand for declared channels whose `.<channel>`
@@ -2176,10 +2191,29 @@ bridge_linux_install_isolated_channel_symlink() {
   # never opened the channel). Owned by the isolated UID so the plugin
   # server can write its own state; controller user gets rwX so the
   # webhook dispatcher and channel-health probe can see it.
+  #
+  # Reject a non-directory at the target path: a stray file there means
+  # something else owns the path and we must not chmod/chown it or symlink
+  # to it. The caller bridge_die's on our return 1, so the operator has to
+  # quarantine the file before reapply continues.
+  if bridge_linux_sudo_root test -e "$target" \
+      && ! bridge_linux_sudo_root test -d "$target"; then
+    bridge_warn "isolation channel symlink: target $target exists and is not a directory, refusing to clobber"
+    return 1
+  fi
   if ! bridge_linux_sudo_root test -d "$target"; then
-    bridge_linux_sudo_root mkdir -p "$target"
-    bridge_linux_sudo_root chown "$os_user" "$target"
-    bridge_linux_sudo_root chmod 0700 "$target"
+    bridge_linux_sudo_root mkdir -p "$target" || {
+      bridge_warn "isolation channel symlink: mkdir target $target failed"
+      return 1
+    }
+    bridge_linux_sudo_root chown "$os_user" "$target" || {
+      bridge_warn "isolation channel symlink: chown target $target failed"
+      return 1
+    }
+    bridge_linux_sudo_root chmod 0700 "$target" || {
+      bridge_warn "isolation channel symlink: chmod target $target failed"
+      return 1
+    }
     bridge_linux_acl_add "u:${controller_user}:rwX" "$target" >/dev/null 2>&1 || true
     bridge_linux_acl_add_default_dirs_recursive "u:${controller_user}:rwX" "$target" >/dev/null 2>&1 || true
   fi
@@ -2190,13 +2224,19 @@ bridge_linux_install_isolated_channel_symlink() {
   # noticed the missing symlink) and silently overwriting it would lose
   # that state. Bail and require manual quarantine.
   if bridge_linux_sudo_root test -L "$link_path"; then
-    bridge_linux_sudo_root rm -f "$link_path" >/dev/null 2>&1 || true
+    bridge_linux_sudo_root rm -f "$link_path" || {
+      bridge_warn "isolation channel symlink: rm stale link $link_path failed"
+      return 1
+    }
   elif bridge_linux_sudo_root test -e "$link_path"; then
     bridge_warn "isolation channel symlink: $link_path is not a symlink, refusing to clobber (move it aside and rerun)"
     return 1
   fi
 
-  bridge_linux_sudo_root ln -s "$target" "$link_path"
+  bridge_linux_sudo_root ln -s "$target" "$link_path" || {
+    bridge_warn "isolation channel symlink: ln -s $target $link_path failed"
+    return 1
+  }
   bridge_linux_sudo_root chown -h root:root "$link_path" >/dev/null 2>&1 || true
 }
 
