@@ -465,13 +465,17 @@ bridge_agent_linux_env_file() {
 }
 
 bridge_agent_linux_roster_fragment_file() {
-  # Issue #358 r2: per-agent declarations-only roster fragment, sibling
-  # to agent-env.sh under $runtime_state_dir. Same controller-owned
-  # boundary as the env file so the same ACL contract applies. Read by
-  # bridge_load_roster's path-priority chain when an isolated UID
-  # invokes agb without an explicit BRIDGE_AGENT_ENV_FILE.
+  # Issue #358 r3: the fragment lands inside the isolated UID's
+  # $BRIDGE_HOME-equivalent (`/home/<os_user>/.agent-bridge/`) so the
+  # path-priority chain in bridge_load_roster (`$BRIDGE_HOME/agent-roster.local.sh`)
+  # actually resolves to it when the isolated UID invokes agb without an
+  # explicit BRIDGE_AGENT_ENV_FILE. r2's `runtime_state_dir/agent-roster.local.sh`
+  # path was controller-side and never appeared in the chain — see PR #372 r3.
   local agent="$1"
-  printf '%s/agent-roster.local.sh' "$(bridge_agent_runtime_state_dir "$agent")"
+  local os_user
+  os_user="$(bridge_agent_os_user "$agent")"
+  [[ -n "$os_user" ]] || return 1
+  printf '%s/.agent-bridge/agent-roster.local.sh' "$(bridge_agent_linux_user_home "$os_user")"
 }
 
 bridge_linux_sudo_root() {
@@ -2373,18 +2377,24 @@ bridge_linux_prepare_agent_isolation() {
   bridge_linux_acl_add "u:${os_user}:r--" "$env_file"
   bridge_linux_acl_add "u:${controller_user}:rw-" "$env_file"
 
-  # Issue #358 r2: write the scoped roster fragment so the isolated UID can
-  # enumerate self + peers without the controller-side roster's secrets.
-  # Sibling to agent-env.sh under $runtime_state_dir; mode 0644 owned by
-  # the isolated UID. Strict subset of safe metadata only: peer LAUNCH_CMD,
+  # Issue #358 r3: write the scoped roster fragment inside the isolated UID's
+  # $BRIDGE_HOME equivalent (`/home/<os_user>/.agent-bridge/agent-roster.local.sh`)
+  # so the isolated UID's `bridge_load_roster` path-priority chain
+  # (`$BRIDGE_HOME/agent-roster.local.sh`) actually resolves to it. r2's
+  # `runtime_state_dir`-sibling path was controller-side and never appeared
+  # in that chain — see PR #372 r3. The .agent-bridge/ parent already exists
+  # (as the symlink installed by bridge_linux_install_agent_bridge_symlink at
+  # line 2154 above). Strict subset of safe metadata only: peer LAUNCH_CMD,
   # NOTIFY_TARGET, DISCORD_CHANNEL_ID, and PROMPT_GUARD never appear here
   # (mirrors the contract in bridge_write_linux_agent_env_file:1962).
   local roster_fragment=""
   roster_fragment="$(bridge_agent_linux_roster_fragment_file "$agent")"
-  mkdir -p "$(dirname "$roster_fragment")" 2>/dev/null || true
-  bridge_write_linux_agent_roster_fragment "$agent" "$roster_fragment"
-  bridge_linux_sudo_root chown "$os_user:$os_user" "$roster_fragment" 2>/dev/null || true
-  bridge_linux_sudo_root chmod 0644 "$roster_fragment" 2>/dev/null || true
+  if [[ -n "$roster_fragment" ]]; then
+    bridge_linux_sudo_root mkdir -p "$(dirname "$roster_fragment")" 2>/dev/null || true
+    bridge_write_linux_agent_roster_fragment "$agent" "$roster_fragment"
+    bridge_linux_sudo_root chown "$os_user:$os_user" "$roster_fragment" 2>/dev/null || true
+    bridge_linux_sudo_root chmod 0644 "$roster_fragment" 2>/dev/null || true
+  fi
 }
 bridge_linux_install_isolated_channel_symlink() {
   # Plant a root-owned symlink at $user_home/.claude/channels/<channel>
