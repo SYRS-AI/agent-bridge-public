@@ -998,6 +998,9 @@ bridge_note_stall_state() {
   local escalated_ts="${11}"
   local task_id="${12}"
   local matched_pattern="${13:-}"
+  # Issue #329 Track D: matched_line_hash is the stable dedup key. Persist it
+  # alongside excerpt_hash so a daemon restart resumes the cap correctly.
+  local matched_line_hash="${14:-}"
   local state_file
 
   state_file="$(bridge_agent_stall_state_file "$agent")"
@@ -1005,6 +1008,7 @@ bridge_note_stall_state() {
   cat >"$state_file" <<EOF
 STALL_ACTIVE_CLASSIFICATION=$(printf '%q' "$classification")
 STALL_ACTIVE_EXCERPT_HASH=$(printf '%q' "$excerpt_hash")
+STALL_ACTIVE_MATCHED_LINE_HASH=$(printf '%q' "$matched_line_hash")
 STALL_FIRST_DETECTED_TS=$(printf '%q' "$first_detected_ts")
 STALL_LAST_DETECTED_TS=$(printf '%q' "$last_detected_ts")
 STALL_LAST_SCAN_TS=$(printf '%q' "$last_scan_ts")
@@ -1053,6 +1057,7 @@ process_stall_reports() {
   local had_state=0
   local active_classification=""
   local active_hash=""
+  local active_matched_line_hash=""
   local first_detected_ts=0
   local last_detected_ts=0
   local last_scan_ts=0
@@ -1061,6 +1066,7 @@ process_stall_reports() {
   local escalated_ts=0
   local task_id=""
   local matched_pattern=""
+  local matched_line_hash=""
   local scan_interval="${BRIDGE_STALL_SCAN_INTERVAL_SECONDS:-30}"
   local explicit_idle="${BRIDGE_STALL_EXPLICIT_IDLE_SECONDS:-30}"
   local unknown_idle="${BRIDGE_STALL_UNKNOWN_IDLE_SECONDS:-900}"
@@ -1080,6 +1086,9 @@ process_stall_reports() {
   local existing_id=""
   local create_output=""
   local recommended=""
+  # Issue #329 Track D: composite dedup keys, recomputed each iteration.
+  local current_dedup_key=""
+  local prior_dedup_key=""
 
   [[ "${BRIDGE_STALL_SCAN_ENABLED:-1}" == "1" ]] || return 1
   if [[ -n "$admin_agent" ]] && bridge_agent_exists "$admin_agent"; then
@@ -1097,6 +1106,7 @@ process_stall_reports() {
     had_state=0
     active_classification=""
     active_hash=""
+    active_matched_line_hash=""
     first_detected_ts=0
     last_detected_ts=0
     last_scan_ts=0
@@ -1112,6 +1122,7 @@ process_stall_reports() {
       source "$state_file"
       active_classification="${STALL_ACTIVE_CLASSIFICATION:-}"
       active_hash="${STALL_ACTIVE_EXCERPT_HASH:-}"
+      active_matched_line_hash="${STALL_ACTIVE_MATCHED_LINE_HASH:-}"
       first_detected_ts="${STALL_FIRST_DETECTED_TS:-0}"
       last_detected_ts="${STALL_LAST_DETECTED_TS:-0}"
       last_scan_ts="${STALL_LAST_SCAN_TS:-0}"
@@ -1143,6 +1154,7 @@ process_stall_reports() {
     classification=""
     matched_pattern=""
     excerpt_hash=""
+    matched_line_hash=""
     excerpt_b64=""
     excerpt=""
 
@@ -1166,12 +1178,14 @@ process_stall_reports() {
             if [[ -n "$analysis_shell" ]]; then
               STALL_CLASSIFICATION=""
               STALL_MATCHED_PATTERN=""
+              STALL_MATCHED_LINE_HASH=""
               STALL_EXCERPT_HASH=""
               STALL_EXCERPT_B64=""
               # shellcheck disable=SC1091
               source /dev/stdin <<<"$analysis_shell"
               classification="${STALL_CLASSIFICATION:-}"
               matched_pattern="${STALL_MATCHED_PATTERN:-}"
+              matched_line_hash="${STALL_MATCHED_LINE_HASH:-}"
               excerpt_hash="${STALL_EXCERPT_HASH:-}"
               excerpt_b64="${STALL_EXCERPT_B64:-}"
               excerpt="$(bridge_stall_decode_excerpt "$excerpt_b64")"
@@ -1199,7 +1213,23 @@ process_stall_reports() {
       continue
     fi
 
-    if [[ "$active_classification" != "$classification" || "$active_hash" != "$excerpt_hash" ]]; then
+    # Issue #329 Track D: dedup on matched_line_hash so a single false-positive
+    # line in scrollback no longer re-fires every loop. excerpt_hash churns on
+    # every idle tick because the captured pane window shifts; matched_line_hash
+    # is stable as long as the offending line itself is. When the classifier
+    # produced no matched line (unknown-classification idle stall), fall back
+    # to the legacy excerpt_hash dedup so behavior there is unchanged.
+    if [[ -n "$matched_line_hash" ]]; then
+      current_dedup_key="line:$matched_line_hash"
+    else
+      current_dedup_key="excerpt:$excerpt_hash"
+    fi
+    if [[ -n "$active_matched_line_hash" ]]; then
+      prior_dedup_key="line:$active_matched_line_hash"
+    else
+      prior_dedup_key="excerpt:$active_hash"
+    fi
+    if [[ "$active_classification" != "$classification" || "$current_dedup_key" != "$prior_dedup_key" ]]; then
       first_detected_ts="$now_ts"
       nudge_count=0
       last_nudge_ts=0
@@ -1209,7 +1239,8 @@ process_stall_reports() {
         --detail classification="$classification" \
         --detail idle_seconds="$idle" \
         --detail claimed="$claimed" \
-        --detail excerpt_hash="$excerpt_hash"
+        --detail excerpt_hash="$excerpt_hash" \
+        --detail matched_line_hash="$matched_line_hash"
       changed=0
     fi
 
@@ -1317,7 +1348,7 @@ process_stall_reports() {
       fi
     fi
 
-    bridge_note_stall_state "$agent" "$classification" "$excerpt_hash" "$first_detected_ts" "$last_detected_ts" "$now_ts" "$idle" "$claimed" "$nudge_count" "$last_nudge_ts" "$escalated_ts" "$task_id" "$matched_pattern"
+    bridge_note_stall_state "$agent" "$classification" "$excerpt_hash" "$first_detected_ts" "$last_detected_ts" "$now_ts" "$idle" "$claimed" "$nudge_count" "$last_nudge_ts" "$escalated_ts" "$task_id" "$matched_pattern" "$matched_line_hash"
   done <<<"$summary_output"
 
   return "$changed"

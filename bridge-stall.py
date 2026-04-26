@@ -174,7 +174,19 @@ def normalize_excerpt(text: str, max_bytes: int) -> str:
     return encoded[-max_bytes:].decode("utf-8", errors="ignore").lstrip()
 
 
-def classify(normalized: str) -> tuple[str, str]:
+def _normalize_matched_line(line: str) -> str:
+    # Issue #329 Track D: produce a stable representation of the offending
+    # line so the daemon can dedup on the line itself instead of the
+    # surrounding excerpt window (which shifts every idle tick). Lower-case
+    # plus collapsed whitespace plus trim absorbs cosmetic diffs; truncating
+    # to 240 chars bounds the hash input for pathological lines.
+    collapsed = re.sub(r"\s+", " ", line.lower()).strip()
+    if len(collapsed) > 240:
+        collapsed = collapsed[:240]
+    return collapsed
+
+
+def classify(normalized: str) -> tuple[str, str, str]:
     # Issue #264: skip agent-authored lines so the classifier never matches
     # the agent narrating a previous error (e.g. "⏺ inbox empty, no 429
     # reoccurrence"). Without this, agent replies referencing past errors
@@ -184,15 +196,21 @@ def classify(normalized: str) -> tuple[str, str]:
         stripped = raw.strip()
         if not stripped or stripped.startswith(AGENT_GLYPH_PREFIXES):
             continue
-        candidate_lines.append(stripped.lower())
+        candidate_lines.append(stripped)
     if not candidate_lines:
-        return "", ""
-    haystack = "\n".join(candidate_lines)
-    for classification, patterns in PATTERN_GROUPS:
-        for pattern in patterns:
-            if re.search(pattern, haystack, flags=re.IGNORECASE):
-                return classification, pattern
-    return "", ""
+        return "", "", ""
+    # Issue #329 Track D: walk lines individually so the classifier can return
+    # the actual matched line. Previously classify() searched the joined
+    # haystack and only knew which (group, pattern) fired; the daemon dedup
+    # therefore had to fall back on excerpt_hash, which churned every loop
+    # whenever any other text moved through the pane.
+    for line in candidate_lines:
+        haystack = line.lower()
+        for classification, patterns in PATTERN_GROUPS:
+            for pattern in patterns:
+                if re.search(pattern, haystack, flags=re.IGNORECASE):
+                    return classification, pattern, _normalize_matched_line(line)
+    return "", "", ""
 
 
 def main() -> int:
@@ -205,10 +223,22 @@ def main() -> int:
     args = parser.parse_args()
 
     normalized = normalize_excerpt(read_capture(args.capture_file), max(args.max_bytes, 256))
-    classification, matched = classify(normalized)
+    classification, matched, matched_line = classify(normalized)
+    # Issue #329 Track D: matched_line_hash is the dedup key the daemon uses
+    # to decide "same stall as last loop". 16 hex chars (64 bits) is enough
+    # collision-resistance for one host's roster. Empty when no line matched
+    # (e.g. unknown-classification idle stalls), in which case the daemon
+    # falls back to excerpt_hash for the legacy behavior.
+    matched_line_hash = (
+        hashlib.sha256(matched_line.encode("utf-8")).hexdigest()[:16]
+        if matched_line
+        else ""
+    )
     payload = {
         "classification": classification,
         "matched_pattern": matched,
+        "matched_line": matched_line,
+        "matched_line_hash": matched_line_hash,
         "excerpt": normalized,
         "excerpt_hash": hashlib.sha256(normalized.encode("utf-8")).hexdigest() if normalized else "",
         "excerpt_lines": len(normalized.splitlines()) if normalized else 0,
@@ -216,6 +246,7 @@ def main() -> int:
     if args.format == "shell":
         print(f"STALL_CLASSIFICATION={json.dumps(payload['classification'])}")
         print(f"STALL_MATCHED_PATTERN={json.dumps(payload['matched_pattern'])}")
+        print(f"STALL_MATCHED_LINE_HASH={json.dumps(payload['matched_line_hash'])}")
         print(f"STALL_EXCERPT_HASH={json.dumps(payload['excerpt_hash'])}")
         print(f"STALL_EXCERPT_LINES={int(payload['excerpt_lines'])}")
         print(f"STALL_EXCERPT_B64={json.dumps(base64.b64encode(payload['excerpt'].encode('utf-8')).decode('ascii'))}")
