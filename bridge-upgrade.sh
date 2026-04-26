@@ -25,6 +25,7 @@ RESTART_AGENTS=1
 RESTART_AGENTS_EXPLICIT=0
 JSON=0
 ALLOW_DIRTY=0
+ALLOW_DIRTY_SOURCE=0
 STRICT_MERGE=0
 BACKUP=1
 MIGRATE_AGENTS=1
@@ -40,7 +41,7 @@ SOURCE_HEAD=""
 usage() {
   cat <<EOF
 Usage:
-  $(basename "$0") [--source <repo-dir>] [--target <bridge-home>] [--check] [--channel stable|dev|current] [--version <semver>] [--ref <git-ref>] [--pull|--no-pull] [--restart-daemon|--no-restart-daemon] [--restart-agents|--no-restart-agents] [--dry-run] [--json] [--allow-dirty] [--strict-merge] [--no-backup] [--no-migrate-agents]
+  $(basename "$0") [--source <repo-dir>] [--target <bridge-home>] [--check] [--channel stable|dev|current] [--version <semver>] [--ref <git-ref>] [--pull|--no-pull] [--restart-daemon|--no-restart-daemon] [--restart-agents|--no-restart-agents] [--dry-run] [--json] [--allow-dirty] [--allow-dirty-source] [--strict-merge] [--no-backup] [--no-migrate-agents]
   $(basename "$0") analyze [--source <repo-dir>] [--target <bridge-home>] [--json]
   $(basename "$0") rollback [--target <bridge-home>] [--backup-root <dir>] [--restart-daemon|--no-restart-daemon] [--restart-agents|--no-restart-agents] [--dry-run] [--json]
 
@@ -615,6 +616,10 @@ while [[ $# -gt 0 ]]; do
       ALLOW_DIRTY=1
       shift
       ;;
+    --allow-dirty-source)
+      ALLOW_DIRTY_SOURCE=1
+      shift
+      ;;
     --strict-merge)
       STRICT_MERGE=1
       shift
@@ -820,6 +825,37 @@ PY
       echo "update_available: $([[ $UPDATE_AVAILABLE -eq 1 ]] && printf yes || printf no)"
     fi
     exit 0
+  fi
+
+  # Pre-flight: when the target ref is a tag (v*) or a release/* branch, the
+  # operator's expectation (per --check / --dry-run output `target_ref: vX.Y.Z`)
+  # is that the tag's content drives the merge. The merge resolution actually
+  # uses the source checkout's working tree, so any uncommitted edits or a
+  # non-release feature branch get silently folded in. Refuse to proceed for
+  # release-style targets when the source is dirty so dry-run/apply produce
+  # the same surprise-free abort. Fires for both dry-run and apply (issue #380).
+  if [[ -n "$TARGET_REF" ]] \
+    && [[ "$TARGET_REF" =~ ^v[0-9] || "$TARGET_REF" == release/* ]] \
+    && [[ $ALLOW_DIRTY_SOURCE -eq 0 && $ALLOW_DIRTY -eq 0 ]]; then
+    if [[ -n "$(git -C "$SOURCE_ROOT" status --porcelain)" ]]; then
+      cat >&2 <<EOF
+error: source checkout at $SOURCE_ROOT has uncommitted changes (or is on a non-release branch).
+The current behavior would fold those changes into the merge source, producing
+surprise conflicts on core files even though the $TARGET_REF release ref is clean.
+
+Resolve one of:
+  1. Commit or stash your changes:
+       (cd $SOURCE_ROOT && git stash push -u)
+     ... then re-run \`agent-bridge upgrade --apply\`. After the upgrade:
+       (cd $SOURCE_ROOT && git stash pop)
+  2. Point AGENT_BRIDGE_SOURCE_DIR at a clean checkout:
+       AGENT_BRIDGE_SOURCE_DIR=/path/to/clean/checkout agent-bridge upgrade --apply
+  3. If you genuinely want to fold the working-tree changes in (uncommon —
+     usually only maintainers testing a release candidate locally):
+       agent-bridge upgrade --apply --allow-dirty-source
+EOF
+      exit 64
+    fi
   fi
 
   if [[ $ALLOW_DIRTY -eq 0 && $DRY_RUN -eq 0 ]]; then
