@@ -87,6 +87,10 @@ write_watermark_atomic() {
   tmp="$(mktemp "$WIKI_INGEST_STATE_DIR/.last-ingest.XXXXXX")" || return 1
   printf '%s\n' "$date_str" >"$tmp" || { rm -f "$tmp"; return 1; }
   mv -f "$tmp" "$WIKI_INGEST_WATERMARK_FILE"
+  # Issue #321 r2: explicit permission so the watermark mode does not depend
+  # on the caller's umask. Matches peer daemon-owned state files under
+  # $BRIDGE_STATE_DIR (active-roster.md, tasks.db, daemon.* — all 0600).
+  chmod 600 "$WIKI_INGEST_WATERMARK_FILE" 2>/dev/null || true
 }
 
 # -------------------------------------------------------------------------
