@@ -19,7 +19,11 @@
 #      → falls back to legacy controller tree.
 #   3. legacy mode (BRIDGE_LAYOUT unset) → uses controller tree.
 #   4. neither v2 populated nor legacy controller tree → no-op.
-#   5. resolved root contains the v2 marketplace mirror.
+#   5. both v2 populated AND legacy populated → v2 wins (precedence
+#      contract from PR body §"v2/legacy precedence").
+#   6. direct resolver `bridge_isolation_v2_shared_plugins_root`
+#      returns non-zero when v2 is unpopulated/unset (positive +
+#      negative cases for the helper's contract that callers depend on).
 
 set -uo pipefail
 
@@ -326,4 +330,89 @@ case "$result4" in
 $result4" ;;
 esac
 
-log "all PR-B acceptance checks passed (4 cases against real bridge_linux_share_plugin_catalog)"
+# ---------------------------------------------------------------------------
+# Case 5: both v2 populated AND legacy populated → v2 wins.
+# Precedence contract per PR body §"v2/legacy precedence". Without this
+# explicit assertion, a reviewer cannot confirm the resolver does not
+# silently prefer legacy when both roots are present.
+# ---------------------------------------------------------------------------
+log "case 5: v2 populated + legacy populated → v2 wins"
+DATA5="$TMP_ROOT/case5-data"
+build_v2_fixture "$DATA5" 1
+CTRL5="$TMP_ROOT/case5-controller-home"
+build_legacy_fixture "$CTRL5"
+
+result5="$(drive_share_helper case5 "$DATA5" "$CTRL5" v2)"
+case "$result5" in
+  *manifest_present=yes*) ok "case 5: manifest written when both roots populated" ;;
+  *) die "case 5: manifest NOT written
+$result5" ;;
+esac
+case "$result5" in
+  *"manifest_install_path=$DATA5/shared/plugins-cache/marketplaces/test-mkt/plugins/test-plugin"*)
+    ok "case 5: v2 path wins over legacy when both populated"
+    ;;
+  *) die "case 5: legacy path leaked through despite v2 being populated
+$result5" ;;
+esac
+
+# ---------------------------------------------------------------------------
+# Case 6: direct resolver `bridge_isolation_v2_shared_plugins_root`
+# contract — exits non-zero when v2 is unpopulated/unset; exits 0 +
+# prints the path when populated. Other consumers
+# (resolve_plugin_install_path, known_marketplaces_lookup) depend on
+# this contract.
+# ---------------------------------------------------------------------------
+log "case 6: direct resolver contract"
+
+# 6a. unset BRIDGE_LAYOUT → returns non-zero.
+unpop6a="$TMP_ROOT/case6a-data"
+mkdir -p "$unpop6a/shared/plugins-cache"
+set +e
+out6a="$(env -i \
+  HOME="$HOME" \
+  PATH="$PATH" \
+  TMPDIR="$TMPDIR" \
+  BRIDGE_LAYOUT="" \
+  BRIDGE_DATA_ROOT="$unpop6a" \
+  bash -c "source '$REPO_ROOT/lib/bridge-isolation-v2.sh' >/dev/null 2>&1; bridge_isolation_v2_shared_plugins_root")"
+rc6a=$?
+set -e
+[[ $rc6a -ne 0 ]] || die "case 6a: resolver should exit non-zero when BRIDGE_LAYOUT unset (rc=$rc6a, out=$out6a)"
+ok "case 6a: resolver exits non-zero when BRIDGE_LAYOUT unset"
+
+# 6b. BRIDGE_LAYOUT=v2 but installed_plugins.json absent → returns non-zero.
+unpop6b="$TMP_ROOT/case6b-data"
+mkdir -p "$unpop6b/shared/plugins-cache"   # dir present but no catalog file
+set +e
+out6b="$(env -i \
+  HOME="$HOME" \
+  PATH="$PATH" \
+  TMPDIR="$TMPDIR" \
+  BRIDGE_LAYOUT=v2 \
+  BRIDGE_DATA_ROOT="$unpop6b" \
+  bash -c "source '$REPO_ROOT/lib/bridge-isolation-v2.sh' >/dev/null 2>&1; bridge_isolation_v2_shared_plugins_root")"
+rc6b=$?
+set -e
+[[ $rc6b -ne 0 ]] || die "case 6b: resolver should exit non-zero when installed_plugins.json absent (rc=$rc6b, out=$out6b)"
+ok "case 6b: resolver exits non-zero when installed_plugins.json absent"
+
+# 6c. v2 populated → returns 0 and prints v2 plugins-cache path.
+pop6c="$TMP_ROOT/case6c-data"
+build_v2_fixture "$pop6c" 1
+set +e
+out6c="$(env -i \
+  HOME="$HOME" \
+  PATH="$PATH" \
+  TMPDIR="$TMPDIR" \
+  BRIDGE_LAYOUT=v2 \
+  BRIDGE_DATA_ROOT="$pop6c" \
+  bash -c "source '$REPO_ROOT/lib/bridge-isolation-v2.sh' >/dev/null 2>&1; bridge_isolation_v2_shared_plugins_root")"
+rc6c=$?
+set -e
+[[ $rc6c -eq 0 ]] || die "case 6c: resolver should exit 0 when v2 populated (rc=$rc6c, out=$out6c)"
+[[ "$out6c" == "$pop6c/shared/plugins-cache" ]] \
+  || die "case 6c: resolver returned unexpected path: $out6c (expected $pop6c/shared/plugins-cache)"
+ok "case 6c: resolver exits 0 + prints v2 plugins-cache path when populated"
+
+log "all PR-B acceptance checks passed (6 cases against real bridge_linux_share_plugin_catalog + helper)"
