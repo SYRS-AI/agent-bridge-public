@@ -3071,6 +3071,102 @@ STALE_NUDGE_RESULT="$("$BASH4_BIN" "$STALE_NUDGE_CHECKER" "$STALE_NUDGE_ROW" "$S
 [[ ! -f "$STALE_NUDGE_SEND_LOG" ]] || die "stale nudge unexpectedly dispatched"
 tmux_kill_session_exact "$CODEX_CLI_SESSION" || true
 
+# Issue #331 Track A: queue state as the delivery oracle for session_nudge_sent.
+# When the tmux paste/submit helper returns 0 but the agent never actually
+# claims the task (the codex composer race described in the issue), the
+# daemon must record session_nudge_dropped instead of session_nudge_sent and
+# return non-zero so the next idle-nudge tick can retry.
+log "Issue #331: marking session_nudge_dropped when the task stays queued past the verify grace"
+NUDGE_VERIFY_AUDIT="$TMP_ROOT/nudge-verify-audit.jsonl"
+NUDGE_VERIFY_CHECKER="$TMP_ROOT/nudge-verify-check.sh"
+cat >"$NUDGE_VERIFY_CHECKER" <<EOF
+#!/usr/bin/env bash
+set -euo pipefail
+
+mode="\$1"
+task_id="\$2"
+audit_file="\$3"
+daemon_lib="$TMP_ROOT/bridge-daemon-functions.sh"
+
+awk -v repo_root="$REPO_ROOT" '
+  BEGIN { q="\"" }
+  index(\$0, "CMD=\"\${1:-}\"") == 1 { exit }
+  /^SCRIPT_DIR=/ { print "SCRIPT_DIR=" q repo_root q; next }
+  { print }
+' "$REPO_ROOT/bridge-daemon.sh" >"\$daemon_lib"
+
+# shellcheck disable=SC1090
+source "\$daemon_lib"
+
+export BRIDGE_AUDIT_LOG="\$audit_file"
+export BRIDGE_NUDGE_VERIFY_GRACE_SECONDS=0
+: >"\$audit_file"
+
+daemon_info() { :; }
+
+if [[ "\$mode" == "claimed" ]]; then
+  bridge_dispatch_notification() {
+    # Simulate the agent observing the nudge and claiming the task.
+    python3 "$REPO_ROOT/bridge-queue.py" claim "\$task_id" --agent "$CODEX_CLI_AGENT" >/dev/null
+    return 0
+  }
+else
+  bridge_dispatch_notification() {
+    # Paste/submit returned 0 but the codex composer ate the C-m: task
+    # remains queued (the post-#331 race the audit log used to lie about).
+    return 0
+  }
+fi
+
+set +e
+nudge_agent_session "$CODEX_CLI_AGENT" "$CODEX_CLI_SESSION" "1" "0" "0" "\$task_id"
+rc=\$?
+set -e
+printf 'RC=%s\n' "\$rc"
+EOF
+chmod +x "$NUDGE_VERIFY_CHECKER"
+
+NUDGE_DROP_OUTPUT="$(python3 "$REPO_ROOT/bridge-queue.py" create --to "$CODEX_CLI_AGENT" --title "verify drop oracle" --body "pickup" --from "$REQUESTER_AGENT")"
+NUDGE_DROP_TASK_ID="$(printf '%s\n' "$NUDGE_DROP_OUTPUT" | sed -n 's/^created task #\([0-9][0-9]*\).*/\1/p' | head -n1)"
+[[ -n "$NUDGE_DROP_TASK_ID" ]] || die "expected verify-drop task id"
+NUDGE_DROP_RUN="$("$BASH4_BIN" "$NUDGE_VERIFY_CHECKER" queued "$NUDGE_DROP_TASK_ID" "$NUDGE_VERIFY_AUDIT")"
+assert_contains "$NUDGE_DROP_RUN" "RC=1"
+NUDGE_DROP_ACTION="$(python3 - "$NUDGE_VERIFY_AUDIT" "$NUDGE_DROP_TASK_ID" <<'PY'
+import json, sys
+audit_path, task_id = sys.argv[1], sys.argv[2]
+last = ""
+for raw in open(audit_path, encoding="utf-8"):
+    item = json.loads(raw)
+    detail = item.get("detail") or {}
+    if str(detail.get("task_id")) == task_id:
+        last = item.get("action", "")
+print(last)
+PY
+)"
+[[ "$NUDGE_DROP_ACTION" == "session_nudge_dropped" ]] || die "expected session_nudge_dropped audit row, got '$NUDGE_DROP_ACTION'"
+python3 "$REPO_ROOT/bridge-queue.py" cancel "$NUDGE_DROP_TASK_ID" --agent "$REQUESTER_AGENT" --note "verify drop cleanup" >/dev/null
+
+log "Issue #331: marking session_nudge_sent when the task moves out of queued before the grace expires"
+NUDGE_SENT_OUTPUT="$(python3 "$REPO_ROOT/bridge-queue.py" create --to "$CODEX_CLI_AGENT" --title "verify sent oracle" --body "pickup" --from "$REQUESTER_AGENT")"
+NUDGE_SENT_TASK_ID="$(printf '%s\n' "$NUDGE_SENT_OUTPUT" | sed -n 's/^created task #\([0-9][0-9]*\).*/\1/p' | head -n1)"
+[[ -n "$NUDGE_SENT_TASK_ID" ]] || die "expected verify-sent task id"
+NUDGE_SENT_RUN="$("$BASH4_BIN" "$NUDGE_VERIFY_CHECKER" claimed "$NUDGE_SENT_TASK_ID" "$NUDGE_VERIFY_AUDIT")"
+assert_contains "$NUDGE_SENT_RUN" "RC=0"
+NUDGE_SENT_ACTION="$(python3 - "$NUDGE_VERIFY_AUDIT" "$NUDGE_SENT_TASK_ID" <<'PY'
+import json, sys
+audit_path, task_id = sys.argv[1], sys.argv[2]
+last = ""
+for raw in open(audit_path, encoding="utf-8"):
+    item = json.loads(raw)
+    detail = item.get("detail") or {}
+    if str(detail.get("task_id")) == task_id:
+        last = item.get("action", "")
+print(last)
+PY
+)"
+[[ "$NUDGE_SENT_ACTION" == "session_nudge_sent" ]] || die "expected session_nudge_sent audit row, got '$NUDGE_SENT_ACTION'"
+python3 "$REPO_ROOT/bridge-queue.py" done "$NUDGE_SENT_TASK_ID" --agent "$CODEX_CLI_AGENT" --note "verify sent cleanup" >/dev/null
+
 log "waking a prompt-ready Claude session even when the idle marker is missing"
 tmux_kill_session_exact "$CLAUDE_STATIC_SESSION" || true
 tmux new-session -d -s "$CLAUDE_STATIC_SESSION" "$BASH4_BIN -lc 'printf \"❯ ready\\n\"; sleep 30'"

@@ -2318,11 +2318,46 @@ PY
     return 1
   fi
   bridge_task_note_nudge "$agent" "${live_nudge_key:-$nudge_key}" || true
+
+  # Issue #331 Track A: bridge_dispatch_notification's success only proves the
+  # tmux paste/submit helper returned 0 — it does not prove the codex/claude
+  # composer actually consumed the C-m. Codex agents have a real race where
+  # the paste lands and C-m fires but the placeholder lifecycle eats the
+  # submission, leaving the task `queued` while the daemon logs
+  # session_nudge_sent. Use the queue itself as the delivery oracle: a
+  # successful nudge causes the agent to claim within ~1s; if the task is
+  # still queued after $BRIDGE_NUDGE_VERIFY_GRACE_SECONDS (default 2s), flip
+  # the audit row to session_nudge_dropped and return non-zero so the next
+  # idle-nudge tick (post-cooldown) retries instead of leaving a stale
+  # success on the audit log. We do NOT retry inline — a tight loop on a
+  # sticky tmux race wastes ticks. Skip when we have no task_id to verify.
+  local nudge_grace_seconds="${BRIDGE_NUDGE_VERIFY_GRACE_SECONDS:-2}"
+  local post_status=""
+  if [[ -n "$task_id" ]]; then
+    if [[ "$nudge_grace_seconds" =~ ^[0-9]+$ ]] && (( nudge_grace_seconds > 0 )); then
+      sleep "$nudge_grace_seconds"
+    fi
+    post_status="$(bridge_queue_task_status "$task_id" 2>/dev/null || true)"
+    if [[ "$post_status" == "queued" ]]; then
+      bridge_audit_log daemon session_nudge_dropped "$agent" \
+        --detail task_id="$task_id" \
+        --detail reason=submit_lost_post_grace \
+        --detail grace_seconds="$nudge_grace_seconds" \
+        --detail queued="$live_queued" \
+        --detail claimed="$live_claimed" \
+        --detail idle_seconds="$idle" \
+        --detail title="$title"
+      daemon_info "nudge to ${agent} appears dropped (task #${task_id} still queued after ${nudge_grace_seconds}s); will retry on next idle-nudge tick"
+      return 1
+    fi
+  fi
+
   bridge_audit_log daemon session_nudge_sent "$agent" \
     --detail queued="$live_queued" \
     --detail claimed="$live_claimed" \
     --detail idle_seconds="$idle" \
     --detail task_id="${task_id:-0}" \
+    --detail post_status="${post_status:-unknown}" \
     --detail title="$title"
   daemon_info "nudged ${agent} (queued=${live_queued}, claimed=${live_claimed}, idle=${idle}s)"
 }
