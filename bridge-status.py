@@ -5,11 +5,12 @@ from __future__ import annotations
 
 import argparse
 import csv
+import json
 import os
 import signal
 import sqlite3
 import sys
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 
@@ -155,6 +156,88 @@ def daemon_status(pid_file: str) -> tuple[bool, str]:
     except OSError:
         return (False, pid)
     return (True, pid)
+
+
+def _audit_input_files(base: Path) -> list[Path]:
+    # Mirror bridge-audit.py rotation_candidates so the dashboard counts
+    # rolled-over fragments alongside the live `audit.jsonl`. Without this,
+    # operators on long-running hosts whose log just rotated would see the
+    # FP rate snap to 0/0 (#338 Track C — observability counter).
+    files: list[Path] = []
+    if base.parent.exists():
+        files.extend(
+            sorted(
+                base.parent.glob(f"{base.stem}.*{base.suffix}"),
+                key=lambda item: item.name,
+            )
+        )
+    if base.is_file():
+        files.append(base)
+    return files
+
+
+def context_pressure_fp_rate(audit_log: str, window_days: int = 7) -> tuple[int, int]:
+    """Compute the (false-positive count, critical task count) tuple over the
+    last `window_days` for `agent-bridge status` to render. Both numbers are
+    derived from the JSONL audit log written by `bridge-audit.py`.
+
+    Numerator: rows with `action=context_pressure_false_positive` (one row per
+    operator-marked false-positive done; emitted by bridge-task.sh on any
+    `[context-pressure] <agent> (critical)` task whose --note matches the
+    "false-positive" / "HUD says <85%" markers in #338 Track C).
+
+    Denominator: unique `task_id` values from `action=context_pressure_report`
+    rows whose detail carries `severity=critical`. Counting unique task ids
+    deduplicates the rebroadcast/cooldown emissions the daemon writes for the
+    same critical task across syncs (issue #184 cooldown semantics) so the
+    rate reflects "1 task = 1 critical event".
+    """
+    if not audit_log:
+        return (0, 0)
+    base = Path(audit_log).expanduser()
+    files = _audit_input_files(base)
+    if not files:
+        return (0, 0)
+    cutoff = datetime.now(timezone.utc) - timedelta(days=max(1, int(window_days)))
+    fp_count = 0
+    critical_task_ids: set[str] = set()
+    for path in files:
+        try:
+            with path.open("r", encoding="utf-8") as fh:
+                for raw in fh:
+                    line = raw.strip()
+                    if not line:
+                        continue
+                    try:
+                        record = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+                    if not isinstance(record, dict):
+                        continue
+                    ts_raw = record.get("ts")
+                    if not isinstance(ts_raw, str):
+                        continue
+                    try:
+                        ts_str = ts_raw[:-1] + "+00:00" if ts_raw.endswith("Z") else ts_raw
+                        ts = datetime.fromisoformat(ts_str)
+                    except ValueError:
+                        continue
+                    if ts.tzinfo is None:
+                        ts = ts.replace(tzinfo=timezone.utc)
+                    if ts < cutoff:
+                        continue
+                    action = record.get("action")
+                    detail = record.get("detail") if isinstance(record.get("detail"), dict) else {}
+                    if action == "context_pressure_false_positive":
+                        fp_count += 1
+                        continue
+                    if action == "context_pressure_report" and detail.get("severity") == "critical":
+                        task_id = detail.get("task_id")
+                        if isinstance(task_id, (str, int)) and str(task_id):
+                            critical_task_ids.add(str(task_id))
+        except OSError:
+            continue
+    return (fp_count, len(critical_task_ids))
 
 
 def fetch_agent_metrics(conn: sqlite3.Connection) -> dict[str, dict[str, int | str | None]]:
@@ -351,6 +434,20 @@ def render_dashboard(args: argparse.Namespace) -> str:
         f"health warn>={fmt_age(int(datetime.now(timezone.utc).timestamp()) - args.stale_warn_seconds) if args.stale_warn_seconds > 0 else 'off'} "
         f"crit>={fmt_age(int(datetime.now(timezone.utc).timestamp()) - args.stale_critical_seconds) if args.stale_critical_seconds > 0 else 'off'}"
     )
+    # Issue #338 Track C — observability counter for the context-pressure
+    # analyzer. Hidden when the denominator is zero (no critical task in the
+    # rolling window, nothing to report); operators on healthy hosts should
+    # not see a noisy `0/0` line. When the denominator is non-zero the line
+    # always renders, even with `0` numerator, so an analyzer that just
+    # stopped mis-firing is visibly distinct from one that never has.
+    fp_window_days = max(1, int(args.fp_window_days))
+    fp_count, critical_count = context_pressure_fp_rate(args.audit_log, fp_window_days)
+    if critical_count > 0:
+        pct = int(round(100.0 * fp_count / critical_count))
+        lines.append(
+            f"context-pressure FP rate ({fp_window_days}d): "
+            f"{fp_count}/{critical_count} ({pct}%)"
+        )
     lines.append("")
     lines.append("Agents")
     lines.append("  #  agent           eng     src     loop on  state    q   c   b   garden  idle  stale wake chan  nudge  load        session        workdir")
@@ -438,6 +535,13 @@ def main() -> int:
     parser.add_argument("--roster-snapshot", required=True)
     parser.add_argument("--db", required=True)
     parser.add_argument("--daemon-pid-file", required=True)
+    parser.add_argument("--audit-log", default="")
+    parser.add_argument(
+        "--fp-window-days",
+        type=int,
+        default=7,
+        help="Rolling window for the context-pressure FP-rate dashboard line (#338 Track C).",
+    )
     parser.add_argument("--version", default="")
     parser.add_argument("--open-limit", type=int, default=8)
     parser.add_argument("--stale-warn-seconds", type=int, default=3600)

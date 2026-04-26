@@ -8695,4 +8695,65 @@ rows = json.loads(sys.argv[1])
 assert any(row.get("target") == sys.argv[2] for row in rows), rows
 PY
 
+log "context-pressure FP-rate counter (#338 Track C)"
+# Fixture: emit a fake [context-pressure] critical task body (the daemon's
+# own format), seed a context_pressure_report audit row so the dashboard
+# denominator picks it up, then close the task with a "false-positive"
+# operator note via bridge-task.sh and assert (a) the audit row was
+# written by bridge-task.sh and (b) `agent-bridge status` renders the
+# 1/1 (100%) line.
+FP_AGENT="fp-counter-$SESSION_NAME"
+FP_BODY_DIR="$BRIDGE_SHARED_DIR/context-pressure"
+FP_BODY_FILE="$FP_BODY_DIR/$FP_AGENT-critical.md"
+mkdir -p "$FP_BODY_DIR"
+cat >"$FP_BODY_FILE" <<EOF
+# Context Pressure Report
+
+- agent: $FP_AGENT
+- session: $FP_AGENT
+- severity: critical
+- idle_seconds: 0
+- agent_source: static
+- first_detected_at: $(date -u +%Y-%m-%dT%H:%M:%S+00:00)
+- detected_at: $(date -u +%Y-%m-%dT%H:%M:%S+00:00)
+- matched_pattern: hud:context_pct=92
+
+## Recommended Next Action
+
+**Resolve autonomously.** Smoke fixture body.
+
+## Recent Output
+
+\`\`\`text
+Context ████████░░ 92%
+\`\`\`
+EOF
+FP_TASK_CREATE_OUTPUT="$(BRIDGE_TASK_DB="$BRIDGE_TASK_DB" python3 "$REPO_ROOT/bridge-queue.py" create --to "$SMOKE_AGENT" --from daemon --priority urgent --title "[context-pressure] $FP_AGENT (critical)" --body-file "$FP_BODY_FILE" --format shell)"
+FP_TASK_ID="$(printf '%s\n' "$FP_TASK_CREATE_OUTPUT" | sed -n "s/^TASK_ID=//p" | tr -d "'\"" | head -n1)"
+[[ "$FP_TASK_ID" =~ ^[0-9]+$ ]] || die "expected fp-counter task id, got: $FP_TASK_ID"
+# Seed the denominator row exactly as the daemon would (process_context_pressure_reports).
+python3 "$REPO_ROOT/bridge-audit.py" write --file "$BRIDGE_AUDIT_LOG" \
+  --actor daemon --action context_pressure_report --target "$SMOKE_AGENT" \
+  --detail agent="$FP_AGENT" \
+  --detail severity=critical \
+  --detail task_id="$FP_TASK_ID" >/dev/null
+bash "$REPO_ROOT/bridge-task.sh" claim "$FP_TASK_ID" --agent "$SMOKE_AGENT" >/dev/null
+bash "$REPO_ROOT/bridge-task.sh" "done" "$FP_TASK_ID" --agent "$SMOKE_AGENT" --note "false-positive — HUD shows 36%" >/dev/null
+FP_AUDIT_JSON="$("$REPO_ROOT/agent-bridge" audit --action context_pressure_false_positive --target "$FP_AGENT" --limit 5 --json)"
+python3 - "$FP_AUDIT_JSON" "$FP_AGENT" "$FP_TASK_ID" <<'PY'
+import json, sys
+rows = json.loads(sys.argv[1])
+target = sys.argv[2]
+task_id = sys.argv[3]
+matches = [r for r in rows if r.get("target") == target]
+assert matches, f"expected context_pressure_false_positive audit row for {target}: {rows}"
+detail = matches[-1].get("detail") or {}
+assert str(detail.get("task_id")) == task_id, detail
+assert detail.get("severity") == "critical", detail
+assert detail.get("matched_pattern", "").startswith("hud:context_pct="), detail
+assert "false-positive" in (detail.get("done_note_excerpt") or "").lower(), detail
+PY
+FP_STATUS_OUTPUT="$("$REPO_ROOT/agent-bridge" status --all-agents)"
+assert_contains "$FP_STATUS_OUTPUT" "context-pressure FP rate (7d): 1/1 (100%)"
+
 log "smoke test passed"

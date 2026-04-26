@@ -58,6 +58,100 @@ emit_inferred_actor_hint() {
   echo "[hint] --from omitted; inferred sender: ${inferred_actor}. Use --from <agent> to override." >&2
 }
 
+emit_context_pressure_false_positive_if_match() {
+  # Issue #338 Track C: when an operator marks a [context-pressure]
+  # severity=critical task done with a "false-positive" / "HUD says <85%"
+  # note, append a `context_pressure_false_positive` audit row so the
+  # observability counter rendered in `agent-bridge status` can flag a
+  # mis-firing analyzer. Tracks A + B (anchor regex + cache invalidation
+  # on /clear) already landed; this is the metrics-surfacing follow-up
+  # and intentionally has no behavioral effect on the analyzer or the
+  # task itself.
+  local task_id="$1"
+  local note="$2"
+  local note_file="$3"
+  local task_shell=""
+  local TASK_ID=""
+  local TASK_TITLE=""
+  local TASK_BODY_PATH=""
+  local impacted_agent=""
+  local matched_pattern=""
+  local body_text=""
+  local note_text=""
+  local note_excerpt=""
+
+  task_shell="$(bridge_queue_cli show "$task_id" --format shell 2>/dev/null || true)"
+  [[ -n "$task_shell" ]] || return 0
+  # shellcheck disable=SC1091
+  source /dev/stdin <<<"$task_shell"
+
+  # Title shape is `[context-pressure] <agent> (<severity>)`; only critical
+  # participates per the issue's scope. warning is informational and out of
+  # scope for the FP counter.
+  [[ "${TASK_TITLE:-}" =~ ^\[context-pressure\]\ (.+)\ \(critical\)$ ]] || return 0
+  impacted_agent="${BASH_REMATCH[1]}"
+
+  # The daemon writes the report body to a file; the inline DB body_text is
+  # therefore the same content but we read body_path so the existing on-disk
+  # representation stays the source of truth.
+  if [[ -n "${TASK_BODY_PATH:-}" && -f "$TASK_BODY_PATH" ]]; then
+    body_text="$(cat "$TASK_BODY_PATH" 2>/dev/null || true)"
+  fi
+  [[ -n "$body_text" ]] || return 0
+
+  # Confirm the daemon's HUD pattern actually fired this report. The body
+  # carries lines like `- severity: critical` and `- matched_pattern:
+  # hud:context_pct=NN`; we only count rows where the matched pattern came
+  # from the HUD anchor (issue #338 Track A scope). Other criticals — e.g.
+  # "context window exceeded" hard banners — are not the HUD analyzer's
+  # output and stay out of the false-positive counter.
+  printf '%s' "$body_text" | grep -Eq '^- severity: critical$' || return 0
+  # BSD sed (macOS) does not understand `\+`; use ERE so the regex is portable
+  # across macOS and Linux.
+  matched_pattern="$(printf '%s' "$body_text" | sed -nE 's/^- matched_pattern: (hud:context_pct=[0-9]+)$/\1/p' | head -n1)"
+  [[ -n "$matched_pattern" ]] || return 0
+
+  if [[ -n "$note" ]]; then
+    note_text="$note"
+  elif [[ -n "$note_file" && -f "$note_file" ]]; then
+    note_text="$(cat "$note_file" 2>/dev/null || true)"
+  fi
+  [[ -n "$note_text" ]] || return 0
+
+  note_excerpt="$(NOTE="$note_text" python3 - <<'PY'
+import os
+import re
+import sys
+
+note = os.environ.get("NOTE", "")
+if not note:
+    sys.exit(1)
+fp_phrase = re.search(r"false[-\s]?positive", note, re.IGNORECASE)
+hud_claim = re.search(
+    r"\b(?:actual|hud says|hud shows|actual hud|hud reports)\b[^0-9]*\b(?:[0-9]|[1-7][0-9]|8[0-4])\s*%",
+    note,
+    re.IGNORECASE,
+)
+if not (fp_phrase or hud_claim):
+    sys.exit(1)
+print(note[:200])
+PY
+)" || return 0
+  [[ -n "$note_excerpt" ]] || return 0
+
+  # `agent` is duplicated as a detail key (in addition to the audit row's
+  # `target` field) so FP-rate aggregators that filter purely on detail
+  # fields don't have to special-case the target column. (#338 Track C
+  # r1 codex review flagged this absence.)
+  bridge_audit_log daemon context_pressure_false_positive "$impacted_agent" \
+    --detail agent="$impacted_agent" \
+    --detail task_id="$task_id" \
+    --detail severity=critical \
+    --detail matched_pattern="$matched_pattern" \
+    --detail done_note_excerpt="$note_excerpt" \
+    >/dev/null 2>&1 || true
+}
+
 ack_crash_loop_task_if_needed() {
   local task_id="$1"
   local task_shell=""
@@ -388,6 +482,7 @@ cmd_done() {
     args+=(--note-file "$note_file")
   fi
   bridge_queue_cli "${args[@]}"
+  emit_context_pressure_false_positive_if_match "$task_id" "$note" "$note_file"
   ack_crash_loop_task_if_needed "$task_id"
   notify_task_requester "$task_id" "$agent" "$note" "$note_file"
 }

@@ -65,6 +65,7 @@ render_once() {
     --roster-snapshot "$roster_snapshot"
     --db "$BRIDGE_TASK_DB"
     --daemon-pid-file "$BRIDGE_DAEMON_PID_FILE"
+    --audit-log "$BRIDGE_AUDIT_LOG"
     --version "$(bridge_version)"
     --open-limit "$OPEN_LIMIT"
     --stale-warn-seconds "$BRIDGE_HEALTH_WARN_SECONDS"
