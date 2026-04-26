@@ -6831,6 +6831,128 @@ log "bridge_check_memory_pressure bash helper handles probe failure as healthy"
   esac
 "
 
+log "native-finalize-run treats deferred state as +deferred_seconds reschedule, not error (#263 Track B)"
+# Regression guard for PR #330 round-1 finding 5: the runner writes
+# state="deferred" and deferred_seconds into status.json, but finalize used
+# to collapse anything non-success into the error branch — clearing
+# nextRunAtMs and incrementing consecutiveErrors. Build a minimal jobs.json
+# + status.json + request.json fixture and verify finalize bumps
+# nextRunAtMs forward by ≥895s and leaves the error counter alone.
+CRON_DEFERRED_DIR="$TMP_ROOT/cron-deferred-finalize"
+CRON_DEFERRED_RUN_DIR="$CRON_DEFERRED_DIR/run"
+CRON_DEFERRED_JOBS_FILE="$CRON_DEFERRED_DIR/jobs.json"
+CRON_DEFERRED_REQUEST_FILE="$CRON_DEFERRED_RUN_DIR/request.json"
+CRON_DEFERRED_RESULT_FILE="$CRON_DEFERRED_RUN_DIR/result.json"
+CRON_DEFERRED_STATUS_FILE="$CRON_DEFERRED_RUN_DIR/status.json"
+mkdir -p "$CRON_DEFERRED_RUN_DIR"
+
+CRON_DEFERRED_JOBS_FILE="$CRON_DEFERRED_JOBS_FILE" \
+CRON_DEFERRED_REQUEST_FILE="$CRON_DEFERRED_REQUEST_FILE" \
+CRON_DEFERRED_RESULT_FILE="$CRON_DEFERRED_RESULT_FILE" \
+CRON_DEFERRED_STATUS_FILE="$CRON_DEFERRED_STATUS_FILE" \
+python3 - <<'PY'
+import json, os
+from pathlib import Path
+
+jobs_file = Path(os.environ["CRON_DEFERRED_JOBS_FILE"])
+request_file = Path(os.environ["CRON_DEFERRED_REQUEST_FILE"])
+result_file = Path(os.environ["CRON_DEFERRED_RESULT_FILE"])
+status_file = Path(os.environ["CRON_DEFERRED_STATUS_FILE"])
+
+jobs_file.write_text(json.dumps({
+    "format": "agent-bridge-cron-v1",
+    "updatedAt": "2026-04-26T00:00:00+00:00",
+    "jobs": [
+        {
+            "id": "deferred-smoke-job",
+            "name": "deferred-smoke",
+            "agentId": "tester",
+            "enabled": True,
+            "schedule": {"kind": "cron", "expr": "*/5 * * * *", "tz": "UTC"},
+            "payload": {"kind": "text", "text": "ping"},
+            "state": {
+                "consecutiveErrors": 0,
+                "lastStatus": "ok",
+                "nextRunAtMs": 0,
+            },
+        }
+    ],
+}, indent=2) + "\n", encoding="utf-8")
+
+# Runner-style status.json from a pressure-defer run.
+status_file.write_text(json.dumps({
+    "run_id": "deferred-smoke-run",
+    "state": "deferred",
+    "engine": "claude",
+    "deferred_reason": "memory_pressure",
+    "deferred_seconds": 900,
+    "memory_probe": {"reason": "memory_pressure", "metric": "swap_pct", "value": 92, "limit": 80},
+}, indent=2) + "\n", encoding="utf-8")
+
+# Empty result is fine; deferred runs do not produce a result payload.
+result_file.write_text("{}\n", encoding="utf-8")
+
+request_file.write_text(json.dumps({
+    "run_id": "deferred-smoke-run",
+    "job_id": "deferred-smoke-job",
+    "source_file": str(jobs_file.resolve()),
+    "result_file": str(result_file.resolve()),
+    "status_file": str(status_file.resolve()),
+}, indent=2) + "\n", encoding="utf-8")
+PY
+
+CRON_DEFERRED_BEFORE_MS="$(python3 -c 'import time; print(int(time.time()*1000))')"
+python3 "$REPO_ROOT/bridge-cron.py" native-finalize-run \
+    --jobs-file "$CRON_DEFERRED_JOBS_FILE" \
+    --request-file "$CRON_DEFERRED_REQUEST_FILE" \
+    --json >"$CRON_DEFERRED_DIR/finalize-output.json"
+
+CRON_DEFERRED_JOBS_FILE="$CRON_DEFERRED_JOBS_FILE" \
+CRON_DEFERRED_BEFORE_MS="$CRON_DEFERRED_BEFORE_MS" \
+python3 - <<'PY'
+import json, os, sys
+
+jobs_file = os.environ["CRON_DEFERRED_JOBS_FILE"]
+before_ms = int(os.environ["CRON_DEFERRED_BEFORE_MS"])
+
+payload = json.loads(open(jobs_file, encoding="utf-8").read())
+job = next(j for j in payload["jobs"] if j["id"] == "deferred-smoke-job")
+state = job.get("state") or {}
+
+next_run_at_ms = int(state.get("nextRunAtMs") or 0)
+last_status = state.get("lastStatus")
+last_run_status = state.get("lastRunStatus")
+consecutive_errors = int(state.get("consecutiveErrors") or 0)
+last_error = state.get("lastError")
+last_error_at_ms = state.get("lastErrorAtMs")
+
+# nextRunAtMs must be bumped by at least 895_000 ms past finalize-call time
+# (deferred_seconds=900, allowing 5s slack for execution overhead).
+expected_min = before_ms + 895_000
+assert next_run_at_ms >= expected_min, (
+    f"deferred finalize did not bump nextRunAtMs by +15min "
+    f"(before_ms={before_ms}, nextRunAtMs={next_run_at_ms}, expected ≥ {expected_min})"
+)
+
+# Error counter MUST NOT advance for a deferred run.
+assert consecutive_errors == 0, (
+    f"deferred finalize incorrectly incremented consecutiveErrors "
+    f"(expected 0, got {consecutive_errors})"
+)
+assert last_error is None, f"deferred finalize wrote lastError={last_error!r}"
+assert last_error_at_ms is None, f"deferred finalize wrote lastErrorAtMs={last_error_at_ms!r}"
+
+# lastStatus / lastRunStatus must reflect the deferred branch so dashboards
+# and errors-report do not flag the job.
+assert last_status == "deferred", f"expected lastStatus=deferred, got {last_status!r}"
+assert last_run_status == "deferred", f"expected lastRunStatus=deferred, got {last_run_status!r}"
+
+# Job must remain enabled so the scheduler re-fires the next slot.
+assert job.get("enabled") is True, f"deferred finalize disabled the job: {job!r}"
+
+print("native-finalize-run deferred branch OK")
+PY
+
 log "rendering typed channel relay blocks into cron follow-up bodies"
 CRON_RELAY_RUN_ID="relay-smoke--2026-04-16T13-20"
 CRON_RELAY_RUN_DIR="$BRIDGE_CRON_STATE_DIR/runs/$CRON_RELAY_RUN_ID"

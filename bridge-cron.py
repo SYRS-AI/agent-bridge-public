@@ -237,7 +237,9 @@ def agent_matches(agent_id, expected):
 
 
 def is_error_record(record):
-    return record["consecutive_errors"] > 0 or record["last_status"] not in ("-", "ok", "success")
+    # "deferred" is a deliberate skip (e.g. #263 Track B pre-flight memory
+    # guard). It is not a failure; the next scheduler tick re-fires the slot.
+    return record["consecutive_errors"] > 0 or record["last_status"] not in ("-", "ok", "success", "deferred")
 
 
 def build_job_record(job):
@@ -1083,7 +1085,18 @@ def run_native_finalize(args):
     run_state = str(status.get("state") or "")
     result_status = str(result.get("status") or "")
     now_ms_value = now_epoch_ms()
-    final_status = "success" if run_state == "success" and result_status != "error" else "error"
+    # Three terminal run states feed finalize:
+    #   * "success"  — engine ran and produced a non-error result.
+    #   * "deferred" — runner short-circuited (e.g. #263 Track B pre-flight
+    #                  memory guard). NOT a failure; the slot must re-fire and
+    #                  the consecutive-error counter must NOT advance.
+    #   * anything else (incl. "error") — treated as failure.
+    if run_state == "deferred":
+        final_status = "deferred"
+    elif run_state == "success" and result_status != "error":
+        final_status = "success"
+    else:
+        final_status = "error"
     duration_ms = result.get("duration_ms")
     try:
         duration_ms = int(duration_ms) if duration_ms not in (None, "") else None
@@ -1093,15 +1106,32 @@ def run_native_finalize(args):
     job_state["lastRunAtMs"] = now_ms_value
     job_state["lastStatus"] = final_status
     job_state["lastRunStatus"] = final_status
-    job_state["nextRunAtMs"] = 0
     if duration_ms is not None:
         job_state["lastDurationMs"] = duration_ms
 
     if final_status == "success":
+        job_state["nextRunAtMs"] = 0
         job_state["consecutiveErrors"] = 0
         job_state.pop("lastErrorAtMs", None)
         job_state.pop("lastError", None)
+    elif final_status == "deferred":
+        # #263 Track B: the runner asked us to defer this slot for
+        # `deferred_seconds`. Push nextRunAtMs forward by that window so
+        # operators reading the dashboard see the actual re-fire time, and
+        # leave the consecutive-error counter / lastError fields untouched.
+        try:
+            deferred_seconds = int(status.get("deferred_seconds") or 0)
+        except (TypeError, ValueError):
+            deferred_seconds = 0
+        if deferred_seconds <= 0:
+            deferred_seconds = 900  # mirror PRESSURE_DEFER_SECONDS default
+        job_state["nextRunAtMs"] = now_ms_value + (deferred_seconds * 1000)
+        job_state["lastDeferredAtMs"] = now_ms_value
+        deferred_reason = str(status.get("deferred_reason") or "").strip()
+        if deferred_reason:
+            job_state["lastDeferredReason"] = deferred_reason
     else:
+        job_state["nextRunAtMs"] = 0
         try:
             previous_errors = int(job_state.get("consecutiveErrors") or 0)
         except (TypeError, ValueError):
@@ -1117,7 +1147,13 @@ def run_native_finalize(args):
 
     action = "updated"
     if schedule.get("kind") == "at":
-        if job.get("deleteAfterRun") is True:
+        if final_status == "deferred":
+            # One-shot "at" runs that deferred must stay enabled and pending so
+            # the next scheduler pass re-fires the slot.
+            job["state"] = job_state
+            job["updatedAtMs"] = now_ms_value
+            jobs[job_index] = job
+        elif job.get("deleteAfterRun") is True:
             del jobs[job_index]
             action = "deleted"
         else:
