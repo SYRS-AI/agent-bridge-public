@@ -27,7 +27,7 @@ agent-bridge wave close-issue <issue> [--wave <wave-id>]   # see §12
 
 `dispatch` should create a wave id, write one durable brief per member under `shared/waves/<wave-id>/<member-id>/brief.md`, start or reuse one worker per independent track, and create a queue task assigned to each worker. Do not use direct urgent sends for normal dispatch. Worker agent ids should be deterministic enough to inspect and unique enough to avoid collisions, for example `wave-276-A-4f3a`, with the full metadata stored in `state/waves/<wave-id>.json`. If the operator supplies a prewritten brief instead of a GitHub issue, the plugin should treat it as the source of truth and skip issue parsing.
 
-The plugin should decide "one worker or many" in this order: explicit `--tracks`; track headings found in the issue body; otherwise one worker. When multiple tracks are found, `dispatch --dry-run` should show expected file surfaces and a proposed parallelization plan. The default wave size should be 2-4 members. Tracks with overlapping same-function write surfaces should be serialized by creating later members in `pending` state rather than dispatching them immediately.
+The plugin should decide "one worker or many" by explicit `--tracks` list only. Without `--tracks`, dispatch creates a single worker covering the whole brief. The plugin does **not** parse issue body for track headings (per §2 operator decision). When multiple tracks are listed, `dispatch --dry-run` should show expected file surfaces per track and a proposed parallelization plan. The default wave size should be 2-4 members. Tracks with overlapping same-function write surfaces should be serialized by creating later members in `pending` state rather than dispatching them immediately.
 
 Trade-offs: a rich CLI with list/show/watch adds implementation work, but it prevents wave state from living only in transcripts. Inferring tracks from issue text saves time but can be wrong; explicit `--tracks` plus `--dry-run` keeps the operator in control when scope is ambiguous.
 
@@ -179,9 +179,9 @@ Trade-offs: state files plus audit rows duplicate some information, but they ser
 3. **On validation pass**: `gh issue close <N>` with a structured body summarizing the merged PRs, audit row `wave_close_invoked`.
 4. **On validation fail**: do **not** close. Emit audit row `wave_close_blocked` with the failed reasons. Escalate to the main agent's own surface (TUI or notify-target — never admin's queue, per #345 contract). Body: "Issue #N close blocked: <reason>. Open tracks: <list>. Run `agent-bridge wave close-issue <N>` again after addressing."
 
-Manual operator override: `--force` skips validation but writes `wave_close_invoked detail=force=1` audit row. Used only when validation logic itself is wrong (e.g., a track was implemented out-of-band as a single PR not tagged as a wave member).
+Manual operator override: `--force` is reserved for the human operator only — the main agent **never** passes `--force`. When the operator (Sean) personally invokes `agent-bridge wave close-issue <N> --force`, validation is skipped and the audit row records `wave_close_invoked detail=force=operator-override`. Used only when validation logic itself is wrong (e.g., a track was implemented out-of-band as a single PR not tagged as a wave member). The agent-side automatic path always validates.
 
-**Operator decision (2026-04-26)**: **main agent invokes `wave close-issue` automatically once all wave members merge**. Validation runs every time. On validation failure, the plugin escalates to the main agent's own operator-attached surface (TUI for dynamic main, notify-target for static main) and does not close the issue. The main agent's role here is consistent with #304/#345: admin/coordinator queue is not the escalation target; the originating surface is.
+**Operator decision (2026-04-26)**: **main agent invokes `wave close-issue` automatically once all wave members merge**. The agent-driven path always runs validation — `--force` is reserved for human-operator invocation only and is never passed by the agent. On validation failure, the plugin escalates to the main agent's own operator-attached surface (TUI for dynamic main, notify-target for static main) and does not close the issue. The main agent's role here is consistent with #304/#345: admin/coordinator queue is not the escalation target; the originating surface is.
 
 ## 12. Open questions resolved
 
@@ -193,13 +193,13 @@ All eleven open questions from the original design draft have been resolved by t
 | 2 | Track inference | Explicit `--tracks` only; no auto-parse (§2) |
 | 3 | Worker default engine | Claude calling Codex CLI (§7) |
 | 4 | Codex unavailable behavior | Fallback to bridge review task (§9) |
-| 5 | PR mode | Normal PR; draft only when Codex review needs-more (§4, §5) |
+| 5 | PR mode | Normal PR by default; draft when Codex review `needs-more` (§4); operator may always force via `--pr-mode draft` (§5) |
 | 6 | Worktree cleanup TTL | 7 days for failed/blocked; immediate on merge success (§3) |
 | 7 | `--main-agent` requirement | Inferred from `BRIDGE_AGENT_ID`; explicit flag overrides (§6) |
 | 8 | Policy location | Both global and repo-local; repo-local precedence (§7) |
 | 9 | Skill migration | Automatic via `agent-bridge upgrade` (§8) |
 | 10 | Wave state visibility | JSON + README mirror (§10) |
-| 11 | Issue close discipline | Main agent automatic via `wave close-issue` with validation; escalate on validation failure (§11) |
+| 11 | Issue close discipline | Agent-driven `wave close-issue` always validates; `--force` is operator-only override (§11); on validation fail, escalate to main agent's surface |
 
 These decisions inform the Phase 1 implementation scope: CLI surface (§2), worktree integration (§3), Codex adapter (§4), PR automation with close-keyword guard (§5), main-agent feedback loop (§6), policy file loading (§7), skill migration on upgrade (§8), Codex fallback path (§9), JSON+README state (§10), and `wave close-issue` validation flow (§11).
 
