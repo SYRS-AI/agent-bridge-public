@@ -6637,6 +6637,200 @@ finally:
 print("disable_mcp wire-through OK")
 PY
 
+log "pre-flight memory guard defers cron dispatch on pressured hosts (#263 Track B)"
+# Mock check_memory_pressure to return a pressured probe and assert that
+# cmd_run skips the engine spawn, writes a deferred status, and surfaces the
+# probe metadata. Then mock the probe to clear and confirm the engine spawn
+# path executes normally.
+CRON_PREFLIGHT_RUN_DIR="$TMP_ROOT/cron-preflight-run"
+mkdir -p "$CRON_PREFLIGHT_RUN_DIR"
+CRON_PREFLIGHT_REQUEST_FILE="$CRON_PREFLIGHT_RUN_DIR/request.json"
+python3 - "$CRON_PREFLIGHT_REQUEST_FILE" "$CRON_PREFLIGHT_RUN_DIR" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+request_path = Path(sys.argv[1])
+run_dir = Path(sys.argv[2])
+request_path.write_text(
+    json.dumps(
+        {
+            "run_id": "preflight-smoke",
+            "job_name": "preflight-smoke-job",
+            "family": "preflight-smoke",
+            "slot": "2026-04-26T00:00",
+            "target_agent": "tester",
+            "target_engine": "claude",
+            "target_workdir": str(run_dir),
+            "target_channels": "",
+            "allow_channel_delivery": False,
+            "disposable_needs_channels": False,
+            "payload_file": str(run_dir / "payload.txt"),
+            "result_file": str(run_dir / "result.json"),
+            "status_file": str(run_dir / "status.json"),
+            "stdout_log": str(run_dir / "stdout.log"),
+            "stderr_log": str(run_dir / "stderr.log"),
+        },
+        ensure_ascii=True,
+        indent=2,
+    )
+    + "\n",
+    encoding="utf-8",
+)
+(run_dir / "payload.txt").write_text("ping\n", encoding="utf-8")
+PY
+
+CRON_PREFLIGHT_REQUEST_FILE="$CRON_PREFLIGHT_REQUEST_FILE" \
+CRON_PREFLIGHT_RUN_DIR="$CRON_PREFLIGHT_RUN_DIR" \
+python3 - <<'PY'
+import argparse
+import importlib.util
+import json
+import os
+import subprocess
+from pathlib import Path
+
+path = Path("bridge-cron-runner.py").resolve()
+spec = importlib.util.spec_from_file_location("bridge_cron_runner", path)
+module = importlib.util.module_from_spec(spec)
+assert spec.loader is not None
+spec.loader.exec_module(module)
+
+request_file = os.environ["CRON_PREFLIGHT_REQUEST_FILE"]
+run_dir = Path(os.environ["CRON_PREFLIGHT_RUN_DIR"])
+status_file = run_dir / "status.json"
+
+# --- Pressured path -----------------------------------------------------
+spawn_calls = []
+real_run = subprocess.run
+
+def fake_run(cmd, **kw):
+    spawn_calls.append(list(cmd))
+    return subprocess.CompletedProcess(cmd, 0, "{}", "")
+
+pressure_probe = {
+    "reason": "memory_pressure",
+    "kind": "darwin",
+    "metric": "swap_pct",
+    "value": 92,
+    "limit": 80,
+    "swap_used_mb": 3700,
+    "swap_total_mb": 4096,
+}
+module.check_memory_pressure = lambda: dict(pressure_probe)
+audit_calls = []
+notify_calls = []
+module.emit_pressure_audit = lambda run_id, target, probe: audit_calls.append((run_id, target, dict(probe)))
+module.notify_admin_pressure_defer = lambda run_id, job, probe: notify_calls.append((run_id, job, dict(probe)))
+subprocess.run = fake_run
+try:
+    args = argparse.Namespace(request_file=request_file, dry_run=False)
+    rc = module.cmd_run(args)
+finally:
+    subprocess.run = real_run
+
+assert rc == 0, f"deferred cmd_run should return 0, got {rc}"
+status = json.loads(status_file.read_text(encoding="utf-8"))
+assert status.get("state") == "deferred", f"expected deferred state, got {status!r}"
+assert status.get("deferred_reason") == "memory_pressure", status
+assert status.get("deferred_seconds") == module.PRESSURE_DEFER_SECONDS, status
+assert status.get("memory_probe", {}).get("metric") == "swap_pct", status
+assert status.get("memory_probe", {}).get("value") == 92, status
+# No engine spawn should have happened on the pressured path.
+spawn_bins = [cmd[0] for cmd in spawn_calls if cmd]
+assert not any("claude" in os.path.basename(b) for b in spawn_bins), (
+    f"expected no Claude spawn on pressured host, got {spawn_calls!r}"
+)
+assert not any("codex" in os.path.basename(b) for b in spawn_bins), (
+    f"expected no Codex spawn on pressured host, got {spawn_calls!r}"
+)
+assert audit_calls, "expected emit_pressure_audit to be called"
+assert audit_calls[0][2]["reason"] == "memory_pressure"
+assert notify_calls, "expected notify_admin_pressure_defer to be called"
+
+# Reset for the healthy-path probe.
+status_file.unlink(missing_ok=True)
+
+# --- Healthy path -------------------------------------------------------
+# Probe returns None → cmd_run continues into the engine spawn. Stub the
+# Claude binary spawn so we don't need a real CLI on PATH.
+module.check_memory_pressure = lambda: None
+module.resolve_binary = lambda name, env_var: f"/fake/{name}"
+
+healthy_spawn_calls = []
+healthy_completed_payload = json.dumps(
+    {
+        "structured_output": {
+            "status": "completed",
+            "summary": "ok",
+            "findings": [],
+            "actions_taken": [],
+            "needs_human_followup": False,
+            "recommended_next_steps": [],
+            "artifacts": [],
+            "confidence": "high",
+        }
+    },
+    ensure_ascii=True,
+)
+
+def healthy_fake_run(cmd, **kw):
+    healthy_spawn_calls.append(list(cmd))
+    return subprocess.CompletedProcess(cmd, 0, healthy_completed_payload, "")
+
+subprocess.run = healthy_fake_run
+try:
+    args = argparse.Namespace(request_file=request_file, dry_run=False)
+    rc = module.cmd_run(args)
+finally:
+    subprocess.run = real_run
+
+assert rc == 0, f"healthy cmd_run should return 0 on success, got {rc}"
+final_status = json.loads(status_file.read_text(encoding="utf-8"))
+assert final_status.get("state") == "success", f"expected success state on healthy host, got {final_status!r}"
+assert healthy_spawn_calls, "expected the healthy path to spawn the engine"
+assert any("claude" in os.path.basename(cmd[0]) for cmd in healthy_spawn_calls), (
+    f"expected Claude spawn on healthy path, got {healthy_spawn_calls!r}"
+)
+
+# --- Probe knob handling ------------------------------------------------
+# Default Darwin limit is 80, default Linux threshold is 512MB. Confirm
+# the env knobs are honoured.
+os.environ["BRIDGE_CRON_SWAP_PCT_LIMIT"] = "55"
+assert module._swap_pct_limit() == 55
+os.environ["BRIDGE_CRON_SWAP_PCT_LIMIT"] = "not-a-number"
+assert module._swap_pct_limit() == module.DEFAULT_SWAP_PCT_LIMIT
+del os.environ["BRIDGE_CRON_SWAP_PCT_LIMIT"]
+assert module._swap_pct_limit() == module.DEFAULT_SWAP_PCT_LIMIT
+
+os.environ["BRIDGE_CRON_MIN_AVAIL_MB"] = "1024"
+assert module._min_avail_mb() == 1024
+os.environ["BRIDGE_CRON_MIN_AVAIL_MB"] = "garbage"
+assert module._min_avail_mb() == module.DEFAULT_MIN_AVAIL_MB
+del os.environ["BRIDGE_CRON_MIN_AVAIL_MB"]
+assert module._min_avail_mb() == module.DEFAULT_MIN_AVAIL_MB
+
+print("pre-flight memory guard OK")
+PY
+
+log "bridge_check_memory_pressure bash helper handles probe failure as healthy"
+"$BASH4_BIN" -lc "
+  set -euo pipefail
+  source \"$REPO_ROOT/bridge-lib.sh\"
+  # Probe runs cleanly on the smoke host. Whatever the local memory state
+  # is, the helper must terminate without erroring; on a non-pressured
+  # smoke host it should return 0.
+  if bridge_check_memory_pressure; then
+    rc=0
+  else
+    rc=\$?
+  fi
+  case \"\$rc\" in
+    0|1) ;;
+    *) echo \"unexpected return code from bridge_check_memory_pressure: \$rc\" >&2; exit 1 ;;
+  esac
+"
+
 log "rendering typed channel relay blocks into cron follow-up bodies"
 CRON_RELAY_RUN_ID="relay-smoke--2026-04-16T13-20"
 CRON_RELAY_RUN_DIR="$BRIDGE_CRON_STATE_DIR/runs/$CRON_RELAY_RUN_ID"
