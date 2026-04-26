@@ -3250,21 +3250,165 @@ def _build_result_payload(
     }
 
 
+def _parse_harvest_date_arg(value: str) -> "datetime":
+    """Parse a YYYY-MM-DD argument used by harvest-daily flags.
+
+    Returns a naive ``datetime`` at midnight (callers compare via .date()).
+    Raises ValueError on malformed input — caller surfaces via stderr.
+    """
+    return datetime.strptime(value, "%Y-%m-%d")
+
+
 def cmd_harvest_daily(args: argparse.Namespace) -> int:
-    """Detection-only daily note harvester (issue #216)."""
+    """Detection-only daily note harvester (issue #216).
+
+    Single-date dispatcher (`--date` or default). When ``--from`` is supplied,
+    iterates over a date range, optionally skipping dates that already have a
+    sidecar harvest manifest via ``--missing-only``, and emits an aggregate
+    ``{"results": [...]}`` JSON to stdout. The single-date stdout shape is
+    unchanged. ``--missing-only`` also applies to the single-date path: when
+    the manifest already exists for the target date, exit 0 with a stderr line
+    and no harvest run.
+    """
     agent = args.agent
-    home = Path(args.home).expanduser()
     workdir = args.workdir
     tz_name = args.tz or "Asia/Seoul"
-    date = args.date or _harvest_default_date(tz_name)
-    state_dir = _harvest_state_dir(args)
-    db_path = _harvest_task_db(args)
-    now_iso = _harvest_now_iso(tz_name)
-    run_id = os.environ.get("CRON_RUN_ID", "")
 
     if not workdir:
         sys.stderr.write("harvest-daily: --workdir is required (no fallback)\n")
         return 2
+
+    date_from = getattr(args, "date_from", None)
+    date_to = getattr(args, "date_to", None)
+    missing_only = bool(getattr(args, "missing_only", False))
+    state_dir = _harvest_state_dir(args)
+
+    # --- Range-mode validation + dispatch ----------------------------------
+    if date_to and not date_from:
+        sys.stderr.write("harvest-daily: --to requires --from\n")
+        return 2
+
+    if date_from:
+        try:
+            from_dt = _parse_harvest_date_arg(date_from)
+        except ValueError:
+            sys.stderr.write(f"harvest-daily: --from {date_from!r} is not YYYY-MM-DD\n")
+            return 2
+        today_dt = datetime.strptime(_today_date_str(tz_name), "%Y-%m-%d")
+        if date_to:
+            try:
+                to_dt = _parse_harvest_date_arg(date_to)
+            except ValueError:
+                sys.stderr.write(f"harvest-daily: --to {date_to!r} is not YYYY-MM-DD\n")
+                return 2
+        else:
+            to_dt = today_dt
+        if from_dt > to_dt:
+            sys.stderr.write(
+                f"harvest-daily: --from {from_dt.date().isoformat()} is later than "
+                f"--to {to_dt.date().isoformat()}\n"
+            )
+            return 2
+        if to_dt > today_dt:
+            sys.stderr.write(
+                f"harvest-daily: --to {to_dt.date().isoformat()} is in the future "
+                f"(today={today_dt.date().isoformat()} tz={tz_name})\n"
+            )
+            return 2
+        span = (to_dt - from_dt).days + 1
+        target_dates = [
+            (from_dt + timedelta(days=i)).date().isoformat() for i in range(span)
+        ]
+        results: list[dict] = []
+        rc_max = 0
+        ok_count = 0
+        fail_count = 0
+        skipped_count = 0
+        for tdate in target_dates:
+            if missing_only and _manifest_path(state_dir, agent, tdate).exists():
+                # Sidecar manifest is the SSOT for "this date has been
+                # harvested" — Lane B reads the same path. Manual-note-without-
+                # manifest dates must still be harvested.
+                results.append({
+                    "date": tdate,
+                    "skipped": "exists",
+                })
+                skipped_count += 1
+                continue
+            try:
+                payload = _harvest_one_date(args, tdate)
+            except Exception as exc:  # noqa: BLE001 — per-date isolation
+                sys.stderr.write(
+                    f"[bridge-memory] harvest-daily date={tdate} failed: {exc}\n"
+                )
+                results.append({
+                    "date": tdate,
+                    "error": f"{type(exc).__name__}: {exc}",
+                })
+                rc_max = max(rc_max, 1)
+                fail_count += 1
+                continue
+            results.append({"date": tdate, "result": payload})
+            ok_count += 1
+        sys.stderr.write(
+            f"[bridge-memory] harvest-daily range complete: "
+            f"{ok_count + fail_count + skipped_count} dates, "
+            f"{ok_count} succeeded, {fail_count} failed, "
+            f"{skipped_count} skipped\n"
+        )
+        aggregate = {
+            "schema": "memory-daily-harvest-range-v1",
+            "agent": agent,
+            "from": from_dt.date().isoformat(),
+            "to": to_dt.date().isoformat(),
+            "missing_only": missing_only,
+            "count": len(results),
+            "results": results,
+        }
+        sidecar_out = getattr(args, "sidecar_out", None)
+        if sidecar_out:
+            try:
+                _atomic_write_json(Path(sidecar_out).expanduser(), aggregate)
+            except OSError as exc:
+                sys.stderr.write(f"harvest-daily: sidecar write failed: {exc}\n")
+                return 2
+        try:
+            print(json.dumps(aggregate, ensure_ascii=True))
+        except OSError:
+            pass
+        return rc_max
+
+    # --- Single-date path --------------------------------------------------
+    # `--missing-only` is propagated here too (Option A — symmetric semantics
+    # with the range path). When the manifest already exists, skip the harvest
+    # run and exit 0 with a stderr breadcrumb. This lets operators run
+    # `harvest-daily --date YYYY-MM-DD --missing-only` opportunistically.
+    single_date = args.date or _harvest_default_date(tz_name)
+    if missing_only and _manifest_path(state_dir, agent, single_date).exists():
+        sys.stderr.write(
+            f"[bridge-memory] harvest-daily date={single_date} already harvested "
+            f"(manifest exists); --missing-only skip\n"
+        )
+        return 0
+    payload = _harvest_one_date(args, single_date)
+    return _emit_result(args, payload)
+
+
+def _today_date_str(tz_name: str) -> str:
+    zone = _harvest_tz_zone(tz_name)
+    return datetime.now(zone).date().isoformat()
+
+
+def _harvest_one_date(args: argparse.Namespace, date: str) -> dict:
+    """Per-date harvest body. Returns the RESULT_SCHEMA payload (no emit)."""
+    agent = args.agent
+    home = Path(args.home).expanduser()
+    workdir = args.workdir
+    tz_name = args.tz or "Asia/Seoul"
+    state_dir = _harvest_state_dir(args)
+    db_path = _harvest_task_db(args)
+    now_iso = _harvest_now_iso(tz_name)
+    run_id = os.environ.get("CRON_RUN_ID", "")
 
     # --- Skipped-permission branch -----------------------------------------
     # Stub detected linux-user isolation but could not assume the target OS
@@ -3343,7 +3487,7 @@ def cmd_harvest_daily(args: argparse.Namespace) -> int:
             ],
             confidence="high",
         )
-        return _emit_result(args, payload)
+        return payload
 
     # --- Gate check ---------------------------------------------------------
     if args.disabled_gate or _gate_disabled(agent):
@@ -3390,7 +3534,7 @@ def cmd_harvest_daily(args: argparse.Namespace) -> int:
             recommended_next_steps=[],
             confidence="high",
         )
-        return _emit_result(args, payload)
+        return payload
 
     # --- Probe canonical + legacy ------------------------------------------
     daily_note = _probe_daily_note(home, date)
@@ -3593,7 +3737,7 @@ def cmd_harvest_daily(args: argparse.Namespace) -> int:
         ),
         confidence=confidence,
     )
-    return _emit_result(args, payload)
+    return payload
 
 
 def _emit_result(args: argparse.Namespace, payload: dict) -> int:
@@ -3839,7 +3983,26 @@ def build_parser() -> argparse.ArgumentParser:
     hd_parser.add_argument("--agent", required=True)
     hd_parser.add_argument("--home", required=True, help="agent profile home root")
     hd_parser.add_argument("--workdir", required=True, help="agent workdir (no fallback)")
-    hd_parser.add_argument("--date", help="YYYY-MM-DD; defaults to yesterday in --tz")
+    hd_date_group = hd_parser.add_mutually_exclusive_group()
+    hd_date_group.add_argument(
+        "--date", help="YYYY-MM-DD; defaults to yesterday in --tz",
+    )
+    hd_date_group.add_argument(
+        "--from", dest="date_from", default=None,
+        help="Start date YYYY-MM-DD (inclusive); pair with --to. Mutually exclusive with --date.",
+    )
+    hd_parser.add_argument(
+        "--to", dest="date_to", default=None,
+        help="End date YYYY-MM-DD (inclusive); requires --from. Defaults to today in --tz.",
+    )
+    hd_parser.add_argument(
+        "--missing-only", dest="missing_only", action="store_true", default=False,
+        help=(
+            "Skip dates whose sidecar harvest manifest already exists. "
+            "Applies to both range mode (--from/--to) and single-date mode "
+            "(--date or default)."
+        ),
+    )
     hd_parser.add_argument("--tz", default="Asia/Seoul")
     hd_parser.add_argument("--state-dir", help="override $BRIDGE_STATE_DIR/memory-daily")
     hd_parser.add_argument("--sidecar-out", help="authoritative RESULT_SCHEMA JSON path")

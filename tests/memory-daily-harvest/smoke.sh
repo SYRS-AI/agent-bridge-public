@@ -671,6 +671,258 @@ else
 fi
 
 # =============================================================================
+# scenario R1 — --missing-only skips dates with manifest, harvests dates
+# without manifest even when canonical note exists (Lane B SSOT semantics).
+# =============================================================================
+banner "R1 — --missing-only checks manifest, not canonical note"
+
+r1_dir="$SMOKE_ROOT/r1"
+r1_home="$r1_dir/agents/r1-agent"
+r1_workdir="$r1_dir/workdir"
+r1_state="$r1_dir/bridge-home/state/memory-daily"
+r1_sidecar="$r1_dir/r1.sidecar.json"
+mkdir -p "$r1_home/memory" "$r1_workdir" "$r1_state/r1-agent"
+
+# Two dates inside the range:
+#   D1 (2026-04-20): pre-existing manifest → must be skipped
+#   D2 (2026-04-21): canonical note only, NO manifest → must be harvested
+#                    (this is the regression case the brief calls out)
+r1_d1="2026-04-20"
+r1_d2="2026-04-21"
+r1_d3="2026-04-22"  # nothing — must also be harvested (or no-op'd) but NOT skipped
+
+# Pre-write a manifest for D1.
+cat >"$r1_state/r1-agent/$r1_d1.json" <<EOF
+{"schema":"memory-daily-manifest-v1","agent":"r1-agent","date":"$r1_d1","state":"checked"}
+EOF
+
+# Canonical note (substantial enough to be semantic_nonempty) for D2.
+cat >"$r1_home/memory/$r1_d2.md" <<EOF
+# $r1_d2 — r1-agent
+
+- kickoff: this is a manually-written daily note with no harvester manifest.
+- decision: the harvester must still run because the manifest is the SSOT.
+
+## Work log
+
+Filling out enough body so semantic_nonempty=True, and proving the legacy
+canonical-note-only short-circuit no longer skips this date.
+EOF
+
+BRIDGE_HOME="$r1_dir/bridge-home" \
+"$PYTHON" "$REPO_ROOT/bridge-memory.py" harvest-daily \
+  --agent r1-agent \
+  --home "$r1_home" \
+  --workdir "$r1_workdir" \
+  --from "$r1_d1" --to "$r1_d3" \
+  --tz Asia/Seoul \
+  --missing-only \
+  --state-dir "$r1_state" \
+  --sidecar-out "$r1_sidecar" \
+  >"$r1_dir/stdout" 2>"$r1_dir/stderr"
+rc=$?
+
+# Expected: D1 skipped:exists, D2 has a "result" entry, D3 has a "result" entry.
+r1_d1_skipped="$("$PYTHON" -c '
+import json, sys
+data = json.load(open(sys.argv[1]))
+for r in data.get("results", []):
+    if r.get("date") == sys.argv[2]:
+        print("yes" if r.get("skipped") == "exists" else "no")
+        break
+else:
+    print("missing")
+' "$r1_sidecar" "$r1_d1" 2>/dev/null || echo "err")"
+
+r1_d2_harvested="$("$PYTHON" -c '
+import json, sys
+data = json.load(open(sys.argv[1]))
+for r in data.get("results", []):
+    if r.get("date") == sys.argv[2]:
+        print("yes" if "result" in r else "no")
+        break
+else:
+    print("missing")
+' "$r1_sidecar" "$r1_d2" 2>/dev/null || echo "err")"
+
+r1_d2_manifest_after="$([[ -f "$r1_state/r1-agent/$r1_d2.json" ]] && echo "yes" || echo "no")"
+r1_summary_line="$(grep -c 'harvest-daily range complete' "$r1_dir/stderr" || true)"
+
+if [[ $rc -eq 0 \
+      && "$r1_d1_skipped" == "yes" \
+      && "$r1_d2_harvested" == "yes" \
+      && "$r1_d2_manifest_after" == "yes" \
+      && "$r1_summary_line" -ge 1 ]]; then
+  pass "R1"
+else
+  fail "R1" "rc=$rc d1_skipped=$r1_d1_skipped d2_harvested=$r1_d2_harvested d2_manifest=$r1_d2_manifest_after summary_line=$r1_summary_line"
+fi
+
+# =============================================================================
+# scenario R2 — one bad date in a range does NOT abort the run; rc_max
+# reflects the failure; final summary line lists ok/fail counts.
+# =============================================================================
+banner "R2 — per-date error capture continues the range"
+
+r2_dir="$SMOKE_ROOT/r2"
+r2_home="$r2_dir/agents/r2-agent"
+r2_workdir="$r2_dir/workdir"
+r2_state="$r2_dir/bridge-home/state/memory-daily"
+r2_sidecar="$r2_dir/r2.sidecar.json"
+mkdir -p "$r2_home/memory" "$r2_workdir"
+
+# Wrap bridge-memory.py via a Python shim that monkey-patches
+# `_harvest_one_date` to raise on date == 2026-04-21 only. This proves the
+# range loop catches and continues.
+r2_shim="$r2_dir/shim.py"
+cat >"$r2_shim" <<'PY'
+import importlib.util, runpy, sys, pathlib
+mem_path = pathlib.Path(sys.argv[1])
+spec = importlib.util.spec_from_file_location("bridge_memory", mem_path)
+mod = importlib.util.module_from_spec(spec)
+sys.modules["bridge_memory"] = mod
+spec.loader.exec_module(mod)
+
+orig = mod._harvest_one_date
+def patched(args, date):
+    if date == "2026-04-21":
+        raise RuntimeError(f"synthetic-failure for {date}")
+    return orig(args, date)
+mod._harvest_one_date = patched
+
+# Re-execute argparse dispatch with the rest of argv.
+sys.argv = ["bridge-memory.py", *sys.argv[2:]]
+parser = mod.build_parser()
+ns = parser.parse_args()
+sys.exit(ns.func(ns))
+PY
+
+BRIDGE_HOME="$r2_dir/bridge-home" \
+"$PYTHON" "$r2_shim" "$REPO_ROOT/bridge-memory.py" \
+  harvest-daily \
+  --agent r2-agent \
+  --home "$r2_home" \
+  --workdir "$r2_workdir" \
+  --from 2026-04-20 --to 2026-04-22 \
+  --tz Asia/Seoul \
+  --state-dir "$r2_state" \
+  --sidecar-out "$r2_sidecar" \
+  >"$r2_dir/stdout" 2>"$r2_dir/stderr"
+rc=$?
+
+r2_d1_ok="$("$PYTHON" -c '
+import json, sys
+data = json.load(open(sys.argv[1]))
+for r in data.get("results", []):
+    if r.get("date") == "2026-04-20":
+        print("yes" if "result" in r else "no")
+        break
+else:
+    print("missing")
+' "$r2_sidecar" 2>/dev/null || echo "err")"
+
+r2_d2_failed="$("$PYTHON" -c '
+import json, sys
+data = json.load(open(sys.argv[1]))
+for r in data.get("results", []):
+    if r.get("date") == "2026-04-21":
+        print("yes" if "error" in r and "synthetic-failure" in (r.get("error") or "") else "no")
+        break
+else:
+    print("missing")
+' "$r2_sidecar" 2>/dev/null || echo "err")"
+
+r2_d3_ok="$("$PYTHON" -c '
+import json, sys
+data = json.load(open(sys.argv[1]))
+for r in data.get("results", []):
+    if r.get("date") == "2026-04-22":
+        print("yes" if "result" in r else "no")
+        break
+else:
+    print("missing")
+' "$r2_sidecar" 2>/dev/null || echo "err")"
+
+r2_summary="$(grep -E 'harvest-daily range complete: 3 dates, 2 succeeded, 1 failed' "$r2_dir/stderr" || true)"
+r2_failure_line="$(grep -E 'harvest-daily date=2026-04-21 failed: synthetic-failure' "$r2_dir/stderr" || true)"
+
+if [[ $rc -eq 1 \
+      && "$r2_d1_ok" == "yes" \
+      && "$r2_d2_failed" == "yes" \
+      && "$r2_d3_ok" == "yes" \
+      && -n "$r2_summary" \
+      && -n "$r2_failure_line" ]]; then
+  pass "R2"
+else
+  fail "R2" "rc=$rc d1=$r2_d1_ok d2=$r2_d2_failed d3=$r2_d3_ok summary='${r2_summary:0:80}' failure_line='${r2_failure_line:0:80}'"
+fi
+
+# =============================================================================
+# scenario R3 — single-date --missing-only (Option A): skips when manifest
+# exists, harvests when missing. Symmetric with the range-mode semantics.
+# =============================================================================
+banner "R3 — single-date --missing-only Option A"
+
+r3_dir="$SMOKE_ROOT/r3"
+r3_home="$r3_dir/agents/r3-agent"
+r3_workdir="$r3_dir/workdir"
+r3_state="$r3_dir/bridge-home/state/memory-daily"
+mkdir -p "$r3_home/memory" "$r3_workdir" "$r3_state/r3-agent"
+
+# Pre-existing manifest for the target date.
+r3_d="2026-04-19"
+cat >"$r3_state/r3-agent/$r3_d.json" <<EOF
+{"schema":"memory-daily-manifest-v1","agent":"r3-agent","date":"$r3_d","state":"checked"}
+EOF
+
+# 3a — manifest exists → skip with stderr breadcrumb, exit 0.
+r3a_sidecar="$r3_dir/r3a.sidecar.json"
+BRIDGE_HOME="$r3_dir/bridge-home" \
+"$PYTHON" "$REPO_ROOT/bridge-memory.py" harvest-daily \
+  --agent r3-agent \
+  --home "$r3_home" \
+  --workdir "$r3_workdir" \
+  --date "$r3_d" \
+  --tz Asia/Seoul \
+  --missing-only \
+  --state-dir "$r3_state" \
+  --sidecar-out "$r3a_sidecar" \
+  --json \
+  >"$r3_dir/r3a.stdout" 2>"$r3_dir/r3a.stderr"
+r3a_rc=$?
+
+r3a_breadcrumb="$(grep -E "already harvested .*--missing-only skip" "$r3_dir/r3a.stderr" || true)"
+r3a_sidecar_present="$([[ -f "$r3a_sidecar" ]] && echo "yes" || echo "no")"
+
+# 3b — manifest absent → harvest runs, returns success, writes a manifest.
+r3b_d="2026-04-18"
+r3b_sidecar="$r3_dir/r3b.sidecar.json"
+BRIDGE_HOME="$r3_dir/bridge-home" \
+"$PYTHON" "$REPO_ROOT/bridge-memory.py" harvest-daily \
+  --agent r3-agent \
+  --home "$r3_home" \
+  --workdir "$r3_workdir" \
+  --date "$r3b_d" \
+  --tz Asia/Seoul \
+  --missing-only \
+  --state-dir "$r3_state" \
+  --sidecar-out "$r3b_sidecar" \
+  --json \
+  >"$r3_dir/r3b.stdout" 2>"$r3_dir/r3b.stderr"
+r3b_rc=$?
+r3b_manifest_after="$([[ -f "$r3_state/r3-agent/$r3b_d.json" ]] && echo "yes" || echo "no")"
+
+if [[ $r3a_rc -eq 0 \
+      && -n "$r3a_breadcrumb" \
+      && "$r3a_sidecar_present" == "no" \
+      && $r3b_rc -eq 0 \
+      && "$r3b_manifest_after" == "yes" ]]; then
+  pass "R3"
+else
+  fail "R3" "r3a_rc=$r3a_rc breadcrumb='${r3a_breadcrumb:0:80}' r3a_sidecar=$r3a_sidecar_present r3b_rc=$r3b_rc r3b_manifest=$r3b_manifest_after"
+fi
+
+# =============================================================================
 # Summary
 # =============================================================================
 printf '\n================================\n'
