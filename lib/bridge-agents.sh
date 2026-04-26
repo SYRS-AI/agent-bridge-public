@@ -490,6 +490,16 @@ bridge_linux_can_sudo_to() {
   sudo -n -u "$os_user" -- "$bash_bin" -c 'exit 0' 2>/dev/null
 }
 
+# Internal: non-fatal sudo presence probe. Returns 0 if the helper can
+# safely call bridge_linux_sudo_root, 1 if sudo is absent (so the helper
+# must early-return and the daemon is not killed by bridge_die).
+bridge_linux_have_sudo_or_skip() {
+  if [[ "$(id -u)" == "0" ]]; then
+    return 0
+  fi
+  command -v sudo >/dev/null 2>&1
+}
+
 bridge_agent_preserved_env_vars() {
   # Intentionally conservative: the ENV_PREFIX inlined in the SESSION_CMD
   # re-exports all BRIDGE_* runtime paths inside the bash -c child, so sudo
@@ -753,6 +763,8 @@ bridge_linux_acl_add_default_dirs_recursive() {
 bridge_linux_acl_repair_channel_env_files() {
   local agent="$1"
 
+  bridge_linux_have_sudo_or_skip || return 0
+
   local controller_user
   controller_user="$(bridge_current_user 2>/dev/null || true)"
   [[ -n "$controller_user" ]] || return 0
@@ -812,6 +824,11 @@ bridge_linux_acl_repair_channel_env_files() {
 #   - graceful when getfacl is missing, target is missing, or sudo fails.
 bridge_agent_channel_acl_diagnostics_text() {
   local agent="$1"
+
+  if ! bridge_linux_have_sudo_or_skip; then
+    printf '_ACL diagnostics unavailable: sudo not present_\n'
+    return 0
+  fi
 
   command -v getfacl >/dev/null 2>&1 || {
     printf '_getfacl unavailable; skipping ACL diagnostics_\n'
