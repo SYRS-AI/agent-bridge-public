@@ -71,8 +71,14 @@ const MESSAGES_FILE = join(STATE_DIR, 'messages.jsonl')
 const MS365_CALLBACK_DIR =
   process.env.MS365_CALLBACK_SHARED_DIR ?? join(BRIDGE_HOME, 'shared', 'ms365-callbacks')
 
+// chmod is best-effort; if it fails (e.g. an isolated linux-user UID
+// that owns the file via setfacl-grant but not via inode owner) we must
+// still proceed to load the env file. Splitting the chmod and the read
+// avoids the previous abort-on-chmod-EPERM path.
 try {
   chmodSync(ENV_FILE, 0o600)
+} catch {}
+try {
   const inheritedEnv = new Set(Object.keys(process.env))
   for (const line of readFileSync(ENV_FILE, 'utf8').split('\n')) {
     const m = line.match(/^(\w+)=(.*)$/)
