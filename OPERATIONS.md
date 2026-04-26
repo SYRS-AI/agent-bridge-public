@@ -311,6 +311,28 @@ For the step-by-step operator walkthrough for transitioning an existing
 Linux fleet from shared mode to per-UID isolation one agent at a time,
 see [docs/isolation-migration-guide.md](./docs/isolation-migration-guide.md).
 
+Isolated agents reach peer agents through the queue gateway, not the
+SQLite DB directly. The per-agent scoped env file
+(`<state>/agents/<agent>/agent-env.sh`) carries every static peer's id and
+non-secret metadata (description, engine, session, workdir, isolation
+mode, prompt-guard policy) so client-side validation
+(`bridge_require_agent`, prompt-guard) passes for any registered peer.
+Peer `BRIDGE_AGENT_LAUNCH_CMD` is **never** emitted into the scoped env —
+the array entry is present-but-empty so callers fall through to the
+controller-side path. Direct sqlite access from the isolated UID stays
+blocked by the `BRIDGE_TASK_DB` ACL strip; gateway routing is selected
+explicitly via the `BRIDGE_GATEWAY_PROXY=1` flag the scoped env writer
+emits when `BRIDGE_AGENT_ISOLATION_MODE=linux-user`. See issue
+[#294](https://github.com/SYRS-AI/agent-bridge-public/issues/294).
+
+> **Upgrading from <0.6.13:** the gateway-proxy gate now requires
+> `BRIDGE_GATEWAY_PROXY=1` in the scoped env. Restart isolated agents
+> (`agent-bridge agent stop <agent>` then `agent-bridge agent start
+> <agent> --no-attach`) so the env file is rewritten with the new flag.
+> Sessions started under the old code keep working until restart, but
+> A2A queue tasks from those sessions stop routing through the gateway
+> until they pick up the new env.
+
 ## Release Checklist
 
 Before pushing bridge changes:

@@ -1,0 +1,201 @@
+#!/usr/bin/env bash
+# tests/isolation-peer-routing.sh
+#
+# Regression test for issue #294 — isolated peer A2A through the queue gateway.
+#
+# Verifies (portable, runs on macOS with bash 4+):
+#   1. bridge_write_linux_agent_env_file emits BRIDGE_AGENT_IDS for every
+#      static peer, plus non-secret metadata (description, engine, session,
+#      workdir, isolation_mode, source, prompt_guard policy).
+#   2. The scoped env NEVER contains a peer's BRIDGE_AGENT_LAUNCH_CMD value.
+#      The peer's LAUNCH_CMD entry is present-but-empty so the array shape
+#      stays consistent.
+#   3. The scoped env emits the explicit BRIDGE_GATEWAY_PROXY=1 flag when the
+#      calling agent is in linux-user isolation, and omits it otherwise.
+#   4. bridge_queue_gateway_proxy_agent() returns the calling agent when
+#      BRIDGE_GATEWAY_PROXY=1, even with multiple BRIDGE_AGENT_IDS — i.e.,
+#      decoupled from roster cardinality.
+#   5. Shared-mode regression guard: bridge_queue_gateway_proxy_agent returns
+#      empty when BRIDGE_GATEWAY_PROXY is unset.
+#
+# The Linux-only ACL/sudo path lives in tests/isolation-queue-gateway-acl.sh.
+# This test focuses on the env-file content + proxy-detection contract.
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd -P "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
+REPO_ROOT="$(cd -P "$SCRIPT_DIR/.." && pwd -P)"
+
+log() { printf '[peer-routing] %s\n' "$*"; }
+die() { printf '[peer-routing][error] %s\n' "$*" >&2; exit 1; }
+skip() { printf '[peer-routing][skip] %s\n' "$*"; exit 0; }
+
+# Bash 4+ is required for associative arrays (the entire roster API).
+if (( BASH_VERSINFO[0] < 4 )); then
+  skip "bash 4+ required (have ${BASH_VERSION})"
+fi
+
+TMP_ROOT="$(mktemp -d -t peer-routing-test.XXXXXX)"
+trap 'rm -rf "$TMP_ROOT" >/dev/null 2>&1 || true' EXIT
+
+export BRIDGE_HOME="$TMP_ROOT/bridge-home"
+export BRIDGE_AGENT_HOME_ROOT="$BRIDGE_HOME/agents"
+export BRIDGE_STATE_DIR="$BRIDGE_HOME/state"
+export BRIDGE_LOG_DIR="$BRIDGE_HOME/logs"
+export BRIDGE_SHARED_DIR="$BRIDGE_HOME/shared"
+export BRIDGE_ACTIVE_AGENT_DIR="$BRIDGE_STATE_DIR/agents"
+export BRIDGE_HISTORY_DIR="$BRIDGE_STATE_DIR/history"
+export BRIDGE_ROSTER_FILE="$BRIDGE_HOME/agent-roster.sh"
+export BRIDGE_ROSTER_LOCAL_FILE="$BRIDGE_HOME/agent-roster.local.sh"
+export BRIDGE_TASK_DB="$BRIDGE_STATE_DIR/tasks.db"
+mkdir -p "$BRIDGE_HOME" "$BRIDGE_AGENT_HOME_ROOT" "$BRIDGE_STATE_DIR" "$BRIDGE_LOG_DIR" "$BRIDGE_SHARED_DIR"
+: > "$BRIDGE_ROSTER_FILE"
+
+# Two static agents: peer (linux-user isolated) + admin (shared).
+ISOLATED_AGENT="peer-a"
+ADMIN_AGENT="admin-a"
+PEER_LAUNCH_CMD="claude --token=PEER-TOKEN-DO-NOT-LEAK"
+ADMIN_LAUNCH_CMD="claude --token=ADMIN-TOKEN-DO-NOT-LEAK"
+PEER_WORKDIR="$BRIDGE_AGENT_HOME_ROOT/$ISOLATED_AGENT"
+ADMIN_WORKDIR="$BRIDGE_AGENT_HOME_ROOT/$ADMIN_AGENT"
+mkdir -p "$PEER_WORKDIR" "$ADMIN_WORKDIR"
+
+cat > "$BRIDGE_ROSTER_LOCAL_FILE" <<ROSTER
+#!/usr/bin/env bash
+# shellcheck shell=bash disable=SC2034
+BRIDGE_AGENT_IDS=("$ISOLATED_AGENT" "$ADMIN_AGENT")
+BRIDGE_AGENT_DESC[$ISOLATED_AGENT]="peer agent"
+BRIDGE_AGENT_DESC[$ADMIN_AGENT]="admin agent"
+BRIDGE_AGENT_ENGINE[$ISOLATED_AGENT]=claude
+BRIDGE_AGENT_ENGINE[$ADMIN_AGENT]=claude
+BRIDGE_AGENT_SESSION[$ISOLATED_AGENT]=$ISOLATED_AGENT
+BRIDGE_AGENT_SESSION[$ADMIN_AGENT]=$ADMIN_AGENT
+BRIDGE_AGENT_WORKDIR[$ISOLATED_AGENT]=$PEER_WORKDIR
+BRIDGE_AGENT_WORKDIR[$ADMIN_AGENT]=$ADMIN_WORKDIR
+BRIDGE_AGENT_LAUNCH_CMD[$ISOLATED_AGENT]=$(printf '%q' "$PEER_LAUNCH_CMD")
+BRIDGE_AGENT_LAUNCH_CMD[$ADMIN_AGENT]=$(printf '%q' "$ADMIN_LAUNCH_CMD")
+BRIDGE_AGENT_SOURCE[$ISOLATED_AGENT]=static
+BRIDGE_AGENT_SOURCE[$ADMIN_AGENT]=static
+BRIDGE_AGENT_ISOLATION_MODE[$ISOLATED_AGENT]=linux-user
+BRIDGE_AGENT_ISOLATION_MODE[$ADMIN_AGENT]=shared
+BRIDGE_AGENT_OS_USER[$ISOLATED_AGENT]=agent-bridge-peer-a
+BRIDGE_AGENT_PROMPT_GUARD[$ADMIN_AGENT]="enabled:1;task_body_min_block:high"
+ROSTER
+
+# shellcheck source=../bridge-lib.sh
+source "$REPO_ROOT/bridge-lib.sh"
+bridge_load_roster
+
+ENV_FILE="$TMP_ROOT/agent-env.sh"
+
+log "writing scoped env for isolated peer"
+bridge_write_linux_agent_env_file "$ISOLATED_AGENT" "$ENV_FILE"
+[[ -f "$ENV_FILE" ]] || die "env file not written at $ENV_FILE"
+
+log "asserting peer id is present in scoped env"
+grep -Fq "bridge_add_agent_id_if_missing $ADMIN_AGENT" "$ENV_FILE" \
+  || die "peer id $ADMIN_AGENT missing from scoped env"
+grep -Fq "bridge_add_agent_id_if_missing $ISOLATED_AGENT" "$ENV_FILE" \
+  || die "self id $ISOLATED_AGENT missing from scoped env"
+
+log "asserting peer non-secret metadata is emitted"
+grep -Eq "BRIDGE_AGENT_DESC\[$ADMIN_AGENT\]=" "$ENV_FILE" \
+  || die "peer description missing"
+grep -Eq "BRIDGE_AGENT_ENGINE\[$ADMIN_AGENT\]=" "$ENV_FILE" \
+  || die "peer engine missing"
+grep -Eq "BRIDGE_AGENT_SESSION\[$ADMIN_AGENT\]=" "$ENV_FILE" \
+  || die "peer session missing"
+grep -Eq "BRIDGE_AGENT_WORKDIR\[$ADMIN_AGENT\]=" "$ENV_FILE" \
+  || die "peer workdir missing"
+grep -Eq "BRIDGE_AGENT_ISOLATION_MODE\[$ADMIN_AGENT\]=" "$ENV_FILE" \
+  || die "peer isolation_mode missing"
+grep -Eq "BRIDGE_AGENT_SOURCE\[$ADMIN_AGENT\]=" "$ENV_FILE" \
+  || die "peer source missing"
+
+log "asserting peer guard policy is emitted (non-secret)"
+grep -Eq "BRIDGE_AGENT_PROMPT_GUARD\[$ADMIN_AGENT\]=" "$ENV_FILE" \
+  || die "peer prompt_guard missing"
+
+log "asserting peer LAUNCH_CMD entry exists but is empty"
+peer_launch_line="$(grep -E "^BRIDGE_AGENT_LAUNCH_CMD\[$ADMIN_AGENT\]=" "$ENV_FILE" || true)"
+[[ -n "$peer_launch_line" ]] || die "peer launch_cmd entry missing (must be present-but-empty)"
+case "$peer_launch_line" in
+  "BRIDGE_AGENT_LAUNCH_CMD[$ADMIN_AGENT]=''") ;;
+  *) die "peer launch_cmd must be empty string, got: $peer_launch_line" ;;
+esac
+
+log "asserting peer launch_cmd token is NEVER leaked"
+if grep -Fq "ADMIN-TOKEN-DO-NOT-LEAK" "$ENV_FILE"; then
+  die "peer launch_cmd leaked into scoped env"
+fi
+# Self launch_cmd should still be present (calling agent's own command).
+if ! grep -Fq "PEER-TOKEN-DO-NOT-LEAK" "$ENV_FILE"; then
+  die "self launch_cmd missing from scoped env"
+fi
+
+log "asserting BRIDGE_GATEWAY_PROXY=1 emitted for isolated agent"
+grep -Eq '^BRIDGE_GATEWAY_PROXY=1' "$ENV_FILE" \
+  || die "BRIDGE_GATEWAY_PROXY=1 not emitted for linux-user isolated agent"
+
+log "asserting BRIDGE_GATEWAY_PROXY is NOT emitted for shared-mode agent"
+SHARED_ENV_FILE="$TMP_ROOT/admin-env.sh"
+bridge_write_linux_agent_env_file "$ADMIN_AGENT" "$SHARED_ENV_FILE"
+if grep -Eq '^BRIDGE_GATEWAY_PROXY=1' "$SHARED_ENV_FILE"; then
+  die "BRIDGE_GATEWAY_PROXY=1 must not be emitted for shared-mode agents"
+fi
+
+log "asserting bridge_queue_gateway_proxy_agent triggers via the explicit flag"
+# Source the scoped env in a subshell so we don't pollute the test process.
+# Override BRIDGE_HOST_PLATFORM so this assertion runs identically on macOS:
+# bridge_agent_linux_user_isolation_effective normally requires the real
+# host to be Linux. The test target here is the proxy-flag contract, not
+# the platform gate.
+# shellcheck disable=SC2030,SC2031
+(
+  export BRIDGE_HOST_PLATFORM_OVERRIDE=Linux
+  # shellcheck source=/dev/null
+  source "$ENV_FILE"
+  export BRIDGE_AGENT_ENV_FILE="$ENV_FILE"
+  export BRIDGE_AGENT_ID="$ISOLATED_AGENT"
+  result="$(bridge_queue_gateway_proxy_agent 2>/dev/null || true)"
+  if [[ "$result" != "$ISOLATED_AGENT" ]]; then
+    printf '[peer-routing][error] expected proxy_agent=%s, got=%q\n' \
+      "$ISOLATED_AGENT" "$result" >&2
+    exit 1
+  fi
+  # Multi-id roster + explicit flag must still trigger proxy mode (the bug
+  # before the fix was that `${#BRIDGE_AGENT_IDS[@]} == 1` gated detection).
+  if (( ${#BRIDGE_AGENT_IDS[@]} < 2 )); then
+    printf '[peer-routing][error] expected multi-id BRIDGE_AGENT_IDS in scoped env, got %d\n' \
+      "${#BRIDGE_AGENT_IDS[@]}" >&2
+    exit 1
+  fi
+) || die "proxy detection failed for isolated agent"
+
+log "asserting bridge_queue_gateway_proxy_agent is OFF for shared-mode (regression guard)"
+# shellcheck disable=SC2030,SC2031
+(
+  export BRIDGE_HOST_PLATFORM_OVERRIDE=Linux
+  # shellcheck source=/dev/null
+  source "$SHARED_ENV_FILE"
+  export BRIDGE_AGENT_ENV_FILE="$SHARED_ENV_FILE"
+  export BRIDGE_AGENT_ID="$ADMIN_AGENT"
+  unset BRIDGE_GATEWAY_PROXY
+  result="$(bridge_queue_gateway_proxy_agent 2>/dev/null || true)"
+  if [[ -n "$result" ]]; then
+    printf '[peer-routing][error] shared-mode must not trigger proxy, got=%q\n' "$result" >&2
+    exit 1
+  fi
+) || die "shared-mode regression guard failed"
+
+# Linux-only: full live-isolation peer-routing roundtrip lives in
+# tests/isolation-queue-gateway-acl.sh. Skipping that here keeps this test
+# portable across macOS dev hosts.
+if [[ "$(uname -s)" != "Linux" ]]; then
+  log "macOS host — skipping live linux-user isolation roundtrip"
+  log "isolation peer-routing test passed (env-file + proxy-flag contract)"
+  exit 0
+fi
+
+log "Linux host — sudo+setfacl roundtrip lives in isolation-queue-gateway-acl.sh"
+log "isolation peer-routing test passed"
