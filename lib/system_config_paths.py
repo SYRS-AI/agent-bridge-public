@@ -114,3 +114,45 @@ def matched_pattern(path: Path) -> str | None:
             if fnmatch.fnmatchcase(relative, pattern):
                 return pattern
     return None
+
+
+def protected_literal_suffixes() -> tuple[str, ...]:
+    """Return literal substrings derived from PROTECTED_GLOBS that uniquely
+    identify a protected path inside a free-form command string.
+
+    Used by `hooks/tool-policy.py` as its degraded substring-scan fallback
+    when ``shlex.split`` rejects a command (unbalanced quotes etc.). For
+    each glob we pick the longest literal segment between wildcards (or
+    the whole pattern when there is no wildcard) and strip leading slashes
+    so the needle matches whether the command quoted the absolute or
+    relative form.
+
+    Examples (matching ``PROTECTED_GLOBS`` at the top of this file):
+
+    - ``agents/*/.discord/access.json`` → ``.discord/access.json``
+    - ``state/cron/*.json``             → ``state/cron/``
+    - ``hooks/*``                       → ``hooks/``
+    - ``agent-roster.local.sh``         → ``agent-roster.local.sh``
+
+    The returned tuple is the single source of truth for that fallback —
+    do not maintain a parallel list anywhere else (codex r1 #341 CP1).
+    """
+    suffixes: list[str] = []
+    seen: set[str] = set()
+    for pattern in PROTECTED_GLOBS:
+        if "*" in pattern:
+            # Pick the longest literal segment between (or around) `*`s.
+            segments = [seg for seg in pattern.split("*") if seg]
+            if not segments:
+                continue
+            needle = max(segments, key=len)
+        else:
+            needle = pattern
+        # Drop a leading slash so the needle matches both the absolute
+        # form (`/a/b/c`) and the relative form (`a/b/c`) of the path.
+        if needle.startswith("/"):
+            needle = needle[1:]
+        if needle and needle not in seen:
+            seen.add(needle)
+            suffixes.append(needle)
+    return tuple(suffixes)

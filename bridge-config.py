@@ -116,24 +116,28 @@ def caller_agent_id(args: argparse.Namespace) -> str:
 
 
 def caller_is_admin(agent: str) -> bool:
-    """The wrapper requires the caller to either be the explicit admin
-    agent or to invoke from operator-TUI without claiming an agent
-    identity at all (the human operator typing the command).
+    """Return True only when the caller has explicitly identified as the
+    admin agent.
 
-    The check is intentionally stricter than the hook's `is_admin_agent`
-    — the hook gates by session-type files that an agent could in theory
-    plant; the wrapper requires either an env-declared admin id or a
-    TTY-resolved operator identity.
+    Strict identity check (codex r1 #341 CP5): the caller must pass
+    ``--from <admin>`` *or* run with ``BRIDGE_AGENT_ID=<admin>`` set.
+    A missing caller agent is rejected even from operator-TUI — the
+    wrapper does not accept "operator at a TTY" as an implicit admin
+    bypass. Bridge-managed TUI sessions already export
+    ``BRIDGE_AGENT_ID``; operators running from a raw shell must pass
+    ``--from`` explicitly.
+
+    The check is intentionally stricter than the hook's
+    ``is_admin_agent`` — the hook gates by session-type files that an
+    agent could in theory plant; the wrapper requires an env- or
+    flag-declared admin id and refuses anonymous callers.
     """
     admin = admin_agent_id()
-    if admin and agent == admin:
-        return True
-    # Operator typing at a TTY without setting BRIDGE_AGENT_ID is the
-    # canonical "operator personally invoking" surface — accept it as
-    # admin-equivalent only when the caller-source is operator-tui.
-    if not agent and detect_caller_source() == CALLER_SOURCE_OPERATOR_TUI:
-        return True
-    return False
+    if not admin:
+        return False
+    if not agent:
+        return False
+    return agent == admin
 
 
 def write_audit(detail: dict[str, Any]) -> Path:
@@ -341,9 +345,18 @@ def cmd_set(args: argparse.Namespace) -> int:
     deny_reason: str | None = None
     if not is_protected_path(path):
         deny_reason = "path not in system-config protected list"
+    elif not caller_agent:
+        # Strict admin check (codex r1 #341 CP5): the caller must
+        # explicitly identify via --from or BRIDGE_AGENT_ID. Anonymous
+        # callers (raw shell with neither set) cannot satisfy the
+        # admin requirement, even from operator-TUI.
+        deny_reason = (
+            "caller_agent unspecified — pass `--from <admin-agent>` or set "
+            "BRIDGE_AGENT_ID before invoking `agent-bridge config set`"
+        )
     elif not caller_is_admin(caller_agent):
         deny_reason = (
-            f"caller agent {caller_agent or '(none)'} is not the admin "
+            f"caller agent {caller_agent} is not the admin "
             "agent — refusing system-config mutation"
         )
     elif caller_source not in ALLOWED_CALLER_SOURCES:
@@ -356,6 +369,10 @@ def cmd_set(args: argparse.Namespace) -> int:
         "operator" if caller_source == CALLER_SOURCE_OPERATOR_TUI else "unknown"
     )
     if deny_reason is not None:
+        # `after_sha256` is intentionally omitted on wrapper-deny — the
+        # change was prevented, so there is no "after" state (codex r1
+        # #341 CP3). The wrapper-apply row below is the only place
+        # `after_sha256` is meaningful.
         write_audit(
             {
                 "kind": "system_config_mutation",
@@ -364,7 +381,6 @@ def cmd_set(args: argparse.Namespace) -> int:
                 "trigger": "wrapper-deny",
                 "path": str(path),
                 "before_sha256": file_sha256(path),
-                "after_sha256": file_sha256(path),
                 "operation": args.change,
                 "matched_pattern": matched_pattern(path) or "",
                 "reason": deny_reason,
@@ -376,7 +392,8 @@ def cmd_set(args: argparse.Namespace) -> int:
     # Limit to JSON files. Roster (`agent-roster.local.sh`) is a shell
     # file; mutating it through this wrapper would require shell-aware
     # editing that is well out of scope for v1. We still record a
-    # `wrapper-deny` row so the operator sees the attempt.
+    # `wrapper-deny` row (without `after_sha256`, codex r1 #341 CP3) so
+    # the operator sees the attempt.
     if path.suffix != ".json":
         write_audit(
             {
@@ -386,7 +403,6 @@ def cmd_set(args: argparse.Namespace) -> int:
                 "trigger": "wrapper-deny",
                 "path": str(path),
                 "before_sha256": file_sha256(path),
-                "after_sha256": file_sha256(path),
                 "operation": args.change,
                 "matched_pattern": matched_pattern(path) or "",
                 "reason": "non-JSON system config files are not yet wrapper-mutable",
@@ -446,7 +462,16 @@ def build_parser() -> argparse.ArgumentParser:
         required=True,
         help="change expression: key=value | a.b=value | a.b.append=value | a.b.remove=value",
     )
-    set_parser.add_argument("--from", dest="from_agent", help="caller agent id (defaults to $BRIDGE_AGENT_ID)")
+    set_parser.add_argument(
+        "--from",
+        dest="from_agent",
+        help=(
+            "caller agent id; required when BRIDGE_AGENT_ID is unset. "
+            "Operator workflows from a raw shell must pass --from <admin-agent> "
+            "explicitly — anonymous callers cannot satisfy the admin check "
+            "(codex r1 #341 CP5)."
+        ),
+    )
     set_parser.set_defaults(handler=cmd_set)
 
     get_parser = sub.add_parser("get", help="read a protected path")

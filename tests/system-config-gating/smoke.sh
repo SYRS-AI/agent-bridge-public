@@ -1,24 +1,38 @@
 #!/usr/bin/env bash
 # system-config-gating smoke — issue #341 hook + wrapper coverage.
 #
-# Asserts:
+# Asserts the runtime contract for every audit row trigger:
 #
 #   1. Hook denial path: feed a synthetic Claude PreToolUse Edit payload
 #      against agents/x/.discord/access.json into hooks/tool-policy.py.
 #      Expect deny + a `system_config_mutation` audit row with
-#      `trigger=hook-deny`.
+#      `trigger=hook-deny`, no `after_sha256` field (codex r1 #341 CP3).
 #
 #   2. Wrapper happy path: invoke `bridge-config.py set` from operator-
-#      attached TUI context (BRIDGE_CALLER_SOURCE=operator-tui). Expect
-#      the file mutated + a `system_config_mutation` audit row with
-#      `trigger=wrapper-apply` and matching before/after sha256.
+#      attached TUI context (BRIDGE_CALLER_SOURCE=operator-tui) with
+#      --from <admin>. Expect the file mutated + a `system_config_mutation`
+#      audit row with `trigger=wrapper-apply` and matching before/after
+#      sha256. `after_sha256` MUST be present (the only trigger that
+#      records it).
 #
 #   3. Wrapper denial — non-admin caller: invoke from a non-admin
-#      BRIDGE_AGENT_ID. Expect refusal + `wrapper-deny` audit row.
+#      BRIDGE_AGENT_ID. Expect refusal + `wrapper-deny` audit row,
+#      no `after_sha256`.
 #
 #   4. Wrapper denial — untrusted ID-match attempt: caller-source falls
 #      back to `agent-direct` (no TTY, no env override). Expect refusal
-#      + `wrapper-deny` audit row.
+#      + `wrapper-deny` audit row, no `after_sha256`.
+#
+#   5. list-protected is read-only and unrestricted (no audit row).
+#
+#   6. Wrapper denial — non-JSON path: invoke `set` against
+#      agent-roster.local.sh (a shell file in PROTECTED_GLOBS). Expect
+#      refusal + `wrapper-deny` audit row with reason mentioning the
+#      manual flow, no `after_sha256` (codex r1 #341 CP10).
+#
+# Every audit row is structurally validated (Fix CP8): kind, trigger,
+# path, before_sha256, actor, actor_source, operation, conditional
+# after_sha256.
 #
 # Uses an isolated mktemp BRIDGE_HOME — never touches the live install.
 
@@ -39,6 +53,7 @@ trap 'rm -rf "$BRIDGE_HOME"' EXIT
 ADMIN_AGENT="patch"
 NON_ADMIN_AGENT="huchu"
 ACCESS_PATH="$BRIDGE_HOME/agents/$ADMIN_AGENT/.discord/access.json"
+ROSTER_PATH="$BRIDGE_HOME/agent-roster.local.sh"
 AUDIT_LOG="$BRIDGE_HOME/logs/audit.jsonl"
 
 mkdir -p "$BRIDGE_HOME/agents/$ADMIN_AGENT/.discord"
@@ -50,6 +65,11 @@ cat >"$ACCESS_PATH" <<'JSON'
   "policy": "owner-only"
 }
 JSON
+
+cat >"$ROSTER_PATH" <<'SH'
+# agent-roster.local.sh fixture for #341 smoke
+export BRIDGE_AGENT_CHANNELS_patch="discord:fixture"
+SH
 
 PASS=0
 FAIL=0
@@ -66,14 +86,29 @@ fail() {
   printf '[smoke][fail] %s\n' "$1" >&2
 }
 
-audit_has_kind_trigger() {
-  local kind="$1"
-  local trigger="$2"
+# audit_row_shape_check <expected_trigger> <expected_path> <expect_after_sha256: 0|1>
+#
+# Walks the audit log for the most recent system_config_mutation row whose
+# trigger and path match the expected values, then validates the field
+# contract (codex r1 #341 CP8):
+#   - kind == "system_config_mutation"
+#   - trigger ∈ {hook-deny, wrapper-apply, wrapper-deny}
+#   - path matches expected
+#   - before_sha256 non-empty
+#   - after_sha256 present iff trigger == wrapper-apply (per CP3)
+#   - actor and actor_source non-empty strings
+#   - operation field present
+audit_row_shape_check() {
+  local trigger="$1"
+  local expected_path="$2"
+  local expect_after="$3"
   [[ -f "$AUDIT_LOG" ]] || return 1
-  "$PYTHON" - "$AUDIT_LOG" "$kind" "$trigger" <<'PY'
+  "$PYTHON" - "$AUDIT_LOG" "$trigger" "$expected_path" "$expect_after" <<'PY'
 import json, sys
-path, kind, trigger = sys.argv[1], sys.argv[2], sys.argv[3]
-with open(path, "r", encoding="utf-8") as fh:
+log_path, trigger, expected_path, expect_after_raw = sys.argv[1:5]
+expect_after = expect_after_raw == "1"
+matches = []
+with open(log_path, "r", encoding="utf-8") as fh:
     for line in fh:
         line = line.strip()
         if not line:
@@ -85,9 +120,51 @@ with open(path, "r", encoding="utf-8") as fh:
         detail = row.get("detail")
         if not isinstance(detail, dict):
             continue
-        if detail.get("kind") == kind and detail.get("trigger") == trigger:
-            sys.exit(0)
-sys.exit(1)
+        if detail.get("kind") != "system_config_mutation":
+            continue
+        if detail.get("trigger") != trigger:
+            continue
+        if expected_path and detail.get("path") != expected_path:
+            continue
+        matches.append(detail)
+if not matches:
+    print(f"no row matched trigger={trigger} path={expected_path}", file=sys.stderr)
+    sys.exit(2)
+detail = matches[-1]
+errors = []
+allowed_triggers = {"hook-deny", "wrapper-apply", "wrapper-deny"}
+if detail.get("trigger") not in allowed_triggers:
+    errors.append(f"unexpected trigger {detail.get('trigger')!r}")
+before = detail.get("before_sha256")
+if not isinstance(before, str) or not before:
+    errors.append("before_sha256 missing/empty")
+has_after = "after_sha256" in detail
+if expect_after:
+    if not has_after:
+        errors.append("after_sha256 missing on wrapper-apply row")
+    else:
+        after = detail.get("after_sha256")
+        if not isinstance(after, str) or not after:
+            errors.append("after_sha256 empty on wrapper-apply row")
+else:
+    if has_after:
+        errors.append(
+            f"after_sha256 must be absent on trigger={detail.get('trigger')!r} "
+            "(codex r1 #341 CP3)"
+        )
+actor = detail.get("actor")
+if not isinstance(actor, str) or not actor:
+    errors.append("actor missing/empty")
+actor_source = detail.get("actor_source")
+if not isinstance(actor_source, str) or not actor_source:
+    errors.append("actor_source missing/empty")
+if "operation" not in detail:
+    errors.append("operation field missing")
+if errors:
+    for err in errors:
+        print(err, file=sys.stderr)
+    sys.exit(3)
+sys.exit(0)
 PY
 }
 
@@ -124,21 +201,21 @@ else
   fail "scenario 1: hook did not deny — output: $sce1_out"
 fi
 
-if audit_has_kind_trigger "system_config_mutation" "hook-deny"; then
-  pass "scenario 1: audit row trigger=hook-deny present"
+if sce1_shape_err="$(audit_row_shape_check "hook-deny" "$ACCESS_PATH" 0 2>&1)"; then
+  pass "scenario 1: hook-deny audit row shape valid (no after_sha256)"
 else
-  fail "scenario 1: missing system_config_mutation/hook-deny audit row"
+  fail "scenario 1: hook-deny audit row shape invalid — $sce1_shape_err"
 fi
 
 # --- Scenario 2: wrapper happy path -------------------------------------
 # Operator at a TTY → BRIDGE_CALLER_SOURCE=operator-tui. caller agent
-# unset (operator personally). Should mutate the file.
+# must be the admin id (codex r1 #341 CP5: anonymous caller is denied).
 before_sha="$("$PYTHON" -c "import hashlib,sys; sys.stdout.write(hashlib.sha256(open('$ACCESS_PATH','rb').read()).hexdigest())")"
 sce2_out="$(BRIDGE_HOME="$BRIDGE_HOME" \
   BRIDGE_AUDIT_LOG="$AUDIT_LOG" \
   BRIDGE_CALLER_SOURCE="operator-tui" \
   BRIDGE_ADMIN_AGENT_ID="$ADMIN_AGENT" \
-  BRIDGE_AGENT_ID="" \
+  BRIDGE_AGENT_ID="$ADMIN_AGENT" \
   "$PYTHON" "$REPO_ROOT/bridge-config.py" set \
     --path "$ACCESS_PATH" \
     --change "groups.append=12345" 2>&1 || true)"
@@ -159,10 +236,10 @@ else
   fail "scenario 2: groups list did not become [12345]"
 fi
 
-if audit_has_kind_trigger "system_config_mutation" "wrapper-apply"; then
-  pass "scenario 2: audit row trigger=wrapper-apply present"
+if sce2_shape_err="$(audit_row_shape_check "wrapper-apply" "$ACCESS_PATH" 1 2>&1)"; then
+  pass "scenario 2: wrapper-apply audit row shape valid (after_sha256 present)"
 else
-  fail "scenario 2: missing system_config_mutation/wrapper-apply audit row"
+  fail "scenario 2: wrapper-apply audit row shape invalid — $sce2_shape_err"
 fi
 
 # --- Scenario 3: wrapper denial — non-admin caller ----------------------
@@ -180,10 +257,10 @@ else
   fail "scenario 3: wrapper did not reject non-admin — output: $sce3_out"
 fi
 
-if audit_has_kind_trigger "system_config_mutation" "wrapper-deny"; then
-  pass "scenario 3: audit row trigger=wrapper-deny present"
+if sce3_shape_err="$(audit_row_shape_check "wrapper-deny" "$ACCESS_PATH" 0 2>&1)"; then
+  pass "scenario 3: wrapper-deny audit row shape valid (no after_sha256)"
 else
-  fail "scenario 3: missing system_config_mutation/wrapper-deny audit row"
+  fail "scenario 3: wrapper-deny audit row shape invalid — $sce3_shape_err"
 fi
 
 # Confirm the file was NOT mutated.
@@ -217,6 +294,12 @@ else
   fail "scenario 4: wrapper did not reject untrusted source — output: $sce4_out"
 fi
 
+if sce4_shape_err="$(audit_row_shape_check "wrapper-deny" "$ACCESS_PATH" 0 2>&1)"; then
+  pass "scenario 4: wrapper-deny audit row shape valid (no after_sha256)"
+else
+  fail "scenario 4: wrapper-deny audit row shape invalid — $sce4_shape_err"
+fi
+
 # --- Scenario 5: list-protected is read-only and unrestricted -----------
 sce5_out="$(BRIDGE_HOME="$BRIDGE_HOME" \
   BRIDGE_AUDIT_LOG="$AUDIT_LOG" \
@@ -226,6 +309,45 @@ if [[ "$sce5_out" == *"agents/*/.discord/access.json"* ]]; then
   pass "scenario 5: list-protected shows access.json glob"
 else
   fail "scenario 5: list-protected did not include access.json — output: $sce5_out"
+fi
+
+if [[ "$sce5_out" == *"agent-roster.local.sh"* ]]; then
+  pass "scenario 5: list-protected shows agent-roster.local.sh"
+else
+  fail "scenario 5: list-protected did not include agent-roster.local.sh — output: $sce5_out"
+fi
+
+# --- Scenario 6: wrapper denial — non-JSON protected path ---------------
+# agent-roster.local.sh is a shell file in PROTECTED_GLOBS. Wrapper must
+# refuse with a wrapper-deny row + a manual-flow message; the operator
+# uses the queued admin task to edit the shell file by hand. Codex r1
+# #341 CP10 surfaced this gap — the path was implemented but never
+# exercised by smoke.
+sce6_out="$(BRIDGE_HOME="$BRIDGE_HOME" \
+  BRIDGE_AUDIT_LOG="$AUDIT_LOG" \
+  BRIDGE_CALLER_SOURCE="operator-tui" \
+  BRIDGE_ADMIN_AGENT_ID="$ADMIN_AGENT" \
+  BRIDGE_AGENT_ID="$ADMIN_AGENT" \
+  "$PYTHON" "$REPO_ROOT/bridge-config.py" set \
+    --path "$ROSTER_PATH" \
+    --change "BRIDGE_AGENT_CHANNELS_patch=discord:other" 2>&1 || true)"
+if [[ "$sce6_out" == *"deny:"* ]] && [[ "$sce6_out" == *"not yet wrapper-mutable"* ]]; then
+  pass "scenario 6: wrapper rejected non-JSON protected path (agent-roster.local.sh)"
+else
+  fail "scenario 6: wrapper did not reject non-JSON path — output: $sce6_out"
+fi
+
+if sce6_shape_err="$(audit_row_shape_check "wrapper-deny" "$ROSTER_PATH" 0 2>&1)"; then
+  pass "scenario 6: non-JSON wrapper-deny audit row shape valid (no after_sha256)"
+else
+  fail "scenario 6: non-JSON wrapper-deny audit row shape invalid — $sce6_shape_err"
+fi
+
+# Confirm the roster file was NOT mutated by the failed call.
+if grep -q "discord:fixture" "$ROSTER_PATH" && ! grep -q "discord:other" "$ROSTER_PATH"; then
+  pass "scenario 6: agent-roster.local.sh contents unchanged after deny"
+else
+  fail "scenario 6: roster file was mutated despite deny"
 fi
 
 # --- Summary -------------------------------------------------------------

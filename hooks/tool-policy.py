@@ -43,6 +43,7 @@ if _LIB_DIR.is_dir() and str(_LIB_DIR) not in sys.path:
 from system_config_paths import (  # noqa: E402
     is_protected_path,
     matched_pattern,
+    protected_literal_suffixes,
 )
 
 
@@ -188,6 +189,12 @@ SYSTEM_CONFIG_DENY_REASON = (
     "(direct Edit/Write blocked by issue #341 gating)"
 )
 
+ROSTER_LOCAL_DENY_REASON = (
+    "agent-roster.local.sh is a protected system config path. "
+    "Use `agent-bridge config set` instead. Admin role does not exempt "
+    "this path — the wrapper preserves the audit chain."
+)
+
 
 def protected_path_reason(path: Path, agent: str) -> str | None:
     admin = is_admin_agent(agent)
@@ -197,9 +204,15 @@ def protected_path_reason(path: Path, agent: str) -> str | None:
     # narrower wording. The system-config gate (issue #341) catches the
     # additional protected paths that don't map to a specific helper —
     # access.json, cron job files, hooks settings, runtime config.
+    #
+    # Admin agents do NOT bypass roster_local_path (codex r1 #341 CP2):
+    # the file is in PROTECTED_GLOBS and the wrapper is the only sound
+    # mutation surface even for admin. The wrapper itself runs from
+    # operator-TUI, so legitimate operator workflows still succeed —
+    # only direct Edit/Write attempts are blocked.
     if path == roster_local_path():
         if admin:
-            return None
+            return ROSTER_LOCAL_DENY_REASON
         return "shared roster secrets are not available inside Claude tool calls"
     if path == task_db_path():
         return "direct queue DB access is blocked; use `agb` queue commands instead"
@@ -383,19 +396,20 @@ def _bash_argv_references_system_config(command: str) -> bool:
     Uses the same skip/treat rules as ``_bash_argv_references_path`` so a
     `--body "agents/foo/.discord/access.json"` mention does not trigger.
     A `shlex.split` ``ValueError`` (unbalanced quotes etc.) falls back to
-    a substring scan of the static suffixes that uniquely identify
-    protected globs; this is a weaker check but keeps us no worse than
-    the pre-#341 baseline.
+    a substring scan of the literal suffixes derived from
+    :func:`system_config_paths.protected_literal_suffixes` — the single
+    source of truth. The fallback is weaker than the structural argv
+    check but keeps us no worse than the pre-#341 baseline, and it
+    cannot drift from ``PROTECTED_GLOBS`` because the suffix list is
+    derived at call time.
     """
     if not command:
         return False
     try:
         tokens = shlex.split(command, posix=True, comments=False)
     except ValueError:
-        for needle in (".discord/access.json", ".telegram/access.json",
-                       "cron/jobs.json", "runtime/openclaw.json",
-                       "runtime/bridge-config.json"):
-            if needle in command:
+        for needle in protected_literal_suffixes():
+            if needle and needle in command:
                 return True
         return False
 
@@ -460,8 +474,10 @@ def protected_alias_reason(text: str, agent: str) -> str | None:
     # messages first so existing smoke tests find their specific wording,
     # then the issue #341 generic system-config gate.
     if _bash_argv_references_path(text, roster_local_path()):
+        # Admin no longer bypasses the roster path (codex r1 #341 CP2);
+        # mutations route through `agent-bridge config set`.
         if admin:
-            return None
+            return ROSTER_LOCAL_DENY_REASON
         return "shared roster secrets are not available inside Claude tool calls"
     if _bash_argv_references_path(text, task_db_path()):
         return "direct queue DB access is blocked; use `agb` queue commands instead"
@@ -583,11 +599,11 @@ def _system_config_path_from_input(tool_name: str, tool_input: dict[str, Any]) -
 def _path_sha256(path: Path) -> str:
     """sha256 of *path* contents, or empty string if unreadable.
 
-    The hook records both before and after sha to satisfy the audit shape
-    in issue #341. On hook-deny no mutation actually happens, so before
-    and after are the same value — that's the documented invariant the
-    operator can rely on when distinguishing hook-deny rows from wrapper
-    rows.
+    The hook records the at-rest sha as `before_sha256`. There is
+    intentionally no `after_sha256` on hook-deny rows — the change was
+    prevented, so there is no "after" state to record (codex r1 #341
+    CP3). The wrapper-apply row is the only place `after_sha256` is
+    meaningful.
     """
     try:
         import hashlib
@@ -605,20 +621,19 @@ def _write_system_config_audit_row(
 ) -> None:
     """Write the issue #341 `system_config_mutation` audit row.
 
-    Shape mirrors the brief exactly: actor, actor_source, trigger,
-    path, before/after sha, operation. Hook-side actor_source is always
-    `agent-direct` — the hook fires before any caller-source promotion
-    that the wrapper would otherwise apply.
+    Shape mirrors the brief: actor, actor_source, trigger, path,
+    before_sha256, operation. ``after_sha256`` is intentionally omitted
+    on hook-deny — no mutation occurred, so an "after" hash would
+    misrepresent the audit chain (codex r1 #341 CP3). Hook-side
+    actor_source is always `agent-direct` — the hook fires before any
+    caller-source promotion that the wrapper would otherwise apply.
     """
     if target_path is None:
         path_str = ""
         before = ""
-        after = ""
     else:
         path_str = str(target_path)
-        sha = _path_sha256(target_path)
-        before = sha
-        after = sha
+        before = _path_sha256(target_path)
     if tool_name == "Bash":
         operation = truncate_text(str(tool_input.get("command") or ""), 240)
     else:
@@ -638,7 +653,6 @@ def _write_system_config_audit_row(
         "trigger": "hook-deny",
         "path": path_str,
         "before_sha256": before,
-        "after_sha256": after,
         "operation": truncate_text(operation, 240),
         "tool_name": tool_name,
         "matched_pattern": matched_pattern(target_path) or "" if target_path else "",
@@ -682,7 +696,11 @@ def handle_pretool(payload: dict[str, Any], agent: str) -> int:
     if reason:
         detail["reason"] = reason
         write_audit("agent_tool_denied", agent or "unknown", detail)
-        if reason == SYSTEM_CONFIG_DENY_REASON:
+        # Both the generic system-config deny and the more-specific
+        # roster-local deny (codex r1 #341 CP2) are protected-path
+        # mutations and need a `system_config_mutation` audit row so
+        # the operator can attribute the attempt.
+        if reason in (SYSTEM_CONFIG_DENY_REASON, ROSTER_LOCAL_DENY_REASON):
             _write_system_config_audit_row(
                 agent,
                 tool_name,
