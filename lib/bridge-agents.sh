@@ -728,6 +728,146 @@ bridge_linux_acl_add_default_dirs_recursive() {
   done
 }
 
+# Iterate the agent's declared channel state .env files and re-apply the
+# controller named-user ACL plus mask::rwX. Recovers from two observed
+# failure modes in v0.6.17:
+#   - POSIX ACL mask drifted to `---` after an unrelated chmod elsewhere
+#     reset the mask to the file's group bits (group is 0 on these .env
+#     files), which silently nullifies all named-user entries' effective
+#     bits. Daemon's grep against the file then returns EACCES, the
+#     channel status reads "miss", and a noisy channel-health task is
+#     enqueued every cycle.
+#   - The controller named-user entry was lost entirely (a fresh write
+#     of the file by an external tool dropped the named-user ACL).
+#
+# Scope is intentionally narrow: known channel state .env files for one
+# isolated agent. Other files and other agents are out of scope so the
+# blast radius stays bounded. Helper is best-effort throughout (any
+# setfacl failure is swallowed) so the caller can still fall through to
+# the existing miss/credentials path on a real credentials problem.
+#
+# bridge_plugin_channel_state_dir lookup is sidestepped here so this
+# helper works whether or not PR #363's ms365 case has merged into the
+# tree being deployed: each declared `plugin:<id>` channel is mapped
+# directly to `${workdir}/.<id>` for the four channel kinds we ship.
+bridge_linux_acl_repair_channel_env_files() {
+  local agent="$1"
+
+  local controller_user
+  controller_user="$(bridge_current_user 2>/dev/null || true)"
+  [[ -n "$controller_user" ]] || return 0
+
+  local workdir
+  workdir="$(bridge_agent_workdir "$agent" 2>/dev/null || true)"
+  [[ -n "$workdir" ]] || return 0
+
+  local channels_csv
+  channels_csv="$(bridge_agent_channels_csv "$agent" 2>/dev/null || true)"
+  [[ -n "$channels_csv" ]] || return 0
+
+  local IFS=',' tokens=()
+  read -ra tokens <<<"$channels_csv"
+
+  local token id state_dir env_file
+  for token in "${tokens[@]}"; do
+    token="${token// /}"
+    [[ "$token" == plugin:* ]] || continue
+    id="${token#plugin:}"
+    id="${id%%@*}"
+    case "$id" in
+      discord|telegram|teams|ms365) ;;
+      *) continue ;;
+    esac
+    state_dir="$workdir/.$id"
+
+    # Use sudo test, not bash `[[ -d ... ]]`, because the controller
+    # named-user traverse on the workdir may have drifted too — the
+    # check needs to succeed via root.
+    bridge_linux_sudo_root test -d "$state_dir" || continue
+
+    # Repair the state dir's ACL too (small hardening — mask drift on
+    # the dir would make file-level repair unreachable on the next
+    # daemon read).
+    bridge_linux_sudo_root setfacl \
+      -m "u:${controller_user}:rwX" \
+      -m "m::rwX" \
+      "$state_dir" >/dev/null 2>&1 || true
+
+    env_file="$state_dir/.env"
+    bridge_linux_sudo_root test -f "$env_file" || continue
+
+    bridge_linux_sudo_root setfacl \
+      -m "u:${controller_user}:rw-" \
+      -m "m::rwX" \
+      "$env_file" >/dev/null 2>&1 || true
+  done
+}
+
+# Emit ACL metadata (not file contents) for each declared channel state
+# dir + its .env, suitable for inclusion in a channel-health miss task
+# body. Bounded by design:
+#   - declared channels only (discord/telegram/teams/ms365);
+#   - per-target output capped at 12 lines via head;
+#   - never reads .env content; only `getfacl -p` metadata;
+#   - graceful when getfacl is missing, target is missing, or sudo fails.
+bridge_agent_channel_acl_diagnostics_text() {
+  local agent="$1"
+
+  command -v getfacl >/dev/null 2>&1 || {
+    printf '_getfacl unavailable; skipping ACL diagnostics_\n'
+    return 0
+  }
+
+  local workdir
+  workdir="$(bridge_agent_workdir "$agent" 2>/dev/null || true)"
+  [[ -n "$workdir" ]] || return 0
+
+  local channels_csv
+  channels_csv="$(bridge_agent_channels_csv "$agent" 2>/dev/null || true)"
+  [[ -n "$channels_csv" ]] || return 0
+
+  local IFS=',' tokens=()
+  read -ra tokens <<<"$channels_csv"
+
+  local token id state_dir env_file
+  local emitted=0
+  for token in "${tokens[@]}"; do
+    token="${token// /}"
+    [[ "$token" == plugin:* ]] || continue
+    id="${token#plugin:}"
+    id="${id%%@*}"
+    case "$id" in
+      discord|telegram|teams|ms365) ;;
+      *) continue ;;
+    esac
+    state_dir="$workdir/.$id"
+    env_file="$state_dir/.env"
+
+    if ! bridge_linux_sudo_root test -d "$state_dir" 2>/dev/null; then
+      printf '_state_dir missing: %s_\n\n' "$state_dir"
+      emitted=1
+      continue
+    fi
+
+    printf '### %s state-dir ACL\n\n' "$id"
+    printf '```\n'
+    ( bridge_linux_sudo_root getfacl -p "$state_dir" 2>&1 || true ) | head -12
+    printf '```\n\n'
+    emitted=1
+
+    if bridge_linux_sudo_root test -f "$env_file" 2>/dev/null; then
+      printf '### %s .env ACL\n\n' "$id"
+      printf '```\n'
+      ( bridge_linux_sudo_root getfacl -p "$env_file" 2>&1 || true ) | head -12
+      printf '```\n\n'
+    fi
+  done
+
+  if (( emitted == 0 )); then
+    printf '_no declared channel state dirs to diagnose_\n'
+  fi
+}
+
 bridge_linux_grant_traverse_chain() {
   # Grant `u:${os_user}:--x` on every directory from $target up to
   # (and including) $stop_path. Callers must pass an explicit stop_path
