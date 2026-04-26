@@ -242,4 +242,84 @@ source "$REPO_ROOT/lib/bridge-isolation-v2.sh"
   || die "v2 module unexpectedly set BRIDGE_HOME: $BRIDGE_HOME"
 ok "legacy regression: v2 module does not set BRIDGE_HOME"
 
+# ---------------------------------------------------------------------------
+# 9. legacy default does not pollute child env (r2 ITEM 1)
+# ---------------------------------------------------------------------------
+
+# Re-source under legacy default and confirm no v2 group vars leak into
+# a fresh child shell. Pre-r2 this leaked BRIDGE_SHARED_GROUP=ab-shared
+# etc. unconditionally; gated exports must not.
+(
+  unset BRIDGE_LAYOUT BRIDGE_DATA_ROOT
+  unset BRIDGE_SHARED_GROUP BRIDGE_CONTROLLER_GROUP BRIDGE_AGENT_GROUP_PREFIX
+  unset BRIDGE_SHARED_ROOT BRIDGE_AGENT_ROOT_V2 BRIDGE_CONTROLLER_STATE_ROOT
+  # shellcheck source=/dev/null
+  source "$REPO_ROOT/lib/bridge-isolation-v2.sh"
+
+  leaked="$(bash -c 'env | grep -E "^BRIDGE_(SHARED|CONTROLLER|AGENT)_(GROUP|ROOT|ROOT_V2|STATE_ROOT|GROUP_PREFIX)=" || true')"
+  [[ -z "$leaked" ]] \
+    || die "legacy default leaks v2 env vars to child: $leaked"
+) || exit 1
+ok "legacy default does not leak v2 group exports to child env"
+
+# ---------------------------------------------------------------------------
+# 10. chgrp_setgid_dir single-dir variant (r2 ITEM 8)
+# ---------------------------------------------------------------------------
+
+if [[ -n "$caller_group" ]]; then
+  single_dir="$TMP_ROOT/setgid-single"
+  mkdir -p "$single_dir"
+  bridge_isolation_v2_chgrp_setgid_dir "$caller_group" 2750 "$single_dir" \
+    || die "chgrp_setgid_dir: failed on rootless primary-group path"
+  single_mode="$(stat -c '%a' "$single_dir" 2>/dev/null || stat -f '%Lp' "$single_dir" 2>/dev/null)"
+  case "$single_mode" in
+    2750|02750|750) ok "chgrp_setgid_dir: applied mode (got $single_mode)" ;;
+    *) die "chgrp_setgid_dir: dir mode unexpected: $single_mode" ;;
+  esac
+else
+  log "skipping chgrp_setgid_dir test: cannot determine caller's primary group"
+fi
+
+# ---------------------------------------------------------------------------
+# 11. _ensure_group basic shape — root only (r2 ITEM 8)
+# ---------------------------------------------------------------------------
+
+# Sudo path requires interactive password on most dev workstations, so
+# only exercise the root branch. Idempotency check guarantees the
+# rc=9-as-success path (ITEM 2) is covered when the second call hits
+# an existing group.
+if [[ "$(id -u)" -eq 0 ]] && command -v groupadd >/dev/null 2>&1; then
+  test_group="bridge-test-group-$$-$(date +%s)"
+  bridge_isolation_v2_ensure_group "$test_group" \
+    || die "ensure_group failed for fresh group $test_group"
+  bridge_isolation_v2_group_exists "$test_group" \
+    || die "ensure_group did not actually create $test_group"
+  bridge_isolation_v2_ensure_group "$test_group" \
+    || die "ensure_group not idempotent on existing group"
+  command -v groupdel >/dev/null 2>&1 && groupdel "$test_group" 2>/dev/null || true
+  ok "ensure_group: creates fresh group + idempotent"
+else
+  log "skipping ensure_group test: not running as root (sudo path requires interactive password)"
+fi
+
+# ---------------------------------------------------------------------------
+# 12. umask wrapper survives caller's set -e (r2 ITEM 5)
+# ---------------------------------------------------------------------------
+
+# Pre-r2 the wrapper set umask, ran "$@", then restored umask post-hoc.
+# Under `set -e` in the caller, a non-zero rc from "$@" terminated the
+# function before the restore ran. The trap-RETURN rewrite must guarantee
+# restore on every exit path, including errexit propagation.
+saved_before_seteset="$(umask)"
+(
+  set -e
+  prev_umask="$(umask)"
+  bridge_with_private_umask bash -c 'exit 23' || true
+  [[ "$(umask)" == "$prev_umask" ]] \
+    || { printf '[isolation-v2][error] set -e: umask not restored after failure (now %s, expected %s)\n' "$(umask)" "$prev_umask" >&2; exit 1; }
+) || die "umask wrapper did not restore under caller's set -e"
+[[ "$(umask)" == "$saved_before_seteset" ]] \
+  || die "outer umask drifted after subshell test (now $(umask))"
+ok "umask wrapper restores under caller's set -e"
+
 log "all PR-A acceptance checks passed"

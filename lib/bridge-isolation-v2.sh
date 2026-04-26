@@ -84,8 +84,22 @@ bridge_isolation_v2_active() {
 
 bridge_isolation_v2_agent_group_name() {
   local agent="$1"
-  [[ -n "$agent" ]] || return 1
-  printf '%s%s' "$BRIDGE_AGENT_GROUP_PREFIX" "$agent"
+  [[ -n "$agent" ]] || {
+    bridge_warn "agent_group_name: agent name required"
+    return 1
+  }
+  # Linux groupadd accepts [a-z_][a-z0-9_-]* with total length <= 32.
+  # Reject early so _ensure_group does not fail opaquely later.
+  if [[ ! "$agent" =~ ^[a-z_][a-z0-9_-]*$ ]]; then
+    bridge_warn "agent_group_name: '$agent' has invalid chars for a Linux group name (allowed: [a-z_][a-z0-9_-]*)"
+    return 1
+  fi
+  local composed="${BRIDGE_AGENT_GROUP_PREFIX}${agent}"
+  if (( ${#composed} > 32 )); then
+    bridge_warn "agent_group_name: '$composed' exceeds 32-char Linux group-name limit"
+    return 1
+  fi
+  printf '%s' "$composed"
 }
 
 # ---------------------------------------------------------------------------
@@ -121,14 +135,26 @@ bridge_isolation_v2_ensure_group() {
   if bridge_isolation_v2_group_exists "$name"; then
     return 0
   fi
+  # groupadd -r returns 9 when the group already exists. The pre-check
+  # above covers the common case but a TOCTOU window between
+  # group_exists and groupadd lets rc=9 leak through under concurrent
+  # prepare runs; treat it as success.
+  local rc
   if [[ "$(id -u)" -eq 0 ]]; then
-    groupadd -r "$name"
+    if ! groupadd -r "$name"; then
+      rc=$?
+      [[ $rc -eq 9 ]] || return 1
+    fi
   else
-    sudo -n groupadd -r "$name" 2>/dev/null || {
-      bridge_warn "ensure_group: cannot create '$name' (need root or passwordless sudo)"
-      return 1
-    }
+    if ! sudo -n groupadd -r "$name" 2>/dev/null; then
+      rc=$?
+      if [[ $rc -ne 9 ]]; then
+        bridge_warn "ensure_group: cannot create '$name' (need root or passwordless sudo)"
+        return 1
+      fi
+    fi
   fi
+  return 0
 }
 
 bridge_isolation_v2_ensure_user_in_group() {
@@ -220,7 +246,14 @@ bridge_isolation_v2_chgrp_setgid_recursive() {
     bridge_warn "chgrp_setgid_recursive: not a directory: $root"
     return 1
   }
-  _bridge_isolation_v2_run_root_or_sudo chgrp -R "$group" "$root" || return 1
+  # `chgrp -R` follows symlinks on BSD/macOS by default while GNU
+  # coreutils does not, so a symlink-to-directory inside $root could
+  # lead the chown out of the tree on macOS. Restrict the recursion
+  # to files+dirs explicitly via find so symlinks (-type l) are never
+  # chgrp'd or chmod'd; the four-pass approach is consistent with the
+  # chmod passes below.
+  _bridge_isolation_v2_run_root_or_sudo find "$root" -type d -exec chgrp "$group" {} + || return 1
+  _bridge_isolation_v2_run_root_or_sudo find "$root" -type f -exec chgrp "$group" {} + || return 1
   _bridge_isolation_v2_run_root_or_sudo find "$root" -type d -exec chmod "$dir_mode" {} + || return 1
   _bridge_isolation_v2_run_root_or_sudo find "$root" -type f -exec chmod "$file_mode" {} + || return 1
 }
@@ -232,26 +265,26 @@ bridge_isolation_v2_chgrp_setgid_recursive() {
 bridge_with_private_umask() {
   # Run a command under umask 007 so newly-created files are 0660 and
   # directories are 2770 (setgid bit applied separately by chmod). The
-  # umask is restored even if the wrapped command fails.
-  local saved rc
+  # umask is restored on every exit path including `set -e` propagation
+  # in a caller — RETURN trap fires when the function returns, normally
+  # or via errexit, where post-hoc `umask "$saved"` would be skipped.
+  # Double quotes capture the value at trap-set time.
+  local saved
   saved="$(umask)"
+  trap "umask $saved" RETURN
   umask 007
   "$@"
-  rc=$?
-  umask "$saved"
-  return "$rc"
 }
 
 bridge_with_shared_umask() {
   # Run a command under umask 027 so newly-created files are 0640 and
-  # directories are 2750. Restore on every path, including failure.
-  local saved rc
+  # directories are 2750. Restore on every exit path including `set -e`
+  # propagation; see bridge_with_private_umask for the trap rationale.
+  local saved
   saved="$(umask)"
+  trap "umask $saved" RETURN
   umask 027
   "$@"
-  rc=$?
-  umask "$saved"
-  return "$rc"
 }
 
 # ---------------------------------------------------------------------------
@@ -279,6 +312,16 @@ bridge_isolation_v2_layout_summary() {
 # 7. exports
 # ---------------------------------------------------------------------------
 
-export BRIDGE_LAYOUT BRIDGE_DATA_ROOT BRIDGE_SHARED_ROOT BRIDGE_AGENT_ROOT_V2
-export BRIDGE_CONTROLLER_STATE_ROOT BRIDGE_SHARED_GROUP BRIDGE_CONTROLLER_GROUP
-export BRIDGE_AGENT_GROUP_PREFIX
+# Always export the layout flag so children inherit the explicit choice.
+export BRIDGE_LAYOUT
+
+# Only export the v2-specific vars when v2 is active. Legacy installs
+# do not see these vars in the child env, preserving the unset semantics
+# any pre-v2 reader may depend on (e.g. callers distinguishing
+# ${VAR+set} vs ${VAR-empty}).
+if bridge_isolation_v2_active; then
+  export BRIDGE_DATA_ROOT BRIDGE_SHARED_ROOT BRIDGE_AGENT_ROOT_V2 \
+         BRIDGE_CONTROLLER_STATE_ROOT \
+         BRIDGE_SHARED_GROUP BRIDGE_CONTROLLER_GROUP \
+         BRIDGE_AGENT_GROUP_PREFIX
+fi
