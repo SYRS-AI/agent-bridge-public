@@ -141,6 +141,15 @@ cleanup() {
   if id "$TEST_OS_USER" >/dev/null 2>&1; then
     sudo -n setfacl -Rx "u:${TEST_OS_USER}" "$CONTROLLER_HOME_FAKE" >/dev/null 2>&1 || true
     sudo -n setfacl -Rx "u:${TEST_OS_USER}" "$BRIDGE_HOME/plugins" >/dev/null 2>&1 || true
+    # Strip the temporary repo-traverse ACL granted for the
+    # trust-controller-manifest assertion (#346 r2 fixture).
+    sudo -n setfacl -Rx "u:${TEST_OS_USER}" "$REPO_ROOT" >/dev/null 2>&1 || true
+    _ancestor_cleanup="$REPO_ROOT"
+    while [[ "$_ancestor_cleanup" != "/" && "$_ancestor_cleanup" != "/tmp" ]]; do
+      _ancestor_cleanup="$(dirname "$_ancestor_cleanup")"
+      [[ -d "$_ancestor_cleanup" ]] || break
+      sudo -n setfacl -x "u:${TEST_OS_USER}" "$_ancestor_cleanup" >/dev/null 2>&1 || true
+    done
   fi
   if [[ "$cleanup_test_user_locked" -eq 0 ]] && id "$TEST_OS_USER" >/dev/null 2>&1; then
     sudo -n userdel "$TEST_OS_USER" >/dev/null 2>&1 || true
@@ -284,6 +293,156 @@ data = json.load(sys.stdin)
 chans = data.get("channels", [])
 assert chans == ["plugin:declared-plugin@td-mkt"], f"unexpected persisted channels: {chans!r}"
 ' || die "persisted grant-set contents do not match"
+
+log "trust-controller-manifest short-circuit (#346 regression)"
+
+# Regression coverage for #346: when an isolated agent declares a plugin
+# from a third-party marketplace, the controller does not expose that
+# marketplace's metadata in known_marketplaces.json under the isolated
+# home (only the directory-source 'agent-bridge' marketplace and similar
+# vetted entries are passed through). bridge_claude_plugin_status must
+# therefore trust the controller-managed per-UID installed_plugins.json
+# as authoritative — otherwise bridge-run.sh:451 preflight would invoke
+# `claude plugin install`, which crashes inside the isolated UID and
+# triggers a tmux respawn loop. Verify the short-circuit fires AND no
+# `claude` shell-out happens for the third-party plugin id.
+
+THIRD_PLUGIN_ID="third-party-plugin@third-marketplace"
+mkdir -p "$BRIDGE_HOME/plugins/third-party-plugin"
+echo 'third-party plugin (dir-marketplace)' \
+  > "$BRIDGE_HOME/plugins/third-party-plugin/server.ts"
+chmod -R o+rX "$BRIDGE_HOME/plugins"
+
+# Add the third-party plugin entry to the controller's manifest with a
+# valid installPath, but DO NOT add 'third-marketplace' to
+# known_marketplaces.json — that's the whole point of #346.
+python3 - "$CONTROLLER_PLUGINS/installed_plugins.json" "$BRIDGE_HOME/plugins/third-party-plugin" <<'PY'
+import json, sys
+manifest_path, install_path = sys.argv[1], sys.argv[2]
+with open(manifest_path) as f:
+    data = json.load(f)
+data.setdefault("plugins", {})["third-party-plugin@third-marketplace"] = [
+    {"scope": "user", "version": "0.1.0", "installPath": install_path}
+]
+with open(manifest_path, "w") as f:
+    json.dump(data, f, indent=2)
+PY
+
+# Sanity: confirm the marketplace metadata is intentionally absent.
+python3 -c '
+import json, sys
+with open(sys.argv[1]) as f:
+    data = json.load(f)
+assert "third-marketplace" not in data, \
+    f"test setup invariant broken: third-marketplace must not be in known_marketplaces.json"
+' "$CONTROLLER_PLUGINS/known_marketplaces.json" \
+  || die "test setup: third-marketplace unexpectedly present in known_marketplaces.json"
+
+# Re-issue the share with the augmented channel set so the per-UID
+# manifest picks up the third-party plugin.
+BRIDGE_AGENT_CHANNELS["$TEST_AGENT"]='plugin:declared-plugin@td-mkt,plugin:third-party-plugin@third-marketplace'
+BRIDGE_CONTROLLER_HOME_OVERRIDE="$CONTROLLER_HOME_FAKE" \
+  bridge_linux_share_plugin_catalog "$TEST_OS_USER" "$TEST_OS_HOME" "$CONTROLLER_USER" "$TEST_AGENT"
+
+log "verifying per-UID manifest contains the third-party plugin entry"
+sudo -n cat "$ISOLATED_PLUGINS/installed_plugins.json" | python3 -c '
+import json, sys
+m = json.load(sys.stdin)
+plugins = m.get("plugins", {})
+assert "third-party-plugin@third-marketplace" in plugins, \
+    f"per-UID manifest missing third-party plugin: {sorted(plugins)!r}"
+entry = plugins["third-party-plugin@third-marketplace"][0]
+assert entry.get("installPath", "").endswith("/third-party-plugin"), \
+    f"unexpected installPath: {entry!r}"
+' || die "per-UID manifest does not include third-party plugin"
+
+log "verifying isolated UID's known_marketplaces.json hides 'third-marketplace'"
+sudo -n -u "$TEST_OS_USER" python3 -c '
+import json, sys
+with open(sys.argv[1]) as f:
+    data = json.load(f)
+assert "third-marketplace" not in data, \
+    f"isolation boundary broken: third-marketplace leaked into known_marketplaces.json visible to isolated UID"
+' "$ISOLATED_PLUGINS/known_marketplaces.json" \
+  || die "isolated UID can see third-marketplace metadata; expected hidden"
+
+# Stub `claude` so any accidental shell-out is observable. The short-
+# circuit path must NOT touch this stub; the negative case below MUST.
+STUB_DIR="$TMP_ROOT/stubs"
+STUB_LOG="$TMP_ROOT/claude-stub-calls.log"
+mkdir -p "$STUB_DIR"
+: > "$STUB_LOG"
+chmod 0777 "$STUB_LOG"          # writable by the isolated UID
+chmod 0755 "$STUB_DIR" "$TMP_ROOT"
+cat > "$STUB_DIR/claude" <<STUB
+#!/usr/bin/env bash
+echo "stub-claude-invoked: \$*" >> "$STUB_LOG"
+exit 0
+STUB
+chmod 0755 "$STUB_DIR/claude"
+
+# Grant the isolated UID r-x access to the source checkout so it can
+# source bridge-lib.sh from the test user's shell. setfacl is already a
+# hard prerequisite for this test; the cleanup hook strips the ACL.
+sudo -n setfacl -R -m "u:${TEST_OS_USER}:r-X" "$REPO_ROOT" \
+  || die "failed to grant r-X ACL on $REPO_ROOT to $TEST_OS_USER"
+# Traverse chain up to /tmp so the test user can reach the worktree.
+_ancestor="$REPO_ROOT"
+while [[ "$_ancestor" != "/" && "$_ancestor" != "/tmp" ]]; do
+  _ancestor="$(dirname "$_ancestor")"
+  [[ -d "$_ancestor" ]] || break
+  sudo -n setfacl -m "u:${TEST_OS_USER}:--x" "$_ancestor" >/dev/null 2>&1 || true
+done
+
+log "asserting bridge_ensure_claude_plugin_enabled short-circuits without invoking claude"
+sudo -n -u "$TEST_OS_USER" env \
+    HOME="$TEST_OS_HOME" \
+    PATH="$STUB_DIR:/usr/bin:/bin" \
+    REPO_ROOT="$REPO_ROOT" \
+    PLUGIN_SPEC="$THIRD_PLUGIN_ID" \
+    BRIDGE_HOME="$BRIDGE_HOME" \
+  bash -c '
+    set -euo pipefail
+    # shellcheck source=/dev/null
+    source "$REPO_ROOT/bridge-lib.sh"
+    status="$(bridge_claude_plugin_status "$PLUGIN_SPEC")"
+    if [[ "$status" != "enabled" ]]; then
+      echo "FAIL: expected enabled, got $status" >&2
+      exit 1
+    fi
+    bridge_ensure_claude_plugin_enabled "$PLUGIN_SPEC" >/dev/null
+  ' || die "bridge_ensure_claude_plugin_enabled did not short-circuit on third-party plugin"
+
+if [[ -s "$STUB_LOG" ]]; then
+  die "claude stub was invoked during short-circuit path; log: $(cat "$STUB_LOG")"
+fi
+
+log "asserting fall-through path still invokes claude when manifest is absent"
+# Negative case: when HOME has no per-UID root-owned manifest (shared-mode
+# semantics), bridge_claude_plugin_status falls through to `claude plugin
+# list`. Stub returns no matching status line so the function reports
+# "missing"; the key assertion is that the stub WAS called — proving the
+# short-circuit gate is correctly scoped to the isolated-UID/root-owned
+# manifest case.
+NEG_HOME="$TMP_ROOT/no-manifest-home"
+mkdir -p "$NEG_HOME"
+chmod 0755 "$NEG_HOME"
+: > "$STUB_LOG"
+neg_status="$(env HOME="$NEG_HOME" PATH="$STUB_DIR:$PATH" \
+  bash -c 'source "'"$REPO_ROOT"'/bridge-lib.sh"; bridge_claude_plugin_status "'"$THIRD_PLUGIN_ID"'"')"
+if [[ "$neg_status" == "enabled" ]]; then
+  die "negative case: expected fall-through to report 'missing', got '$neg_status'"
+fi
+if [[ ! -s "$STUB_LOG" ]]; then
+  die "negative case: claude stub was NOT invoked; short-circuit gate is too loose"
+fi
+
+# Drop the third-party plugin from the channel set so the existing
+# stale-ACL-revoke assertion below operates on the original baseline
+# (declared-plugin only -> replacement-plugin only).
+BRIDGE_AGENT_CHANNELS["$TEST_AGENT"]='plugin:declared-plugin@td-mkt'
+BRIDGE_CONTROLLER_HOME_OVERRIDE="$CONTROLLER_HOME_FAKE" \
+  bridge_linux_share_plugin_catalog "$TEST_OS_USER" "$TEST_OS_HOME" "$CONTROLLER_USER" "$TEST_AGENT"
 
 log "stale-ACL revoke on channel change (Blocking 1 regression)"
 
