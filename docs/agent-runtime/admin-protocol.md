@@ -10,6 +10,40 @@
 - Onboarding State is `pending` OR the user is explicitly performing a channel setup for some agent (admin or non-admin).
 - If Session Type is anything other than `admin`, stop reading this file — it does not apply.
 
+## Admin role boundary
+
+The admin agent is a queue-aware coordinator, not a human-channel gateway. Several bridge subsystems historically routed alerts and escalations to admin's inbox or notify transport on the implicit assumption that "admin = the path to the human." That assumption is wrong, and the admin role contract makes the limits explicit.
+
+### Admin is
+
+- **The queue-routing coordinator.** Admin owns ecosystem-wide task routing (cron registration, agent registration policy, bridge upgrade decisions, multi-agent handoffs).
+- **The owner of self-cleanup for its own queue.** Per `common-instructions.md` and the [#303] self-cleanup contract, admin re-evaluates its own blocked tasks against current reality and closes them when the original premise is no longer load-bearing. Admin's queue is not a parking lot.
+- **The default destination for tasks that explicitly need admin-class arbitration.** Examples: bridge version upgrade approval, ecosystem-wide config policy changes, conflicts between agents that need a coordinator to break.
+
+### Admin is not
+
+- **A human-channel gateway.** Admin's notify-target (Discord / Telegram / Teams / terminal) is configured the same way every other agent's notify-target is. There is no special "admin reaches the operator faster" route. If the operator is reading admin's channel, they are at the same surface as any other agent's channel — not a privileged shortcut.
+- **An authority on per-agent config.** Admin does not hold other agents' tokens, secrets, or per-agent runtime state. When agent X's channel binding is broken, agent X's transcript is corrupt, or agent X's launch command is failing, admin cannot fix any of it without going through agent X's own surface.
+- **A fallback dump for "I don't know who else to escalate to."** If the originating agent has an operator-attached surface (a tmux pane the operator is watching for dynamic agents; a notify-target for static agents), that surface IS the human channel. Admin is not a closer one.
+
+### What this means for escalation paths
+
+When an agent encounters a condition that requires human input:
+
+- **Dynamic agents** (operator attached to the agent's tmux pane in TUI): the agent's own conversation IS the human channel. The agent surfaces the question in its own pane and waits. No queue task to admin. No `agent-bridge escalate question` round-trip.
+- **Static agents** (operator only via the agent's configured notify-target — Discord / Telegram / Teams): the agent re-pushes the question once on its own notify channel with an @-mention of the operator, then waits. No queue task to admin. Re-push is one-shot, not a loop — repeated re-prods are spam.
+- **Admin-class arbitration** (the originating agent legitimately needs admin to decide, not a human): create a queue task on admin's inbox with a body that admin can act on without further human input. If the body's resolution actually requires human config or business judgment, route it back to the originating agent's operator surface instead — admin cannot manufacture a human reader.
+
+The same principle applies inbound: subsystems that historically created tasks on admin's inbox for crash-loop reports, channel-health misses, cron-followup config drift, and similar conditions need to evaluate whether admin can actually resolve the case. If the case requires the affected agent's local config or the operator's decision, the alert belongs on the affected agent's own surface (or the operator-facing dashboard), not in admin's queue.
+
+### Why this matters
+
+Admin's queue grows monotonically when alerts that admin cannot resolve land in it. The visible failure mode is "admin's queue keeps filling up with blocked tasks no one closes" — already documented as #303. The deeper failure mode is "subsystems silently report success because they handed the alert to admin, when in reality the alert never reached anyone with the authority to act." Both failure modes share the same root: the wrong assumption about what admin is.
+
+For the inverse case — admin should *not* push outbound nudges/maintenance to dynamic agents whose operators are already at the agent's TUI — see the same family of issues #304 and #343.
+
+[#303]: https://github.com/SYRS-AI/agent-bridge-public/issues/303
+
 ## Admin First-Run Onboarding Defaults
 
 - `SESSION-TYPE.md`의 Session Type이 `admin`이고 Onboarding State가 `pending`이면, 사용자에게는 필요한 것만 짧게 묻는다.
