@@ -96,6 +96,43 @@ for a in data:
 '
 }
 
+# list_active_static_claude_agents — same as list_active_claude_agents, but
+# also filters to source=="static". Issue #376: per-agent pipelines like
+# memory-daily-<agent> assume a stable agent home (~/.agent-bridge/agents/<n>/)
+# that only static roster entries provide. Dynamic agents (--codex/--name from
+# `agent-bridge`) are ephemeral and have no per-agent daily-note pipeline; if
+# they appear in the broader list, registering memory-daily crons for them
+# causes daily exit-2 failures and a [cron-followup] task storm in admin's
+# queue. Use this helper for any registration that targets static-only flows.
+list_active_static_claude_agents() {
+  if [[ ! -x "$BRIDGE_AGB" ]]; then
+    echo "BRIDGE_AGB not executable: $BRIDGE_AGB" >&2
+    return 1
+  fi
+  "$BRIDGE_AGB" agent list --json 2>/dev/null \
+    | "$BRIDGE_PYTHON" -c '
+import json, sys
+try:
+    data = json.load(sys.stdin)
+except Exception:
+    sys.exit(0)
+for a in data:
+    if not isinstance(a, dict):
+        continue
+    if a.get("engine") != "claude":
+        continue
+    if not a.get("active"):
+        continue
+    if a.get("source") != "static":
+        continue
+    name = a.get("agent") or ""
+    wd = a.get("workdir") or ""
+    if not name or not wd:
+        continue
+    print(f"{name}\t{wd}")
+'
+}
+
 # agent_home_for <agent> — print the workdir for <agent> or empty string.
 agent_home_for() {
   local agent="$1"

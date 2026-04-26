@@ -22,6 +22,23 @@ json="$("$BRIDGE_AGB" agent show "$AGENT" --json 2>/dev/null)" \
   || { echo "error: agent show failed for $AGENT" >&2; exit 2; }
 [[ -n "$json" ]] || { echo "error: empty agent show output for $AGENT" >&2; exit 2; }
 
+# Issue #376 Track C: defense-in-depth source-class refusal. Track A filters
+# memory-daily-<agent> registration to static-only agents, but an operator
+# might create a cron manually or a future helper might forget to filter.
+# Exit 0 (success / no-op) — NOT exit 2 — so the cron's run-state stays
+# "success" and the daemon does not generate a [cron-followup] task.
+agent_source="$(printf '%s' "$json" | "$BRIDGE_PYTHON" -c '
+import json, sys
+try:
+    d = json.load(sys.stdin)
+except Exception:
+    sys.exit(0)
+print(d.get("source") or "")')"
+if [[ "$agent_source" == "dynamic" ]]; then
+  printf '[memory-daily-harvest] dynamic agent %s has no per-agent daily-note pipeline; nothing to harvest. exiting cleanly.\n' "$AGENT" >&2
+  exit 0
+fi
+
 # Parse JSON twice to stay whitespace-safe (paths may contain spaces).
 workdir="$(printf '%s' "$json" | "$BRIDGE_PYTHON" -c '
 import json, sys

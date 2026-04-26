@@ -172,6 +172,22 @@ fi
 AGENT_COUNT=$(wc -l < "$AGENT_LIST_TMP" | tr -d ' ')
 log "active claude agents: $AGENT_COUNT"
 
+# Issue #376: memory-daily-<agent> crons require a stable per-agent home
+# (~/.agent-bridge/agents/<n>/) which only static roster entries have. Build
+# a separate static-only set so step_memory_daily_cron_one is gated on it
+# without changing what hook/rebuild see.
+STATIC_AGENT_LIST_TMP="$(mktemp -t bootstrap-memory-static-agents.XXXXXX)"
+list_active_static_claude_agents > "$STATIC_AGENT_LIST_TMP"
+if [[ -n "$TARGET_AGENT" ]]; then
+  grep -E "^${TARGET_AGENT}"$'\t' "$STATIC_AGENT_LIST_TMP" > "$STATIC_AGENT_LIST_TMP.filt" || true
+  mv "$STATIC_AGENT_LIST_TMP.filt" "$STATIC_AGENT_LIST_TMP"
+fi
+declare -A STATIC_AGENT_SET
+while IFS=$'\t' read -r _sa _sh; do
+  [[ -z "$_sa" ]] && continue
+  STATIC_AGENT_SET["$_sa"]=1
+done < "$STATIC_AGENT_LIST_TMP"
+
 # -----------------------------------------------------------------------------
 # step 1: PreCompact hook
 # -----------------------------------------------------------------------------
@@ -974,7 +990,12 @@ while IFS=$'\t' read -r agent home; do
   [[ -z "$agent" || -z "$home" ]] && continue
   step_hook_one "$agent" "$home"
   step_rebuild_one "$agent" "$home"
-  step_memory_daily_cron_one "$agent"
+  # Issue #376: only register memory-daily-<agent> crons for static agents.
+  # Dynamic agents have no stable per-agent home; the harvester would fail
+  # every morning with exit 2 and spam admin's queue with cron-followup tasks.
+  if [[ -n "${STATIC_AGENT_SET[$agent]:-}" ]]; then
+    step_memory_daily_cron_one "$agent"
+  fi
 done < "$AGENT_LIST_TMP"
 
 for spec in "${CRON_SPECS[@]}"; do
@@ -994,7 +1015,7 @@ elif [[ -n "$BACKFILL_HISTORY_DAYS" ]]; then
     "mode=$MODE n=$BACKFILL_HISTORY_DAYS"
 fi
 
-rm -f "$EXISTING_CRONS_JSON" "$AGENT_LIST_TMP"
+rm -f "$EXISTING_CRONS_JSON" "$AGENT_LIST_TMP" "$STATIC_AGENT_LIST_TMP"
 
 # -----------------------------------------------------------------------------
 # first-run post-bootstrap signal — queue the "do the first scan + hub
