@@ -464,6 +464,16 @@ bridge_agent_linux_env_file() {
   printf '%s/agent-env.sh' "$(bridge_agent_runtime_state_dir "$agent")"
 }
 
+bridge_agent_linux_roster_fragment_file() {
+  # Issue #358 r2: per-agent declarations-only roster fragment, sibling
+  # to agent-env.sh under $runtime_state_dir. Same controller-owned
+  # boundary as the env file so the same ACL contract applies. Read by
+  # bridge_load_roster's path-priority chain when an isolated UID
+  # invokes agb without an explicit BRIDGE_AGENT_ENV_FILE.
+  local agent="$1"
+  printf '%s/agent-roster.local.sh' "$(bridge_agent_runtime_state_dir "$agent")"
+}
+
 bridge_linux_sudo_root() {
   if [[ "$(id -u)" == "0" ]]; then
     "$@"
@@ -2025,6 +2035,83 @@ EOF
   fi
 }
 
+bridge_write_linux_agent_roster_fragment() {
+  # Issue #358 r2: emits a per-agent declarations-only roster fragment
+  # at the isolated UID's $BRIDGE_HOME/agent-roster.local.sh. The fragment
+  # contains:
+  #   - self entry: full BRIDGE_AGENT_* record (the calling agent's own —
+  #     same fields as bridge_write_linux_agent_env_file's self block).
+  #   - peer entries: id + NON-SECRET metadata (desc, engine, session,
+  #     workdir, isolation_mode, source). NEVER includes peer LAUNCH_CMD,
+  #     NOTIFY_TARGET, DISCORD_CHANNEL_ID, PROMPT_GUARD.
+  #
+  # The fragment is shell-loadable via the bridge-state.sh path priority
+  # chain. The canonical controller-side roster stays mode 0600 + hidden
+  # from isolated UIDs — only the scoped fragment crosses the isolation
+  # boundary, and it carries no peer secrets.
+  local agent="$1"
+  local file="$2"   # absolute path inside the isolated UID's home
+
+  [[ -n "$agent" && -n "$file" ]] || return 1
+
+  local description engine session workdir isolation_mode os_user source
+  description="$(bridge_agent_desc "$agent")"
+  engine="$(bridge_agent_engine "$agent")"
+  session="$(bridge_agent_session "$agent")"
+  workdir="$(bridge_agent_workdir "$agent")"
+  isolation_mode="$(bridge_agent_isolation_mode "$agent")"
+  os_user="$(bridge_agent_os_user "$agent")"
+  source="$(bridge_agent_source "$agent")"
+
+  # Header + self entry. No env-var setup; this file is sourced by
+  # bridge_load_roster only, after bridge-lib has already initialized
+  # BRIDGE_HOME etc.
+  cat >"$file" <<EOF
+#!/usr/bin/env bash
+# shellcheck shell=bash disable=SC2034
+#
+# Auto-generated per-agent roster fragment (see #358). Contains only this
+# agent's full record + peers' non-secret metadata. Do not edit by hand —
+# bridge_linux_prepare_agent_isolation rewrites this file on every reapply.
+
+bridge_add_agent_id_if_missing $(printf '%q' "$agent")
+BRIDGE_AGENT_DESC[$(printf '%q' "$agent")]=$(printf '%q' "$description")
+BRIDGE_AGENT_ENGINE[$(printf '%q' "$agent")]=$(printf '%q' "$engine")
+BRIDGE_AGENT_SESSION[$(printf '%q' "$agent")]=$(printf '%q' "$session")
+BRIDGE_AGENT_WORKDIR[$(printf '%q' "$agent")]=$(printf '%q' "$workdir")
+BRIDGE_AGENT_ISOLATION_MODE[$(printf '%q' "$agent")]=$(printf '%q' "$isolation_mode")
+BRIDGE_AGENT_OS_USER[$(printf '%q' "$agent")]=$(printf '%q' "$os_user")
+BRIDGE_AGENT_SOURCE[$(printf '%q' "$agent")]=$(printf '%q' "$source")
+EOF
+
+  # Peer entries: id + non-secret metadata only. Mirrors the peer-stripping
+  # contract in bridge_write_linux_agent_env_file at lib/bridge-agents.sh:1962
+  # (no LAUNCH_CMD, no NOTIFY_*, no DISCORD_CHANNEL_ID, no PROMPT_GUARD).
+  local peer
+  for peer in "${BRIDGE_AGENT_IDS[@]}"; do
+    [[ "$peer" == "$agent" ]] && continue
+    [[ "$(bridge_agent_source "$peer")" == "static" ]] || continue
+    local peer_desc peer_engine peer_session peer_workdir peer_isolation peer_source
+    peer_desc="$(bridge_agent_desc "$peer")"
+    peer_engine="$(bridge_agent_engine "$peer")"
+    peer_session="$(bridge_agent_session "$peer")"
+    peer_workdir="$(bridge_agent_workdir "$peer")"
+    peer_isolation="$(bridge_agent_isolation_mode "$peer")"
+    peer_source="$(bridge_agent_source "$peer")"
+    cat >>"$file" <<EOF
+bridge_add_agent_id_if_missing $(printf '%q' "$peer")
+BRIDGE_AGENT_DESC[$(printf '%q' "$peer")]=$(printf '%q' "$peer_desc")
+BRIDGE_AGENT_ENGINE[$(printf '%q' "$peer")]=$(printf '%q' "$peer_engine")
+BRIDGE_AGENT_SESSION[$(printf '%q' "$peer")]=$(printf '%q' "$peer_session")
+BRIDGE_AGENT_WORKDIR[$(printf '%q' "$peer")]=$(printf '%q' "$peer_workdir")
+BRIDGE_AGENT_ISOLATION_MODE[$(printf '%q' "$peer")]=$(printf '%q' "$peer_isolation")
+BRIDGE_AGENT_SOURCE[$(printf '%q' "$peer")]=$(printf '%q' "$peer_source")
+EOF
+  done
+
+  return 0
+}
+
 bridge_linux_prepare_agent_isolation() {
   local agent="$1"
   local os_user="$2"
@@ -2113,23 +2200,7 @@ bridge_linux_prepare_agent_isolation() {
   # Root traverse-only on the gateway root for the isolated UID prevents
   # cross-agent dir-name enumeration while keeping its own subtree reachable.
   bridge_linux_acl_add "u:${os_user}:--x" "$queue_gateway_root" >/dev/null 2>&1 || true
-  # Issue #358: the global roster files (agent-roster.sh + agent-roster.local.sh)
-  # were previously hidden from isolated UIDs. That broke `agent-bridge list`
-  # and `task create --to <peer>` invoked as the isolated UID, because
-  # bridge_load_roster could not source the canonical roster. Per #358 the
-  # roster is "not secret across agents on the same host" — it is a list of
-  # declared roles + channel definitions, not credentials. Grant read-only
-  # ACL access here and remove these files from the hidden_paths revoke
-  # below. Tokens that ARE secret live in scoped agent-env.sh snapshots
-  # written by bridge_write_linux_agent_env_file (see issue #116), which
-  # remain per-agent and unchanged.
-  hidden_paths+=("$BRIDGE_RUNTIME_CREDENTIALS_DIR" "$BRIDGE_RUNTIME_SECRETS_DIR" "$BRIDGE_RUNTIME_CONFIG_FILE" "$BRIDGE_TASK_DB" "${BRIDGE_LOG_DIR}/audit.jsonl")
-  if [[ -e "$BRIDGE_ROSTER_FILE" ]]; then
-    bridge_linux_acl_add "u:${os_user}:r--" "$BRIDGE_ROSTER_FILE" >/dev/null 2>&1 || true
-  fi
-  if [[ -e "$BRIDGE_ROSTER_LOCAL_FILE" ]]; then
-    bridge_linux_acl_add "u:${os_user}:r--" "$BRIDGE_ROSTER_LOCAL_FILE" >/dev/null 2>&1 || true
-  fi
+  hidden_paths+=("$BRIDGE_ROSTER_FILE" "$BRIDGE_ROSTER_LOCAL_FILE" "$BRIDGE_RUNTIME_CREDENTIALS_DIR" "$BRIDGE_RUNTIME_SECRETS_DIR" "$BRIDGE_RUNTIME_CONFIG_FILE" "$BRIDGE_TASK_DB" "${BRIDGE_LOG_DIR}/audit.jsonl")
 
   # Issue #233: every traverse_chain call used to climb unconditionally
   # to `/` and stamp `u:${os_user}:--x` on each ancestor, including
@@ -2301,6 +2372,19 @@ bridge_linux_prepare_agent_isolation() {
   # access via ACL instead — the agent only needs to read this file.
   bridge_linux_acl_add "u:${os_user}:r--" "$env_file"
   bridge_linux_acl_add "u:${controller_user}:rw-" "$env_file"
+
+  # Issue #358 r2: write the scoped roster fragment so the isolated UID can
+  # enumerate self + peers without the controller-side roster's secrets.
+  # Sibling to agent-env.sh under $runtime_state_dir; mode 0644 owned by
+  # the isolated UID. Strict subset of safe metadata only: peer LAUNCH_CMD,
+  # NOTIFY_TARGET, DISCORD_CHANNEL_ID, and PROMPT_GUARD never appear here
+  # (mirrors the contract in bridge_write_linux_agent_env_file:1962).
+  local roster_fragment=""
+  roster_fragment="$(bridge_agent_linux_roster_fragment_file "$agent")"
+  mkdir -p "$(dirname "$roster_fragment")" 2>/dev/null || true
+  bridge_write_linux_agent_roster_fragment "$agent" "$roster_fragment"
+  bridge_linux_sudo_root chown "$os_user:$os_user" "$roster_fragment" 2>/dev/null || true
+  bridge_linux_sudo_root chmod 0644 "$roster_fragment" 2>/dev/null || true
 }
 bridge_linux_install_isolated_channel_symlink() {
   # Plant a root-owned symlink at $user_home/.claude/channels/<channel>
