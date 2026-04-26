@@ -35,8 +35,11 @@
 # Usage:   ./tests/wiki-daily-ingest/smoke.sh
 # Exit 0 if every scenario PASSes; exit 1 otherwise.
 
-set -u
-# Keep going on individual failures so the summary lists everything.
+set -uo pipefail
+# Note: -e (errexit) intentionally NOT set. The PASS/FAIL aggregator below
+# needs to continue past individual scenario failures so the summary reports
+# every failing case, not just the first. Each scenario uses explicit
+# `|| fail ...` predicates, so missed errors cannot escape silently.
 
 REPO_ROOT="$(cd -P "$(dirname "${BASH_SOURCE[0]}")"/../.. && pwd -P)"
 PYTHON="${BRIDGE_PYTHON:-$(command -v python3 || echo /usr/bin/python3)}"
@@ -169,7 +172,19 @@ fi
 # =============================================================================
 banner "2 — strand-recovery: watermark older than YESTERDAY catches stranded note"
 reset_runtime
+# Simulate "previous successful Lane A run completed at D-3" by running
+# ingest with no inputs at D-3 first — this is what would have happened
+# in production three days ago. The natural-flow run produces a watermark
+# of $TODAY (the script's --until is always "today"), so we then backdate
+# the watermark file to D-3 to model the calendar gap. This separates
+# "did the watermark mechanism work?" (Scenario 1) from "does an existing
+# watermark of D-3 actually catch a D-2 strand?" (this scenario).
 mkdir -p "$(dirname "$WIKI_WATERMARK_FILE")"
+out_file_prelude="$(run_ingest s2-prelude)"   # creates watermark via natural path
+[[ -s "$WIKI_WATERMARK_FILE" ]] || fail "2-prelude" "natural-path watermark not written: $(head -c 200 "$out_file_prelude" 2>/dev/null || true)"
+# Backdate watermark to model "last successful run was D-3, agent has been
+# offline since". Same-calendar-day re-runs cannot otherwise simulate strand
+# recovery because the script writes watermark=today on every successful run.
 printf '%s\n' "$D_MINUS_3" >"$WIKI_WATERMARK_FILE"
 # Strand a D-2 note (within the 14-day clamp window, outside the default
 # 2-day rolling window the bug describes).
