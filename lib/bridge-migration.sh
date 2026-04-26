@@ -521,10 +521,18 @@ bridge_migration_unisolate() {
   # other isolated agents.
   local history_file="" memory_daily_agent_dir="" memory_daily_shared_aggregate_dir=""
   history_file="$(bridge_history_file_for_agent "$agent" 2>/dev/null || true)"
-  memory_daily_agent_dir="$BRIDGE_STATE_DIR/memory-daily/$agent"
-  memory_daily_shared_aggregate_dir="$BRIDGE_STATE_DIR/memory-daily/shared/aggregate"
-  local memory_daily_root="$BRIDGE_STATE_DIR/memory-daily"
-  local memory_daily_shared_root="$memory_daily_root/shared"
+  local memory_daily_root="" memory_daily_shared_root=""
+  if bridge_isolation_v2_active; then
+    memory_daily_agent_dir="$(bridge_isolation_v2_agent_memory_daily_root "$agent" 2>/dev/null || true)"
+    memory_daily_shared_aggregate_dir="$(bridge_isolation_v2_memory_daily_shared_aggregate_dir 2>/dev/null || true)"
+    # v2 layout has no legacy memory-daily root/shared parents to ACL-strip
+    # — leave those local strings empty so the shallow strip below skips.
+  else
+    memory_daily_agent_dir="$BRIDGE_STATE_DIR/memory-daily/$agent"
+    memory_daily_shared_aggregate_dir="$BRIDGE_STATE_DIR/memory-daily/shared/aggregate"
+    memory_daily_root="$BRIDGE_STATE_DIR/memory-daily"
+    memory_daily_shared_root="$memory_daily_root/shared"
+  fi
 
   local -a acl_strip_paths_recursive=()
   [[ -n "$workdir" && -d "$workdir" ]] && acl_strip_paths_recursive+=("$workdir")
@@ -550,8 +558,8 @@ bridge_migration_unisolate() {
   # recursive list above doesn't already cover: the memory-daily root
   # and its shared subdir. Non-recursive so sibling agent dirs stay
   # intact.
-  [[ -d "$memory_daily_root" ]] && acl_strip_paths_shallow+=("$memory_daily_root")
-  [[ -d "$memory_daily_shared_root" ]] && acl_strip_paths_shallow+=("$memory_daily_shared_root")
+  [[ -n "$memory_daily_root" && -d "$memory_daily_root" ]] && acl_strip_paths_shallow+=("$memory_daily_root")
+  [[ -n "$memory_daily_shared_root" && -d "$memory_daily_shared_root" ]] && acl_strip_paths_shallow+=("$memory_daily_shared_root")
 
   # Root-level helper files isolate grants u:<os_user>:r-x on
   # (bridge-agents.sh:1000-1011). These are files, not directories, so

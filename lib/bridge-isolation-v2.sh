@@ -43,8 +43,22 @@
 #   │   ├── plugins/                        ← agent-bridge plugin source (teams/ms365)
 #   │   ├── skills/, docs/
 #   ├── agents/                             owner=root,       group=root,         mode 755
-#   │   └── <agent>/                        owner=agent-bridge-<name>,
-#   │                                       group=ab-agent-<name>,                mode 2770
+#   │   └── <agent>/                        owner=root,
+#   │                                       group=ab-agent-<name>,                mode 2750
+#   │       ├── home/                       owner=agent-bridge-<name>,
+#   │       │                               group=ab-agent-<name>,                mode 2770
+#   │       ├── workdir/                    owner=agent-bridge-<name>,
+#   │       │                               group=ab-agent-<name>,                mode 2770
+#   │       ├── runtime/                    owner=agent-bridge-<name>,
+#   │       │                               group=ab-agent-<name>,                mode 2770
+#   │       ├── logs/                       owner=agent-bridge-<name>,
+#   │       │                               group=ab-agent-<name>,                mode 2770
+#   │       ├── requests/, responses/       owner=agent-bridge-<name>,
+#   │       │                               group=ab-agent-<name>,                mode 2770
+#   │       └── credentials/                owner=controller,
+#   │                                       group=ab-agent-<name>,                mode 2750
+#   │           └── launch-secrets.env      owner=controller,
+#   │                                       group=ab-agent-<name>,                mode 0640
 #   ├── state/                              owner=controller, group=ab-controller, mode 2750
 #   │   └── runtime/                        bridge-config.json + secrets here
 #   ├── agent-roster.sh                     owner=controller, group=ab-controller, mode 0640
@@ -125,6 +139,149 @@ bridge_isolation_v2_shared_plugins_root() {
   # contract elsewhere.
   bridge_isolation_v2_shared_plugins_root_populated || return 1
   printf '%s' "$BRIDGE_SHARED_ROOT/plugins-cache"
+}
+
+bridge_isolation_v2_agent_root() {
+  # Print the v2 per-agent root path. Caller MUST gate on
+  # bridge_isolation_v2_active first; this helper does not re-check.
+  local agent="$1"
+  [[ -n "$agent" && -n "$BRIDGE_AGENT_ROOT_V2" ]] || return 1
+  printf '%s/%s' "$BRIDGE_AGENT_ROOT_V2" "$agent"
+}
+
+bridge_isolation_v2_agent_credentials_dir() {
+  # Controller-owned subtree under the per-agent root. Mode 2750: the
+  # isolated UID can read launch-secrets.env via group r-x but cannot
+  # write/rm/mv anything inside it. Parent (per-agent root) is also
+  # mode 2750 root-owned so the credentials/ directory itself cannot
+  # be renamed/removed by the isolated UID.
+  local agent="$1"
+  local root
+  root="$(bridge_isolation_v2_agent_root "$agent")" || return 1
+  printf '%s/credentials' "$root"
+}
+
+bridge_isolation_v2_agent_secret_env_file() {
+  # Path to the per-agent launch-secrets.env file, the controller-owned
+  # KEY=VALUE shell-env file that bridge-run.sh sources before child
+  # execution (bridge_isolation_v2_load_secret_env). Keeping secrets in
+  # this file (not in BRIDGE_AGENT_LAUNCH_CMD) prevents leaks via
+  # process listings, dry-run output, log lines, and crash reports.
+  local agent="$1"
+  local credentials_dir
+  credentials_dir="$(bridge_isolation_v2_agent_credentials_dir "$agent")" || return 1
+  printf '%s/launch-secrets.env' "$credentials_dir"
+}
+
+bridge_isolation_v2_load_secret_env() {
+  # Strict KEY=VALUE shell-env loader. Used by bridge-run.sh to inject
+  # launch secrets into the current shell so they reach the child via
+  # `export` without ever appearing in the LAUNCH_CMD string.
+  #
+  # Strict parse rules (refuse anything else, fail closed):
+  #   - blank line: skip
+  #   - comment line (^[[:space:]]*#): skip
+  #   - KEY=VALUE: KEY must match [A-Z_][A-Z0-9_]*. VALUE may be:
+  #       * unquoted (no whitespace, no quote, no $, no `, no \\)
+  #       * single-quoted '...'  (literal, no escapes inside)
+  #       * double-quoted "..." (literal but allows \" \\ and $ literal —
+  #                              we deliberately do NOT expand $ here so
+  #                              loaded files cannot exfiltrate other env)
+  #
+  # The strict shape blocks attempts to smuggle command substitution,
+  # arithmetic expansion, parameter expansion, here-docs, or array
+  # syntax through this loader.
+  local file="$1"
+  [[ -n "$file" ]] || {
+    bridge_warn "load_secret_env: file required"
+    return 1
+  }
+  [[ -f "$file" ]] || {
+    bridge_warn "load_secret_env: file not found: $file"
+    return 1
+  }
+  if [[ -r "$file" ]]; then
+    :
+  else
+    bridge_warn "load_secret_env: cannot read $file"
+    return 1
+  fi
+  local line key value lineno=0
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    lineno=$((lineno + 1))
+    # strip leading/trailing whitespace
+    line="${line#"${line%%[![:space:]]*}"}"
+    line="${line%"${line##*[![:space:]]}"}"
+    [[ -z "$line" ]] && continue
+    [[ "$line" == \#* ]] && continue
+    # KEY=VALUE split on first =
+    if [[ "$line" != *=* ]]; then
+      bridge_warn "load_secret_env: $file:$lineno not KEY=VALUE form"
+      return 1
+    fi
+    key="${line%%=*}"
+    value="${line#*=}"
+    if [[ ! "$key" =~ ^[A-Z_][A-Z0-9_]*$ ]]; then
+      bridge_warn "load_secret_env: $file:$lineno invalid KEY"
+      return 1
+    fi
+    case "$value" in
+      \'*\')
+        # single-quoted literal
+        value="${value:1:${#value}-2}"
+        if [[ "$value" == *\'* ]]; then
+          bridge_warn "load_secret_env: $file:$lineno embedded single-quote"
+          return 1
+        fi
+        ;;
+      \"*\")
+        # double-quoted literal (we treat it literally; no $/`/\\ expansion)
+        value="${value:1:${#value}-2}"
+        case "$value" in
+          *\$*|*\`*|*\\*)
+            bridge_warn "load_secret_env: $file:$lineno disallowed metachar in double-quoted value"
+            return 1
+            ;;
+        esac
+        ;;
+      *)
+        # bare value: forbid whitespace, quotes, $, `, \\
+        case "$value" in
+          *[[:space:]]*|*\"*|*\'*|*\$*|*\`*|*\\*)
+            bridge_warn "load_secret_env: $file:$lineno bare value contains disallowed character (use single-quotes)"
+            return 1
+            ;;
+        esac
+        ;;
+    esac
+    # export into current shell. Subshell `export` would not propagate.
+    # shellcheck disable=SC2163
+    export "$key=$value"
+  done < "$file"
+  return 0
+}
+
+bridge_isolation_v2_agent_memory_daily_root() {
+  # Per-agent memory-daily root. Lives inside the per-agent root so it
+  # inherits the same isolation contract; the daily harvester aggregates
+  # into the shared aggregate dir (controller-owned, group-readable).
+  local agent="$1"
+  local root
+  root="$(bridge_isolation_v2_agent_root "$agent")" || return 1
+  printf '%s/runtime/memory-daily' "$root"
+}
+
+bridge_isolation_v2_memory_daily_shared_aggregate_dir() {
+  # Canonical shared aggregate directory — the harvester writes
+  # admin-aggregate-*.json files DIRECTLY under this path (not inside an
+  # extra `aggregate/` child). Lives under shared/ so other isolated UIDs
+  # may read the aggregate but never write it (design-r3 decision: shared
+  # writes are controller-only). PR-C r3: contract unified across all
+  # callers so prepare/migration grants the same path the Python writer
+  # uses, eliminating the parent-vs-child mismatch flagged in r2 review
+  # finding P2 #2.
+  [[ -n "$BRIDGE_SHARED_ROOT" ]] || return 1
+  printf '%s/memory-daily/aggregate' "$BRIDGE_SHARED_ROOT"
 }
 
 bridge_isolation_v2_agent_group_name() {

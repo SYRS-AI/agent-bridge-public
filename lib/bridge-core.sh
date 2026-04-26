@@ -287,6 +287,16 @@ PY
 }
 
 bridge_queue_gateway_root() {
+  # v2 layout: queue agent dirs live inside the per-agent root so the
+  # requests/ and responses/ subtrees inherit the isolated-UID
+  # ownership without a separate ACL subtree. The "root" returned
+  # here is therefore the per-agent root parent (BRIDGE_AGENT_ROOT_V2),
+  # and bridge_queue_gateway_agent_dir composes "<root>/<agent>" the
+  # same way as the legacy "<state>/queue-gateway/<agent>" path.
+  if bridge_isolation_v2_active && [[ -n "$BRIDGE_AGENT_ROOT_V2" ]]; then
+    printf '%s' "$BRIDGE_AGENT_ROOT_V2"
+    return 0
+  fi
   printf '%s/queue-gateway' "$BRIDGE_STATE_DIR"
 }
 
@@ -655,6 +665,16 @@ bridge_history_file_for() {
   local workdir="$3"
   local key
 
+  # v2 layout: history.env lives inside the per-agent runtime root
+  # rather than in BRIDGE_HISTORY_DIR. Format stays shell-env (KEY=VALUE)
+  # so the existing readers/writers (`source` in
+  # bridge_load_static_agent_history, shell assignments in
+  # bridge_write_agent_state_file, the session-id rewrite path) work
+  # without a format migration. Only the location changes.
+  if bridge_isolation_v2_active && [[ -n "$BRIDGE_AGENT_ROOT_V2" && -n "$name" ]]; then
+    printf '%s/%s/runtime/history.env' "$BRIDGE_AGENT_ROOT_V2" "$name"
+    return 0
+  fi
   key="$(bridge_history_key_for "$engine" "$name" "$workdir")"
   printf '%s/%s--%s--%s.env' "$BRIDGE_HISTORY_DIR" "$name" "$engine" "$key"
 }

@@ -478,12 +478,55 @@ while true; do
   if [[ -f "$ERRFILE" ]]; then
     local_err_size_before="$(wc -c <"$ERRFILE" 2>/dev/null || echo 0)"
   fi
-  run_started_at="$(date +%s)"
-  if "$BRIDGE_BASH_BIN" -lc "$LAUNCH_CMD" 2> >(tee -a "$ERRFILE" >&2); then
-    EXIT_CODE=0
-  else
-    EXIT_CODE=$?
+  # v2 isolation: load per-agent launch secrets from credentials/launch-secrets.env
+  # into the child shell so the child inherits them via export, NEVER via
+  # composing into LAUNCH_CMD. Composing tokens into LAUNCH_CMD leaks via
+  # process listings, the `log_line` above, dry-run output, the crash-report
+  # path (bridge_agent_write_crash_report writes LAUNCH_CMD verbatim), and
+  # any tee'd stderr. Loading inside the launch subshell (not the parent)
+  # also prevents stale secrets from persisting across restart-loop
+  # iterations after the credentials file is rotated, emptied, or removed.
+  _v2_secret_file=""
+  if bridge_isolation_v2_active; then
+    _v2_secret_file="$(bridge_isolation_v2_agent_secret_env_file "$AGENT" 2>/dev/null || true)"
+    [[ -n "$_v2_secret_file" && -f "$_v2_secret_file" ]] || _v2_secret_file=""
   fi
+  run_started_at="$(date +%s)"
+  if [[ -n "$_v2_secret_file" ]]; then
+    # PR-C r2 review P2 #1: cannot use the subshell exit code as the
+    # loader-failure sentinel — the same subshell `exec`s the agent
+    # command, so any legitimate child exit code (e.g. exit 75 from a
+    # claude / codex process) would be misclassified as a secret-load
+    # failure and call bridge_die. Use an out-of-band marker file that
+    # only the loader-failure branch creates; the parent then checks the
+    # marker independently of the exit code.
+    _v2_secret_fail_marker="$(mktemp -t agb-secret-fail.XXXXXX 2>/dev/null || printf '%s' "/tmp/agb-secret-fail.$$.$RANDOM")"
+    rm -f "$_v2_secret_fail_marker"
+    if (
+      bridge_isolation_v2_load_secret_env "$_v2_secret_file" || {
+        : > "$_v2_secret_fail_marker" 2>/dev/null || true
+        exit 1
+      }
+      exec "$BRIDGE_BASH_BIN" -lc "$LAUNCH_CMD"
+    ) 2> >(tee -a "$ERRFILE" >&2); then
+      EXIT_CODE=0
+    else
+      EXIT_CODE=$?
+    fi
+    if [[ -f "$_v2_secret_fail_marker" ]]; then
+      rm -f "$_v2_secret_fail_marker"
+      bridge_die "isolation v2: failed to load launch secrets for '$AGENT' from $_v2_secret_file"
+    fi
+    rm -f "$_v2_secret_fail_marker"
+    unset _v2_secret_fail_marker
+  else
+    if "$BRIDGE_BASH_BIN" -lc "$LAUNCH_CMD" 2> >(tee -a "$ERRFILE" >&2); then
+      EXIT_CODE=0
+    else
+      EXIT_CODE=$?
+    fi
+  fi
+  unset _v2_secret_file
   run_ended_at="$(date +%s)"
   if [[ "$run_started_at" =~ ^[0-9]+$ && "$run_ended_at" =~ ^[0-9]+$ ]]; then
     run_duration=$((run_ended_at - run_started_at))

@@ -1921,6 +1921,15 @@ BRIDGE_RUNTIME_SECRETS_DIR=$(printf '%q' "$BRIDGE_RUNTIME_SECRETS_DIR")
 BRIDGE_RUNTIME_CONFIG_FILE=$(printf '%q' "$BRIDGE_RUNTIME_CONFIG_FILE")
 BRIDGE_HOOKS_DIR=$(printf '%q' "$BRIDGE_HOOKS_DIR")
 BRIDGE_SHARED_DIR=$(printf '%q' "$BRIDGE_SHARED_DIR")
+BRIDGE_LAYOUT=$(printf '%q' "${BRIDGE_LAYOUT:-legacy}")
+BRIDGE_DATA_ROOT=$(printf '%q' "${BRIDGE_DATA_ROOT:-}")
+BRIDGE_SHARED_ROOT=$(printf '%q' "${BRIDGE_SHARED_ROOT:-}")
+BRIDGE_AGENT_ROOT_V2=$(printf '%q' "${BRIDGE_AGENT_ROOT_V2:-}")
+BRIDGE_CONTROLLER_STATE_ROOT=$(printf '%q' "${BRIDGE_CONTROLLER_STATE_ROOT:-}")
+BRIDGE_SHARED_GROUP=$(printf '%q' "${BRIDGE_SHARED_GROUP:-ab-shared}")
+BRIDGE_CONTROLLER_GROUP=$(printf '%q' "${BRIDGE_CONTROLLER_GROUP:-ab-controller}")
+BRIDGE_AGENT_GROUP_PREFIX=$(printf '%q' "${BRIDGE_AGENT_GROUP_PREFIX:-ab-agent-}")
+export BRIDGE_LAYOUT BRIDGE_DATA_ROOT BRIDGE_SHARED_ROOT BRIDGE_AGENT_ROOT_V2 BRIDGE_CONTROLLER_STATE_ROOT BRIDGE_SHARED_GROUP BRIDGE_CONTROLLER_GROUP BRIDGE_AGENT_GROUP_PREFIX
 BRIDGE_LOG_DIR=$(printf '%q' "$agent_log_dir")
 BRIDGE_AUDIT_LOG=$(printf '%q' "$agent_audit_log")
 BRIDGE_ROSTER_FILE=""
@@ -2104,6 +2113,55 @@ bridge_linux_prepare_agent_isolation() {
   bridge_linux_ensure_user_home "$os_user" "$user_home"
   bridge_linux_install_agent_bridge_symlink "$os_user" "$user_home" "$BRIDGE_HOME"
 
+  # v2 layout: lay down the per-agent private root before any ACL grants
+  # touch its children. The contract is:
+  #   $BRIDGE_AGENT_ROOT_V2/<agent>            owner=root, group=ab-agent-<name>, mode 2750
+  #   ├── home/, workdir/, runtime/, logs/,
+  #   │   requests/, responses/                 owner=isolated, group=ab-agent-<name>, mode 2770
+  #   └── credentials/                          owner=controller, group=ab-agent-<name>, mode 2750
+  #       └── launch-secrets.env                owner=controller, group=ab-agent-<name>, mode 0640
+  # The root mode 2750 means unrelated UIDs cannot traverse/list the
+  # private root; the isolated UID enters via group r-x but cannot write
+  # at the root level — so it cannot rm/mv `credentials/` or its file.
+  if bridge_isolation_v2_active; then
+    local _v2_agent_group _v2_agent_root _v2_credentials_dir _v2_subdir
+    _v2_agent_group="$(bridge_isolation_v2_agent_group_name "$agent")" \
+      || bridge_die "isolation v2: invalid agent name '$agent' for group composition"
+    bridge_isolation_v2_ensure_group "$_v2_agent_group" \
+      || bridge_die "isolation v2: cannot ensure group '$_v2_agent_group'"
+    bridge_isolation_v2_ensure_user_in_group "$os_user" "$_v2_agent_group" \
+      || bridge_die "isolation v2: cannot add '$os_user' to '$_v2_agent_group'"
+    bridge_isolation_v2_ensure_user_in_group "$controller_user" "$_v2_agent_group" \
+      || bridge_die "isolation v2: cannot add controller '$controller_user' to '$_v2_agent_group'"
+    _v2_agent_root="$(bridge_isolation_v2_agent_root "$agent")" \
+      || bridge_die "isolation v2: cannot resolve per-agent root for '$agent'"
+    bridge_linux_sudo_root mkdir -p "$_v2_agent_root"
+    bridge_linux_sudo_root chown root: "$_v2_agent_root"
+    bridge_linux_sudo_root chgrp "$_v2_agent_group" "$_v2_agent_root"
+    bridge_linux_sudo_root chmod 2750 "$_v2_agent_root"
+    for _v2_subdir in home workdir runtime logs requests responses; do
+      bridge_linux_sudo_root mkdir -p "$_v2_agent_root/$_v2_subdir"
+      bridge_linux_sudo_root chown "$os_user" "$_v2_agent_root/$_v2_subdir"
+      bridge_linux_sudo_root chgrp "$_v2_agent_group" "$_v2_agent_root/$_v2_subdir"
+      bridge_linux_sudo_root chmod 2770 "$_v2_agent_root/$_v2_subdir"
+    done
+    _v2_credentials_dir="$(bridge_isolation_v2_agent_credentials_dir "$agent")"
+    bridge_linux_sudo_root mkdir -p "$_v2_credentials_dir"
+    bridge_linux_sudo_root chown "$controller_user" "$_v2_credentials_dir"
+    bridge_linux_sudo_root chgrp "$_v2_agent_group" "$_v2_credentials_dir"
+    bridge_linux_sudo_root chmod 2750 "$_v2_credentials_dir"
+    # If a launch-secrets.env already exists (carried over from a previous
+    # prepare cycle or seeded by migration), normalize its ownership/mode.
+    # We do not create it here — the operator/migration tool plants it.
+    local _v2_secrets_file
+    _v2_secrets_file="$(bridge_isolation_v2_agent_secret_env_file "$agent")"
+    if bridge_linux_sudo_root test -f "$_v2_secrets_file"; then
+      bridge_linux_sudo_root chown "$controller_user" "$_v2_secrets_file"
+      bridge_linux_sudo_root chgrp "$_v2_agent_group" "$_v2_secrets_file"
+      bridge_linux_sudo_root chmod 0640 "$_v2_secrets_file"
+    fi
+  fi
+
   recursive_read_paths+=("$BRIDGE_HOOKS_DIR" "$BRIDGE_SHARED_DIR")
   [[ -d "$BRIDGE_RUNTIME_ROOT" ]] && recursive_read_paths+=("$BRIDGE_RUNTIME_ROOT")
   [[ -d "$BRIDGE_HOME/.claude" ]] && recursive_read_paths+=("$BRIDGE_HOME/.claude")
@@ -2125,25 +2183,59 @@ bridge_linux_prepare_agent_isolation() {
   #   <state>/memory-daily/shared/aggregate/        — shared rwX (all isolated
   #     agents write to the fcntl.flock-guarded aggregate files; no cross-agent
   #     directory-entry tampering because peer <agent>/ dirs remain un-ACL'd)
-  local memory_daily_root="$BRIDGE_STATE_DIR/memory-daily"
-  local memory_daily_agent_dir="$memory_daily_root/$agent"
-  local memory_daily_shared_aggregate_dir="$memory_daily_root/shared/aggregate"
+  local memory_daily_root memory_daily_agent_dir memory_daily_shared_aggregate_dir
+  if bridge_isolation_v2_active; then
+    # v2 layout: per-agent memory-daily lives inside the per-agent root
+    # (group-isolated), shared aggregate lives under BRIDGE_SHARED_ROOT
+    # so other agents' harvesters can read it via ab-shared. The legacy
+    # `memory_daily_root` aggregate (BRIDGE_STATE_DIR/memory-daily) is no
+    # longer the source of truth in v2 — we keep an empty value so any
+    # later legacy-only ACL grant on it short-circuits below.
+    memory_daily_root=""
+    memory_daily_agent_dir="$(bridge_isolation_v2_agent_memory_daily_root "$agent")"
+    memory_daily_shared_aggregate_dir="$(bridge_isolation_v2_memory_daily_shared_aggregate_dir)"
+  else
+    memory_daily_root="$BRIDGE_STATE_DIR/memory-daily"
+    memory_daily_agent_dir="$memory_daily_root/$agent"
+    memory_daily_shared_aggregate_dir="$memory_daily_root/shared/aggregate"
+  fi
   bridge_linux_sudo_root mkdir -p "$memory_daily_agent_dir" "$memory_daily_shared_aggregate_dir"
 
   # One-shot legacy aggregate migration — runs as sudo-root here so it has
   # write access on the memory-daily root even though the new ACL contract
   # only grants isolated UIDs r-x on the root. Idempotent + safe to re-run.
-  local _agg_name
-  for _agg_name in admin-aggregate-skip.json admin-aggregate-escalated.json; do
-    if [[ -f "$memory_daily_root/$_agg_name" && ! -f "$memory_daily_shared_aggregate_dir/$_agg_name" ]]; then
-      bridge_linux_sudo_root mv "$memory_daily_root/$_agg_name" "$memory_daily_shared_aggregate_dir/$_agg_name"
-    fi
-    if [[ -f "$memory_daily_root/$_agg_name.lock" && ! -f "$memory_daily_shared_aggregate_dir/$_agg_name.lock" ]]; then
-      bridge_linux_sudo_root mv "$memory_daily_root/$_agg_name.lock" "$memory_daily_shared_aggregate_dir/$_agg_name.lock"
-    fi
-  done
+  # In v2 layout the legacy `<state>/memory-daily/` root is no longer the
+  # source of truth, so this one-shot is skipped.
+  if [[ -n "$memory_daily_root" ]]; then
+    local _agg_name
+    for _agg_name in admin-aggregate-skip.json admin-aggregate-escalated.json; do
+      if [[ -f "$memory_daily_root/$_agg_name" && ! -f "$memory_daily_shared_aggregate_dir/$_agg_name" ]]; then
+        bridge_linux_sudo_root mv "$memory_daily_root/$_agg_name" "$memory_daily_shared_aggregate_dir/$_agg_name"
+      fi
+      if [[ -f "$memory_daily_root/$_agg_name.lock" && ! -f "$memory_daily_shared_aggregate_dir/$_agg_name.lock" ]]; then
+        bridge_linux_sudo_root mv "$memory_daily_root/$_agg_name.lock" "$memory_daily_shared_aggregate_dir/$_agg_name.lock"
+      fi
+    done
+  fi
 
-  recursive_write_paths+=("$workdir" "$runtime_state_dir" "$log_dir" "$queue_gateway_agent_dir" "$request_dir" "$response_dir" "$memory_daily_agent_dir" "$memory_daily_shared_aggregate_dir")
+  if bridge_isolation_v2_active; then
+    # v2 split: the per-agent root (= queue_gateway_agent_dir in v2) is
+    # root-owned mode 2750 and MUST stay outside the isolated UID's
+    # rwX grant set; only the writable subtrees are listed. The isolated
+    # UID still reaches requests/responses through ab-agent-<name> group
+    # traverse on the parent root.
+    #
+    # PR-C r3 review P2: $memory_daily_shared_aggregate_dir is removed
+    # from the v2 write set. The shared aggregate sits under ab-shared
+    # (read-only public per the v2 contract) and the harvester writes it
+    # in controller context — isolated UIDs only need read/execute, not
+    # write/delete. Granting rwX recursively here would let any isolated
+    # agent corrupt the shared admin aggregate.
+    recursive_read_paths+=("$memory_daily_shared_aggregate_dir")
+    recursive_write_paths+=("$workdir" "$runtime_state_dir" "$log_dir" "$request_dir" "$response_dir" "$memory_daily_agent_dir")
+  else
+    recursive_write_paths+=("$workdir" "$runtime_state_dir" "$log_dir" "$queue_gateway_agent_dir" "$request_dir" "$response_dir" "$memory_daily_agent_dir" "$memory_daily_shared_aggregate_dir")
+  fi
   # Issue: per-agent queue-gateway dir was missing isolated/controller ACLs
   # because only its children (requests/, responses/) were granted. The
   # daemon's controller-side glob of the queue-gateway root and the
@@ -2179,7 +2271,9 @@ bridge_linux_prepare_agent_isolation() {
   else
     bridge_warn "controller_user=$controller_user has no passwd entry / home; traverse grants skipped (isolated agent may hit EACCES)"
   fi
-  bridge_linux_acl_add "u:${os_user}:r-x" "$memory_daily_root" "$memory_daily_root/shared" >/dev/null 2>&1 || true
+  if [[ -n "$memory_daily_root" ]]; then
+    bridge_linux_acl_add "u:${os_user}:r-x" "$memory_daily_root" "$memory_daily_root/shared" >/dev/null 2>&1 || true
+  fi
 
   bridge_linux_acl_add "u:${os_user}:r-x" "$BRIDGE_HOME" "$BRIDGE_AGENT_HOME_ROOT"
   bridge_linux_acl_add "u:${os_user}:r-x" "$BRIDGE_HOME/agent-bridge" "$BRIDGE_HOME/agb" "$BRIDGE_HOME/VERSION" >/dev/null 2>&1 || true
@@ -2198,7 +2292,17 @@ bridge_linux_prepare_agent_isolation() {
   bridge_linux_grant_claude_credentials_access "$os_user" "$user_home" "$controller_user" "$(bridge_agent_engine "$agent")"
   bridge_linux_acl_add_recursive "u:${os_user}:r-X" "${recursive_read_paths[@]}"
   bridge_linux_acl_add_recursive "u:${os_user}:rwX" "${recursive_write_paths[@]}"
-  bridge_linux_acl_add_default_dirs_recursive "u:${os_user}:rwX" "$runtime_state_dir" "$log_dir" "$queue_gateway_agent_dir" "$request_dir" "$response_dir" "$memory_daily_agent_dir" "$memory_daily_shared_aggregate_dir"
+  if bridge_isolation_v2_active; then
+    # Match the recursive_write_paths v2 split: queue_gateway_agent_dir
+    # (= per-agent root, root-owned 2750) is intentionally absent so the
+    # isolated UID never inherits a default rwX over its credentials/.
+    # $memory_daily_shared_aggregate_dir is also absent here (PR-C r3 P2):
+    # default rwX would let new files inside the shared aggregate inherit
+    # isolated UID write, defeating the read-only-shared contract.
+    bridge_linux_acl_add_default_dirs_recursive "u:${os_user}:rwX" "$runtime_state_dir" "$log_dir" "$request_dir" "$response_dir" "$memory_daily_agent_dir"
+  else
+    bridge_linux_acl_add_default_dirs_recursive "u:${os_user}:rwX" "$runtime_state_dir" "$log_dir" "$queue_gateway_agent_dir" "$request_dir" "$response_dir" "$memory_daily_agent_dir" "$memory_daily_shared_aggregate_dir"
+  fi
   bridge_linux_acl_add "u:${os_user}:rw-" "$history_file"
 
   for other in "${BRIDGE_AGENT_IDS[@]}"; do
@@ -2458,6 +2562,10 @@ bridge_linux_install_isolated_channel_symlink() {
 
 bridge_agent_default_home() {
   local agent="$1"
+  if bridge_isolation_v2_active && [[ -n "$BRIDGE_AGENT_ROOT_V2" && -n "$agent" ]]; then
+    printf '%s/%s/home' "$BRIDGE_AGENT_ROOT_V2" "$agent"
+    return 0
+  fi
   printf '%s/%s' "$BRIDGE_AGENT_HOME_ROOT" "$agent"
 }
 
@@ -2539,6 +2647,19 @@ bridge_agent_ms365_state_dir() {
 bridge_agent_workdir() {
   local agent="$1"
   local explicit="${BRIDGE_AGENT_WORKDIR[$agent]-}"
+
+  # v2 takes precedence over explicit roster workdirs: the per-agent private
+  # root (root-owned, group r-x, mode 2750) IS the isolation contract. An
+  # explicit workdir outside that root would launch the agent into a
+  # directory the per-agent group cannot reach — or worse, a directory that
+  # other isolated UIDs can reach — silently breaking PR-C's per-agent
+  # privacy. Static rosters that need a non-default location should set
+  # BRIDGE_DATA_ROOT (which moves the v2 anchor for every agent), not
+  # BRIDGE_AGENT_WORKDIR per-agent.
+  if bridge_isolation_v2_active && [[ -n "$BRIDGE_AGENT_ROOT_V2" && -n "$agent" ]]; then
+    printf '%s/%s/workdir' "$BRIDGE_AGENT_ROOT_V2" "$agent"
+    return 0
+  fi
 
   if [[ -n "$explicit" ]]; then
     printf '%s' "$explicit"
