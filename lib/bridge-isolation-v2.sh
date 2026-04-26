@@ -206,6 +206,23 @@ bridge_isolation_v2_load_secret_env() {
     bridge_warn "load_secret_env: cannot read $file"
     return 1
   fi
+  # PR-C r2 (codex r1 B-3): reject secret files whose mode would allow
+  # group write or world read. The launch-secrets.env contract is 0640
+  # (controller-write, group-read, no other) per PR body §"Per-Agent
+  # Root Layout"; anything broader is either a misconfigured deploy or
+  # a tampering attempt and we MUST refuse to export from it. Probe
+  # cross-platform: GNU `stat -c '%a'` first, BSD `stat -f '%Lp'` fallback.
+  local _secret_mode=""
+  _secret_mode="$(stat -c '%a' "$file" 2>/dev/null || stat -f '%Lp' "$file" 2>/dev/null || true)"
+  case "$_secret_mode" in
+    640|0640|600|0600|400|0400)
+      : # acceptable — controller-write only, no group-write, no world-read
+      ;;
+    *)
+      bridge_warn "load_secret_env: refusing $file (mode=${_secret_mode}, expected 0640/0600/0400)"
+      return 1
+      ;;
+  esac
   local line key value lineno=0
   while IFS= read -r line || [[ -n "$line" ]]; do
     lineno=$((lineno + 1))
@@ -258,6 +275,61 @@ bridge_isolation_v2_load_secret_env() {
     # shellcheck disable=SC2163
     export "$key=$value"
   done < "$file"
+  return 0
+}
+
+bridge_isolation_v2_exec_with_secret_env() {
+  # Subshell-wrap for bridge-run.sh's launch path. Loads launch secrets
+  # inside a subshell, then `exec`s the agent command from the same
+  # subshell so the secrets reach the child via `export` without ever
+  # appearing in LAUNCH_CMD or persisting in the long-lived parent.
+  #
+  # PR-C r2 (codex r1 G-19): extracted from bridge-run.sh so the smoke
+  # test exercises the EXACT production code path, not a re-implementation.
+  #
+  # Args:
+  #   $1 secret_file   absolute path to launch-secrets.env
+  #   $2 bash_bin      bash to use for `exec ... -lc <launch_cmd>`
+  #   $3 launch_cmd    the agent launch command line
+  #   $4 errfile       path to append child stderr to (via tee)
+  #   $5 agent_name    agent id, used in the loader-failure bridge_die message
+  #
+  # Side effects:
+  #   - Sets BRIDGE_ISOLATION_V2_LAST_EXEC_RC to the child's exit code.
+  #   - On loader failure, calls bridge_die (does not return).
+  local _secret_file="$1"
+  local _bash_bin="$2"
+  local _launch_cmd="$3"
+  local _errfile="$4"
+  local _agent="$5"
+  # PR-C r2 review P2 #1: cannot use the subshell exit code as the
+  # loader-failure sentinel — the same subshell `exec`s the agent
+  # command, so any legitimate child exit code (e.g. exit 75 from a
+  # claude / codex process) would be misclassified as a secret-load
+  # failure and call bridge_die. Use an out-of-band marker file that
+  # only the loader-failure branch creates; the parent then checks the
+  # marker independently of the exit code.
+  local _fail_marker
+  _fail_marker="$(mktemp -t agb-secret-fail.XXXXXX 2>/dev/null || printf '%s' "/tmp/agb-secret-fail.$$.$RANDOM")"
+  rm -f "$_fail_marker"
+  local _rc=0
+  if (
+    bridge_isolation_v2_load_secret_env "$_secret_file" || {
+      : > "$_fail_marker" 2>/dev/null || true
+      exit 1
+    }
+    exec "$_bash_bin" -lc "$_launch_cmd"
+  ) 2> >(tee -a "$_errfile" >&2); then
+    _rc=0
+  else
+    _rc=$?
+  fi
+  if [[ -f "$_fail_marker" ]]; then
+    rm -f "$_fail_marker"
+    bridge_die "isolation v2: failed to load launch secrets for '$_agent' from $_secret_file"
+  fi
+  rm -f "$_fail_marker"
+  BRIDGE_ISOLATION_V2_LAST_EXEC_RC="$_rc"
   return 0
 }
 

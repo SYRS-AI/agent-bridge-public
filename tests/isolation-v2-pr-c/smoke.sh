@@ -339,6 +339,9 @@ for hostile in \
     'BARE=has space here'; do
   bad_file="$secret_dir/bad.$RANDOM.env"
   printf '%s\n' "$hostile" > "$bad_file"
+  # PR-C r2 (codex r1 B-3): mode check rejects 0644 default; pin to 0600
+  # so this case tests CONTENT rejection, not mode rejection.
+  chmod 0600 "$bad_file"
   if ( set +u; export BRIDGE_HOME="$TMP_ROOT/loader-bh" \
                   BRIDGE_LAYOUT=v2 BRIDGE_DATA_ROOT="$TMP_ROOT/loader-data";
        # shellcheck source=/dev/null
@@ -377,20 +380,74 @@ fi
 ok "S3: launch surfaces (LAUNCH_CMD / log_line / crash payload) free of secret canary"
 
 # ---------------------------------------------------------------------------
+# S3b: file-mode rejection (codex r1 B-3) — load_secret_env must refuse to
+# export from a secret file whose mode would allow group-write or
+# world-read. Acceptable modes: 0640 / 0600 / 0400. Anything broader is
+# either a misconfigured deploy or a tampering attempt.
+# ---------------------------------------------------------------------------
+log "case: secret file-mode rejection (S3b / B-3)"
+mode_dir="$secret_dir/mode"
+mkdir -p "$mode_dir"
+
+# Negative cases: each broader mode must be refused.
+for bad_mode in 0644 0664 0666 0660 0755 0777; do
+  bad_mode_file="$mode_dir/bad-$bad_mode.env"
+  printf 'MODE_TOKEN=ok\n' > "$bad_mode_file"
+  chmod "$bad_mode" "$bad_mode_file"
+  if ( set +u; export BRIDGE_HOME="$TMP_ROOT/loader-bh" \
+                  BRIDGE_LAYOUT=v2 BRIDGE_DATA_ROOT="$TMP_ROOT/loader-data";
+       # shellcheck source=/dev/null
+       source "$REPO_ROOT/bridge-lib.sh" 2>/dev/null;
+       bridge_isolation_v2_load_secret_env "$bad_mode_file" >/dev/null 2>&1
+     ); then
+    die "S3b: file with mode $bad_mode was not rejected"
+  fi
+done
+
+# Positive cases: each acceptable mode must succeed.
+for ok_mode in 0640 0600 0400; do
+  ok_mode_file="$mode_dir/ok-$ok_mode.env"
+  printf 'MODE_TOKEN=ok\n' > "$ok_mode_file"
+  chmod "$ok_mode" "$ok_mode_file"
+  if ! ( set +u; export BRIDGE_HOME="$TMP_ROOT/loader-bh" \
+                    BRIDGE_LAYOUT=v2 BRIDGE_DATA_ROOT="$TMP_ROOT/loader-data";
+         # shellcheck source=/dev/null
+         source "$REPO_ROOT/bridge-lib.sh" 2>/dev/null;
+         unset MODE_TOKEN
+         bridge_isolation_v2_load_secret_env "$ok_mode_file" >/dev/null 2>&1
+       ); then
+    die "S3b: file with mode $ok_mode was incorrectly rejected"
+  fi
+done
+ok "S3b: load_secret_env refuses 0644/0664/0666/0660/0755/0777, accepts 0640/0600/0400"
+
+# ---------------------------------------------------------------------------
 # S4: subshell-scoped secret load — bridge-run.sh now loads launch secrets
 # inside the launch subshell (not the parent). PR-C r1 review P1 #3:
 # loading into the long-lived parent meant rotated/emptied/removed secret
-# files left stale exports across restart-loop iterations. Verify the
-# pattern: a subshell that loads + exits leaves no SECRET in the parent.
+# files left stale exports across restart-loop iterations.
+#
+# PR-C r2 (codex r1 G-19): exercise the EXACT production helper
+# bridge_isolation_v2_exec_with_secret_env (extracted from bridge-run.sh)
+# instead of re-implementing the subshell shape in the test fixture.
+# The launch command is a fake bash script that writes the secret value
+# it observed to a child-marker file; the parent then asserts (a) the
+# child saw the secret, and (b) the parent's env did not.
 # ---------------------------------------------------------------------------
-log "case: subshell-scoped secret load (S4)"
+log "case: subshell-scoped secret load (S4 / G-19 integration)"
 s4_secret_old="$secret_dir/s4-old.env"
 s4_secret_new="$secret_dir/s4-new.env"
 s4_canary_old="zzzz-S4-OLD-$RANDOM"
 s4_canary_new="zzzz-S4-NEW-$RANDOM"
 printf 'S4_TOKEN=%s\n' "$s4_canary_old" > "$s4_secret_old"
 printf 'S4_TOKEN=%s\n' "$s4_canary_new" > "$s4_secret_new"
-chmod 0600 "$s4_secret_old" "$s4_secret_new"
+chmod 0640 "$s4_secret_old" "$s4_secret_new"
+
+s4_errfile="$TMP_ROOT/s4-errfile.log"
+: > "$s4_errfile"
+s4_child_marker_old="$TMP_ROOT/s4-child-old.observed"
+s4_child_marker_new="$TMP_ROOT/s4-child-new.observed"
+rm -f "$s4_child_marker_old" "$s4_child_marker_new"
 
 (
   set +u
@@ -402,32 +459,39 @@ chmod 0600 "$s4_secret_old" "$s4_secret_new"
   source "$REPO_ROOT/bridge-lib.sh"
   unset S4_TOKEN
 
-  # Iteration 1: subshell loads OLD secret + observes it inside the
-  # subshell, then exits. Parent must NOT see S4_TOKEN.
-  observed_in_sub=""
-  observed_in_sub="$(
-    bridge_isolation_v2_load_secret_env "$s4_secret_old" >/dev/null 2>&1
-    printf '%s' "${S4_TOKEN:-<unset>}"
-  )"
-  [[ "$observed_in_sub" == "$s4_canary_old" ]] || exit 41
-  [[ "${S4_TOKEN:-}" == "" ]] || exit 42  # parent leak check
+  # Iteration 1: drive the actual production helper. Launch command writes
+  # what the child saw to a marker file, then exits 0. Production helper
+  # `exec`s the launch command, so it inherits any env exported by the
+  # secret loader inside the subshell.
+  s4_launch_old='printf "%s" "${S4_TOKEN:-<unset>}" > "'"$s4_child_marker_old"'"'
+  BRIDGE_ISOLATION_V2_LAST_EXEC_RC=0
+  bridge_isolation_v2_exec_with_secret_env \
+    "$s4_secret_old" "$BRIDGE_BASH_BIN" "$s4_launch_old" "$s4_errfile" "s4-test"
+  [[ "$BRIDGE_ISOLATION_V2_LAST_EXEC_RC" == 0 ]] || exit 41
+  [[ -f "$s4_child_marker_old" ]] || exit 42
+  observed_in_child_old="$(cat "$s4_child_marker_old")"
+  [[ "$observed_in_child_old" == "$s4_canary_old" ]] || exit 43
+  [[ "${S4_TOKEN:-}" == "" ]] || exit 44  # parent leak check
 
-  # Iteration 2: rotate the file (emulate Sean rotating the secret) and
-  # verify the parent never observed iteration-1 value, so cannot leak it
-  # into iteration-2 child.
-  : > "$s4_secret_new.empty"
+  # Iteration 2: rotate the file (emulate Sean rotating the secret).
+  # Without invoking the helper this iteration, parent must still be clean.
   observed_after_rotate="${S4_TOKEN:-<unset>}"
-  [[ "$observed_after_rotate" == "<unset>" ]] || exit 43
+  [[ "$observed_after_rotate" == "<unset>" ]] || exit 45
 
-  # Iteration 3: subshell loads NEW secret. Parent still must not see it.
-  observed_iter3="$(
-    bridge_isolation_v2_load_secret_env "$s4_secret_new" >/dev/null 2>&1
-    printf '%s' "${S4_TOKEN:-<unset>}"
-  )"
-  [[ "$observed_iter3" == "$s4_canary_new" ]] || exit 44
-  [[ "${S4_TOKEN:-}" == "" ]] || exit 45
-) || die "S4: subshell scope leaked into parent (rc=$?)"
-ok "S4: secret load in launch subshell does not persist in parent across iterations"
+  # Iteration 3: drive the helper again with the NEW secret. Parent still
+  # must not see iteration-1 value (no stale export), and the new child
+  # must see iteration-3 value.
+  s4_launch_new='printf "%s" "${S4_TOKEN:-<unset>}" > "'"$s4_child_marker_new"'"'
+  BRIDGE_ISOLATION_V2_LAST_EXEC_RC=0
+  bridge_isolation_v2_exec_with_secret_env \
+    "$s4_secret_new" "$BRIDGE_BASH_BIN" "$s4_launch_new" "$s4_errfile" "s4-test"
+  [[ "$BRIDGE_ISOLATION_V2_LAST_EXEC_RC" == 0 ]] || exit 46
+  [[ -f "$s4_child_marker_new" ]] || exit 47
+  observed_in_child_new="$(cat "$s4_child_marker_new")"
+  [[ "$observed_in_child_new" == "$s4_canary_new" ]] || exit 48
+  [[ "${S4_TOKEN:-}" == "" ]] || exit 49
+) || die "S4: production subshell-wrap leaked into parent or child did not observe secret (rc=$?)"
+ok "S4: bridge_isolation_v2_exec_with_secret_env: child sees secret, parent does not, no cross-iteration leak"
 
 # ---------------------------------------------------------------------------
 # S5: out-of-band loader-failure marker — PR-C r2 review P2 #1. The subshell
@@ -474,6 +538,9 @@ chmod 0600 "$s5_secret"
   # malformed secret file so the loader rejects it.
   bad_file="$secret_dir/s5-bad.env"
   printf 'BARE=has space here\n' > "$bad_file"
+  # PR-C r2 (codex r1 B-3): pin to 0600 so the loader rejects on CONTENT,
+  # not mode.
+  chmod 0600 "$bad_file"
   if (
     bridge_isolation_v2_load_secret_env "$bad_file" >/dev/null 2>&1 || {
       : > "$s5_marker"

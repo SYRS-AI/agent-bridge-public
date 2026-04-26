@@ -493,32 +493,16 @@ while true; do
   fi
   run_started_at="$(date +%s)"
   if [[ -n "$_v2_secret_file" ]]; then
-    # PR-C r2 review P2 #1: cannot use the subshell exit code as the
-    # loader-failure sentinel — the same subshell `exec`s the agent
-    # command, so any legitimate child exit code (e.g. exit 75 from a
-    # claude / codex process) would be misclassified as a secret-load
-    # failure and call bridge_die. Use an out-of-band marker file that
-    # only the loader-failure branch creates; the parent then checks the
-    # marker independently of the exit code.
-    _v2_secret_fail_marker="$(mktemp -t agb-secret-fail.XXXXXX 2>/dev/null || printf '%s' "/tmp/agb-secret-fail.$$.$RANDOM")"
-    rm -f "$_v2_secret_fail_marker"
-    if (
-      bridge_isolation_v2_load_secret_env "$_v2_secret_file" || {
-        : > "$_v2_secret_fail_marker" 2>/dev/null || true
-        exit 1
-      }
-      exec "$BRIDGE_BASH_BIN" -lc "$LAUNCH_CMD"
-    ) 2> >(tee -a "$ERRFILE" >&2); then
-      EXIT_CODE=0
-    else
-      EXIT_CODE=$?
-    fi
-    if [[ -f "$_v2_secret_fail_marker" ]]; then
-      rm -f "$_v2_secret_fail_marker"
-      bridge_die "isolation v2: failed to load launch secrets for '$AGENT' from $_v2_secret_file"
-    fi
-    rm -f "$_v2_secret_fail_marker"
-    unset _v2_secret_fail_marker
+    # PR-C r2 (codex r1 G-19): the subshell-wrap pattern lives in
+    # lib/bridge-isolation-v2.sh as bridge_isolation_v2_exec_with_secret_env
+    # so the smoke test exercises the EXACT production code path. The
+    # helper sets BRIDGE_ISOLATION_V2_LAST_EXEC_RC to the child's exit
+    # code (or calls bridge_die on loader failure).
+    BRIDGE_ISOLATION_V2_LAST_EXEC_RC=0
+    bridge_isolation_v2_exec_with_secret_env \
+      "$_v2_secret_file" "$BRIDGE_BASH_BIN" "$LAUNCH_CMD" "$ERRFILE" "$AGENT"
+    EXIT_CODE="$BRIDGE_ISOLATION_V2_LAST_EXEC_RC"
+    unset BRIDGE_ISOLATION_V2_LAST_EXEC_RC
   else
     if "$BRIDGE_BASH_BIN" -lc "$LAUNCH_CMD" 2> >(tee -a "$ERRFILE" >&2); then
       EXIT_CODE=0
