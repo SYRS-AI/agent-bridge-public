@@ -1457,7 +1457,12 @@ BRIDGE_ACTIVE_ROSTER_MD=$(printf '%q' "$BRIDGE_ACTIVE_ROSTER_MD")
 BRIDGE_DAEMON_PID_FILE=$(printf '%q' "$BRIDGE_DAEMON_PID_FILE")
 BRIDGE_DAEMON_LOG=$(printf '%q' "$BRIDGE_DAEMON_LOG")
 BRIDGE_DAEMON_CRASH_LOG=$(printf '%q' "$BRIDGE_DAEMON_CRASH_LOG")
-BRIDGE_TASK_DB=$(printf '%q' "$BRIDGE_TASK_DB")
+# BRIDGE_TASK_DB is sentineled (not the live path) for isolated UIDs: every
+# queue read/write must route through the gateway proxy when
+# BRIDGE_GATEWAY_PROXY=1. Emitting the real path would disclose operator state
+# layout (#287 / #294 r1 finding 4) and re-open a direct-DB code path. Setting
+# /dev/null fails loudly if any caller bypasses the gateway and tries sqlite.
+BRIDGE_TASK_DB=/dev/null
 BRIDGE_PROFILE_STATE_DIR=$(printf '%q' "$BRIDGE_PROFILE_STATE_DIR")
 BRIDGE_CRON_STATE_DIR=$(printf '%q' "$BRIDGE_CRON_STATE_DIR")
 BRIDGE_CRON_HOME_DIR=$(printf '%q' "$BRIDGE_CRON_HOME_DIR")
@@ -1506,29 +1511,79 @@ declare -g -A BRIDGE_AGENT_OS_USER=()
 declare -g -A BRIDGE_AGENT_MODEL=()
 declare -g -A BRIDGE_AGENT_EFFORT=()
 declare -g -A BRIDGE_AGENT_PERMISSION_MODE=()
-bridge_add_agent_id_if_missing $(printf '%q' "$agent")
-BRIDGE_AGENT_DESC["$agent"]=$(printf '%q' "$description")
-BRIDGE_AGENT_ENGINE["$agent"]=$(printf '%q' "$engine")
-BRIDGE_AGENT_SESSION["$agent"]=$(printf '%q' "$session")
-BRIDGE_AGENT_WORKDIR["$agent"]=$(printf '%q' "$workdir")
-BRIDGE_AGENT_PROFILE_HOME["$agent"]=$(printf '%q' "$profile_home")
-BRIDGE_AGENT_LAUNCH_CMD["$agent"]=$(printf '%q' "$launch_cmd")
-BRIDGE_AGENT_SOURCE["$agent"]="static"
-BRIDGE_AGENT_LOOP["$agent"]=$(printf '%q' "$loop_mode")
-BRIDGE_AGENT_CONTINUE["$agent"]=$(printf '%q' "$continue_mode")
-BRIDGE_AGENT_SESSION_ID["$agent"]=$(printf '%q' "$session_id")
-BRIDGE_AGENT_HISTORY_KEY["$agent"]=$(printf '%q' "$history_key")
-BRIDGE_AGENT_CREATED_AT["$agent"]=$(printf '%q' "$created_at")
-BRIDGE_AGENT_UPDATED_AT["$agent"]=$(printf '%q' "$updated_at")
-BRIDGE_AGENT_IDLE_TIMEOUT["$agent"]=$(printf '%q' "$idle_timeout")
-BRIDGE_AGENT_NOTIFY_KIND["$agent"]=$(printf '%q' "$notify_kind")
-BRIDGE_AGENT_NOTIFY_TARGET["$agent"]=$(printf '%q' "$notify_target")
-BRIDGE_AGENT_NOTIFY_ACCOUNT["$agent"]=$(printf '%q' "$notify_account")
-BRIDGE_AGENT_DISCORD_CHANNEL_ID["$agent"]=$(printf '%q' "$discord_channel")
-BRIDGE_AGENT_CHANNELS["$agent"]=$(printf '%q' "$channels")
-BRIDGE_AGENT_ISOLATION_MODE["$agent"]=$(printf '%q' "$isolation_mode")
-BRIDGE_AGENT_OS_USER["$agent"]=$(printf '%q' "$os_user")
+declare -g -A BRIDGE_AGENT_PROMPT_GUARD=()
 EOF
+  # Self entry first: full record including LAUNCH_CMD (the calling agent's
+  # own launch command may legitimately carry tokens; ACLs already restrict
+  # the file to the calling UID + controller).
+  cat >>"$file" <<EOF
+bridge_add_agent_id_if_missing $(printf '%q' "$agent")
+BRIDGE_AGENT_DESC[$(printf '%q' "$agent")]=$(printf '%q' "$description")
+BRIDGE_AGENT_ENGINE[$(printf '%q' "$agent")]=$(printf '%q' "$engine")
+BRIDGE_AGENT_SESSION[$(printf '%q' "$agent")]=$(printf '%q' "$session")
+BRIDGE_AGENT_WORKDIR[$(printf '%q' "$agent")]=$(printf '%q' "$workdir")
+BRIDGE_AGENT_PROFILE_HOME[$(printf '%q' "$agent")]=$(printf '%q' "$profile_home")
+BRIDGE_AGENT_LAUNCH_CMD[$(printf '%q' "$agent")]=$(printf '%q' "$launch_cmd")
+BRIDGE_AGENT_SOURCE[$(printf '%q' "$agent")]="static"
+BRIDGE_AGENT_LOOP[$(printf '%q' "$agent")]=$(printf '%q' "$loop_mode")
+BRIDGE_AGENT_CONTINUE[$(printf '%q' "$agent")]=$(printf '%q' "$continue_mode")
+BRIDGE_AGENT_SESSION_ID[$(printf '%q' "$agent")]=$(printf '%q' "$session_id")
+BRIDGE_AGENT_HISTORY_KEY[$(printf '%q' "$agent")]=$(printf '%q' "$history_key")
+BRIDGE_AGENT_CREATED_AT[$(printf '%q' "$agent")]=$(printf '%q' "$created_at")
+BRIDGE_AGENT_UPDATED_AT[$(printf '%q' "$agent")]=$(printf '%q' "$updated_at")
+BRIDGE_AGENT_IDLE_TIMEOUT[$(printf '%q' "$agent")]=$(printf '%q' "$idle_timeout")
+BRIDGE_AGENT_NOTIFY_KIND[$(printf '%q' "$agent")]=$(printf '%q' "$notify_kind")
+BRIDGE_AGENT_NOTIFY_TARGET[$(printf '%q' "$agent")]=$(printf '%q' "$notify_target")
+BRIDGE_AGENT_NOTIFY_ACCOUNT[$(printf '%q' "$agent")]=$(printf '%q' "$notify_account")
+BRIDGE_AGENT_DISCORD_CHANNEL_ID[$(printf '%q' "$agent")]=$(printf '%q' "$discord_channel")
+BRIDGE_AGENT_CHANNELS[$(printf '%q' "$agent")]=$(printf '%q' "$channels")
+BRIDGE_AGENT_ISOLATION_MODE[$(printf '%q' "$agent")]=$(printf '%q' "$isolation_mode")
+BRIDGE_AGENT_OS_USER[$(printf '%q' "$agent")]=$(printf '%q' "$os_user")
+BRIDGE_AGENT_PROMPT_GUARD[$(printf '%q' "$agent")]=$(printf '%q' "${BRIDGE_AGENT_PROMPT_GUARD[$agent]-}")
+EOF
+  # Peer entries: id + non-secret metadata. NEVER emit a peer's LAUNCH_CMD
+  # (token-bearing) or PROMPT_GUARD policy (canary tokens at
+  # lib/bridge-guard.sh:123 are sensitive — see #294 r1 finding 3). The empty
+  # LAUNCH_CMD / PROMPT_GUARD entries are written explicitly so the array shape
+  # stays consistent across map keys; downstream callers that require the
+  # launch command for a peer must fall through to the controller (queue
+  # gateway path). Client-side guard parity for peers is intentionally dropped:
+  # gateway-side enforcement remains, and a follow-up issue covers the case if
+  # peer-targeted prompt blocking before queue submission is actually needed.
+  local peer=""
+  for peer in "${BRIDGE_AGENT_IDS[@]}"; do
+    [[ "$peer" == "$agent" ]] && continue
+    [[ "$(bridge_agent_source "$peer")" == "static" ]] || continue
+    local peer_desc peer_engine peer_session peer_workdir peer_isolation
+    local peer_source
+    peer_desc="$(bridge_agent_desc "$peer")"
+    peer_engine="$(bridge_agent_engine "$peer")"
+    peer_session="$(bridge_agent_session "$peer")"
+    peer_workdir="$(bridge_agent_workdir "$peer")"
+    peer_isolation="$(bridge_agent_isolation_mode "$peer")"
+    peer_source="$(bridge_agent_source "$peer")"
+    cat >>"$file" <<EOF
+bridge_add_agent_id_if_missing $(printf '%q' "$peer")
+BRIDGE_AGENT_DESC[$(printf '%q' "$peer")]=$(printf '%q' "$peer_desc")
+BRIDGE_AGENT_ENGINE[$(printf '%q' "$peer")]=$(printf '%q' "$peer_engine")
+BRIDGE_AGENT_SESSION[$(printf '%q' "$peer")]=$(printf '%q' "$peer_session")
+BRIDGE_AGENT_WORKDIR[$(printf '%q' "$peer")]=$(printf '%q' "$peer_workdir")
+BRIDGE_AGENT_SOURCE[$(printf '%q' "$peer")]=$(printf '%q' "$peer_source")
+BRIDGE_AGENT_ISOLATION_MODE[$(printf '%q' "$peer")]=$(printf '%q' "$peer_isolation")
+BRIDGE_AGENT_LAUNCH_CMD[$(printf '%q' "$peer")]=''
+BRIDGE_AGENT_PROMPT_GUARD[$(printf '%q' "$peer")]=''
+EOF
+  done
+  # Explicit gateway-proxy signal for isolated agents. Decouples gateway
+  # routing from `${#BRIDGE_AGENT_IDS[@]}` so the peer-id additions above do
+  # not accidentally drop the agent off the gateway. See issue #294 +
+  # bridge_queue_gateway_proxy_agent.
+  if [[ "$isolation_mode" == "linux-user" ]]; then
+    cat >>"$file" <<'EOF'
+BRIDGE_GATEWAY_PROXY=1
+export BRIDGE_GATEWAY_PROXY
+EOF
+  fi
   # Inject engine CLI directory into PATH for sudo-wrapped launchers when
   # isolation is active. Under sudo, PATH falls back to secure_path which
   # almost never contains the operator's per-user bin (e.g.

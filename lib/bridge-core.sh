@@ -350,13 +350,26 @@ bridge_queue_gateway_responses_dir() {
 }
 
 bridge_queue_gateway_proxy_agent() {
+  # Resolve the calling agent that should route through the queue gateway
+  # instead of touching the SQLite DB directly. Returns the agent id on stdout
+  # when proxy mode applies; empty + non-zero rc otherwise.
+  #
+  # Decoupled from `${#BRIDGE_AGENT_IDS[@]}` so the scoped env can carry every
+  # peer's id (needed for client-side bridge_require_agent on A2A queue tasks)
+  # without simultaneously dropping the isolated UID off the gateway path.
+  # The explicit `BRIDGE_GATEWAY_PROXY=1` flag is emitted by
+  # bridge_write_linux_agent_env_file whenever the agent runs in linux-user
+  # isolation. See issue #294.
   local agent=""
-  local count=0
 
   [[ -n "${BRIDGE_AGENT_ENV_FILE:-}" ]] || return 1
-  count="${#BRIDGE_AGENT_IDS[@]}"
-  [[ "$count" -eq 1 ]] || return 1
-  agent="${BRIDGE_AGENT_IDS[0]}"
+  [[ "${BRIDGE_GATEWAY_PROXY:-}" == "1" ]] || return 1
+  agent="${BRIDGE_AGENT_ID:-}"
+  if [[ -z "$agent" ]]; then
+    # Fallback: scoped envs always emit the calling agent's id first.
+    agent="${BRIDGE_AGENT_IDS[0]:-}"
+  fi
+  [[ -n "$agent" ]] || return 1
   bridge_agent_linux_user_isolation_effective "$agent" || return 1
   printf '%s' "$agent"
 }
