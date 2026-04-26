@@ -285,6 +285,162 @@ chans = data.get("channels", [])
 assert chans == ["plugin:declared-plugin@td-mkt"], f"unexpected persisted channels: {chans!r}"
 ' || die "persisted grant-set contents do not match"
 
+log "BRIDGE_AGENT_PLUGINS allowlist propagates into isolated manifest (#348)"
+
+# Phase: with the channel set already granted (declared-plugin@td-mkt),
+# add a non-channel domain plugin via BRIDGE_AGENT_PLUGINS["<agent>"].
+# That allowlist (#272) was previously invisible to
+# bridge_write_isolated_installed_plugins_manifest /
+# bridge_linux_share_plugin_catalog (#348). The reapply below should now:
+#   - merge `allowlisted-plugin@allowlist-mkt` into the isolated
+#     installed_plugins.json (union with channel-declared plugins),
+#   - grant u:<os_user>:r-X to the allowlisted plugin's install path,
+#   - symlink marketplaces/allowlist-mkt under the isolated plugins root,
+#   - emit an `isolated_plugin_manifest_written` audit row carrying both
+#     plugin ids.
+mkdir -p "$CONTROLLER_PLUGINS/cache/allowlist-mkt/allowlisted-plugin/0.1.0" \
+         "$CONTROLLER_PLUGINS/marketplaces/allowlist-mkt"
+echo 'allowlisted plugin source (cache)' \
+  > "$CONTROLLER_PLUGINS/cache/allowlist-mkt/allowlisted-plugin/0.1.0/index.js"
+echo '{"name":"allowlist-mkt","plugins":["allowlisted-plugin"]}' \
+  > "$CONTROLLER_PLUGINS/marketplaces/allowlist-mkt/marketplace.json"
+mkdir -p "$BRIDGE_HOME/plugins/allowlisted-plugin"
+echo 'allowlisted plugin (dir-marketplace)' \
+  > "$BRIDGE_HOME/plugins/allowlisted-plugin/server.ts"
+chmod -R o+rX "$CONTROLLER_HOME_FAKE" "$BRIDGE_HOME/plugins"
+
+python3 - "$CONTROLLER_PLUGINS/installed_plugins.json" "$BRIDGE_HOME/plugins/allowlisted-plugin" <<'PY'
+import json, sys
+manifest_path, install_path = sys.argv[1], sys.argv[2]
+with open(manifest_path) as f:
+    data = json.load(f)
+data.setdefault("plugins", {})["allowlisted-plugin@allowlist-mkt"] = [
+    {"scope": "user", "version": "0.1.0", "installPath": install_path}
+]
+with open(manifest_path, "w") as f:
+    json.dump(data, f, indent=2)
+PY
+
+# known_marketplaces.json needs the allowlist-mkt entry so
+# bridge_resolve_plugin_install_path's directory-marketplace fallback
+# path is exercised the same way as td-mkt.
+python3 - "$CONTROLLER_PLUGINS/known_marketplaces.json" "$BRIDGE_HOME" <<'PY'
+import json, sys
+markets_path, bridge_home = sys.argv[1], sys.argv[2]
+with open(markets_path) as f:
+    data = json.load(f)
+data["allowlist-mkt"] = {
+    "source": {"source": "directory", "path": bridge_home},
+    "installLocation": bridge_home,
+}
+with open(markets_path, "w") as f:
+    json.dump(data, f, indent=2)
+PY
+
+# Roster declares the allowlist alongside the existing channel; both
+# tokens should land in the isolated manifest after the reapply.
+BRIDGE_AGENT_PLUGINS["$TEST_AGENT"]='allowlisted-plugin@allowlist-mkt'
+
+# Truncate the audit log so the post-reapply assertion does not match
+# audit rows produced by the earlier share-call. The default location
+# is $BRIDGE_LOG_DIR/audit.jsonl per bridge_load_roster's defaulting.
+audit_log_file="${BRIDGE_AUDIT_LOG:-$BRIDGE_LOG_DIR/audit.jsonl}"
+mkdir -p "$(dirname "$audit_log_file")"
+: > "$audit_log_file"
+
+BRIDGE_CONTROLLER_HOME_OVERRIDE="$CONTROLLER_HOME_FAKE" \
+  bridge_linux_share_plugin_catalog "$TEST_OS_USER" "$TEST_OS_HOME" "$CONTROLLER_USER" "$TEST_AGENT"
+
+log "verifying per-UID manifest now lists union of channel + allowlist plugins"
+sudo -n cat "$ISOLATED_PLUGINS/installed_plugins.json" | python3 -c '
+import json, sys
+m = json.load(sys.stdin)
+plugins = sorted(m.get("plugins", {}).keys())
+expected = ["allowlisted-plugin@allowlist-mkt", "declared-plugin@td-mkt"]
+assert plugins == expected, f"unexpected manifest plugins: {plugins!r} (expected {expected!r})"
+for pid in expected:
+    entry = m["plugins"][pid][0]
+    assert "installPath" in entry and entry["installPath"], f"missing installPath for {pid}"
+' || die "per-UID manifest did not include BRIDGE_AGENT_PLUGINS allowlist entry (#348)"
+
+log "verifying allowlisted plugin's install path has u:${TEST_OS_USER}:r-X recursively"
+allowlisted_path="$BRIDGE_HOME/plugins/allowlisted-plugin"
+sudo -n getfacl --no-effective "$allowlisted_path" 2>/dev/null \
+  | grep -Eq "^user:${TEST_OS_USER}:r(-x|wx)" \
+  || die "allowlisted plugin dir missing u:${TEST_OS_USER}:r-x ACL ($allowlisted_path)"
+sudo -n getfacl --no-effective "$allowlisted_path/server.ts" 2>/dev/null \
+  | grep -Eq "^user:${TEST_OS_USER}:r--" \
+  || die "allowlisted plugin file missing u:${TEST_OS_USER}:r-- ACL"
+
+log "verifying isolated UID can read allowlisted plugin sources"
+sudo -n -u "$TEST_OS_USER" cat "$allowlisted_path/server.ts" >/dev/null \
+  || die "isolated UID should be able to read allowlisted plugin source"
+
+log "verifying marketplaces/allowlist-mkt symlink landed under isolated plugins root"
+allowlisted_mkt_link="$ISOLATED_PLUGINS/marketplaces/allowlist-mkt"
+sudo -n test -L "$allowlisted_mkt_link" \
+  || die "expected $allowlisted_mkt_link to be a symlink"
+allowlisted_mkt_resolved="$(sudo -n readlink -f "$allowlisted_mkt_link" 2>/dev/null || true)"
+allowlisted_mkt_expected="$CONTROLLER_PLUGINS/marketplaces/allowlist-mkt"
+[[ "$allowlisted_mkt_resolved" == "$allowlisted_mkt_expected" ]] \
+  || die "marketplace symlink resolved to $allowlisted_mkt_resolved (expected $allowlisted_mkt_expected)"
+sudo -n -u "$TEST_OS_USER" cat "$allowlisted_mkt_expected/marketplace.json" >/dev/null \
+  || die "isolated UID should be able to read allowlisted marketplace metadata"
+
+log "verifying persisted grant-set carries union (allowlist promoted to plugin:<id>)"
+sudo -n cat "$state_file" | python3 -c '
+import json, sys
+data = json.load(sys.stdin)
+chans = sorted(data.get("channels", []))
+expected = ["plugin:allowlisted-plugin@allowlist-mkt", "plugin:declared-plugin@td-mkt"]
+assert chans == expected, f"unexpected persisted channels: {chans!r} (expected {expected!r})"
+' || die "persisted grant-set did not include BRIDGE_AGENT_PLUGINS allowlist entry (#348)"
+
+log "verifying isolated_plugin_manifest_written audit row carries both plugin ids"
+python3 - "$audit_log_file" "$TEST_AGENT" "$TEST_OS_USER" <<'PY' \
+  || die "isolated_plugin_manifest_written audit row missing or malformed"
+import json, sys
+path, agent, os_user = sys.argv[1], sys.argv[2], sys.argv[3]
+with open(path) as f:
+    rows = [json.loads(line) for line in f if line.strip()]
+matches = [
+    r for r in rows
+    if r.get("action") == "isolated_plugin_manifest_written" and r.get("target") == agent
+]
+assert matches, f"no isolated_plugin_manifest_written rows for {agent} in {path}"
+row = matches[-1]
+detail = row.get("detail", {})
+assert detail.get("os_user") == os_user, f"unexpected os_user: {detail!r}"
+plugins_csv = detail.get("plugins") or ""
+ids = sorted(filter(None, plugins_csv.split(",")))
+expected = sorted([
+    "plugin:allowlisted-plugin@allowlist-mkt",
+    "plugin:declared-plugin@td-mkt",
+])
+assert ids == expected, f"audit plugins mismatch: {ids!r} (expected {expected!r})"
+count = detail.get("plugin_count")
+# plugin_count is recorded as a string by bridge-audit.py's --detail
+# normaliser (everything goes through ensure_ascii=True/json.dumps with
+# the value as-is — bash always passes it as a string).
+assert str(count) == str(len(expected)), f"plugin_count mismatch: {count!r}"
+PY
+
+# Reset BRIDGE_AGENT_PLUGINS so the existing channel-flip phase below
+# runs in its original shape (channel-only) and the prior assertions
+# stay semantically unchanged.
+unset 'BRIDGE_AGENT_PLUGINS[$TEST_AGENT]'
+
+# Re-apply once with the allowlist removed so the persisted grant set
+# returns to channel-only state before the channel-flip phase.
+BRIDGE_CONTROLLER_HOME_OVERRIDE="$CONTROLLER_HOME_FAKE" \
+  bridge_linux_share_plugin_catalog "$TEST_OS_USER" "$TEST_OS_HOME" "$CONTROLLER_USER" "$TEST_AGENT"
+
+log "verifying allowlist removal revoked ACLs on the allowlisted plugin"
+post_revoke_count="$(sudo -n getfacl --no-effective "$allowlisted_path" 2>/dev/null \
+  | grep -cE "^user:${TEST_OS_USER}:" || true)"
+[[ "$post_revoke_count" == "0" ]] \
+  || die "expected u:${TEST_OS_USER} ACL gone from allowlisted plugin after allowlist removal; still has $post_revoke_count"
+
 log "stale-ACL revoke on channel change (Blocking 1 regression)"
 
 # At this point declared-plugin@td-mkt has been granted (line ~195 above).
