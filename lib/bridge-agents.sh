@@ -465,17 +465,14 @@ bridge_agent_linux_env_file() {
 }
 
 bridge_agent_linux_roster_fragment_file() {
-  # Issue #358 r3: the fragment lands inside the isolated UID's
-  # $BRIDGE_HOME-equivalent (`/home/<os_user>/.agent-bridge/`) so the
-  # path-priority chain in bridge_load_roster (`$BRIDGE_HOME/agent-roster.local.sh`)
-  # actually resolves to it when the isolated UID invokes agb without an
-  # explicit BRIDGE_AGENT_ENV_FILE. r2's `runtime_state_dir/agent-roster.local.sh`
-  # path was controller-side and never appeared in the chain — see PR #372 r3.
-  local agent="$1"
-  local os_user
-  os_user="$(bridge_agent_os_user "$agent")"
-  [[ -n "$os_user" ]] || return 1
-  printf '%s/.agent-bridge/agent-roster.local.sh' "$(bridge_agent_linux_user_home "$os_user")"
+  # Issue #358 r4: revert r3 — `/home/<os_user>/.agent-bridge` is a
+  # symlink to the controller's $BRIDGE_HOME (installed by
+  # bridge_linux_install_agent_bridge_symlink at lib/bridge-agents.sh:540).
+  # Writing through it would overwrite the canonical 0600 secret-bearing
+  # roster. The fragment lives in the agent's runtime state dir,
+  # controller-side; bridge_load_roster's USER-derived chain candidate
+  # (added in r4) resolves it via the same symlink for the calling UID.
+  printf '%s/agent-roster.local.sh' "$(bridge_agent_runtime_state_dir "$1")"
 }
 
 bridge_linux_sudo_root() {

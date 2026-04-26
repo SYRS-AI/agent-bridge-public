@@ -1124,14 +1124,38 @@ bridge_load_roster() {
 
     # Issue #358: under linux-user isolation the calling UID's $HOME (and
     # therefore the per-UID-defaulted $BRIDGE_HOME) points at the isolated
-    # user's home, not the controller's. The roster file lives at the
-    # controller-canonical path. Try candidates in priority order and source
-    # the first readable one — never $HOME, never bridge_die on the
-    # bridge-lib default if the controller-side install root has the file.
+    # user's home — but ~/.agent-bridge is a symlink to the controller's
+    # $BRIDGE_HOME (installed by bridge_linux_install_agent_bridge_symlink),
+    # so the canonical roster (mode 0600) is unreadable for the isolated
+    # UID. Use a path priority chain that includes the per-agent fragment
+    # written into the agent's runtime_state_dir during isolation prepare
+    # (see bridge_write_linux_agent_roster_fragment + dispatch site in
+    # lib/bridge-agents.sh::bridge_linux_prepare_agent_isolation).
+    #
+    # Order:
+    #   1. BRIDGE_ROSTER_LOCAL_FILE (explicit override or controller-set)
+    #   2. $BRIDGE_HOME/agent-roster.local.sh (controller's bridge-lib default;
+    #      0600 — only the controller can read it)
+    #   3. $BRIDGE_HOME/state/agents/<agent>/agent-roster.local.sh —
+    #      per-agent declarations-only fragment, agent id derived from
+    #      $USER under linux-user isolation (`agent-bridge-<name>` → `<name>`).
+    #      Fragment is owned by the isolated UID with mode 0644 so the
+    #      calling UID can read its own per-agent record + peer non-secret
+    #      metadata without crossing the controller's secret boundary.
+    #   4. $BRIDGE_SCRIPT_DIR/agent-roster.local.sh — install-root fallback.
+    local roster_local_isolation_candidate=""
+    if [[ "${USER:-}" == agent-bridge-* ]]; then
+      local _isolated_agent_id="${USER#agent-bridge-}"
+      if [[ -n "$_isolated_agent_id" ]]; then
+        roster_local_isolation_candidate="$BRIDGE_HOME/state/agents/${_isolated_agent_id}/agent-roster.local.sh"
+      fi
+    fi
+
     local roster_local_candidate=""
     for roster_local_candidate in \
         "$BRIDGE_ROSTER_LOCAL_FILE" \
         "$BRIDGE_HOME/agent-roster.local.sh" \
+        "$roster_local_isolation_candidate" \
         "$BRIDGE_SCRIPT_DIR/agent-roster.local.sh"; do
       [[ -n "$roster_local_candidate" ]] || continue
       if [[ -r "$roster_local_candidate" ]]; then
