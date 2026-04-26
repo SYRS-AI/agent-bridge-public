@@ -1296,10 +1296,31 @@ def blocked_task_reminder_body(task: sqlite3.Row, age_seconds: int, reminder_sec
             "",
             "This task has stayed blocked without a status refresh.",
             "",
-            "Please do one of the following:",
-            f"1. refresh the blocked status: `agb update {task_id} --status blocked --note \"...\"`",
-            f"2. hand it off if ownership changed: `agb handoff {task_id} --to <agent> --note \"...\"`",
-            f"3. resolve it and close it: `agb done {task_id} --agent {assigned_to} --note \"...\"`",
+            "## Self-Cleanup Decision Tree",
+            "",
+            "(admin contract; see CLAUDE.md `## Admin Self-Cleanup of Own Queue`)",
+            "",
+            "Apply (a)-(f) in order, ruling each one out in writing in your refresh note "
+            "before reaching `refresh blocked`. Refresh is the exception, not the equilibrium.",
+            "",
+            "(a) original premise satisfied / invalidated by later events",
+            f"    → `agb done {task_id} --agent {assigned_to} --note \"stale: <why>\"`",
+            "(b) source agent moved on / closed its driving cycle",
+            f"    → `agb done {task_id} --agent {assigned_to} --note \"source moved on\"`",
+            "(c) another active task already covers this work",
+            f"    → `agb handoff {task_id} --to <agent> --note \"<cross-ref>\"`"
+            f" OR `agb done {task_id} --agent {assigned_to} --note \"duplicate of #<id>\"`",
+            "(d) doable in <15 minutes by you alone",
+            "    → unblock and do it now; do NOT defer as `tech debt`",
+            "(e) operator decision required AND obtainable on the shared channel today",
+            "    → escalate via Discord/Telegram, then refresh blocked with deadline",
+            "(f) none of the above",
+            f"    → `agb update {task_id} --status blocked --note \"I will revisit when "
+            "<verifiable trigger>. Decision tree: ruled out (a)-(e) because: <one line>.\"`",
+            "",
+            "The `note` on a refresh-blocked must include both the verifiable trigger AND "
+            "the one-line summary of why (a)-(e) were ruled out. Empty notes and bare-refresh "
+            "notes are rejected by the contract.",
         ]
     )
     return "\n".join(lines).rstrip() + "\n"
@@ -1328,6 +1349,35 @@ def blocked_task_escalation_body(
         "",
         "This blocked task has gone stale past the escalation threshold.",
         "Please review whether the assignee needs intervention, handoff, or closure.",
+        "",
+        "## Self-Cleanup Decision Tree",
+        "",
+        "(admin contract; see CLAUDE.md `## Admin Self-Cleanup of Own Queue`)",
+        "",
+        "Apply (a)-(f) in order, ruling each one out in writing in your refresh note "
+        "before reaching `refresh blocked`. Refresh is the exception, not the equilibrium.",
+        "",
+        "(a) original premise satisfied / invalidated by later events",
+        f"    → `agb done {task_id} --agent {assigned_to} --note \"stale: <why>\"`",
+        "(b) source agent moved on / closed its driving cycle",
+        f"    → `agb done {task_id} --agent {assigned_to} --note \"source moved on\"`",
+        "(c) another active task already covers this work",
+        f"    → `agb handoff {task_id} --to <agent> --note \"<cross-ref>\"`"
+        f" OR `agb done {task_id} --agent {assigned_to} --note \"duplicate of #<id>\"`",
+        "(d) doable in <15 minutes by you alone",
+        "    → unblock and do it now; do NOT defer as `tech debt`",
+        "(e) operator decision required AND obtainable on the shared channel today",
+        "    → escalate via Discord/Telegram, then refresh blocked with deadline",
+        "(f) none of the above",
+        f"    → `agb update {task_id} --status blocked --note \"I will revisit when "
+        "<verifiable trigger>. Decision tree: ruled out (a)-(e) because: <one line>.\"`",
+        "",
+        "The `note` on a refresh-blocked must include both the verifiable trigger AND "
+        "the one-line summary of why (a)-(e) were ruled out. Empty notes and bare-refresh "
+        "notes are rejected by the contract.",
+        "",
+        "This is the second escalation cycle for this id. If you cannot reach (a)-(e) this "
+        "round, the operator will be paged via the shared channel; do not bare-refresh.",
     ]
     return "\n".join(lines).rstrip() + "\n"
 

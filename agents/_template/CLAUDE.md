@@ -30,6 +30,7 @@ task를 수신하면 아래 순서를 반드시 따른다:
    - 사람이 최종 수신자 → 연결된 채널 세션(Discord/Telegram)에 메시지
    - 다른 에이전트가 요청자 → `agent-bridge task create --to <요청자>`로 결과 전달
 4. **done**: `agb done <task_id> --note "요약"` — 반드시 note에 무엇을 했는지 기록
+- `NEXT-SESSION.md`은 **표준 파일명**이고, 에이전트 home의 `NEXT-SESSION.md`만 SessionStart hook이 자동으로 인지한다. `handoff-*.md`, `NEXT-SESSION-*.md` (suffix 추가), `next-session.md` (소문자) 같은 변형은 hook이 인지하지 못하는 **개인 노트**일 뿐이다. cross-session continuity 용도로는 정확히 `<agent-home>/NEXT-SESSION.md` 한 파일만 사용한다. 자세한 contract는 [`docs/agent-runtime/handoff-protocol.md`](../../docs/agent-runtime/handoff-protocol.md)에 있다.
 - **조용한 done 금지**: 결과를 아무에게도 전달하지 않은 채 done만 치는 것은 금지
 - **빈 note done 금지**: --note 없이 done 금지
 - queue의 open status는 `queued`, `claimed`, `blocked`만 공식 상태다. 작업 시작 표시는 별도 `in_progress`가 아니라 `claim` 또는 `--status claimed`를 사용한다.

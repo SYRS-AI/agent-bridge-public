@@ -440,6 +440,35 @@ def prompt_timestamp_context(agent: str, now: datetime | None = None) -> str:
     return context
 
 
+def admin_blocked_self_cleanup_context(agent: str) -> str:
+    """Return a single-line self-cleanup pressure note when admin starts a session
+    with blocked tasks in its own queue. Empty string for non-admin agents or when
+    the admin has no blocked tasks. Filename contract for the role spec is in
+    docs/agent-runtime/handoff-protocol.md.
+    """
+    admin_id = os.environ.get("BRIDGE_ADMIN_AGENT_ID", "").strip()
+    if not admin_id or agent != admin_id:
+        return ""
+    summary_proc = queue_cli(["summary", "--agent", agent, "--format", "json"])
+    if summary_proc.returncode != 0 or not summary_proc.stdout.strip():
+        return ""
+    try:
+        rows = json.loads(summary_proc.stdout)
+    except json.JSONDecodeError:
+        return ""
+    if not isinstance(rows, list) or not rows or not isinstance(rows[0], dict):
+        return ""
+    blocked = int(rows[0].get("blocked_count", 0) or 0)
+    if blocked <= 0:
+        return ""
+    return (
+        f"[Self-cleanup] {blocked} blocked task(s) in your queue. "
+        "Self-cleanup contract requires evaluating each per the role spec "
+        "(CLAUDE.md `## Admin Self-Cleanup of Own Queue`) before any other work. "
+        "If you cannot reach a close decision today, refresh with a verifiable trigger."
+    )
+
+
 def session_start_context(agent: str) -> str:
     queue_context = (
         f"Agent Bridge queue protocol applies to {agent}. "
@@ -449,6 +478,9 @@ def session_start_context(agent: str) -> str:
         f"If a task is queued, claim the highest-priority one first. "
         f"If a task is already claimed by you, continue that task."
     )
+    self_cleanup = admin_blocked_self_cleanup_context(agent)
+    if self_cleanup:
+        queue_context = f"{self_cleanup}\n\n{queue_context}"
     bootstrap_context = bootstrap_artifact_context(agent)
     if bootstrap_context:
         return f"{bootstrap_context}\n\n{queue_context}"
