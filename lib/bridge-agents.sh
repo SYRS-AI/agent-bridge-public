@@ -1669,9 +1669,13 @@ bridge_linux_share_plugin_catalog() {
     # Even when known_marketplaces.json carries an entry, the on-disk
     # mirror tree may not yet exist (common for git-source marketplaces
     # on a fresh checkout, or directory-source marketplaces whose cache
-    # has been pruned). Skip silently rather than creating a dangling
-    # symlink — the issue spec calls this out as the expected shape.
-    [[ -d "$_mkt_src" ]] || continue
+    # has been pruned). Surface a warn so operators can act on the
+    # diagnostic — the alternative is silent plugin drop at session
+    # start with zero log signal (#362).
+    if [[ ! -d "$_mkt_src" ]]; then
+      bridge_warn "marketplace ${_mkt_id} is in known_marketplaces.json but the controller-side tree at ${_mkt_src} is missing — declared plugins from this marketplace will not load. Operator must run \`/plugin marketplace add\` once with credentials, then re-run isolation prepare."
+      continue
+    fi
     if (( _marketplaces_root_created == 0 )); then
       bridge_linux_sudo_root mkdir -p "$_isolated_marketplaces"
       bridge_linux_sudo_root chown root:root "$_isolated_marketplaces"
@@ -1683,10 +1687,21 @@ bridge_linux_share_plugin_catalog() {
     bridge_linux_sudo_root rm -f "$_mkt_dst" >/dev/null 2>&1 || true
     bridge_linux_sudo_root ln -s "$_mkt_src" "$_mkt_dst"
     bridge_linux_sudo_root chown -h root:root "$_mkt_dst" >/dev/null 2>&1 || true
-    # Same r-X chain as the install-path grant: traverse first so the
-    # mask doesn't end up `--x` on entries we then bump to r--/r-x.
-    bridge_linux_grant_traverse_chain "$os_user" "$_mkt_src" "$controller_home"
-    bridge_linux_acl_add_recursive "u:${os_user}:r-X" "$_mkt_src"
+    # r#362: end-to-end readability for the symlinked marketplace tree.
+    # Without all three steps, the symlink is planted but EACCES on first
+    # read and Claude silently drops the plugin from the session. Order
+    # matters: traverse_chain stamps `--x` on every node from target up
+    # to controller_home (including target). The recursive r-X grant
+    # must run AFTER so target/<file> entries end up with r--/r-x rather
+    # than --x. Default-ACL inheritance covers files added on the next
+    # marketplace refresh. Fail-loud throughout: a partially-applied ACL
+    # leaves the symlink planted but unusable, which defeats the fix.
+    bridge_linux_grant_traverse_chain "$os_user" "$_mkt_src" "$controller_home" || \
+      bridge_die "marketplace tree: failed to grant traverse chain to $_mkt_src"
+    bridge_linux_acl_add_recursive "u:${os_user}:r-X" "$_mkt_src" || \
+      bridge_die "marketplace tree: failed to grant recursive r-X ACL on $_mkt_src"
+    bridge_linux_acl_add_default_dirs_recursive "u:${os_user}:r-X" "$_mkt_src" || \
+      bridge_die "marketplace tree: failed to set default ACL inheritance on $_mkt_src"
   done
 
   # 5c. Persist the new grant set so the next reapply / unisolate sees
