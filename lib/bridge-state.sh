@@ -2718,6 +2718,22 @@ bridge_task_note_nudge() {
   bridge_queue_cli "${args[@]}" >/dev/null
 }
 
+bridge_queue_task_status() {
+  # Issue #331 Track A: lightweight status read used by the daemon's nudge
+  # verifier. Reuses the existing `show --format shell` payload (TASK_STATUS)
+  # so we don't introduce a new queue subcommand.
+  local task_id="${1:-}"
+  local status_shell=""
+
+  [[ -n "$task_id" ]] || return 1
+  status_shell="$(bridge_queue_cli show "$task_id" --format shell 2>/dev/null)" || return 1
+  TASK_STATUS=""
+  # shellcheck disable=SC1090
+  source /dev/stdin <<<"$status_shell"
+  [[ -n "$TASK_STATUS" ]] || return 1
+  printf '%s' "$TASK_STATUS"
+}
+
 bridge_render_active_roster() {
   local tmp_tsv tmp_md updated session_id
   local agent
