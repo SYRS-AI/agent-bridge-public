@@ -14,22 +14,22 @@ from pathlib import Path
 
 ANSI_RE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
 
-# Claude HUD renders a live context meter like:
+# Claude HUD renders a live context meter on its own line, like:
 #   Context ████████░░ 40%
-# We require the word "Context" followed within a short window by one of the
-# bar glyphs (█ ░ ▓ ▒ ■), then a 1-3 digit percent. The glyph requirement is
-# what distinguishes the authoritative HUD from prose text such as
-# "Context remaining 8%" that happens to live in post-/compact scrollback
-# after --continue/--resume (issue #126).
-#
-# Defense in depth against pane wrapping: the daemon's capture-pane call
-# passes tmux -J (see lib/bridge-tmux.sh bridge_capture_recent "join"), but
-# we also tolerate a single newline inside the short glyph-neighborhood so
-# captures from non-joined callers (or older recordings used in tests) still
-# match when the HUD wraps on a narrow terminal.
-HUD_RE = re.compile(
-    r"Context[\s\S]{0,60}?[\u2588\u2591\u2592\u2593\u25A0][\u2588\u2591\u2592\u2593\u25A0\s]{0,40}?(\d{1,3})\s*%",
-    re.IGNORECASE,
+# We anchor the regex to line-start and require the literal "Context "
+# prefix, a run of block-element bar glyphs (U+2580-U+259F, which covers
+# the canonical full/light/medium/dark shades plus relatives, and the
+# legacy U+25A0 filled square), whitespace, and a 1-3 digit percent
+# terminator. This rejects free-standing percentages elsewhere in
+# scrollback ("100% complete" in tool output, doc excerpts, etc.) which a
+# looser regex would previously misclassify as a critical HUD reading
+# (issue #338). Prose fallback still covers post-/compact scrollback via
+# PATTERN_GROUPS—this anchor is purely the HUD path.
+_HUD_LINE_RE = re.compile(
+    r"^\s*Context\s+"
+    r"[▀-▟■]"
+    r"[▀-▟■\s]*"
+    r"\s+(\d{1,3})\s*%",
 )
 
 PATTERN_GROUPS: list[tuple[str, list[str]]] = [
@@ -117,17 +117,38 @@ def _env_threshold(name: str, default: int) -> int:
 
 
 def hud_context_pct(normalized: str) -> int | None:
-    """Return the latest HUD context percentage, or None if no HUD line seen."""
-    matches = list(HUD_RE.finditer(normalized))
-    if not matches:
+    """Return the most-recent Claude HUD context percentage, anchored to the
+    canonical HUD line, or None if no HUD line is seen.
+
+    The Claude Code HUD renders one status block of the shape::
+
+        Context ███░░░░░░░ 36%
+
+    on its own line. We split the captured pane into lines and walk them
+    bottom-up (most recent wins), applying ``_HUD_LINE_RE`` which requires
+    the literal "Context " prefix, a run of block-element bar glyphs, and
+    a 1-3 digit percent. Free-standing percentages elsewhere in scrollback
+    ("100% complete", "see report 80%", etc.) are intentionally rejected —
+    that was the false-positive driving issue #338, where tool output
+    embedded `100%` and an unanchored regex classified the session critical.
+
+    The caller already handles a ``None`` return by falling back to
+    ``PATTERN_GROUPS`` (subject to ``ENGINES_WITHOUT_HUD``); we do not need
+    to preserve any compatibility path here.
+    """
+    if not normalized:
         return None
-    try:
-        pct = int(matches[-1].group(1))
-    except (TypeError, ValueError):
-        return None
-    if pct < 0 or pct > 100:
-        return None
-    return pct
+    for line in reversed(normalized.splitlines()):
+        m = _HUD_LINE_RE.match(line)
+        if not m:
+            continue
+        try:
+            pct = int(m.group(1))
+        except (TypeError, ValueError):
+            continue
+        if 0 <= pct <= 100:
+            return pct
+    return None
 
 
 def classify(normalized: str, full: str | None = None, engine: str = "") -> tuple[str, str]:
@@ -178,7 +199,41 @@ def classify(normalized: str, full: str | None = None, engine: str = "") -> tupl
     return "", ""
 
 
+def _self_test() -> int:
+    """Inline smoke for ``hud_context_pct`` (issue #338).
+
+    Run via ``python3 bridge-context-pressure.py --self-test``. Exits 0 on
+    success, 1 on first failure with a diagnostic line on stderr. This is
+    intentionally tiny and dependency-free so it can run from a smoke
+    script without pytest.
+    """
+    cases: list[tuple[str, int | None]] = [
+        ("Context ███░░░░░░░ 36%", 36),
+        ("some preamble\nContext ████████░░ 80%\nfooter", 80),
+        ("Context ███████░░░ 70%\nContext ███░░░░░░░ 36%", 36),
+        ("100% complete — see report", None),
+        ("Context: 100", None),
+        ("", None),
+        ("Context ████████░░ 999%", None),
+    ]
+    failures: list[str] = []
+    for idx, (sample, expected) in enumerate(cases):
+        got = hud_context_pct(sample)
+        if got != expected:
+            failures.append(
+                f"case {idx}: input={sample!r} expected={expected!r} got={got!r}"
+            )
+    if failures:
+        for line in failures:
+            print(f"FAIL {line}", file=sys.stderr)
+        return 1
+    print("OK")
+    return 0
+
+
 def main() -> int:
+    if "--self-test" in sys.argv[1:]:
+        return _self_test()
     parser = argparse.ArgumentParser()
     parser.add_argument("command", choices=("analyze",))
     parser.add_argument("--capture-file")
