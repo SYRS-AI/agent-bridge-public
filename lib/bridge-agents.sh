@@ -2176,14 +2176,28 @@ bridge_linux_install_isolated_channel_symlink() {
     bridge_warn "isolation channel symlink: mkdir $channels_root failed"
     return 1
   }
+  # r2 TOCTOU re-check: the initial guard only proves the path was not a
+  # symlink at guard time. Between the guard and each mutation below, the
+  # isolated UID could race a symlink swap if it owns the parent (`.claude`).
+  # bridge_die hard-stops the isolation prepare loop, which is correct: we
+  # cannot proceed if the path was tampered with mid-setup.
+  if bridge_linux_sudo_root test -L "$channels_root"; then
+    bridge_die "channels parent: raced into a symlink between guard and mkdir at $channels_root"
+  fi
   bridge_linux_sudo_root chown root:root "$channels_root" || {
     bridge_warn "isolation channel symlink: chown $channels_root failed"
     return 1
   }
+  if bridge_linux_sudo_root test -L "$channels_root"; then
+    bridge_die "channels parent: raced into a symlink after chown at $channels_root"
+  fi
   bridge_linux_sudo_root chmod 0755 "$channels_root" || {
     bridge_warn "isolation channel symlink: chmod $channels_root failed"
     return 1
   }
+  if bridge_linux_sudo_root test -L "$channels_root"; then
+    bridge_die "channels parent: raced into a symlink after chmod at $channels_root"
+  fi
   bridge_linux_acl_add "u:${os_user}:r-x" "$channels_root" >/dev/null 2>&1 || true
 
   # Target dir: create on demand for declared channels whose `.<channel>`
@@ -2214,8 +2228,15 @@ bridge_linux_install_isolated_channel_symlink() {
       bridge_warn "isolation channel symlink: chmod target $target failed"
       return 1
     }
-    bridge_linux_acl_add "u:${controller_user}:rwX" "$target" >/dev/null 2>&1 || true
-    bridge_linux_acl_add_default_dirs_recursive "u:${controller_user}:rwX" "$target" >/dev/null 2>&1 || true
+    # r2: target ACLs are load-bearing for the symlink to be useful. A
+    # best-effort silent-skip leaves the symlink planted but the controller
+    # can't read through it -- exactly the failure mode this PR set out to
+    # fix. Fail loud so the operator quarantines the partial state instead
+    # of getting a runtime that pretends to work.
+    bridge_linux_acl_add "u:${controller_user}:rwX" "$target" >/dev/null 2>&1 \
+      || bridge_die "channel target dir: failed to grant controller rwX ACL on $target"
+    bridge_linux_acl_add_default_dirs_recursive "u:${controller_user}:rwX" "$target" >/dev/null 2>&1 \
+      || bridge_die "channel target dir: failed to set default ACL inheritance on $target"
   fi
 
   # Link path: only replace a pre-existing symlink. A real file or directory
@@ -2859,6 +2880,13 @@ bridge_agent_channel_runtime_ready_for_item() {
       [[ -f "$dir/access.json" ]] || return 1
       bridge_env_file_has_any_nonempty_key "$dir/.env" TEAMS_APP_ID MicrosoftAppId || return 1
       bridge_env_file_has_any_nonempty_key "$dir/.env" TEAMS_APP_PASSWORD MicrosoftAppPassword
+      ;;
+    plugin:ms365|plugin:ms365@*)
+      dir="$(bridge_agent_ms365_state_dir "$agent")"
+      [[ -f "$dir/access.json" ]] || return 1
+      bridge_env_file_has_any_nonempty_key "$dir/.env" MS365_CLIENT_ID || return 1
+      bridge_env_file_has_any_nonempty_key "$dir/.env" MS365_CLIENT_SECRET || return 1
+      bridge_env_file_has_any_nonempty_key "$dir/.env" MS365_TENANT_ID
       ;;
     *)
       return 0
