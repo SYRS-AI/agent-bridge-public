@@ -336,16 +336,37 @@ bridge_run_schedule_dev_channels_accept() {
   local launch_cmd="$1"
 
   bridge_run_should_auto_accept_dev_channels "$launch_cmd" || return 0
-  log_line "[info] auto-accepting Claude development-channels prompt for allowlisted dev channel(s)"
+
+  # Operator-tunable timeout. Default 60s covers 4-plugin cold-start
+  # (bun teams + bun ms365 + node cosmax-* MCP servers) on isolated
+  # linux-user agents where claude takes longer than the historic 15s
+  # budget to draw the development-channels picker. Reduce to 5–15s in
+  # diagnosis to fail-loud quickly.
+  local accept_timeout="${BRIDGE_RUN_DEV_CHANNELS_ACCEPT_TIMEOUT_SECONDS:-60}"
+  [[ "$accept_timeout" =~ ^[0-9]+$ ]] || accept_timeout=60
+  (( accept_timeout > 0 )) || accept_timeout=60
+
+  log_line "[info] auto-accepting Claude development-channels prompt for allowlisted dev channel(s) (timeout=${accept_timeout}s)"
+
+  # Background child must not silently swallow stderr — that hid every
+  # picker-stuck warning before. Route its output to the agent log files
+  # the parent already maintains so wait_for_prompt's bridge_warn lines
+  # land where operators look. accept_timeout is passed in as $3 because
+  # the child runs in a fresh `bash -lc` shell with `set -u` — outer
+  # locals are not visible.
   (
     "$BRIDGE_BASH_BIN" -lc '
       set -euo pipefail
       script_dir="$1"
       session="$2"
+      accept_timeout="$3"
       source "$script_dir/bridge-lib.sh"
-      bridge_tmux_wait_for_prompt "$session" claude 15 1 >/dev/null 2>&1 || true
-    ' -- "$SCRIPT_DIR" "$SESSION"
-  ) >/dev/null 2>&1 &
+      if ! bridge_tmux_wait_for_prompt "$session" claude "$accept_timeout" 1; then
+        printf "[%s] [warn] auto-accept dev-channels: bridge_tmux_wait_for_prompt failed/timeout on session=%s\n" \
+          "$(date "+%Y-%m-%d %H:%M:%S")" "$session" >&2
+      fi
+    ' -- "$SCRIPT_DIR" "$SESSION" "$accept_timeout"
+  ) </dev/null >>"$LOGFILE" 2>>"$ERRFILE" &
 }
 
 bridge_run_sync_dev_plugin_cache() {
