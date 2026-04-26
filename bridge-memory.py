@@ -3264,14 +3264,15 @@ def cmd_harvest_daily(args: argparse.Namespace) -> int:
 
     Single-date dispatcher (`--date` or default). When ``--from`` is supplied,
     iterates over a date range, optionally skipping dates that already have a
-    canonical daily note flagged ``semantic_nonempty=True`` via
-    ``--missing-only``, and emits an aggregate ``{"results": [...]}`` JSON to
-    stdout. The single-date stdout shape is unchanged.
+    sidecar harvest manifest via ``--missing-only``, and emits an aggregate
+    ``{"results": [...]}`` JSON to stdout. The single-date stdout shape is
+    unchanged. ``--missing-only`` also applies to the single-date path: when
+    the manifest already exists for the target date, exit 0 with a stderr line
+    and no harvest run.
     """
     agent = args.agent
     workdir = args.workdir
     tz_name = args.tz or "Asia/Seoul"
-    home = Path(args.home).expanduser()
 
     if not workdir:
         sys.stderr.write("harvest-daily: --workdir is required (no fallback)\n")
@@ -3280,6 +3281,7 @@ def cmd_harvest_daily(args: argparse.Namespace) -> int:
     date_from = getattr(args, "date_from", None)
     date_to = getattr(args, "date_to", None)
     missing_only = bool(getattr(args, "missing_only", False))
+    state_dir = _harvest_state_dir(args)
 
     # --- Range-mode validation + dispatch ----------------------------------
     if date_to and not date_from:
@@ -3319,17 +3321,41 @@ def cmd_harvest_daily(args: argparse.Namespace) -> int:
         ]
         results: list[dict] = []
         rc_max = 0
+        ok_count = 0
+        fail_count = 0
+        skipped_count = 0
         for tdate in target_dates:
-            if missing_only:
-                existing = _load_canonical_daily_note(home, tdate)
-                if existing and existing.get("semantic_nonempty"):
-                    results.append({
-                        "date": tdate,
-                        "skipped": "exists",
-                    })
-                    continue
-            payload = _harvest_one_date(args, tdate)
+            if missing_only and _manifest_path(state_dir, agent, tdate).exists():
+                # Sidecar manifest is the SSOT for "this date has been
+                # harvested" — Lane B reads the same path. Manual-note-without-
+                # manifest dates must still be harvested.
+                results.append({
+                    "date": tdate,
+                    "skipped": "exists",
+                })
+                skipped_count += 1
+                continue
+            try:
+                payload = _harvest_one_date(args, tdate)
+            except Exception as exc:  # noqa: BLE001 — per-date isolation
+                sys.stderr.write(
+                    f"[bridge-memory] harvest-daily date={tdate} failed: {exc}\n"
+                )
+                results.append({
+                    "date": tdate,
+                    "error": f"{type(exc).__name__}: {exc}",
+                })
+                rc_max = max(rc_max, 1)
+                fail_count += 1
+                continue
             results.append({"date": tdate, "result": payload})
+            ok_count += 1
+        sys.stderr.write(
+            f"[bridge-memory] harvest-daily range complete: "
+            f"{ok_count + fail_count + skipped_count} dates, "
+            f"{ok_count} succeeded, {fail_count} failed, "
+            f"{skipped_count} skipped\n"
+        )
         aggregate = {
             "schema": "memory-daily-harvest-range-v1",
             "agent": agent,
@@ -3352,8 +3378,18 @@ def cmd_harvest_daily(args: argparse.Namespace) -> int:
             pass
         return rc_max
 
-    # --- Single-date path (preserved byte-identical) -----------------------
+    # --- Single-date path --------------------------------------------------
+    # `--missing-only` is propagated here too (Option A — symmetric semantics
+    # with the range path). When the manifest already exists, skip the harvest
+    # run and exit 0 with a stderr breadcrumb. This lets operators run
+    # `harvest-daily --date YYYY-MM-DD --missing-only` opportunistically.
     single_date = args.date or _harvest_default_date(tz_name)
+    if missing_only and _manifest_path(state_dir, agent, single_date).exists():
+        sys.stderr.write(
+            f"[bridge-memory] harvest-daily date={single_date} already harvested "
+            f"(manifest exists); --missing-only skip\n"
+        )
+        return 0
     payload = _harvest_one_date(args, single_date)
     return _emit_result(args, payload)
 
@@ -3361,19 +3397,6 @@ def cmd_harvest_daily(args: argparse.Namespace) -> int:
 def _today_date_str(tz_name: str) -> str:
     zone = _harvest_tz_zone(tz_name)
     return datetime.now(zone).date().isoformat()
-
-
-def _load_canonical_daily_note(home: Path, date: str) -> dict | None:
-    """Return ``{"semantic_nonempty": bool}`` if the canonical note exists.
-
-    Reuses ``_probe_daily_note`` so the predicate matches the harvester's own
-    classification. Returns ``None`` when the file is absent.
-    """
-    path = _daily_note_path(home, date)
-    if not path.exists():
-        return None
-    probe = _probe_daily_note(home, date)
-    return {"semantic_nonempty": bool(probe.get("semantic_nonempty"))}
 
 
 def _harvest_one_date(args: argparse.Namespace, date: str) -> dict:
@@ -3974,7 +3997,11 @@ def build_parser() -> argparse.ArgumentParser:
     )
     hd_parser.add_argument(
         "--missing-only", dest="missing_only", action="store_true", default=False,
-        help="With --from, skip dates whose canonical daily note already has semantic_nonempty=True.",
+        help=(
+            "Skip dates whose sidecar harvest manifest already exists. "
+            "Applies to both range mode (--from/--to) and single-date mode "
+            "(--date or default)."
+        ),
     )
     hd_parser.add_argument("--tz", default="Asia/Seoul")
     hd_parser.add_argument("--state-dir", help="override $BRIDGE_STATE_DIR/memory-daily")
