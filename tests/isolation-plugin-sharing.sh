@@ -425,6 +425,82 @@ count = detail.get("plugin_count")
 assert str(count) == str(len(expected)), f"plugin_count mismatch: {count!r}"
 PY
 
+log "marketplace symlink path now gates on known_marketplaces.json (#348 r2)"
+
+# r2 changed the 5b' marketplace-symlink loop from a directory-existence
+# gate (was: `[[ -d "$controller_plugins/marketplaces/$mkt" ]]`) to an
+# explicit `known_marketplaces.json` lookup. Exercise that gate by
+# adding a BRIDGE_AGENT_PLUGINS entry whose marketplace is *not*
+# registered in known_marketplaces.json. The plugin should still land
+# in the union manifest + audit row, but no marketplace symlink should
+# be created (and no error should bubble up).
+mkdir -p "$BRIDGE_HOME/plugins/unregistered-plugin"
+echo 'unregistered plugin (no known_marketplaces entry)' \
+  > "$BRIDGE_HOME/plugins/unregistered-plugin/server.ts"
+# Materialise the on-disk mirror tree so the OLD directory-existence
+# gate would have happily symlinked it. The r2 gate must skip it
+# anyway because `unregistered-mkt` is missing from the JSON — that's
+# the regression this assertion guards against.
+mkdir -p "$CONTROLLER_PLUGINS/marketplaces/unregistered-mkt"
+echo '{"name":"unregistered-mkt","plugins":["unregistered-plugin"]}' \
+  > "$CONTROLLER_PLUGINS/marketplaces/unregistered-mkt/marketplace.json"
+chmod -R o+rX "$CONTROLLER_HOME_FAKE" "$BRIDGE_HOME/plugins"
+
+python3 - "$CONTROLLER_PLUGINS/installed_plugins.json" "$BRIDGE_HOME/plugins/unregistered-plugin" <<'PY'
+import json, sys
+manifest_path, install_path = sys.argv[1], sys.argv[2]
+with open(manifest_path) as f:
+    data = json.load(f)
+data.setdefault("plugins", {})["unregistered-plugin@unregistered-mkt"] = [
+    {"scope": "user", "version": "0.1.0", "installPath": install_path}
+]
+with open(manifest_path, "w") as f:
+    json.dump(data, f, indent=2)
+PY
+
+# Allowlist both the original allowlist-mkt entry (registered with a
+# directory source) and the new unregistered-mkt entry — only the
+# former should produce a marketplace symlink after the r2 gate.
+BRIDGE_AGENT_PLUGINS["$TEST_AGENT"]='allowlisted-plugin@allowlist-mkt,unregistered-plugin@unregistered-mkt'
+
+: > "$audit_log_file"
+
+BRIDGE_CONTROLLER_HOME_OVERRIDE="$CONTROLLER_HOME_FAKE" \
+  bridge_linux_share_plugin_catalog "$TEST_OS_USER" "$TEST_OS_HOME" "$CONTROLLER_USER" "$TEST_AGENT"
+
+log "verifying unregistered-mkt symlink was NOT created (known_marketplaces.json gate)"
+unregistered_mkt_link="$ISOLATED_PLUGINS/marketplaces/unregistered-mkt"
+if sudo -n test -e "$unregistered_mkt_link" 2>/dev/null; then
+  die "expected NO symlink at $unregistered_mkt_link (marketplace absent from known_marketplaces.json)"
+fi
+
+log "verifying allowlist-mkt symlink still landed (registered marketplace path)"
+sudo -n test -L "$ISOLATED_PLUGINS/marketplaces/allowlist-mkt" \
+  || die "expected allowlist-mkt symlink to remain after r2 gate"
+
+log "verifying audit row still carries the unregistered-mkt plugin id"
+python3 - "$audit_log_file" "$TEST_AGENT" <<'PY' \
+  || die "audit row missing unregistered-mkt plugin after known_marketplaces.json gate"
+import json, sys
+path, agent = sys.argv[1], sys.argv[2]
+with open(path) as f:
+    rows = [json.loads(line) for line in f if line.strip()]
+matches = [
+    r for r in rows
+    if r.get("action") == "isolated_plugin_manifest_written" and r.get("target") == agent
+]
+assert matches, f"no isolated_plugin_manifest_written rows for {agent}"
+detail = matches[-1].get("detail", {})
+plugins_csv = detail.get("plugins") or ""
+ids = set(filter(None, plugins_csv.split(",")))
+# The plugin id must still be in the union — only the marketplace
+# symlink is gated on known_marketplaces.json; the manifest + audit
+# union is independent.
+assert "plugin:unregistered-plugin@unregistered-mkt" in ids, (
+    f"unregistered plugin missing from audit union: {ids!r}"
+)
+PY
+
 # Reset BRIDGE_AGENT_PLUGINS so the existing channel-flip phase below
 # runs in its original shape (channel-only) and the prior assertions
 # stay semantically unchanged.

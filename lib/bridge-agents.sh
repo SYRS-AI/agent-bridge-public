@@ -926,6 +926,87 @@ print(resolved or "")
 PY
 }
 
+bridge_known_marketplaces_lookup() {
+  # Inspect `known_marketplaces.json` and return whether a marketplace is
+  # registered. Mirrors the lookup shape used by the manifest writer's
+  # `:1092` block (and the directory-source fallback at `:894` in
+  # bridge_resolve_plugin_install_path) so the symlink path in
+  # bridge_linux_share_plugin_catalog gates on the same source-of-truth.
+  #
+  # Output protocol — exactly one line:
+  #   present:directory   — registered with a directory source
+  #   present:git         — registered with a git source
+  #   present:other       — registered with another source kind (http, etc.)
+  #   missing             — not registered (caller should silently skip)
+  #   unparseable         — JSON missing / unreadable / not an object
+  #                         (caller should warn-and-skip the whole 5b'
+  #                          block; this helper has already logged the
+  #                          warning to stderr).
+  #
+  # The `<source-kind>` half of `present:*` is informational — current
+  # callers symlink `<plugins_root>/marketplaces/<mkt>` regardless of
+  # source kind because that mirror tree is what Claude actually reads
+  # at runtime; the source-kind disclosure exists so a future caller
+  # that wants to special-case directory vs git can do so without
+  # re-parsing the JSON. (#348 r2.)
+  local marketplace_id="$1"
+  local plugins_root="$2"
+  local marketplaces_json="$plugins_root/known_marketplaces.json"
+
+  bridge_require_python
+  python3 - "$marketplace_id" "$marketplaces_json" <<'PY'
+import json, os, sys
+
+marketplace_id = sys.argv[1]
+marketplaces_path = sys.argv[2]
+
+
+def warn(msg):
+    sys.stderr.write("[bridge-isolate] " + msg + "\n")
+
+
+if not os.path.isfile(marketplaces_path):
+    # Treat missing as unparseable for caller-side simplicity: the
+    # whole 5b' block is a no-op without it. Mirrors the manifest
+    # writer's behaviour (it also short-circuits the directory-
+    # marketplace fallback when the JSON is absent).
+    print("unparseable")
+    sys.exit(0)
+
+try:
+    with open(marketplaces_path) as f:
+        markets = json.load(f)
+    if not isinstance(markets, dict):
+        raise ValueError("expected JSON object at root, got %r" % type(markets).__name__)
+except (OSError, ValueError) as exc:
+    # Mirror the manifest writer's :1092 pattern: log once and let
+    # the caller skip the marketplace symlink path entirely. This
+    # is informational, not fatal — isolation refresh continues.
+    warn(
+        "controller known_marketplaces.json unparseable (%s): %s — marketplace symlinks disabled this pass"
+        % (type(exc).__name__, marketplaces_path)
+    )
+    print("unparseable")
+    sys.exit(0)
+
+entry = markets.get(marketplace_id)
+if not isinstance(entry, dict):
+    print("missing")
+    sys.exit(0)
+
+src = entry.get("source")
+if isinstance(src, dict):
+    kind = src.get("source")
+    if kind == "directory":
+        print("present:directory")
+        sys.exit(0)
+    if kind == "git":
+        print("present:git")
+        sys.exit(0)
+print("present:other")
+PY
+}
+
 bridge_isolated_plugin_grants_state_file() {
   # State file recording the channel set last granted plugin-share ACLs to
   # an isolated agent. Lives under $BRIDGE_ACTIVE_AGENT_DIR/<agent>/ — the
@@ -1374,12 +1455,19 @@ bridge_linux_share_plugin_catalog() {
   done
 
   # 5b'. Marketplace symlinks (#348). For every union plugin in
-  #     `<plugin>@<marketplace>` form whose marketplace exists in the
-  #     controller's `~/.claude/plugins/marketplaces/<marketplace>` tree,
-  #     mirror the marketplace subtree under the isolated UID's plugins
-  #     root as a read-only symlink so Claude can resolve the marketplace
-  #     reference recorded in installed_plugins.json. Symlink + traverse +
-  #     recursive r-X mirrors the channel install-path pattern (5b).
+  #     `<plugin>@<marketplace>` form whose marketplace is registered
+  #     in the controller's `known_marketplaces.json` AND whose mirror
+  #     tree exists at `~/.claude/plugins/marketplaces/<marketplace>`,
+  #     plant a read-only symlink under the isolated UID's plugins root
+  #     so Claude can resolve the marketplace reference recorded in
+  #     installed_plugins.json. The `known_marketplaces.json` lookup is
+  #     the source-of-truth gate (matches the issue spec wording and the
+  #     manifest writer's :1092 / `:894` directory-source fallback);
+  #     the on-disk `marketplaces/<mkt>` dir is the symlink target, so
+  #     git-source marketplaces whose tree has not been cached yet
+  #     silently skip rather than synthesising a broken symlink.
+  #     Symlink + traverse + recursive r-X mirrors the channel install-
+  #     path pattern (5b). (#348 r2.)
   local _isolated_marketplaces="$isolated_plugins/marketplaces"
   local _marketplaces_root_created=0
   local _mkt_seen=""
@@ -1387,7 +1475,10 @@ bridge_linux_share_plugin_catalog() {
   local _mkt_id=""
   local _mkt_src=""
   local _mkt_dst=""
+  local _mkt_lookup=""
+  local _mkt_block_disabled=0
   for _channel_full in "${_current_plugin_channels[@]+"${_current_plugin_channels[@]}"}"; do
+    (( _mkt_block_disabled == 0 )) || break
     plugin_id="${_channel_full#plugin:}"
     [[ "$plugin_id" == *@* ]] || continue
     _mkt_id="${plugin_id#*@}"
@@ -1396,7 +1487,29 @@ bridge_linux_share_plugin_catalog() {
       *"${_seen_marker}${_mkt_id}${_seen_marker}"*) continue ;;
     esac
     _mkt_seen="${_mkt_seen}${_seen_marker}${_mkt_id}${_seen_marker}"
+    # Source-of-truth gate: marketplace must be registered in
+    # known_marketplaces.json. The helper warns once (and we abandon
+    # the whole 5b' block) when the JSON is missing/unparseable —
+    # same shape the manifest writer uses at :1092.
+    _mkt_lookup="$(bridge_known_marketplaces_lookup "$_mkt_id" "$controller_plugins")"
+    case "$_mkt_lookup" in
+      unparseable)
+        _mkt_block_disabled=1
+        break
+        ;;
+      missing|"")
+        # marketplace not registered → silent skip, no broken symlink.
+        continue
+        ;;
+      present:*) ;;  # fall through to the symlink path
+      *) continue ;;
+    esac
     _mkt_src="$controller_plugins/marketplaces/$_mkt_id"
+    # Even when known_marketplaces.json carries an entry, the on-disk
+    # mirror tree may not yet exist (common for git-source marketplaces
+    # on a fresh checkout, or directory-source marketplaces whose cache
+    # has been pruned). Skip silently rather than creating a dangling
+    # symlink — the issue spec calls this out as the expected shape.
     [[ -d "$_mkt_src" ]] || continue
     if (( _marketplaces_root_created == 0 )); then
       bridge_linux_sudo_root mkdir -p "$_isolated_marketplaces"
