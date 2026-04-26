@@ -3250,142 +3250,21 @@ def _build_result_payload(
     }
 
 
-def _parse_harvest_date_arg(value: str) -> "datetime":
-    """Parse a YYYY-MM-DD argument used by harvest-daily flags.
-
-    Returns a naive ``datetime`` at midnight (callers compare via .date()).
-    Raises ValueError on malformed input — caller surfaces via stderr.
-    """
-    return datetime.strptime(value, "%Y-%m-%d")
-
-
 def cmd_harvest_daily(args: argparse.Namespace) -> int:
-    """Detection-only daily note harvester (issue #216).
-
-    Single-date dispatcher (`--date` or default). When ``--from`` is supplied,
-    iterates over a date range, optionally skipping dates that already have a
-    canonical daily note flagged ``semantic_nonempty=True`` via
-    ``--missing-only``, and emits an aggregate ``{"results": [...]}`` JSON to
-    stdout. The single-date stdout shape is unchanged.
-    """
-    agent = args.agent
-    workdir = args.workdir
-    tz_name = args.tz or "Asia/Seoul"
-    home = Path(args.home).expanduser()
-
-    if not workdir:
-        sys.stderr.write("harvest-daily: --workdir is required (no fallback)\n")
-        return 2
-
-    date_from = getattr(args, "date_from", None)
-    date_to = getattr(args, "date_to", None)
-    missing_only = bool(getattr(args, "missing_only", False))
-
-    # --- Range-mode validation + dispatch ----------------------------------
-    if date_to and not date_from:
-        sys.stderr.write("harvest-daily: --to requires --from\n")
-        return 2
-
-    if date_from:
-        try:
-            from_dt = _parse_harvest_date_arg(date_from)
-        except ValueError:
-            sys.stderr.write(f"harvest-daily: --from {date_from!r} is not YYYY-MM-DD\n")
-            return 2
-        today_dt = datetime.strptime(_today_date_str(tz_name), "%Y-%m-%d")
-        if date_to:
-            try:
-                to_dt = _parse_harvest_date_arg(date_to)
-            except ValueError:
-                sys.stderr.write(f"harvest-daily: --to {date_to!r} is not YYYY-MM-DD\n")
-                return 2
-        else:
-            to_dt = today_dt
-        if from_dt > to_dt:
-            sys.stderr.write(
-                f"harvest-daily: --from {from_dt.date().isoformat()} is later than "
-                f"--to {to_dt.date().isoformat()}\n"
-            )
-            return 2
-        if to_dt > today_dt:
-            sys.stderr.write(
-                f"harvest-daily: --to {to_dt.date().isoformat()} is in the future "
-                f"(today={today_dt.date().isoformat()} tz={tz_name})\n"
-            )
-            return 2
-        span = (to_dt - from_dt).days + 1
-        target_dates = [
-            (from_dt + timedelta(days=i)).date().isoformat() for i in range(span)
-        ]
-        results: list[dict] = []
-        rc_max = 0
-        for tdate in target_dates:
-            if missing_only:
-                existing = _load_canonical_daily_note(home, tdate)
-                if existing and existing.get("semantic_nonempty"):
-                    results.append({
-                        "date": tdate,
-                        "skipped": "exists",
-                    })
-                    continue
-            payload = _harvest_one_date(args, tdate)
-            results.append({"date": tdate, "result": payload})
-        aggregate = {
-            "schema": "memory-daily-harvest-range-v1",
-            "agent": agent,
-            "from": from_dt.date().isoformat(),
-            "to": to_dt.date().isoformat(),
-            "missing_only": missing_only,
-            "count": len(results),
-            "results": results,
-        }
-        sidecar_out = getattr(args, "sidecar_out", None)
-        if sidecar_out:
-            try:
-                _atomic_write_json(Path(sidecar_out).expanduser(), aggregate)
-            except OSError as exc:
-                sys.stderr.write(f"harvest-daily: sidecar write failed: {exc}\n")
-                return 2
-        try:
-            print(json.dumps(aggregate, ensure_ascii=True))
-        except OSError:
-            pass
-        return rc_max
-
-    # --- Single-date path (preserved byte-identical) -----------------------
-    single_date = args.date or _harvest_default_date(tz_name)
-    payload = _harvest_one_date(args, single_date)
-    return _emit_result(args, payload)
-
-
-def _today_date_str(tz_name: str) -> str:
-    zone = _harvest_tz_zone(tz_name)
-    return datetime.now(zone).date().isoformat()
-
-
-def _load_canonical_daily_note(home: Path, date: str) -> dict | None:
-    """Return ``{"semantic_nonempty": bool}`` if the canonical note exists.
-
-    Reuses ``_probe_daily_note`` so the predicate matches the harvester's own
-    classification. Returns ``None`` when the file is absent.
-    """
-    path = _daily_note_path(home, date)
-    if not path.exists():
-        return None
-    probe = _probe_daily_note(home, date)
-    return {"semantic_nonempty": bool(probe.get("semantic_nonempty"))}
-
-
-def _harvest_one_date(args: argparse.Namespace, date: str) -> dict:
-    """Per-date harvest body. Returns the RESULT_SCHEMA payload (no emit)."""
+    """Detection-only daily note harvester (issue #216)."""
     agent = args.agent
     home = Path(args.home).expanduser()
     workdir = args.workdir
     tz_name = args.tz or "Asia/Seoul"
+    date = args.date or _harvest_default_date(tz_name)
     state_dir = _harvest_state_dir(args)
     db_path = _harvest_task_db(args)
     now_iso = _harvest_now_iso(tz_name)
     run_id = os.environ.get("CRON_RUN_ID", "")
+
+    if not workdir:
+        sys.stderr.write("harvest-daily: --workdir is required (no fallback)\n")
+        return 2
 
     # --- Skipped-permission branch -----------------------------------------
     # Stub detected linux-user isolation but could not assume the target OS
@@ -3464,7 +3343,7 @@ def _harvest_one_date(args: argparse.Namespace, date: str) -> dict:
             ],
             confidence="high",
         )
-        return payload
+        return _emit_result(args, payload)
 
     # --- Gate check ---------------------------------------------------------
     if args.disabled_gate or _gate_disabled(agent):
@@ -3511,7 +3390,7 @@ def _harvest_one_date(args: argparse.Namespace, date: str) -> dict:
             recommended_next_steps=[],
             confidence="high",
         )
-        return payload
+        return _emit_result(args, payload)
 
     # --- Probe canonical + legacy ------------------------------------------
     daily_note = _probe_daily_note(home, date)
@@ -3714,7 +3593,7 @@ def _harvest_one_date(args: argparse.Namespace, date: str) -> dict:
         ),
         confidence=confidence,
     )
-    return payload
+    return _emit_result(args, payload)
 
 
 def _emit_result(args: argparse.Namespace, payload: dict) -> int:
@@ -3960,22 +3839,7 @@ def build_parser() -> argparse.ArgumentParser:
     hd_parser.add_argument("--agent", required=True)
     hd_parser.add_argument("--home", required=True, help="agent profile home root")
     hd_parser.add_argument("--workdir", required=True, help="agent workdir (no fallback)")
-    hd_date_group = hd_parser.add_mutually_exclusive_group()
-    hd_date_group.add_argument(
-        "--date", help="YYYY-MM-DD; defaults to yesterday in --tz",
-    )
-    hd_date_group.add_argument(
-        "--from", dest="date_from", default=None,
-        help="Start date YYYY-MM-DD (inclusive); pair with --to. Mutually exclusive with --date.",
-    )
-    hd_parser.add_argument(
-        "--to", dest="date_to", default=None,
-        help="End date YYYY-MM-DD (inclusive); requires --from. Defaults to today in --tz.",
-    )
-    hd_parser.add_argument(
-        "--missing-only", dest="missing_only", action="store_true", default=False,
-        help="With --from, skip dates whose canonical daily note already has semantic_nonempty=True.",
-    )
+    hd_parser.add_argument("--date", help="YYYY-MM-DD; defaults to yesterday in --tz")
     hd_parser.add_argument("--tz", default="Asia/Seoul")
     hd_parser.add_argument("--state-dir", help="override $BRIDGE_STATE_DIR/memory-daily")
     hd_parser.add_argument("--sidecar-out", help="authoritative RESULT_SCHEMA JSON path")

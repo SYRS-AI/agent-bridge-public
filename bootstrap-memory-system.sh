@@ -323,12 +323,7 @@ CRON_SPECS=(
   "wiki-dedup-weekly|0 4 * * 0|Asia/Seoul|wiki-dedup-weekly.sh"
   # Daily-note two-lane ingest. Lane A (wiki-daily-copy.py) runs inside
   # the shell script; Lane B queues [librarian-ingest] for non-daily.
-  # Scheduled at 06:00 to stagger 3 hours after the 03:00 memory-daily-*
-  # fan-out. Co-scheduling at 03:00 produced a same-slot daemon-runner race
-  # in which Lane A's wiki-daily-copy invocation observed files=0 every day
-  # (issue #320 Track A). Existing 0.6.17 installs that already have this
-  # cron at "0 3 * * *" are migrated to "0 6 * * *" by step_cron_one below.
-  "wiki-daily-ingest|0 6 * * *|Asia/Seoul|wiki-daily-ingest.sh"
+  "wiki-daily-ingest|0 3 * * *|Asia/Seoul|wiki-daily-ingest.sh"
   # L1 observation scanner. Populates shared/wiki/_index/mentions.db and
   # the distribution-report snapshot. Offset :17 misses top-of-hour cluster.
   "wiki-mention-scan|17 * * * *|Asia/Seoul|wiki-mention-scan.sh"
@@ -426,50 +421,11 @@ step_cron_one() {
     if [[ "$norm_existing" == "$norm_expected" && "$effective_existing_tz" == "$tz" ]]; then
       record "$BRIDGE_ADMIN_AGENT" "cron:$title" "already-registered" "$existing_sched tz=$effective_existing_tz"
       return 0
-    fi
-    # Planned migration: wiki-daily-ingest moved from 0 3 * * * → 0 6 * * *
-    # in #320 Track A. 0.6.17 installs already have it at the legacy slot;
-    # treat that exact pair as a managed re-registration (not an operator
-    # override) so the apply step can move it forward without manual edits.
-    if [[ "$title" == "wiki-daily-ingest" \
-          && "$norm_existing" == "0 3 * * *" \
-          && "$norm_expected" == "0 6 * * *" \
-          && "$effective_existing_tz" == "$tz" ]]; then
-      local existing_id
-      existing_id="$(printf '%s' "$found" | awk -F'\t' '{print $1}')"
-      if [[ "$MODE" == "check" ]]; then
-        record "$BRIDGE_ADMIN_AGENT" "cron:$title" "drift-migration-pending" \
-          "existing=$existing_sched want=$sched tz=$tz reason=#320-trackA"
-        note_drift
-        return 0
-      fi
-      if [[ "$MODE" == "dry-run" ]]; then
-        record "$BRIDGE_ADMIN_AGENT" "cron:$title" "would-migrate" \
-          "id=$existing_id 0 3 * * * → 0 6 * * * tz=$tz"
-        return 0
-      fi
-      if [[ -z "$existing_id" ]]; then
-        record "$BRIDGE_ADMIN_AGENT" "cron:$title" "migrate-failed" \
-          "no id from cron_lookup; existing=$existing_sched want=$sched"
-        note_drift
-        return 0
-      fi
-      if "$BRIDGE_AGB" cron update "$existing_id" \
-            --schedule "$sched" \
-            --tz "$tz" \
-            >/dev/null 2>&1; then
-        record "$BRIDGE_ADMIN_AGENT" "cron:$title" "migrated" \
-          "id=$existing_id 0 3 * * * → 0 6 * * * tz=$tz reason=#320-trackA"
-      else
-        record "$BRIDGE_ADMIN_AGENT" "cron:$title" "migrate-failed" \
-          "id=$existing_id 0 3 * * * → 0 6 * * *"
-        note_drift
-      fi
+    else
+      record "$BRIDGE_ADMIN_AGENT" "cron:$title" "conflict" "existing=$existing_sched tz=$effective_existing_tz want=$sched tz=$tz — refusing"
+      note_drift
       return 0
     fi
-    record "$BRIDGE_ADMIN_AGENT" "cron:$title" "conflict" "existing=$existing_sched tz=$effective_existing_tz want=$sched tz=$tz — refusing"
-    note_drift
-    return 0
   fi
 
   if [[ "$MODE" == "check" ]]; then
