@@ -31,10 +31,15 @@ SUMMARY_JSON="$(mktemp -t wiki-copy-full-backfill.XXXXXX.json)"
 # shellcheck disable=SC2064
 trap "rm -f '$SUMMARY_JSON'; file_failure_task '$JOB' '$LOG'" ERR
 
-if ! run_with_timeout 1800 "$BRIDGE_PYTHON" "$HERE/wiki-daily-copy.py" \
-      --all --json \
-      >"$SUMMARY_JSON" 2>>"$LOG"; then
-  rc=$?
+# Capture rc *before* an `if` test — `if ! cmd` makes `$?` reflect the
+# negated test, not the underlying command, so a real failure would be
+# logged as `rc=0` and re-exited as success. Run the command bare, snap
+# the status into rc, then branch on it. (#320 r2 codex)
+run_with_timeout 1800 "$BRIDGE_PYTHON" "$HERE/wiki-daily-copy.py" \
+    --all --json \
+    >"$SUMMARY_JSON" 2>>"$LOG" \
+  && rc=0 || rc=$?
+if (( rc != 0 )); then
   log_audit "$JOB" "wiki-daily-copy.py --all FAILED rc=$rc" >/dev/null
   file_failure_task "$JOB" "$LOG"
   rm -f "$SUMMARY_JSON"
