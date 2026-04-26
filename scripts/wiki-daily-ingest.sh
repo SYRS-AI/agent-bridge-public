@@ -25,16 +25,69 @@ set -u
 : "${BRIDGE_SHARED_ROOT:=$BRIDGE_HOME/shared}"
 : "${BRIDGE_WIKI_ROOT:=$BRIDGE_SHARED_ROOT/wiki}"
 : "${BRIDGE_SCRIPTS_ROOT:=$BRIDGE_HOME/scripts}"
+: "${BRIDGE_STATE_DIR:=$BRIDGE_HOME/state}"
 : "${BRIDGE_AGB:=$BRIDGE_HOME/agent-bridge}"
 : "${BRIDGE_ADMIN_AGENT:=${BRIDGE_ADMIN_AGENT_ID:-patch}}"
+
+# Watermark of the last successful Lane A ingest. Persisted between runs so
+# late-arriving daily notes (written after the previous run's window) are
+# still picked up on the next run instead of being stranded by the static
+# 2-day rolling window. See issue #321 Track A.
+WIKI_INGEST_STATE_DIR="$BRIDGE_STATE_DIR/wiki"
+WIKI_INGEST_WATERMARK_FILE="$WIKI_INGEST_STATE_DIR/last-ingest.txt"
 
 AGENTS_ROOT="$BRIDGE_AGENTS_ROOT"
 WIKI="$BRIDGE_WIKI_ROOT"
 SCRIPTS_ROOT="$BRIDGE_SCRIPTS_ROOT"
 DATE=$(date +%Y-%m-%d)
-YESTERDAY=$(date -v-1d +%Y-%m-%d 2>/dev/null || date -d 'yesterday' +%Y-%m-%d)
+
+# compute_since_date — resolve effective --since for Lane A.
+#
+# Reads the persisted watermark if it exists and parses as YYYY-MM-DD.
+# Falls back to "yesterday" on missing/empty/malformed input. Clamps the
+# result to max(watermark, today-14d) so a long-stale watermark cannot
+# trigger an unbounded backfill. The 14-day floor matches the practical
+# lookback window operators care about; revisit if data shows otherwise.
+compute_since_date() {
+  local watermark=""
+  if [ -f "$WIKI_INGEST_WATERMARK_FILE" ]; then
+    watermark="$(head -n1 "$WIKI_INGEST_WATERMARK_FILE" 2>/dev/null | tr -d '[:space:]')"
+    if ! [[ "$watermark" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]]; then
+      watermark=""
+    fi
+  fi
+  local default_since
+  default_since=$(date -v-1d +%Y-%m-%d 2>/dev/null || date -d 'yesterday' +%Y-%m-%d)
+  if [ -z "$watermark" ]; then
+    printf '%s' "$default_since"
+    return 0
+  fi
+  local floor
+  floor=$(date -v-14d +%Y-%m-%d 2>/dev/null || date -d '14 days ago' +%Y-%m-%d)
+  # Lexicographic compare is correct for ISO-8601 YYYY-MM-DD.
+  if [[ "$watermark" < "$floor" ]]; then
+    printf '%s' "$floor"
+  else
+    printf '%s' "$watermark"
+  fi
+}
+
+YESTERDAY="$(compute_since_date)"
 LOG="$WIKI/_audit/ingest-$DATE.md"
 mkdir -p "$(dirname "$LOG")"
+
+# write_watermark_atomic — durable, crash-safe watermark write.
+#
+# Writes to a tempfile in the same directory and renames into place so a
+# crash mid-write cannot leave a partial / corrupt watermark behind.
+write_watermark_atomic() {
+  local date_str="$1"
+  mkdir -p "$WIKI_INGEST_STATE_DIR" || return 1
+  local tmp
+  tmp="$(mktemp "$WIKI_INGEST_STATE_DIR/.last-ingest.XXXXXX")" || return 1
+  printf '%s\n' "$date_str" >"$tmp" || { rm -f "$tmp"; return 1; }
+  mv -f "$tmp" "$WIKI_INGEST_WATERMARK_FILE"
+}
 
 # -------------------------------------------------------------------------
 # Lane A — daily-note byte-replica copy (no librarian involvement)
@@ -66,6 +119,21 @@ print(
     f"unchanged={data.get('unchanged',0)} "
     f"errors={data.get('errors',0)}"
 )
+PYEOF
+)
+
+# Extract Lane A error count for watermark gating. Treat parse failure /
+# missing field as non-zero so we never advance the watermark on a run we
+# could not verify succeeded.
+copy_errors=$(python3 - "$COPY_JSON" <<'PYEOF'
+import json
+import sys
+try:
+    with open(sys.argv[1], encoding="utf-8") as handle:
+        data = json.load(handle)
+    print(int(data.get("errors", 1)))
+except Exception:
+    print(1)
 PYEOF
 )
 
@@ -121,4 +189,11 @@ if [ "$non_daily_total" -gt 0 ]; then
     --body-file "$LOG" >/dev/null 2>&1 || true
 fi
 
-echo "wiki-daily-ingest: date=$DATE lane-a ${copy_summary} lane-b research=$research_count other=$other_count total=$non_daily_total log=$LOG"
+# Advance the watermark only when Lane A reported errors=0 AND the copy
+# subprocess exited cleanly. Any failure leaves the previous watermark in
+# place so the next run retries the same window.
+if [ "$copy_rc" -eq 0 ] && [ "$copy_errors" = "0" ]; then
+  write_watermark_atomic "$DATE" || true
+fi
+
+echo "wiki-daily-ingest: date=$DATE since=$YESTERDAY lane-a ${copy_summary} lane-b research=$research_count other=$other_count total=$non_daily_total log=$LOG"
