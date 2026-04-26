@@ -5578,6 +5578,46 @@ assert payload["notify"]["status"] == "sent"
 PY
 assert_contains "$(cat "$FAKE_DISCORD_REQUESTS")" "Should I deploy now?"
 
+log "verifying escalate question source-aware routing for dynamic agents (#343 Track A)"
+ESCALATE_DYNAMIC_AGENT="escalate-dynamic-$$"
+cat >>"$BRIDGE_ROSTER_LOCAL_FILE" <<EOF
+
+# BEGIN AGENT BRIDGE MANAGED ROLE: $ESCALATE_DYNAMIC_AGENT
+bridge_add_agent_id_if_missing "$ESCALATE_DYNAMIC_AGENT"
+BRIDGE_AGENT_DESC["$ESCALATE_DYNAMIC_AGENT"]="Dynamic escalate fixture"
+BRIDGE_AGENT_ENGINE["$ESCALATE_DYNAMIC_AGENT"]="claude"
+BRIDGE_AGENT_SESSION["$ESCALATE_DYNAMIC_AGENT"]="$ESCALATE_DYNAMIC_AGENT"
+BRIDGE_AGENT_WORKDIR["$ESCALATE_DYNAMIC_AGENT"]="$PROJECT_ROOT"
+BRIDGE_AGENT_SOURCE["$ESCALATE_DYNAMIC_AGENT"]="dynamic"
+# END AGENT BRIDGE MANAGED ROLE: $ESCALATE_DYNAMIC_AGENT
+EOF
+smoke_track_managed_role_id "$ESCALATE_DYNAMIC_AGENT"
+
+ESCALATE_DYNAMIC_STDERR="$TMP_ROOT/escalate-dynamic.stderr"
+set +e
+"$REPO_ROOT/agent-bridge" escalate question --agent "$ESCALATE_DYNAMIC_AGENT" --question "Should I deploy now?" --wait-seconds 30 2>"$ESCALATE_DYNAMIC_STDERR" >/dev/null
+ESCALATE_DYNAMIC_RC=$?
+set -e
+[[ "$ESCALATE_DYNAMIC_RC" == "0" ]] || die "dynamic escalate should exit 0 (got $ESCALATE_DYNAMIC_RC)"
+assert_contains "$(cat "$ESCALATE_DYNAMIC_STDERR")" "skipping admin escalation"
+assert_contains "$(cat "$ESCALATE_DYNAMIC_STDERR")" "$ESCALATE_DYNAMIC_AGENT"
+ESCALATE_DYNAMIC_TASK_ID="$(python3 "$REPO_ROOT/bridge-queue.py" find-open --agent "$SMOKE_AGENT" --title-prefix "[question-escalation] $ESCALATE_DYNAMIC_AGENT " 2>/dev/null || true)"
+[[ -z "$ESCALATE_DYNAMIC_TASK_ID" ]] || die "dynamic escalate should not create admin task (got #$ESCALATE_DYNAMIC_TASK_ID)"
+
+ESCALATE_FORCE_JSON="$("$REPO_ROOT/agent-bridge" escalate question --agent "$ESCALATE_DYNAMIC_AGENT" --question "Force relay through admin." --wait-seconds 30 --force-admin-relay --json)"
+python3 - "$ESCALATE_FORCE_JSON" "$SMOKE_AGENT" <<'PY'
+import json
+import sys
+
+payload = json.loads(sys.argv[1])
+admin_agent = sys.argv[2]
+
+assert payload["admin_agent"] == admin_agent, payload
+assert payload["task_id"], payload
+PY
+ESCALATE_FORCE_TASK_ID="$(python3 "$REPO_ROOT/bridge-queue.py" find-open --agent "$SMOKE_AGENT" --title-prefix "[question-escalation] $ESCALATE_DYNAMIC_AGENT ")"
+[[ "$ESCALATE_FORCE_TASK_ID" =~ ^[0-9]+$ ]] || die "force-admin-relay should create admin task (got '$ESCALATE_FORCE_TASK_ID')"
+
 STATIC_START_DRY_RUN="$("$REPO_ROOT/bridge-start.sh" "$SMOKE_AGENT" --dry-run --no-continue 2>&1 || true)"
 
 log "ensuring Claude Stop hook settings merge"
