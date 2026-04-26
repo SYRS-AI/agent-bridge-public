@@ -440,7 +440,23 @@ bridge_tmux_wait_for_prompt() {
   local allow_devchannels="${4:-0}"
   local start_ts
   local elapsed
-  local bootstrap_actions=0
+  local state=""
+
+  # State-specific advance budgets:
+  # - trust/summary: existing 4-action limit, preserved to avoid regressing
+  #   non-devchannels callers (regular agent restarts, codex sessions, etc.).
+  # - devchannels: separate, larger, env-overridable budget so an isolated
+  #   agent that needs a 2-step picker confirm + concurrent trust prompt
+  #   doesn't exhaust on the 4th attempt before claude finishes drawing.
+  #   Default 12 covers picker-confirm-2-step plus a few stale-pane redraws;
+  #   operators can tighten it via BRIDGE_TMUX_DEV_CHANNELS_MAX_ADVANCE for
+  #   faster fail-loud during diagnosis.
+  local trust_summary_actions=0
+  local trust_summary_max=4
+  local devchannels_actions=0
+  local devchannels_max="${BRIDGE_TMUX_DEV_CHANNELS_MAX_ADVANCE:-12}"
+  [[ "$devchannels_max" =~ ^[0-9]+$ ]] || devchannels_max=12
+  (( devchannels_max > 0 )) || devchannels_max=12
 
   bridge_tmux_engine_requires_prompt "$engine" || return 0
   if bridge_tmux_session_has_prompt "$session" "$engine"; then
@@ -452,14 +468,51 @@ bridge_tmux_wait_for_prompt() {
   start_ts="$(date +%s)"
   while true; do
     if [[ "$engine" == "claude" ]]; then
-      if bridge_tmux_claude_advance_blocker "$session" "$allow_devchannels"; then
-        bootstrap_actions=$((bootstrap_actions + 1))
-        if (( bootstrap_actions >= 4 )); then
-          return 1
-        fi
-      else
-        sleep 0.2
-      fi
+      state="$(bridge_tmux_claude_blocker_state "$session" 2>/dev/null || printf 'none')"
+      case "$state" in
+        trust|summary)
+          if bridge_tmux_claude_advance_blocker "$session" 0; then
+            trust_summary_actions=$((trust_summary_actions + 1))
+            # Re-check prompt before declaring failure; the just-sent C-m
+            # may have cleared the blocker.
+            if bridge_tmux_session_has_prompt "$session" "$engine"; then
+              return 0
+            fi
+            if (( trust_summary_actions >= trust_summary_max )); then
+              bridge_warn "wait_for_prompt: trust/summary advance budget (${trust_summary_max}) exhausted on session=${session}"
+              return 1
+            fi
+          else
+            sleep 0.2
+          fi
+          ;;
+        devchannels)
+          if [[ "$allow_devchannels" == "1" ]]; then
+            if bridge_tmux_claude_advance_blocker "$session" 1; then
+              devchannels_actions=$((devchannels_actions + 1))
+              # Re-check prompt before failing — the picker often clears
+              # on the final allowed Enter and we don't want to declare
+              # failure when the work is actually done.
+              if bridge_tmux_session_has_prompt "$session" "$engine"; then
+                return 0
+              fi
+              if (( devchannels_actions >= devchannels_max )); then
+                bridge_warn "wait_for_prompt: devchannels advance budget (${devchannels_max}) exhausted on session=${session}; picker may need manual intervention"
+                return 1
+              fi
+            else
+              sleep 0.2
+            fi
+          else
+            # devchannels picker present but auto-accept not allowed —
+            # operator must intervene; we cannot bypass it.
+            return 1
+          fi
+          ;;
+        *)
+          sleep 0.2
+          ;;
+      esac
     else
       sleep 0.2
     fi
