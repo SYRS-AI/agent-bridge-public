@@ -33,6 +33,18 @@ from bridge_hook_common import (  # noqa: E402
     write_audit,
 )
 
+# Importing the system-config protected-path SSOT requires lib/ on sys.path.
+# Keep this scoped to tool-policy.py rather than mutating bridge_hook_common
+# so the additional import surface stays auditable in one place.
+_LIB_DIR = ROOT / "lib"
+if _LIB_DIR.is_dir() and str(_LIB_DIR) not in sys.path:
+    sys.path.insert(0, str(_LIB_DIR))
+
+from system_config_paths import (  # noqa: E402
+    is_protected_path,
+    matched_pattern,
+)
+
 
 def roster_local_path() -> Path:
     return bridge_home_dir() / "agent-roster.local.sh"
@@ -171,14 +183,32 @@ def detect_target_agent(tool_name: str, tool_input: dict[str, Any], agent: str) 
     return None
 
 
+SYSTEM_CONFIG_DENY_REASON = (
+    "system config path requires `agent-bridge config set` "
+    "(direct Edit/Write blocked by issue #341 gating)"
+)
+
+
 def protected_path_reason(path: Path, agent: str) -> str | None:
     admin = is_admin_agent(agent)
+    # Order matters: keep the more-specific error messages (roster
+    # secrets / queue DB) ahead of the generic system-config deny so
+    # existing assertions in scripts/smoke-test.sh continue to find the
+    # narrower wording. The system-config gate (issue #341) catches the
+    # additional protected paths that don't map to a specific helper —
+    # access.json, cron job files, hooks settings, runtime config.
     if path == roster_local_path():
         if admin:
             return None
         return "shared roster secrets are not available inside Claude tool calls"
     if path == task_db_path():
         return "direct queue DB access is blocked; use `agb` queue commands instead"
+    # Issue #341: remaining system-config paths must flow through the
+    # wrapper. Even admin agents are denied at the hook level — the
+    # wrapper layers the operator-source check on top, so a hook bypass
+    # would defeat that check entirely.
+    if is_protected_path(path):
+        return SYSTEM_CONFIG_DENY_REASON
     if admin:
         return None
     target = target_agent_for_path(path, agent)
@@ -346,6 +376,75 @@ def _bash_argv_references_path(command: str, protected: Path) -> bool:
     return False
 
 
+def _bash_argv_references_system_config(command: str) -> bool:
+    """Return True if any positional/file-valued argv token in *command*
+    points at a path that :func:`is_protected_path` matches.
+
+    Uses the same skip/treat rules as ``_bash_argv_references_path`` so a
+    `--body "agents/foo/.discord/access.json"` mention does not trigger.
+    A `shlex.split` ``ValueError`` (unbalanced quotes etc.) falls back to
+    a substring scan of the static suffixes that uniquely identify
+    protected globs; this is a weaker check but keeps us no worse than
+    the pre-#341 baseline.
+    """
+    if not command:
+        return False
+    try:
+        tokens = shlex.split(command, posix=True, comments=False)
+    except ValueError:
+        for needle in (".discord/access.json", ".telegram/access.json",
+                       "cron/jobs.json", "runtime/openclaw.json",
+                       "runtime/bridge-config.json"):
+            if needle in command:
+                return True
+        return False
+
+    def _check_value(value: str) -> bool:
+        for fragment in _alias_path_fragments(value):
+            expanded = os.path.expandvars(os.path.expanduser(fragment))
+            if not expanded:
+                continue
+            try:
+                candidate = Path(expanded)
+            except Exception:
+                continue
+            if is_protected_path(candidate):
+                return True
+        return False
+
+    skip_next_payload = False
+    treat_next_as_value = False
+    for tok in tokens:
+        if skip_next_payload:
+            skip_next_payload = False
+            continue
+        if treat_next_as_value:
+            treat_next_as_value = False
+            if _check_value(tok):
+                return True
+            continue
+        if tok in _STRING_PAYLOAD_FLAGS:
+            skip_next_payload = True
+            continue
+        if tok in _FILE_VALUED_FLAGS:
+            treat_next_as_value = True
+            continue
+        if tok.startswith("--") and "=" in tok:
+            flag, _, value = tok.partition("=")
+            if flag in _STRING_PAYLOAD_FLAGS:
+                continue
+            if flag in _FILE_VALUED_FLAGS:
+                if _check_value(value):
+                    return True
+                continue
+            if _check_value(value):
+                return True
+            continue
+        if _check_value(tok):
+            return True
+    return False
+
+
 def protected_alias_reason(text: str, agent: str) -> str | None:
     home_root = agent_home_root()
     admin = is_admin_agent(agent)
@@ -356,12 +455,21 @@ def protected_alias_reason(text: str, agent: str) -> str | None:
     # `--description "…"`, etc.) is skipped. `protected_path_reason`
     # continues to guard the non-Bash tool surfaces (Read/Write) with the
     # structurally-correct `Path ==` check.
+    #
+    # Order mirrors `protected_path_reason`: narrow roster / queue DB
+    # messages first so existing smoke tests find their specific wording,
+    # then the issue #341 generic system-config gate.
     if _bash_argv_references_path(text, roster_local_path()):
         if admin:
             return None
         return "shared roster secrets are not available inside Claude tool calls"
     if _bash_argv_references_path(text, task_db_path()):
         return "direct queue DB access is blocked; use `agb` queue commands instead"
+    # Issue #341: system-config paths get the same argv-based check; the
+    # wrapper command is the only normal mutation surface. Applies to
+    # admin too — wrapper enforces the operator-source layer.
+    if _bash_argv_references_system_config(text):
+        return SYSTEM_CONFIG_DENY_REASON
     if admin:
         return None
     aliases = [
@@ -433,6 +541,111 @@ def pretool_block_response(reason: str, detail: dict[str, Any]) -> None:
     sys.stdout.write("\n")
 
 
+def _system_config_path_from_input(tool_name: str, tool_input: dict[str, Any]) -> Path | None:
+    """Return the protected-path argument that triggered the hook deny.
+
+    Read from `file_path` / `path` for non-Bash tools; for Bash, scan the
+    shlex-tokenised command for the first token that resolves under the
+    protected list. Returns None when no protected path is identifiable —
+    in that case the audit row falls back to a path-less detail.
+    """
+    if tool_name != "Bash":
+        for key in ("file_path", "path"):
+            raw = str(tool_input.get(key) or "").strip()
+            if not raw:
+                continue
+            try:
+                candidate = Path(raw).expanduser()
+            except Exception:
+                continue
+            if is_protected_path(candidate):
+                return candidate
+        return None
+    command = str(tool_input.get("command") or "")
+    try:
+        tokens = shlex.split(command, posix=True, comments=False)
+    except ValueError:
+        return None
+    for tok in tokens:
+        for fragment in _alias_path_fragments(tok):
+            expanded = os.path.expandvars(os.path.expanduser(fragment))
+            if not expanded:
+                continue
+            try:
+                candidate = Path(expanded)
+            except Exception:
+                continue
+            if is_protected_path(candidate):
+                return candidate
+    return None
+
+
+def _path_sha256(path: Path) -> str:
+    """sha256 of *path* contents, or empty string if unreadable.
+
+    The hook records both before and after sha to satisfy the audit shape
+    in issue #341. On hook-deny no mutation actually happens, so before
+    and after are the same value — that's the documented invariant the
+    operator can rely on when distinguishing hook-deny rows from wrapper
+    rows.
+    """
+    try:
+        import hashlib
+        with path.open("rb") as fh:
+            return hashlib.sha256(fh.read()).hexdigest()
+    except OSError:
+        return ""
+
+
+def _write_system_config_audit_row(
+    agent: str,
+    tool_name: str,
+    tool_input: dict[str, Any],
+    target_path: Path | None,
+) -> None:
+    """Write the issue #341 `system_config_mutation` audit row.
+
+    Shape mirrors the brief exactly: actor, actor_source, trigger,
+    path, before/after sha, operation. Hook-side actor_source is always
+    `agent-direct` — the hook fires before any caller-source promotion
+    that the wrapper would otherwise apply.
+    """
+    if target_path is None:
+        path_str = ""
+        before = ""
+        after = ""
+    else:
+        path_str = str(target_path)
+        sha = _path_sha256(target_path)
+        before = sha
+        after = sha
+    if tool_name == "Bash":
+        operation = truncate_text(str(tool_input.get("command") or ""), 240)
+    else:
+        operation = json.dumps(
+            {
+                key: truncate_text(str(value), 120)
+                for key, value in tool_input.items()
+                if value
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+        )
+    detail = {
+        "kind": "system_config_mutation",
+        "actor": agent or "unknown",
+        "actor_source": "agent-direct",
+        "trigger": "hook-deny",
+        "path": path_str,
+        "before_sha256": before,
+        "after_sha256": after,
+        "operation": truncate_text(operation, 240),
+        "tool_name": tool_name,
+        "matched_pattern": matched_pattern(target_path) or "" if target_path else "",
+    }
+    write_audit("system_config_mutation", agent or "unknown", detail)
+
+
 def handle_pretool(payload: dict[str, Any], agent: str) -> int:
     tool_name = str(payload.get("tool_name") or "")
     tool_input = payload.get("tool_input") or {}
@@ -469,6 +682,13 @@ def handle_pretool(payload: dict[str, Any], agent: str) -> int:
     if reason:
         detail["reason"] = reason
         write_audit("agent_tool_denied", agent or "unknown", detail)
+        if reason == SYSTEM_CONFIG_DENY_REASON:
+            _write_system_config_audit_row(
+                agent,
+                tool_name,
+                tool_input,
+                _system_config_path_from_input(tool_name, tool_input),
+            )
         pretool_block_response(reason, detail)
         return 0
     return 0
