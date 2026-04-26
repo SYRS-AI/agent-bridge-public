@@ -1667,8 +1667,14 @@ sqlite_tilde = tp.protected_alias_reason(
 assert sqlite_tilde and "direct queue DB" in sqlite_tilde, \
     f"~/ sqlite3 invocation should block after expansion: {sqlite_tilde!r}"
 cat_abs = tp.protected_alias_reason(f"cat {roster_abs}", "self")
-assert cat_abs and "roster secrets" in cat_abs, \
-    f"absolute roster path cat should block: {cat_abs!r}"
+assert cat_abs is None, \
+    f"read-intent cat against roster must not block (#383): {cat_abs!r}"
+# Edit-equivalent shell write (sed -i) against the same path must still
+# block: read-intent allowance is keyed on the leading command's
+# verb, not the path.
+sed_abs = tp.protected_alias_reason(f"sed -i s/foo/bar/ {roster_abs}", "self")
+assert sed_abs and "roster secrets" in sed_abs, \
+    f"sed -i against roster must still block: {sed_abs!r}"
 
 # 4) String-payload option flags still must not block when their value
 #    merely mentions the protected path (--body / --description / -m etc.).
@@ -1726,10 +1732,19 @@ redir_reason = tp.protected_alias_reason(
     f"cat <{roster_abs}",
     "self",
 )
-assert redir_reason and "roster secrets" in redir_reason, \
-    f"cat <<roster> redirection must block: {redir_reason!r}"
+assert redir_reason is None, \
+    f"cat <roster (read redirection) must not block under #383: {redir_reason!r}"
+# An output redirection that lands in the protected path is still a
+# write and must be denied even when the leading command is normally
+# read-only (the write-redirection check disqualifies the whole stage).
+redir_write_reason = tp.protected_alias_reason(
+    f"cat /tmp/x >{roster_abs}",
+    "self",
+)
+assert redir_write_reason and "roster secrets" in redir_write_reason, \
+    f"output-redirection into roster must still block: {redir_write_reason!r}"
 
-print("[ok] tool-policy protected_alias_reason: payload substrings pass; argv openers (abs + env-var) still block")
+print("[ok] tool-policy protected_alias_reason: payload substrings pass; write-intent argv openers still block; read-intent allowed (#383)")
 PY
 )
 printf '%s\n' "$TOOL_POLICY_ALIAS_CHECK"
