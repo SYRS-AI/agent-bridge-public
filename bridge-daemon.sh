@@ -1470,6 +1470,8 @@ if ts > 0:
     print(datetime.fromtimestamp(ts, timezone.utc).astimezone().isoformat())
 PY
 )"
+  local source_kind=""
+  source_kind="$(bridge_agent_source "$agent")"
   mkdir -p "$(dirname "$body_file")"
   {
     echo "# Context Pressure Report"
@@ -1478,6 +1480,7 @@ PY
     echo "- session: ${session:--}"
     echo "- severity: $severity"
     echo "- idle_seconds: $idle"
+    echo "- agent_source: ${source_kind:-static}"
     echo "- first_detected_at: ${first_detected_iso:-$(bridge_now_iso)}"
     echo "- detected_at: $(bridge_now_iso)"
     if [[ -n "$matched_pattern" ]]; then
@@ -1486,7 +1489,13 @@ PY
     echo
     echo "## Recommended Next Action"
     echo
-    echo "Ask the agent to compact, summarize, or restart with a NEXT-SESSION handoff before context pressure degrades task quality. Treat this separately from process liveness: the session can be running but still need context management."
+    if [[ "$source_kind" == "dynamic" ]]; then
+      echo "**Operator-managed.** This is a dynamic agent — the operator manages it directly in the TUI. Close this task with a one-line note \`dynamic agent — operator-managed\` and take no further action. See CLAUDE.md \`## Admin Static vs Dynamic Agent Boundary\` for the rule."
+    else
+      echo "**Resolve autonomously.** This is a static agent (end-user is on Discord/Telegram/Teams; cannot run any Claude Code command). Do not nudge the agent or its end-user."
+      echo
+      echo "Until \`agent-bridge agent autopilot-compact <agent>\` and \`agent-bridge agent handoff-restart <agent>\` ship (issue #304 Track B), escalate to the human operator on the shared external channel rather than asking the static agent or its end-user to run \`/compact\`, \`/clear\`, or write \`NEXT-SESSION.md\`. Close this task with the action you took. See CLAUDE.md \`## Admin Static vs Dynamic Agent Boundary\` for the rule."
+    fi
     echo
     echo "## Recent Output"
     echo
