@@ -69,8 +69,15 @@ function ensureDirs(): void {
 
 ensureDirs()
 
+// chmod is best-effort; if it fails (e.g. an isolated linux-user UID
+// that owns the file via setfacl-grant but not via inode owner) we must
+// still proceed to load the env file. Splitting the chmod and the read
+// avoids the previous abort-on-chmod-EPERM path that left process.env
+// untouched and tripped the missing-credentials exit below.
 try {
   chmodSync(ENV_FILE, 0o600)
+} catch {}
+try {
   for (const line of readFileSync(ENV_FILE, 'utf8').split('\n')) {
     const m = line.match(/^(\w+)=(.*)$/)
     if (m && process.env[m[1]] === undefined) process.env[m[1]] = m[2]
