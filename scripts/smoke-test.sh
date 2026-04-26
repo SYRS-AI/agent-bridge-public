@@ -299,6 +299,58 @@ run_cp_case "codex + 'must compact before continuing' banner -> critical" \
   $'must compact before continuing before the next turn\n' \
   "codex"
 
+log "stall-detector rate_limit/auth regex narrowing (#329 Track A)"
+# Self-contained classifier checks for the bare `\b429\b` / `\bunauthorized\b`
+# narrowing. Mirrors the #161 timeout fix: bare numerics/keywords now require
+# an HTTP/status/error/code transport qualifier adjacent so non-glyph
+# scrollback (A2A task body inject, [cron-dispatch] payload, vendor incident
+# transcripts, meta-text quoting the regex itself, CJK prose) no longer
+# false-positives. Existing positives (real provider error lines) keep
+# classifying.
+run_stall_classify_case() {
+  local label="$1"
+  local expected_classification="$2"  # "" means must NOT classify
+  local input="$3"
+  local out classification
+  out="$(printf '%s' "$input" | python3 "$REPO_ROOT/bridge-stall.py" analyze --format shell)"
+  classification="$(printf '%s\n' "$out" | sed -n 's/^STALL_CLASSIFICATION="\(.*\)"$/\1/p')"
+  if [[ "$classification" != "$expected_classification" ]]; then
+    die "stall classify [$label]: expected '$expected_classification' got '$classification' for input <<<$input>>>"
+  fi
+  log "  [ok] $label"
+}
+# Positive: must still classify as rate_limit / auth (real provider errors).
+run_stall_classify_case "HTTP 429 Too Many Requests -> rate_limit" \
+  "rate_limit" \
+  $'error: HTTP 429 Too Many Requests\n'
+run_stall_classify_case "status: 401 unauthorized -> auth" \
+  "auth" \
+  $'status: 401 unauthorized\n'
+run_stall_classify_case "api_error_status=429 -> rate_limit" \
+  "rate_limit" \
+  $'api_error_status=429\n'
+run_stall_classify_case "Please wait before trying -> rate_limit" \
+  "rate_limit" \
+  $'Please wait before trying again in 30 seconds\n'
+# Negative regression guards: non-glyph scrollback that bare \b429\b
+# / \bunauthorized\b previously matched. None of these have an HTTP
+# transport qualifier adjacent and must not classify.
+run_stall_classify_case "[cron-dispatch] payload mentioning 429 -> silent" \
+  "" \
+  $'[cron-dispatch] cs-line-poll-5m payload includes 429 references\n'
+run_stall_classify_case "[A2A] task body mentioning 429 -> silent" \
+  "" \
+  $'[A2A] task body: 429 references in incident report\n'
+run_stall_classify_case "external vendor incident transcript -> silent" \
+  "" \
+  $'Vendor incident: 429 reported by upstream\n'
+run_stall_classify_case "meta-text quoting the regex itself -> silent" \
+  "" \
+  $'매칭 정규식: \\b429\\b\n'
+run_stall_classify_case "CJK prose discussing access -> silent" \
+  "" \
+  $'승인 안 된 액세스를 묘님이 검토 중\n'
+
 log "CLI subcommand suggestion helper (issue #163)"
 run_suggest_case() {
   local label="$1"
