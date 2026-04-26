@@ -2058,6 +2058,48 @@ bridge_linux_prepare_agent_isolation() {
   # catalog metadata read-only. plugins/data/ stays writable by the isolated
   # UID so plugin runtime state still works.
   bridge_linux_share_plugin_catalog "$os_user" "$user_home" "$controller_user" "$agent"
+
+  # Channel state-dir symlinks. Without this, MCP plugin servers running
+  # under the isolated UID write to a brand-new empty `~/.<channel>` tree
+  # and the controller-side webhook dispatcher (which writes to the
+  # controller-side `$workdir/.<channel>/`) never reaches the plugin.
+  # Symptom: inbound Teams/Discord/Telegram/ms365 messages silently disappear
+  # and operators discover the gap only by trying to send a test message.
+  #
+  # For each declared `plugin:<id>[@<mkt>]` channel in the agent's roster
+  # entry that has a known state-dir helper, plant a root-owned symlink at
+  # `$user_home/.claude/channels/<id>` -> `$workdir/.<id>/`. The symlink
+  # itself is root-owned (the isolated UID cannot relink it elsewhere); the
+  # target dir is owned by the isolated UID and ACL'd for the controller via
+  # the existing workdir grants (see recursive_write_paths above), so file
+  # contents written through the link are visible to both sides.
+  local _ch_csv=""
+  local _ch_token=""
+  local _ch_id=""
+  local _ch_target=""
+  _ch_csv="$(bridge_agent_channels_csv "$agent" 2>/dev/null || true)"
+  if [[ -n "$_ch_csv" ]]; then
+    local -a _ch_split=()
+    IFS=',' read -ra _ch_split <<<"$_ch_csv"
+    for _ch_token in "${_ch_split[@]}"; do
+      _ch_token="${_ch_token// /}"
+      [[ "$_ch_token" == plugin:* ]] || continue
+      _ch_id="${_ch_token#plugin:}"
+      _ch_id="${_ch_id%%@*}"
+      case "$_ch_id" in
+        discord)  _ch_target="$(bridge_agent_default_discord_state_dir "$agent")"  ;;
+        telegram) _ch_target="$(bridge_agent_default_telegram_state_dir "$agent")" ;;
+        teams)    _ch_target="$(bridge_agent_default_teams_state_dir "$agent")"    ;;
+        ms365)    _ch_target="$(bridge_agent_default_ms365_state_dir "$agent")"    ;;
+        *) continue ;;
+      esac
+      if ! bridge_linux_install_isolated_channel_symlink \
+              "$os_user" "$user_home" "$controller_user" "$_ch_id" "$_ch_target"; then
+        bridge_die "isolation channel symlink: failed to install '$_ch_id' symlink for agent '$agent'; inspect/quarantine $user_home/.claude/channels/ before retrying"
+      fi
+    done
+  fi
+
   # Issue #233: the previous `bridge_linux_grant_traverse_chain
   # $controller_user $isolated_claude_dir` call walked from
   # /home/agent-bridge-<agent>/.claude all the way up to / and left
@@ -2087,6 +2129,77 @@ bridge_linux_prepare_agent_isolation() {
   bridge_linux_acl_add "u:${os_user}:r--" "$env_file"
   bridge_linux_acl_add "u:${controller_user}:rw-" "$env_file"
 }
+bridge_linux_install_isolated_channel_symlink() {
+  # Plant a root-owned symlink at $user_home/.claude/channels/<channel>
+  # pointing to the controller-side per-agent state dir for that channel.
+  # Idempotent: replaces a stale symlink at the link path; refuses to clobber
+  # a real file/directory at either the parent root or the link itself, and
+  # creates the controller-side target dir (chowned to the isolated UID, ACL
+  # granted to the controller user) when it does not yet exist.
+  #
+  # Returns non-zero on any unsafe state so the caller (
+  # bridge_linux_prepare_agent_isolation) can bridge_die instead of leaving
+  # a split-state isolated-local channel dir behind.
+  local os_user="$1"
+  local user_home="$2"
+  local controller_user="$3"
+  local channel="$4"
+  local target="$5"
+
+  [[ -n "$os_user" && -n "$user_home" && -n "$controller_user" && -n "$channel" && -n "$target" ]] \
+    || { bridge_warn "bridge_linux_install_isolated_channel_symlink: missing arg"; return 1; }
+
+  local channels_root="$user_home/.claude/channels"
+  local link_path="$channels_root/$channel"
+
+  # Parent guard: refuse to follow a pre-existing symlink at $channels_root,
+  # and refuse to clobber a non-directory there. Without this, a malicious
+  # or stale `~/.claude/channels` symlink would let the subsequent
+  # `mkdir/chown/chmod` walk into an attacker-chosen target.
+  if bridge_linux_sudo_root test -L "$channels_root"; then
+    bridge_warn "isolation channel symlink: $channels_root is a symlink, refusing to follow"
+    return 1
+  fi
+  if bridge_linux_sudo_root test -e "$channels_root" \
+      && ! bridge_linux_sudo_root test -d "$channels_root"; then
+    bridge_warn "isolation channel symlink: $channels_root exists and is not a directory, refusing to clobber"
+    return 1
+  fi
+
+  bridge_linux_sudo_root mkdir -p "$channels_root"
+  bridge_linux_sudo_root chown root:root "$channels_root"
+  bridge_linux_sudo_root chmod 0755 "$channels_root"
+  bridge_linux_acl_add "u:${os_user}:r-x" "$channels_root" >/dev/null 2>&1 || true
+
+  # Target dir: create on demand for declared channels whose `.<channel>`
+  # has not yet been initialized (typical for fresh isolated agents that
+  # never opened the channel). Owned by the isolated UID so the plugin
+  # server can write its own state; controller user gets rwX so the
+  # webhook dispatcher and channel-health probe can see it.
+  if ! bridge_linux_sudo_root test -d "$target"; then
+    bridge_linux_sudo_root mkdir -p "$target"
+    bridge_linux_sudo_root chown "$os_user" "$target"
+    bridge_linux_sudo_root chmod 0700 "$target"
+    bridge_linux_acl_add "u:${controller_user}:rwX" "$target" >/dev/null 2>&1 || true
+    bridge_linux_acl_add_default_dirs_recursive "u:${controller_user}:rwX" "$target" >/dev/null 2>&1 || true
+  fi
+
+  # Link path: only replace a pre-existing symlink. A real file or directory
+  # at this path likely contains uncommitted state (e.g. an isolated-local
+  # `.<channel>/` that the plugin started writing into before the operator
+  # noticed the missing symlink) and silently overwriting it would lose
+  # that state. Bail and require manual quarantine.
+  if bridge_linux_sudo_root test -L "$link_path"; then
+    bridge_linux_sudo_root rm -f "$link_path" >/dev/null 2>&1 || true
+  elif bridge_linux_sudo_root test -e "$link_path"; then
+    bridge_warn "isolation channel symlink: $link_path is not a symlink, refusing to clobber (move it aside and rerun)"
+    return 1
+  fi
+
+  bridge_linux_sudo_root ln -s "$target" "$link_path"
+  bridge_linux_sudo_root chown -h root:root "$link_path" >/dev/null 2>&1 || true
+}
+
 bridge_agent_default_home() {
   local agent="$1"
   printf '%s/%s' "$BRIDGE_AGENT_HOME_ROOT" "$agent"
@@ -2155,6 +2268,16 @@ bridge_agent_default_teams_state_dir() {
 bridge_agent_teams_state_dir() {
   local agent="$1"
   bridge_agent_default_teams_state_dir "$agent"
+}
+
+bridge_agent_default_ms365_state_dir() {
+  local agent="$1"
+  printf '%s/.ms365' "$(bridge_agent_workdir "$agent")"
+}
+
+bridge_agent_ms365_state_dir() {
+  local agent="$1"
+  bridge_agent_default_ms365_state_dir "$agent"
 }
 
 bridge_agent_workdir() {
@@ -2717,6 +2840,9 @@ bridge_channel_provider_for_item() {
     plugin:teams|plugin:teams@*)
       printf '%s' "teams"
       ;;
+    plugin:ms365|plugin:ms365@*)
+      printf '%s' "ms365"
+      ;;
     plugin:*)
       printf '%s' "${item#plugin:}"
       ;;
@@ -2744,6 +2870,9 @@ bridge_channel_state_dir_for_item() {
     plugin:teams|plugin:teams@*)
       bridge_agent_teams_state_dir "$agent"
       ;;
+    plugin:ms365|plugin:ms365@*)
+      bridge_agent_ms365_state_dir "$agent"
+      ;;
     *)
       printf '%s' ""
       ;;
@@ -2767,6 +2896,15 @@ bridge_channel_credentials_status_for_item() {
     plugin:teams|plugin:teams@*)
       if bridge_env_file_has_any_nonempty_key "$dir/.env" TEAMS_APP_ID MicrosoftAppId \
         && bridge_env_file_has_any_nonempty_key "$dir/.env" TEAMS_APP_PASSWORD MicrosoftAppPassword; then
+        printf '%s' "present"
+      else
+        printf '%s' "missing"
+      fi
+      ;;
+    plugin:ms365|plugin:ms365@*)
+      if bridge_env_file_has_any_nonempty_key "$dir/.env" MS365_CLIENT_ID \
+        && bridge_env_file_has_any_nonempty_key "$dir/.env" MS365_CLIENT_SECRET \
+        && bridge_env_file_has_any_nonempty_key "$dir/.env" MS365_TENANT_ID; then
         printf '%s' "present"
       else
         printf '%s' "missing"
@@ -4609,6 +4747,9 @@ bridge_plugin_channel_state_dir() {
       ;;
     telegram)
       bridge_agent_telegram_state_dir "$agent"
+      ;;
+    ms365)
+      bridge_agent_ms365_state_dir "$agent"
       ;;
     *)
       return 1
