@@ -139,7 +139,12 @@ PY
 )" || return 0
   [[ -n "$note_excerpt" ]] || return 0
 
+  # `agent` is duplicated as a detail key (in addition to the audit row's
+  # `target` field) so FP-rate aggregators that filter purely on detail
+  # fields don't have to special-case the target column. (#338 Track C
+  # r1 codex review flagged this absence.)
   bridge_audit_log daemon context_pressure_false_positive "$impacted_agent" \
+    --detail agent="$impacted_agent" \
     --detail task_id="$task_id" \
     --detail severity=critical \
     --detail matched_pattern="$matched_pattern" \
