@@ -20,6 +20,8 @@ Usage:
   $(basename "$0") restart <agent> [--attach|--no-attach] [--continue|--no-continue] [--dry-run]
   $(basename "$0") forget-session <agent>
   $(basename "$0") attach <agent>
+  $(basename "$0") compact <agent> [--note <text>]
+  $(basename "$0") handoff <agent> [--note <text>]
 
 Options:
   --engine claude|codex        Agent runtime engine (default: claude)
@@ -57,6 +59,8 @@ Examples:
   $(basename "$0") safe-mode reviewer --attach
   $(basename "$0") stop reviewer
   $(basename "$0") attach reviewer
+  $(basename "$0") compact reviewer
+  $(basename "$0") handoff reviewer --note "context critical"
 EOF
 }
 
@@ -1618,6 +1622,183 @@ run_forget_session() {
   fi
 }
 
+# bridge_admin_maintenance_dispatch — issue #304 Track B common path.
+#
+# Both `agent compact` and `agent handoff` are admin-driven autonomous
+# maintenance primitives for *static* agents. The shape is identical:
+#
+#   1. Resolve target via the roster; reject if dynamic (defense in depth
+#      for the role-spec rule in agents/_template/CLAUDE.md
+#      "Admin Static vs Dynamic Agent Boundary"). Dynamic agents are
+#      operator-managed in the TUI and these primitives must not nudge
+#      them — same contract the daemon's [context-pressure] body now
+#      states machine-readably.
+#   2. Create a synthetic queue task to the static agent's inbox via
+#      bridge-task.sh create. The agent processes it on its own — no
+#      end-user keystroke required, which is the static-agent contract
+#      the issue identifies as the missing primitive.
+#   3. Audit row (admin_compact_invoked / admin_handoff_invoked).
+#
+# We deliberately do NOT synchronously block on agent claim+done or
+# drive a tmux send-keys session reset here. The CLI returns once the
+# task is enqueued + audited. The follow-up reset (if any) is the
+# operator's call after the agent has had a chance to process — keeps
+# the primitive cheap and avoids the lib/bridge-tmux.sh busy-gate +
+# 10-minute-timeout coupling the brief flagged as future work.
+bridge_admin_maintenance_dispatch() {
+  local kind="$1"        # compact | handoff
+  local agent="$2"
+  local note="${3:-}"
+  local title=""
+  local body=""
+  local audit_action=""
+  local actor=""
+  local stamp=""
+  local task_label=""
+
+  bridge_require_agent "$agent"
+  if [[ "$(bridge_agent_source "$agent")" != "static" ]]; then
+    bridge_die "agent '$agent' is dynamic — operator-managed; refuse to ${kind}. Dynamic agents are managed by the developer at the TUI; admin maintenance primitives only apply to static agents."
+  fi
+
+  stamp="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  case "$kind" in
+    compact)
+      task_label="admin-compact"
+      title="[admin-compact] $stamp"
+      body="Operator-driven context compaction (issue #304 Track B).
+Save your work, write a NEXT-SESSION.md handoff per the bridge contract
+(<agent-home>/NEXT-SESSION.md, the file SessionStart hook auto-consumes),
+and stop at a safe boundary. The bridge will resume the session fresh.
+End-user contact is not required and must not be requested."
+      audit_action="admin_compact_invoked"
+      ;;
+    handoff)
+      task_label="admin-handoff"
+      title="[admin-handoff] $stamp"
+      body="Operator-driven session handoff (issue #304 Track B).
+Write a structured handoff to <agent-home>/NEXT-SESSION.md — the only
+filename SessionStart hook auto-consumes (see
+docs/agent-runtime/handoff-protocol.md). Include open queue items,
+blockers, current focus, and the last known good state. End-user
+contact is not required and must not be requested."
+      audit_action="admin_handoff_invoked"
+      ;;
+    *)
+      bridge_die "internal: unknown maintenance kind '$kind'"
+      ;;
+  esac
+
+  if [[ -n "$note" ]]; then
+    body="$body
+
+Operator note: $note"
+  fi
+
+  actor="$(bridge_admin_agent_id)"
+  [[ -n "$actor" ]] || actor="bridge-admin"
+
+  "$BRIDGE_BASH_BIN" "$SCRIPT_DIR/bridge-task.sh" create \
+    --to "$agent" \
+    --from "$actor" \
+    --priority high \
+    --title "$title" \
+    --body "$body" >/dev/null
+
+  bridge_audit_log "$actor" "$audit_action" "$agent" \
+    --detail via=bridge-primitive \
+    --detail label="$task_label" \
+    --detail stamp="$stamp" >/dev/null 2>&1 || true
+
+  # Issue #304 r2 (codex review): handoff requires post-completion verification
+  # of <agent-home>/NEXT-SESSION.md. We don't synchronously block here (fire-
+  # and-forget is intentional — keeps the primitive cheap), but we DO enqueue
+  # a follow-up verify task to admin's own inbox so the check is observable
+  # rather than silent. Admin processes it after the static agent has had time
+  # to write the handoff; if the file is missing the admin emits an
+  # `admin_handoff_failed` audit row + re-dispatches with a different note.
+  if [[ "$kind" == "handoff" ]]; then
+    local agent_home=""
+    agent_home="$(bridge_agent_home "$agent" 2>/dev/null || true)"
+    local verify_title="[admin-handoff-verify] $stamp"
+    local verify_body="Verify the static-agent handoff for '$agent'.
+Expected file: ${agent_home:-<agent-home>}/NEXT-SESSION.md (the only path
+SessionStart hook auto-consumes).
+Pass criteria: file exists, non-empty, contains the structured handoff
+fields (open queue items, blockers, current focus, last known good
+state).
+On pass: close this task with note 'verified: NEXT-SESSION.md ok'.
+On fail (missing/empty/malformed): audit admin_handoff_failed and
+re-dispatch \`agent-bridge agent handoff $agent --note 'handoff retry'\`
+with the missing fields in the operator note. (#304 Track B verify path)"
+    "$BRIDGE_BASH_BIN" "$SCRIPT_DIR/bridge-task.sh" create \
+      --to "$actor" \
+      --from "$actor" \
+      --priority normal \
+      --title "$verify_title" \
+      --body "$verify_body" >/dev/null 2>&1 || true
+  fi
+
+  printf 'agent: %s\n' "$agent"
+  printf 'kind: %s\n' "$kind"
+  printf 'task_title: %s\n' "$title"
+  printf 'audit_action: %s\n' "$audit_action"
+}
+
+run_compact() {
+  local agent="${1:-}"
+  local note=""
+
+  shift || true
+  [[ -n "$agent" ]] || bridge_die "Usage: $(basename "$0") compact <agent> [--note <text>]"
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --note)
+        [[ $# -lt 2 ]] && bridge_die "--note 뒤에 텍스트를 지정하세요."
+        note="$2"
+        shift 2
+        ;;
+      -h|--help)
+        usage
+        return 0
+        ;;
+      *)
+        bridge_die "지원하지 않는 agent compact 옵션입니다: $1"
+        ;;
+    esac
+  done
+
+  bridge_admin_maintenance_dispatch compact "$agent" "$note"
+}
+
+run_handoff() {
+  local agent="${1:-}"
+  local note=""
+
+  shift || true
+  [[ -n "$agent" ]] || bridge_die "Usage: $(basename "$0") handoff <agent> [--note <text>]"
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --note)
+        [[ $# -lt 2 ]] && bridge_die "--note 뒤에 텍스트를 지정하세요."
+        note="$2"
+        shift 2
+        ;;
+      -h|--help)
+        usage
+        return 0
+        ;;
+      *)
+        bridge_die "지원하지 않는 agent handoff 옵션입니다: $1"
+        ;;
+    esac
+  done
+
+  bridge_admin_maintenance_dispatch handoff "$agent" "$note"
+}
+
 subcommand="${1:-}"
 shift || true
 
@@ -1652,13 +1833,19 @@ case "$subcommand" in
   attach)
     run_attach "$@"
     ;;
+  compact)
+    run_compact "$@"
+    ;;
+  handoff)
+    run_handoff "$@"
+    ;;
   ""|-h|--help|help)
     usage
     ;;
   *)
     # Issue #163 Phase 2: surface an intent-recovery hint before dying.
     _hint="$(bridge_suggest_subcommand "$subcommand" \
-      "create list show start safe-mode stop restart ack-crash forget-session attach")"
+      "create list show start safe-mode stop restart ack-crash forget-session attach compact handoff")"
     [[ -n "$_hint" ]] && bridge_warn "$_hint"
     bridge_die "지원하지 않는 agent 명령입니다: $subcommand"
     ;;

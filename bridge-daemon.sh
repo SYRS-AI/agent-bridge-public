@@ -1525,7 +1525,13 @@ PY
     else
       echo "**Resolve autonomously.** This is a static agent (end-user is on Discord/Telegram/Teams; cannot run any Claude Code command). Do not nudge the agent or its end-user."
       echo
-      echo "Until \`agent-bridge agent autopilot-compact <agent>\` and \`agent-bridge agent handoff-restart <agent>\` ship (issue #304 Track B), escalate to the human operator on the shared external channel rather than asking the static agent or its end-user to run \`/compact\`, \`/clear\`, or write \`NEXT-SESSION.md\`. Close this task with the action you took. See CLAUDE.md \`## Admin Static vs Dynamic Agent Boundary\` for the rule."
+      echo "Severity: $severity"
+      echo "Target agent: $agent"
+      echo "Target source: $source_kind"
+      echo
+      echo "If target_source == dynamic: close this task with note \`context-pressure: dynamic agent — operator-managed\`. Do NOT create follow-up tasks."
+      echo
+      echo "If target_source == static (this case): invoke \`agent-bridge agent compact $agent\` for warning-class pressure, or \`agent-bridge agent handoff $agent\` if the session is at critical and a fresh-session restart is the safer path. Both primitives reject dynamic agents (defense in depth) and write an \`admin_compact_invoked\` / \`admin_handoff_invoked\` audit row on the static path. Close this task with the action you took. See CLAUDE.md \`## Admin Static vs Dynamic Agent Boundary\` for the rule."
     fi
     echo
     echo "## Recent Output"

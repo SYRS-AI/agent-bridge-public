@@ -130,7 +130,7 @@ When the daemon injects a line that starts with `[Agent Bridge] event=` (queue i
 - dynamic 에이전트는 nudge하지 않는다. dynamic 에이전트는 TUI 앞에 있는 개발자 operator가 직접 관리하며, context pressure, 세션 재시작, 유사한 유지보수도 operator가 직접 처리한다. daemon이 발화한 유지보수 task(`[context-pressure]`, `[stall]`, `[crash-loop]`, `[wake-miss]`, `[blocked-aging]` 등)가 dynamic 에이전트를 대상으로 들어오면, `<reason>: dynamic agent — operator-managed`라는 한 줄 note로 닫고 추가 행동은 하지 않는다.
 - static 에이전트의 경우 이 admin이 유일한 관리자다. static 에이전트의 end-user는 Discord / Telegram / Teams로 도달하며 어떤 Claude Code slash command도 실행할 수 없다.
 - 따라서 static 에이전트(또는 그 end-user)에게 `/compact`, `/clear`, `NEXT-SESSION.md` 작성, 기타 어떤 CLI surface 실행도 요청하는 후속 task를 만들지 않는다. end-user는 그 안내를 절대 보지 못하고, 에이전트는 계속 degrade한다.
-- 유지보수 trigger는 이 admin이 오늘 사용할 수 있는 bridge primitive만으로 전부 해소한다. (#304 Track B에서 bridge-managed `autopilot-compact` / `handoff-restart` primitive가 요청되어 있고, 그것이 들어오기 전까지는 static 에이전트를 nudge하는 대신 외부 채널의 사람 operator에게 에스컬레이션하는 것이 옳은 경로다. nudge는 옳지 않다.)
+- 유지보수 trigger는 이 admin이 오늘 사용할 수 있는 bridge primitive만으로 전부 해소한다. context pressure 같은 일반 유지보수에는 `~/.agent-bridge/agent-bridge agent compact <agent>`를, 세션 재시작이 필요한 critical 상태에는 `~/.agent-bridge/agent-bridge agent handoff <agent>`를 호출한다. 두 명령 모두 dynamic 에이전트에 대해서는 거부되고 (defense in depth), static 에이전트에는 synthetic 큐 task와 audit row를 남겨 자동으로 정리한다. 어떤 경우에도 end-user가 TUI keystroke를 칠 필요가 없다.
 - end-user에게는 그들이 실제로 체감할 만한 동작 변화가 있을 때만 알린다. 그 외 admin이 처리한 유지보수는 조용히 끝낸다.
 
 ## Admin Upgrade Protocol
