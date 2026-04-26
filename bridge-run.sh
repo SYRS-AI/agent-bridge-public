@@ -478,12 +478,39 @@ while true; do
   if [[ -f "$ERRFILE" ]]; then
     local_err_size_before="$(wc -c <"$ERRFILE" 2>/dev/null || echo 0)"
   fi
-  run_started_at="$(date +%s)"
-  if "$BRIDGE_BASH_BIN" -lc "$LAUNCH_CMD" 2> >(tee -a "$ERRFILE" >&2); then
-    EXIT_CODE=0
-  else
-    EXIT_CODE=$?
+  # v2 isolation: load per-agent launch secrets from credentials/launch-secrets.env
+  # into the child shell so the child inherits them via export, NEVER via
+  # composing into LAUNCH_CMD. Composing tokens into LAUNCH_CMD leaks via
+  # process listings, the `log_line` above, dry-run output, the crash-report
+  # path (bridge_agent_write_crash_report writes LAUNCH_CMD verbatim), and
+  # any tee'd stderr. Loading inside the launch subshell (not the parent)
+  # also prevents stale secrets from persisting across restart-loop
+  # iterations after the credentials file is rotated, emptied, or removed.
+  _v2_secret_file=""
+  if bridge_isolation_v2_active; then
+    _v2_secret_file="$(bridge_isolation_v2_agent_secret_env_file "$AGENT" 2>/dev/null || true)"
+    [[ -n "$_v2_secret_file" && -f "$_v2_secret_file" ]] || _v2_secret_file=""
   fi
+  run_started_at="$(date +%s)"
+  if [[ -n "$_v2_secret_file" ]]; then
+    # PR-C r2 (codex r1 G-19): the subshell-wrap pattern lives in
+    # lib/bridge-isolation-v2.sh as bridge_isolation_v2_exec_with_secret_env
+    # so the smoke test exercises the EXACT production code path. The
+    # helper sets BRIDGE_ISOLATION_V2_LAST_EXEC_RC to the child's exit
+    # code (or calls bridge_die on loader failure).
+    BRIDGE_ISOLATION_V2_LAST_EXEC_RC=0
+    bridge_isolation_v2_exec_with_secret_env \
+      "$_v2_secret_file" "$BRIDGE_BASH_BIN" "$LAUNCH_CMD" "$ERRFILE" "$AGENT"
+    EXIT_CODE="$BRIDGE_ISOLATION_V2_LAST_EXEC_RC"
+    unset BRIDGE_ISOLATION_V2_LAST_EXEC_RC
+  else
+    if "$BRIDGE_BASH_BIN" -lc "$LAUNCH_CMD" 2> >(tee -a "$ERRFILE" >&2); then
+      EXIT_CODE=0
+    else
+      EXIT_CODE=$?
+    fi
+  fi
+  unset _v2_secret_file
   run_ended_at="$(date +%s)"
   if [[ "$run_started_at" =~ ^[0-9]+$ && "$run_ended_at" =~ ^[0-9]+$ ]]; then
     run_duration=$((run_ended_at - run_started_at))

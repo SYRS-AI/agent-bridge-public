@@ -2566,6 +2566,30 @@ def _harvest_state_dir(args: argparse.Namespace) -> Path:
     return Path(bridge_home).expanduser() / "state" / "memory-daily"
 
 
+def _per_agent_manifest_dir(args: argparse.Namespace, agent: str) -> Path:
+    # PR-C contract: under v2 layout the per-agent manifest lives inside the
+    # agent's private root ($BRIDGE_AGENT_ROOT_V2/<agent>/runtime/memory-daily),
+    # while admin aggregates live under shared/. Callers pass the resolved
+    # per-agent dir via --per-agent-state-dir; absent that flag we keep the
+    # legacy <state_dir>/<agent> shape so non-v2 installs are untouched.
+    override = getattr(args, "per_agent_state_dir", None)
+    if override:
+        return Path(override).expanduser()
+    return _harvest_state_dir(args) / agent
+
+
+def _shared_aggregate_dir(args: argparse.Namespace) -> Path:
+    # PR-C contract: admin aggregates may live under the shared root
+    # ($BRIDGE_SHARED_ROOT/memory-daily/aggregate) so the per-agent root
+    # remains opaque to other isolated UIDs. Callers pass the resolved
+    # shared aggregate dir via --shared-aggregate-dir; absent that flag we
+    # keep the legacy <state_dir>/shared/aggregate shape.
+    override = getattr(args, "shared_aggregate_dir", None)
+    if override:
+        return Path(override).expanduser()
+    return _harvest_state_dir(args) / "shared" / "aggregate"
+
+
 def _harvest_task_db(args: argparse.Namespace) -> Path:
     env = os.environ.get("BRIDGE_TASK_DB")
     if env:
@@ -2616,12 +2640,12 @@ def _merge_aggregate_state(path: Path, merger) -> None:
                 pass
 
 
-def _manifest_path(state_dir: Path, agent: str, date: str) -> Path:
-    return state_dir / agent / f"{date}.json"
+def _manifest_path(args: argparse.Namespace, agent: str, date: str) -> Path:
+    return _per_agent_manifest_dir(args, agent) / f"{date}.json"
 
 
-def _load_manifest(state_dir: Path, agent: str, date: str) -> dict | None:
-    path = _manifest_path(state_dir, agent, date)
+def _load_manifest(args: argparse.Namespace, agent: str, date: str) -> dict | None:
+    path = _manifest_path(args, agent, date)
     if not path.exists():
         return None
     try:
@@ -2640,8 +2664,8 @@ def _load_manifest(state_dir: Path, agent: str, date: str) -> dict | None:
     return None
 
 
-def _write_manifest(state_dir: Path, agent: str, date: str, data: dict) -> Path:
-    path = _manifest_path(state_dir, agent, date)
+def _write_manifest(args: argparse.Namespace, agent: str, date: str, data: dict) -> Path:
+    path = _manifest_path(args, agent, date)
     _atomic_write_json(path, data)
     return path
 
@@ -3144,12 +3168,14 @@ def _render_aggregate_body(schema_label: str, state: dict) -> str:
     return "\n".join(lines) + "\n"
 
 
-def _update_permission_aggregate(state_dir: Path, agent: str, date: str, now_iso: str, db_path: Path, dry_run: bool) -> int | None:
+def _update_permission_aggregate(args: argparse.Namespace, agent: str, date: str, now_iso: str, db_path: Path, dry_run: bool) -> int | None:
     # Shared aggregate lives under shared/aggregate/ so linux-user isolation
     # can grant write there without opening up the per-agent manifest tree
     # (issue #219). Legacy root-level files are migrated in controller
     # context by bridge_linux_prepare_agent_isolation and bootstrap-memory-system.sh.
-    agg_path = state_dir / "shared" / "aggregate" / "admin-aggregate-skip.json"
+    # Under v2 the shared aggregate dir is resolved via --shared-aggregate-dir
+    # so admin aggregates can live outside the per-agent private root.
+    agg_path = _shared_aggregate_dir(args) / "admin-aggregate-skip.json"
     title_prefix = "[memory-daily-skip-admin]"
 
     def merger(current: dict) -> dict:
@@ -3188,9 +3214,9 @@ def _update_permission_aggregate(state_dir: Path, agent: str, date: str, now_iso
     return new_id
 
 
-def _update_escalation_aggregate(state_dir: Path, agent: str, date: str, now_iso: str, db_path: Path, dry_run: bool) -> int | None:
+def _update_escalation_aggregate(args: argparse.Namespace, agent: str, date: str, now_iso: str, db_path: Path, dry_run: bool) -> int | None:
     # See _update_permission_aggregate for the shared/aggregate rationale.
-    agg_path = state_dir / "shared" / "aggregate" / "admin-aggregate-escalated.json"
+    agg_path = _shared_aggregate_dir(args) / "admin-aggregate-escalated.json"
     title_prefix = "[memory-daily-escalated]"
 
     def merger(current: dict) -> dict:
@@ -3342,7 +3368,7 @@ def cmd_harvest_daily(args: argparse.Namespace) -> int:
         fail_count = 0
         skipped_count = 0
         for tdate in target_dates:
-            if missing_only and _manifest_path(state_dir, agent, tdate).exists():
+            if missing_only and _manifest_path(args, agent, tdate).exists():
                 # Sidecar manifest is the SSOT for "this date has been
                 # harvested" — Lane B reads the same path. Manual-note-without-
                 # manifest dates must still be harvested.
@@ -3410,7 +3436,7 @@ def cmd_harvest_daily(args: argparse.Namespace) -> int:
             return 2
     else:
         single_date = _harvest_default_date(tz_name)
-    if missing_only and _manifest_path(state_dir, agent, single_date).exists():
+    if missing_only and _manifest_path(args, agent, single_date).exists():
         sys.stderr.write(
             f"[bridge-memory] harvest-daily date={single_date} already harvested "
             f"(manifest exists); --missing-only skip\n"
@@ -3442,7 +3468,7 @@ def _harvest_one_date(args: argparse.Namespace, date: str) -> dict:
     # merge (agent,date) into admin-aggregate-skip, and exit success so the
     # cron run surfaces a structured skip rather than an engine error.
     if args.skipped_permission:
-        prev = _load_manifest(state_dir, agent, date) or {}
+        prev = _load_manifest(args, agent, date) or {}
         prev_task = prev.get("task") or {}
         manifest = {
             "schema": "memory-daily-manifest-v1",
@@ -3487,11 +3513,11 @@ def _harvest_one_date(args: argparse.Namespace, date: str) -> dict:
                 "requeue_after": None,
             },
         }
-        manifest_path = state_dir / agent / f"{date}.json"
+        manifest_path = _manifest_path(args, agent, date)
         if not args.dry_run:
-            manifest_path = _write_manifest(state_dir, agent, date, manifest)
+            manifest_path = _write_manifest(args, agent, date, manifest)
             _update_permission_aggregate(
-                state_dir, agent, date, now_iso, db_path, args.dry_run,
+                args, agent, date, now_iso, db_path, args.dry_run,
             )
         summary = f"memory-daily sudo wrap unavailable for {agent}/{date}"
         if args.os_user:
@@ -3517,7 +3543,7 @@ def _harvest_one_date(args: argparse.Namespace, date: str) -> dict:
 
     # --- Gate check ---------------------------------------------------------
     if args.disabled_gate or _gate_disabled(agent):
-        prev = _load_manifest(state_dir, agent, date) or {}
+        prev = _load_manifest(args, agent, date) or {}
         manifest = {
             "schema": "memory-daily-manifest-v1",
             "agent": agent,
@@ -3547,9 +3573,9 @@ def _harvest_one_date(args: argparse.Namespace, date: str) -> dict:
             "decision": {"source_confidence": "none", "action": "skip", "reason_code": "disabled"},
             "task": {"current_task_id": None, "current_task_status": None, "last_task_id": prev.get("task", {}).get("last_task_id"), "last_task_closed_at": prev.get("task", {}).get("last_task_closed_at"), "requeue_after": None},
         }
-        manifest_path = state_dir / agent / f"{date}.json"
+        manifest_path = _manifest_path(args, agent, date)
         if not args.dry_run:
-            manifest_path = _write_manifest(state_dir, agent, date, manifest)
+            manifest_path = _write_manifest(args, agent, date, manifest)
         payload = _build_result_payload(
             status="disabled",
             summary=f"memory-daily gate off for {agent}/{date}",
@@ -3581,7 +3607,7 @@ def _harvest_one_date(args: argparse.Namespace, date: str) -> dict:
     )
 
     # --- Load previous manifest for carry-over / dedupe ---------------------
-    prev = _load_manifest(state_dir, agent, date) or {}
+    prev = _load_manifest(args, agent, date) or {}
     prev_task = prev.get("task") or {}
     prev_state = prev.get("state")
     attempts = int(prev.get("attempts") or 0)
@@ -3676,7 +3702,7 @@ def _harvest_one_date(args: argparse.Namespace, date: str) -> dict:
     # --- Escalation aggregate ----------------------------------------------
     aggregate_notified_at = prev.get("aggregate_notified_at")
     if new_state == "escalated":
-        _update_escalation_aggregate(state_dir, agent, date, now_iso, db_path, args.dry_run)
+        _update_escalation_aggregate(args, agent, date, now_iso, db_path, args.dry_run)
         aggregate_notified_at = now_iso
 
     # --- Build manifest -----------------------------------------------------
@@ -3720,9 +3746,9 @@ def _harvest_one_date(args: argparse.Namespace, date: str) -> dict:
         },
     }
 
-    manifest_path = state_dir / agent / f"{date}.json"
+    manifest_path = _manifest_path(args, agent, date)
     if not args.dry_run:
-        manifest_path = _write_manifest(state_dir, agent, date, manifest)
+        manifest_path = _write_manifest(args, agent, date, manifest)
 
     # --- Build result payload ----------------------------------------------
     status_map = {
@@ -4031,6 +4057,23 @@ def build_parser() -> argparse.ArgumentParser:
     )
     hd_parser.add_argument("--tz", default="Asia/Seoul")
     hd_parser.add_argument("--state-dir", help="override $BRIDGE_STATE_DIR/memory-daily")
+    hd_parser.add_argument(
+        "--per-agent-state-dir",
+        help=(
+            "override the per-agent manifest directory (PR-C v2: "
+            "$BRIDGE_AGENT_ROOT_V2/<agent>/runtime/memory-daily). When set, "
+            "the agent name is NOT appended — the directory is used verbatim."
+        ),
+    )
+    hd_parser.add_argument(
+        "--shared-aggregate-dir",
+        help=(
+            "override the shared admin-aggregate directory (PR-C v2: "
+            "$BRIDGE_SHARED_ROOT/memory-daily/aggregate). When set, the "
+            "directory is used verbatim and admin-aggregate-*.json are "
+            "written directly under it."
+        ),
+    )
     hd_parser.add_argument("--sidecar-out", help="authoritative RESULT_SCHEMA JSON path")
     hd_parser.add_argument("--dry-run", action="store_true")
     hd_parser.add_argument("--json", action="store_true")

@@ -74,11 +74,38 @@ print(d.get("isolation", {}).get("os_user", ""))')"
 
 # Sidecar path: runner-exported CRON_REQUEST_DIR (cron path). Fallback is an
 # agent-scoped state dir for manual/ad-hoc invocation outside the runner.
+# Under v2 layout the per-agent state lives inside the v2 per-agent root, so
+# the fallback resolves through the v2 helper when the layout is active.
 if [[ -n "${CRON_REQUEST_DIR:-}" ]]; then
   sidecar_out="$CRON_REQUEST_DIR/authoritative-memory-daily.json"
 else
-  sidecar_out="$BRIDGE_HOME/state/memory-daily/$AGENT/adhoc.authoritative.json"
+  v2_md_root=""
+  if [[ "${BRIDGE_LAYOUT:-legacy}" == "v2" ]] \
+      && [[ -n "${BRIDGE_AGENT_ROOT_V2:-}" ]]; then
+    v2_md_root="$BRIDGE_AGENT_ROOT_V2/$AGENT/runtime/memory-daily"
+  fi
+  if [[ -n "$v2_md_root" ]]; then
+    sidecar_out="$v2_md_root/adhoc.authoritative.json"
+  else
+    sidecar_out="$BRIDGE_HOME/state/memory-daily/$AGENT/adhoc.authoritative.json"
+  fi
   mkdir -p "$(dirname "$sidecar_out")"
+fi
+
+# PR-C: under v2 layout the per-agent manifest must land under the per-agent
+# private root and admin aggregates must land under shared/, not under the
+# legacy controller state. Pass the resolved paths so bridge-memory.py
+# writes manifests + aggregates into the v2 locations instead of falling
+# back to BRIDGE_STATE_DIR/memory-daily. Without these flags the Python
+# harvester would silently keep using the legacy controller tree (issue:
+# PR-C r1 review finding P1 #1).
+v2_extra_args=()
+if [[ "${BRIDGE_LAYOUT:-legacy}" == "v2" ]] \
+    && [[ -n "${BRIDGE_AGENT_ROOT_V2:-}" ]]; then
+  v2_extra_args+=(--per-agent-state-dir "$BRIDGE_AGENT_ROOT_V2/$AGENT/runtime/memory-daily")
+  if [[ -n "${BRIDGE_SHARED_ROOT:-}" ]]; then
+    v2_extra_args+=(--shared-aggregate-dir "$BRIDGE_SHARED_ROOT/memory-daily/aggregate")
+  fi
 fi
 
 current_user="$(id -un 2>/dev/null || echo '')"
@@ -109,6 +136,7 @@ if [[ "$isolation_mode" == "linux-user" \
       --os-user "$os_user" \
       --transcripts-home "$target_home" \
       --sidecar-out "$sidecar_out" \
+      "${v2_extra_args[@]}" \
       --json
   else
     exec "$BRIDGE_PYTHON" "$BRIDGE_HOME/bridge-memory.py" harvest-daily \
@@ -118,6 +146,7 @@ if [[ "$isolation_mode" == "linux-user" \
       --os-user "$os_user" \
       --skipped-permission \
       --sidecar-out "$sidecar_out" \
+      "${v2_extra_args[@]}" \
       --json
   fi
 fi
@@ -127,4 +156,5 @@ exec "$BRIDGE_PYTHON" "$BRIDGE_HOME/bridge-memory.py" harvest-daily \
   --home "$home" \
   --workdir "$workdir" \
   --sidecar-out "$sidecar_out" \
+  "${v2_extra_args[@]}" \
   --json
