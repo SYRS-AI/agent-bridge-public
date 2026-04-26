@@ -6953,6 +6953,45 @@ assert job.get("enabled") is True, f"deferred finalize disabled the job: {job!r}
 print("native-finalize-run deferred branch OK")
 PY
 
+# #263 Track B r3: a deferred job MUST NOT inflate the operator-visible
+# inventory error_jobs aggregate. The previous fixture only checked the
+# row-level consecutiveErrors counter; this guards summarize() against
+# regressing to its inline whitelist that did not recognize "deferred".
+CRON_DEFERRED_JOBS_FILE="$CRON_DEFERRED_JOBS_FILE" \
+REPO_ROOT="$REPO_ROOT" \
+python3 - <<'PY'
+import json, os, subprocess, sys
+from pathlib import Path
+
+repo_root = Path(os.environ["REPO_ROOT"])
+jobs_file = os.environ["CRON_DEFERRED_JOBS_FILE"]
+
+inventory_proc = subprocess.run(
+    [sys.executable, str(repo_root / "bridge-cron.py"),
+     "inventory", "--jobs-file", jobs_file, "--json"],
+    capture_output=True, text=True, check=True,
+)
+inventory = json.loads(inventory_proc.stdout)
+totals = inventory.get("totals") or {}
+error_jobs = int(totals.get("error_jobs") or 0)
+assert error_jobs == 0, (
+    f"deferred run incorrectly counted in inventory.totals.error_jobs "
+    f"(expected 0, got {error_jobs}); summarize() may not be deferring to "
+    f"is_error_record()"
+)
+
+# filtered_totals is computed from the same predicate; double-check it too so
+# any future divergence between the two summaries is caught.
+filtered_totals = inventory.get("filtered_totals") or {}
+filtered_error_jobs = int(filtered_totals.get("error_jobs") or 0)
+assert filtered_error_jobs == 0, (
+    f"deferred run incorrectly counted in inventory.filtered_totals.error_jobs "
+    f"(expected 0, got {filtered_error_jobs})"
+)
+
+print("inventory aggregate excludes deferred job OK")
+PY
+
 log "rendering typed channel relay blocks into cron follow-up bodies"
 CRON_RELAY_RUN_ID="relay-smoke--2026-04-16T13-20"
 CRON_RELAY_RUN_DIR="$BRIDGE_CRON_STATE_DIR/runs/$CRON_RELAY_RUN_ID"

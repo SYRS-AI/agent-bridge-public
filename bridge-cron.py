@@ -352,11 +352,11 @@ def summarize(records):
             for item in records
             if item["kind"] == "one-shot" and item["next_run_at"] is not None and item["next_run_at"] < now
         ),
-        "error_jobs": sum(
-            1
-            for item in records
-            if item["consecutive_errors"] > 0 or item["last_status"] not in ("-", "ok", "success")
-        ),
+        # Source of truth for the "is this an error?" predicate is
+        # is_error_record(); summarize() must defer to it so deferred jobs
+        # (#263 Track B pre-flight memory guard) are not over-counted in the
+        # operator-visible inventory aggregate.
+        "error_jobs": sum(1 for item in records if is_error_record(item)),
         "schedule_kinds": dict(Counter(item["schedule_kind"] for item in records)),
         "payload_kinds": dict(Counter(item["payload_kind"] for item in records)),
     }
