@@ -36,7 +36,12 @@
 # Layout (final, when BRIDGE_LAYOUT=v2 and BRIDGE_DATA_ROOT is set):
 #   $BRIDGE_DATA_ROOT/                      mode 755 (others traverse)
 #   ├── shared/                             owner=controller, group=ab-shared,    mode 2750
-#   │   ├── plugins/, plugins-cache/, marketplaces/, skills/, docs/
+#   │   ├── plugins-cache/                  ← v2 canonical Claude plugins root.
+#   │   │   ├── installed_plugins.json
+#   │   │   ├── known_marketplaces.json
+#   │   │   └── marketplaces/<id>/         ← marketplace mirror trees live here
+#   │   ├── plugins/                        ← agent-bridge plugin source (teams/ms365)
+#   │   ├── skills/, docs/
 #   ├── agents/                             owner=root,       group=root,         mode 755
 #   │   └── <agent>/                        owner=agent-bridge-<name>,
 #   │                                       group=ab-agent-<name>,                mode 2770
@@ -44,6 +49,14 @@
 #   │   └── runtime/                        bridge-config.json + secrets here
 #   ├── agent-roster.sh                     owner=controller, group=ab-controller, mode 0640
 #   └── agent-roster.local.sh               owner=controller, group=ab-controller, mode 0640
+#
+# Note on `marketplaces/`: PR-A's earlier draft listed `shared/marketplaces/`
+# as a sibling of `plugins-cache/`. That was a bug — Claude expects the
+# marketplace mirror to live under the same root as installed_plugins.json
+# / known_marketplaces.json so manifest entries with marketplace references
+# resolve. PR-B canonicalizes the layout: `shared/plugins-cache/marketplaces/`
+# is the single marketplace mirror root. There is no separate
+# `shared/marketplaces/` directory.
 #
 # Default group names are env-overridable so this can be exercised in
 # tempdir-based tests without root.
@@ -80,6 +93,38 @@ bridge_isolation_v2_active() {
   [[ "$BRIDGE_LAYOUT" == "v2" ]] || return 1
   [[ -n "$BRIDGE_DATA_ROOT" ]] || return 1
   return 0
+}
+
+bridge_isolation_v2_shared_plugins_root_populated() {
+  # Returns 0 only when:
+  #   1. v2 mode is active, and
+  #   2. BRIDGE_SHARED_ROOT is set, and
+  #   3. $BRIDGE_SHARED_ROOT/plugins-cache exists, and
+  #   4. it actually contains the canonical Claude catalog file.
+  #
+  # `[[ -d ... ]]` alone is not enough: an operator who created the
+  # directory tree but has not yet copied controller catalog state into
+  # it would fall through to the v2 path and the share helper would
+  # write garbage. Require installed_plugins.json as the readiness
+  # gate; known_marketplaces.json may legitimately be absent on a
+  # single-marketplace install but installed_plugins.json is always
+  # written by `claude` after the first plugin install.
+  bridge_isolation_v2_active || return 1
+  [[ -n "$BRIDGE_SHARED_ROOT" ]] || return 1
+  local root="$BRIDGE_SHARED_ROOT/plugins-cache"
+  [[ -d "$root" ]] || return 1
+  [[ -f "$root/installed_plugins.json" ]] || return 1
+  return 0
+}
+
+bridge_isolation_v2_shared_plugins_root() {
+  # Print the v2 canonical Claude plugins root if populated, else
+  # return non-zero so callers can fall back to the legacy
+  # controller_home/.claude/plugins location. This is the only public
+  # accessor — callers MUST NOT duplicate the plugins-cache path
+  # contract elsewhere.
+  bridge_isolation_v2_shared_plugins_root_populated || return 1
+  printf '%s' "$BRIDGE_SHARED_ROOT/plugins-cache"
 }
 
 bridge_isolation_v2_agent_group_name() {
