@@ -1122,10 +1122,24 @@ bridge_load_roster() {
       source "$BRIDGE_ROSTER_FILE"
     fi
 
-    if [[ -f "$BRIDGE_ROSTER_LOCAL_FILE" ]]; then
-      # shellcheck source=/dev/null
-      source "$BRIDGE_ROSTER_LOCAL_FILE"
-    fi
+    # Issue #358: under linux-user isolation the calling UID's $HOME (and
+    # therefore the per-UID-defaulted $BRIDGE_HOME) points at the isolated
+    # user's home, not the controller's. The roster file lives at the
+    # controller-canonical path. Try candidates in priority order and source
+    # the first readable one — never $HOME, never bridge_die on the
+    # bridge-lib default if the controller-side install root has the file.
+    local roster_local_candidate=""
+    for roster_local_candidate in \
+        "$BRIDGE_ROSTER_LOCAL_FILE" \
+        "$BRIDGE_HOME/agent-roster.local.sh" \
+        "$BRIDGE_SCRIPT_DIR/agent-roster.local.sh"; do
+      [[ -n "$roster_local_candidate" ]] || continue
+      if [[ -r "$roster_local_candidate" ]]; then
+        # shellcheck source=/dev/null
+        source "$roster_local_candidate"
+        break
+      fi
+    done
   fi
 
   : "${BRIDGE_LOG_DIR:=$BRIDGE_HOME/logs}"

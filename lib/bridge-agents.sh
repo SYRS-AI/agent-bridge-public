@@ -2113,7 +2113,23 @@ bridge_linux_prepare_agent_isolation() {
   # Root traverse-only on the gateway root for the isolated UID prevents
   # cross-agent dir-name enumeration while keeping its own subtree reachable.
   bridge_linux_acl_add "u:${os_user}:--x" "$queue_gateway_root" >/dev/null 2>&1 || true
-  hidden_paths+=("$BRIDGE_ROSTER_FILE" "$BRIDGE_ROSTER_LOCAL_FILE" "$BRIDGE_RUNTIME_CREDENTIALS_DIR" "$BRIDGE_RUNTIME_SECRETS_DIR" "$BRIDGE_RUNTIME_CONFIG_FILE" "$BRIDGE_TASK_DB" "${BRIDGE_LOG_DIR}/audit.jsonl")
+  # Issue #358: the global roster files (agent-roster.sh + agent-roster.local.sh)
+  # were previously hidden from isolated UIDs. That broke `agent-bridge list`
+  # and `task create --to <peer>` invoked as the isolated UID, because
+  # bridge_load_roster could not source the canonical roster. Per #358 the
+  # roster is "not secret across agents on the same host" — it is a list of
+  # declared roles + channel definitions, not credentials. Grant read-only
+  # ACL access here and remove these files from the hidden_paths revoke
+  # below. Tokens that ARE secret live in scoped agent-env.sh snapshots
+  # written by bridge_write_linux_agent_env_file (see issue #116), which
+  # remain per-agent and unchanged.
+  hidden_paths+=("$BRIDGE_RUNTIME_CREDENTIALS_DIR" "$BRIDGE_RUNTIME_SECRETS_DIR" "$BRIDGE_RUNTIME_CONFIG_FILE" "$BRIDGE_TASK_DB" "${BRIDGE_LOG_DIR}/audit.jsonl")
+  if [[ -e "$BRIDGE_ROSTER_FILE" ]]; then
+    bridge_linux_acl_add "u:${os_user}:r--" "$BRIDGE_ROSTER_FILE" >/dev/null 2>&1 || true
+  fi
+  if [[ -e "$BRIDGE_ROSTER_LOCAL_FILE" ]]; then
+    bridge_linux_acl_add "u:${os_user}:r--" "$BRIDGE_ROSTER_LOCAL_FILE" >/dev/null 2>&1 || true
+  fi
 
   # Issue #233: every traverse_chain call used to climb unconditionally
   # to `/` and stamp `u:${os_user}:--x` on each ancestor, including
