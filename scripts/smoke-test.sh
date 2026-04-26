@@ -2503,6 +2503,88 @@ python3 "$REPO_ROOT/bridge-queue.py" cancel "$BLOCKED_REMINDER_ID" --actor smoke
 python3 "$REPO_ROOT/bridge-queue.py" cancel "$BLOCKED_ESCALATION_ID" --actor smoke-test --note "blocked aging smoke cleanup" >/dev/null
 python3 "$REPO_ROOT/bridge-queue.py" cancel "$BLOCKED_AGING_TASK_ID" --actor smoke-test --note "blocked aging smoke cleanup" >/dev/null
 
+# Issue #303 Track C — `garden` column surfaces stale blocked tasks the
+# assignee owns. Seed a blocked task whose updated_ts is 2 days old, run
+# `agent-bridge status --all-agents`, and assert the smoke agent's row
+# carries the `Nd` stale-blocked tag. Refresh the task and assert the
+# column collapses back to `-`.
+log "garden column reports stale blocked tasks (#303 Track C)"
+GARDEN_CREATE_OUTPUT="$(python3 "$REPO_ROOT/bridge-queue.py" create --to "$SMOKE_AGENT" --title "garden column smoke" --body "queue gardening signal" --from "$REQUESTER_AGENT")"
+assert_contains "$GARDEN_CREATE_OUTPUT" "created task #"
+GARDEN_TASK_ID="$(printf '%s\n' "$GARDEN_CREATE_OUTPUT" | sed -n 's/^created task #\([0-9][0-9]*\).*/\1/p' | head -n1)"
+[[ "$GARDEN_TASK_ID" =~ ^[0-9]+$ ]] || die "could not parse garden column task id"
+python3 "$REPO_ROOT/bridge-queue.py" update "$GARDEN_TASK_ID" --status blocked --note "garden column smoke" >/dev/null
+GARDEN_TASK_ID="$GARDEN_TASK_ID" BRIDGE_TASK_DB="$BRIDGE_TASK_DB" python3 - <<'PY'
+import os
+import sqlite3
+import time
+
+db = os.environ["BRIDGE_TASK_DB"]
+task_id = int(os.environ["GARDEN_TASK_ID"])
+stale_ts = int(time.time()) - 86400 * 2
+with sqlite3.connect(db) as conn:
+    conn.execute(
+        "UPDATE tasks SET updated_ts = ? WHERE id = ?",
+        (stale_ts, task_id),
+    )
+    conn.commit()
+PY
+GARDEN_STATUS_STALE="$("$REPO_ROOT/agent-bridge" status --all-agents)"
+assert_contains "$GARDEN_STATUS_STALE" "garden"
+GARDEN_PARSER="$(cat <<'PY'
+import os
+import sys
+
+agent = os.environ["SMOKE_AGENT"]
+header = None
+for line in sys.stdin.read().splitlines():
+    stripped = line.strip()
+    if stripped.startswith("#") and "agent" in stripped and "garden" in stripped:
+        header = stripped.split()
+        continue
+    if header is None:
+        continue
+    parts = stripped.split()
+    if len(parts) < len(header) or agent not in parts:
+        continue
+    try:
+        garden_idx = header.index("garden")
+        agent_idx_header = header.index("agent")
+        agent_idx_row = parts.index(agent)
+        # The row leading "#" cell is either an active index or "-";
+        # aligning on the agent token gives the right offset for garden.
+        garden_offset = garden_idx - agent_idx_header
+        garden_value = parts[agent_idx_row + garden_offset]
+    except (ValueError, IndexError):
+        continue
+    print(garden_value)
+    break
+else:
+    print("missing-row")
+PY
+)"
+GARDEN_STALE_VALUE="$(printf '%s\n' "$GARDEN_STATUS_STALE" | SMOKE_AGENT="$SMOKE_AGENT" python3 -c "$GARDEN_PARSER")"
+[[ "$GARDEN_STALE_VALUE" =~ ^[0-9]+d$ ]] || die "status garden column should mark $SMOKE_AGENT as stale-blocked while task #$GARDEN_TASK_ID has 2d-old updated_ts (got '$GARDEN_STALE_VALUE')"
+GARDEN_TASK_ID="$GARDEN_TASK_ID" BRIDGE_TASK_DB="$BRIDGE_TASK_DB" python3 - <<'PY'
+import os
+import sqlite3
+import time
+
+db = os.environ["BRIDGE_TASK_DB"]
+task_id = int(os.environ["GARDEN_TASK_ID"])
+fresh_ts = int(time.time())
+with sqlite3.connect(db) as conn:
+    conn.execute(
+        "UPDATE tasks SET updated_ts = ? WHERE id = ?",
+        (fresh_ts, task_id),
+    )
+    conn.commit()
+PY
+GARDEN_STATUS_FRESH="$("$REPO_ROOT/agent-bridge" status --all-agents)"
+GARDEN_FRESH_VALUE="$(printf '%s\n' "$GARDEN_STATUS_FRESH" | SMOKE_AGENT="$SMOKE_AGENT" python3 -c "$GARDEN_PARSER")"
+[[ "$GARDEN_FRESH_VALUE" == "-" ]] || die "status garden column should clear to '-' after task #$GARDEN_TASK_ID is refreshed (got '$GARDEN_FRESH_VALUE')"
+python3 "$REPO_ROOT/bridge-queue.py" cancel "$GARDEN_TASK_ID" --actor smoke-test --note "garden column smoke cleanup" >/dev/null
+
 log "claiming and completing queue task"
 SMOKE_AGENT="$SMOKE_AGENT" BRIDGE_TASK_DB="$BRIDGE_TASK_DB" python3 - <<'PY'
 import os

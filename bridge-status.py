@@ -15,6 +15,16 @@ from pathlib import Path
 
 PRIORITY_ORDER = {"urgent": 0, "high": 1, "normal": 2, "low": 3}
 
+# Issue #303 Track C — queue-gardening dashboard column. The `garden` column
+# surfaces blocked tasks the assignee has not refreshed (or closed) recently,
+# i.e. the admin's failure mode where blocked becomes a write-only parking
+# lot. Thresholds are in seconds and intentionally tracked here so future
+# tuning is one place; without an ANSI color path in this dashboard we emit
+# the raw stale-blocked count + `d` suffix (the issue's "yellow at 1 day, red
+# at 3 days" rendering degrades to plain text).
+GARDEN_STALE_SECONDS = 86400        # 1 day — yellow tier; below this, render `-`
+GARDEN_CRITICAL_SECONDS = 86400 * 3  # 3 days — red tier (informational only)
+
 
 def iso_now() -> str:
     return datetime.now(timezone.utc).astimezone().isoformat(timespec="seconds")
@@ -50,6 +60,23 @@ def fmt_remaining(ts: int | None) -> str:
     if delta < 86400:
         return f"{delta // 3600}h"
     return f"{delta // 86400}d"
+
+
+def fmt_garden(blocked_count: int, oldest_blocked_ts: int | None) -> str:
+    """Render the queue-gardening signal for a single agent.
+
+    Returns `-` when the agent has no blocked tasks aged past
+    GARDEN_STALE_SECONDS, and `<N>d` otherwise where N is the count of
+    blocked tasks the agent owns. The `d` suffix marks "stale-blocked"
+    rather than the day count itself; without an ANSI color path the
+    yellow/red tier (#303 Track C) collapses to one stale tier.
+    """
+    if not blocked_count or not oldest_blocked_ts:
+        return "-"
+    age = int(datetime.now(timezone.utc).timestamp()) - int(oldest_blocked_ts)
+    if age < GARDEN_STALE_SECONDS:
+        return "-"
+    return f"{int(blocked_count)}d"
 
 
 def classify_stale(active: bool, activity_ts: int | None, warn_seconds: int, critical_seconds: int) -> str:
@@ -147,7 +174,8 @@ def fetch_agent_metrics(conn: sqlite3.Connection) -> dict[str, dict[str, int | s
         SELECT
           assigned_to AS agent,
           SUM(CASE WHEN status = 'queued' THEN 1 ELSE 0 END) AS queued_count,
-          SUM(CASE WHEN status = 'blocked' THEN 1 ELSE 0 END) AS blocked_count
+          SUM(CASE WHEN status = 'blocked' THEN 1 ELSE 0 END) AS blocked_count,
+          MIN(CASE WHEN status = 'blocked' THEN updated_ts END) AS oldest_blocked_ts
         FROM tasks
         GROUP BY assigned_to
       ),
@@ -161,6 +189,7 @@ def fetch_agent_metrics(conn: sqlite3.Connection) -> dict[str, dict[str, int | s
         agent_state.agent,
         COALESCE(assigned.queued_count, 0) AS queued_count,
         COALESCE(assigned.blocked_count, 0) AS blocked_count,
+        assigned.oldest_blocked_ts AS oldest_blocked_ts,
         COALESCE(claimed.claimed_count, 0) AS claimed_count,
         COALESCE(agent_state.active, 0) AS active,
         agent_state.last_seen_ts,
@@ -178,6 +207,7 @@ def fetch_agent_metrics(conn: sqlite3.Connection) -> dict[str, dict[str, int | s
         data[row["agent"]] = {
             "queued_count": row["queued_count"],
             "blocked_count": row["blocked_count"],
+            "oldest_blocked_ts": row["oldest_blocked_ts"],
             "claimed_count": row["claimed_count"],
             "active": row["active"],
             "last_seen_ts": row["last_seen_ts"],
@@ -323,7 +353,7 @@ def render_dashboard(args: argparse.Namespace) -> str:
     )
     lines.append("")
     lines.append("Agents")
-    lines.append("  #  agent           eng     src     loop on  state    q   c   b   idle  stale wake chan  nudge  load        session        workdir")
+    lines.append("  #  agent           eng     src     loop on  state    q   c   b   garden  idle  stale wake chan  nudge  load        session        workdir")
 
     active_index = 0
     for row in roster:
@@ -338,6 +368,11 @@ def render_dashboard(args: argparse.Namespace) -> str:
         queued = int(metric.get("queued_count", 0) or 0)
         claimed = int(metric.get("claimed_count", 0) or 0)
         blocked = int(metric.get("blocked_count", 0) or 0)
+        oldest_blocked_ts = metric.get("oldest_blocked_ts")
+        garden_str = fmt_garden(
+            blocked,
+            int(oldest_blocked_ts) if oldest_blocked_ts else None,
+        )
         activity_ts = metric.get("session_activity_ts") or metric.get("last_seen_ts")
         last_nudge_ts = metric.get("last_nudge_ts")
         zombie = int(metric.get("zombie", 0) or 0)
@@ -358,6 +393,7 @@ def render_dashboard(args: argparse.Namespace) -> str:
             f"{'yes' if active else 'no ':<3} "
             f"{activity_state:<7} "
             f"{queued:>2}  {claimed:>2}  {blocked:>2}  "
+            f"{garden_str:>6}  "
             f"{fmt_idle(int(activity_ts) if activity_ts else None):>4}  "
             f"{stale:>5} "
             f"{wake_state:>6} "
