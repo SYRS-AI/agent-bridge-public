@@ -1,0 +1,250 @@
+#!/usr/bin/env bash
+# tests/admin-static-dynamic-boundary/smoke.sh
+#
+# Regression test for issue #304 — admin static/dynamic boundary
+# (Tracks B + C). Verifies (portable, runs on macOS with bash 4+):
+#
+#   1. `agent-bridge agent compact <static>` enqueues a synthetic
+#      [admin-compact] task to the static agent and writes an
+#      `admin_compact_invoked` audit row.
+#   2. `agent-bridge agent compact <dynamic>` rejects with a non-zero
+#      exit code and a stderr message identifying the agent as
+#      operator-managed. No task is enqueued.
+#   3. `agent-bridge agent handoff <static>` enqueues a synthetic
+#      [admin-handoff] task. Body references the bridge-spec
+#      <agent-home>/NEXT-SESSION.md filename so the receiving agent
+#      writes the handoff at the path SessionStart hook auto-consumes.
+#   4. The Track C daemon body builder emits the role-aware conditional
+#      block — both the `if target_source == dynamic` close path and
+#      the `agent-bridge agent compact <agent>` / `agent-bridge agent
+#      handoff <agent>` invocation are present in the static-agent
+#      body.
+#
+# This test stands up an isolated BRIDGE_HOME under mktemp, never
+# touches the live bridge state, and does not require a running tmux
+# session or the Claude/Codex CLI.
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd -P "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
+REPO_ROOT="$(cd -P "$SCRIPT_DIR/../.." && pwd -P)"
+
+log() { printf '[admin-boundary] %s\n' "$*"; }
+die() { printf '[admin-boundary][error] %s\n' "$*" >&2; exit 1; }
+skip() { printf '[admin-boundary][skip] %s\n' "$*"; exit 0; }
+
+if (( BASH_VERSINFO[0] < 4 )); then
+  skip "bash 4+ required (have ${BASH_VERSION})"
+fi
+command -v python3 >/dev/null 2>&1 || skip "python3 missing"
+command -v sqlite3 >/dev/null 2>&1 || skip "sqlite3 missing"
+
+TMP_ROOT="$(mktemp -d -t admin-boundary-test.XXXXXX)"
+trap 'rm -rf "$TMP_ROOT" >/dev/null 2>&1 || true' EXIT
+
+export BRIDGE_HOME="$TMP_ROOT/bridge-home"
+export BRIDGE_AGENT_HOME_ROOT="$BRIDGE_HOME/agents"
+export BRIDGE_STATE_DIR="$BRIDGE_HOME/state"
+export BRIDGE_LOG_DIR="$BRIDGE_HOME/logs"
+export BRIDGE_SHARED_DIR="$BRIDGE_HOME/shared"
+export BRIDGE_ACTIVE_AGENT_DIR="$BRIDGE_STATE_DIR/agents"
+export BRIDGE_HISTORY_DIR="$BRIDGE_STATE_DIR/history"
+export BRIDGE_ROSTER_FILE="$BRIDGE_HOME/agent-roster.sh"
+export BRIDGE_ROSTER_LOCAL_FILE="$BRIDGE_HOME/agent-roster.local.sh"
+export BRIDGE_TASK_DB="$BRIDGE_STATE_DIR/tasks.db"
+export BRIDGE_AUDIT_LOG="$BRIDGE_LOG_DIR/audit.jsonl"
+mkdir -p "$BRIDGE_HOME" "$BRIDGE_AGENT_HOME_ROOT" "$BRIDGE_STATE_DIR" "$BRIDGE_LOG_DIR" "$BRIDGE_SHARED_DIR"
+: > "$BRIDGE_ROSTER_FILE"
+
+ADMIN_AGENT="boundary-admin"
+STATIC_AGENT="boundary-static"
+DYNAMIC_AGENT="boundary-dynamic"
+ADMIN_WORKDIR="$BRIDGE_AGENT_HOME_ROOT/$ADMIN_AGENT"
+STATIC_WORKDIR="$BRIDGE_AGENT_HOME_ROOT/$STATIC_AGENT"
+DYNAMIC_WORKDIR="$BRIDGE_AGENT_HOME_ROOT/$DYNAMIC_AGENT"
+mkdir -p "$ADMIN_WORKDIR" "$STATIC_WORKDIR" "$DYNAMIC_WORKDIR"
+
+cat > "$BRIDGE_ROSTER_LOCAL_FILE" <<ROSTER
+#!/usr/bin/env bash
+# shellcheck shell=bash disable=SC2034
+BRIDGE_AGENT_IDS=("$ADMIN_AGENT" "$STATIC_AGENT" "$DYNAMIC_AGENT")
+BRIDGE_AGENT_DESC[$ADMIN_AGENT]="admin"
+BRIDGE_AGENT_DESC[$STATIC_AGENT]="static fixture"
+BRIDGE_AGENT_DESC[$DYNAMIC_AGENT]="dynamic fixture"
+BRIDGE_AGENT_ENGINE[$ADMIN_AGENT]=claude
+BRIDGE_AGENT_ENGINE[$STATIC_AGENT]=claude
+BRIDGE_AGENT_ENGINE[$DYNAMIC_AGENT]=claude
+BRIDGE_AGENT_SESSION[$ADMIN_AGENT]=$ADMIN_AGENT
+BRIDGE_AGENT_SESSION[$STATIC_AGENT]=$STATIC_AGENT
+BRIDGE_AGENT_SESSION[$DYNAMIC_AGENT]=$DYNAMIC_AGENT
+BRIDGE_AGENT_WORKDIR[$ADMIN_AGENT]=$ADMIN_WORKDIR
+BRIDGE_AGENT_WORKDIR[$STATIC_AGENT]=$STATIC_WORKDIR
+BRIDGE_AGENT_WORKDIR[$DYNAMIC_AGENT]=$DYNAMIC_WORKDIR
+BRIDGE_AGENT_LAUNCH_CMD[$ADMIN_AGENT]=$(printf '%q' "claude")
+BRIDGE_AGENT_LAUNCH_CMD[$STATIC_AGENT]=$(printf '%q' "claude")
+BRIDGE_AGENT_LAUNCH_CMD[$DYNAMIC_AGENT]=$(printf '%q' "claude")
+BRIDGE_AGENT_SOURCE[$ADMIN_AGENT]=static
+BRIDGE_AGENT_SOURCE[$STATIC_AGENT]=static
+BRIDGE_AGENT_SOURCE[$DYNAMIC_AGENT]=dynamic
+BRIDGE_AGENT_ISOLATION_MODE[$ADMIN_AGENT]=shared
+BRIDGE_AGENT_ISOLATION_MODE[$STATIC_AGENT]=shared
+BRIDGE_AGENT_ISOLATION_MODE[$DYNAMIC_AGENT]=shared
+BRIDGE_ADMIN_AGENT_ID=$ADMIN_AGENT
+ROSTER
+
+# Tasks DB needs the schema initialized for bridge-task.sh create. The
+# easiest portable path is a no-op `inbox` against the empty DB; the
+# Python backend creates the schema lazily on first open.
+log "initializing tasks.db via empty inbox query"
+"$REPO_ROOT/agent-bridge" inbox "$STATIC_AGENT" >/dev/null 2>&1 || true
+[[ -f "$BRIDGE_TASK_DB" ]] || die "tasks.db not initialized at $BRIDGE_TASK_DB"
+
+count_tasks_for() {
+  local target="$1"
+  sqlite3 "$BRIDGE_TASK_DB" \
+    "SELECT COUNT(*) FROM tasks WHERE assigned_to='$target'" \
+    2>/dev/null || echo 0
+}
+
+# ---------------------------------------------------------------------------
+# Step 1: agent compact <static> succeeds, enqueues task, writes audit row
+# ---------------------------------------------------------------------------
+
+log "step 1 — agent compact <static> on the static fixture"
+before_static="$(count_tasks_for "$STATIC_AGENT")"
+compact_output="$("$REPO_ROOT/agent-bridge" agent compact "$STATIC_AGENT" 2>&1)" \
+  || die "agent compact <static> failed unexpectedly: $compact_output"
+echo "$compact_output" | grep -q "kind: compact" \
+  || die "agent compact output missing 'kind: compact': $compact_output"
+echo "$compact_output" | grep -q "audit_action: admin_compact_invoked" \
+  || die "agent compact output missing audit_action: $compact_output"
+after_static="$(count_tasks_for "$STATIC_AGENT")"
+[[ "$after_static" -eq $((before_static + 1)) ]] \
+  || die "expected static inbox to grow by 1, before=$before_static after=$after_static"
+
+log "step 1 — verifying [admin-compact] task body"
+compact_body="$(sqlite3 "$BRIDGE_TASK_DB" \
+  "SELECT body_text FROM tasks WHERE assigned_to='$STATIC_AGENT' AND title LIKE '[admin-compact]%' ORDER BY id DESC LIMIT 1")"
+[[ -n "$compact_body" ]] || die "[admin-compact] task body empty"
+echo "$compact_body" | grep -q "NEXT-SESSION.md" \
+  || die "[admin-compact] body missing NEXT-SESSION.md filename contract"
+echo "$compact_body" | grep -q "Track B" \
+  || die "[admin-compact] body missing issue #304 Track B reference"
+
+log "step 1 — verifying admin_compact_invoked audit row"
+[[ -f "$BRIDGE_AUDIT_LOG" ]] || die "audit log missing at $BRIDGE_AUDIT_LOG"
+grep -Fq '"action": "admin_compact_invoked"' "$BRIDGE_AUDIT_LOG" \
+  || die "audit log missing admin_compact_invoked entry"
+grep -Fq "\"target\": \"$STATIC_AGENT\"" "$BRIDGE_AUDIT_LOG" \
+  || die "audit log missing target=$STATIC_AGENT"
+
+# ---------------------------------------------------------------------------
+# Step 2: agent compact <dynamic> rejects, no task enqueued
+# ---------------------------------------------------------------------------
+
+log "step 2 — agent compact <dynamic> must reject with non-zero exit"
+before_dynamic="$(count_tasks_for "$DYNAMIC_AGENT")"
+set +e
+reject_output="$("$REPO_ROOT/agent-bridge" agent compact "$DYNAMIC_AGENT" 2>&1)"
+reject_status=$?
+set -e
+[[ "$reject_status" -ne 0 ]] \
+  || die "agent compact <dynamic> exited 0; expected non-zero. output: $reject_output"
+echo "$reject_output" | grep -q "operator-managed" \
+  || die "rejection message missing 'operator-managed': $reject_output"
+echo "$reject_output" | grep -q "$DYNAMIC_AGENT" \
+  || die "rejection message missing target agent name: $reject_output"
+after_dynamic="$(count_tasks_for "$DYNAMIC_AGENT")"
+[[ "$after_dynamic" -eq "$before_dynamic" ]] \
+  || die "dynamic inbox changed despite rejection: before=$before_dynamic after=$after_dynamic"
+
+# ---------------------------------------------------------------------------
+# Step 3: agent handoff <static> enqueues [admin-handoff] task
+# ---------------------------------------------------------------------------
+
+log "step 3 — agent handoff <static> on the static fixture"
+before_static="$(count_tasks_for "$STATIC_AGENT")"
+handoff_output="$("$REPO_ROOT/agent-bridge" agent handoff "$STATIC_AGENT" --note "context critical" 2>&1)" \
+  || die "agent handoff <static> failed unexpectedly: $handoff_output"
+echo "$handoff_output" | grep -q "kind: handoff" \
+  || die "agent handoff output missing 'kind: handoff': $handoff_output"
+echo "$handoff_output" | grep -q "audit_action: admin_handoff_invoked" \
+  || die "agent handoff output missing audit_action: $handoff_output"
+after_static="$(count_tasks_for "$STATIC_AGENT")"
+[[ "$after_static" -eq $((before_static + 1)) ]] \
+  || die "expected static inbox to grow by 1, before=$before_static after=$after_static"
+
+log "step 3 — verifying [admin-handoff] task body references the bridge-spec NEXT-SESSION.md"
+handoff_body="$(sqlite3 "$BRIDGE_TASK_DB" \
+  "SELECT body_text FROM tasks WHERE assigned_to='$STATIC_AGENT' AND title LIKE '[admin-handoff]%' ORDER BY id DESC LIMIT 1")"
+[[ -n "$handoff_body" ]] || die "[admin-handoff] task body empty"
+echo "$handoff_body" | grep -q "<agent-home>/NEXT-SESSION.md" \
+  || die "[admin-handoff] body missing <agent-home>/NEXT-SESSION.md spec"
+echo "$handoff_body" | grep -q "context critical" \
+  || die "[admin-handoff] body missing operator note"
+
+# ---------------------------------------------------------------------------
+# Step 4: Track C — daemon body builder emits role-aware conditional block
+# ---------------------------------------------------------------------------
+
+log "step 4 — Track C daemon body for static target"
+# bridge_write_context_pressure_report_body is a daemon helper; we sourcestate
+# the daemon script in a subshell so the function definition is available
+# without starting the daemon proper. The function depends on bridge_now_iso
+# + bridge_agent_source, both of which are in lib/bridge-state.sh and
+# lib/bridge-agents.sh and are loaded via bridge-lib.sh.
+body_file="$TMP_ROOT/static-body.md"
+(
+  set +u
+  # shellcheck source=../../bridge-lib.sh
+  source "$REPO_ROOT/bridge-lib.sh"
+  bridge_load_roster
+  # bridge-daemon.sh defines the body builder near the top; sourcing the
+  # whole script triggers its own startup work, so we extract just the
+  # function body via awk.
+  helper_src="$TMP_ROOT/body-builder.sh"
+  awk '
+    /^bridge_write_context_pressure_report_body\(\) \{/ { capture=1 }
+    capture { print }
+    capture && /^}$/ { capture=0 }
+  ' "$REPO_ROOT/bridge-daemon.sh" > "$helper_src"
+  [[ -s "$helper_src" ]] || die "could not extract body builder from bridge-daemon.sh"
+  # shellcheck disable=SC1090
+  source "$helper_src"
+  bridge_write_context_pressure_report_body \
+    "$STATIC_AGENT" "$STATIC_AGENT" warning 0 0 hud:context_pct=85 "demo excerpt" "$body_file"
+)
+[[ -s "$body_file" ]] || die "static body file empty: $body_file"
+grep -q "Target source: static" "$body_file" \
+  || die "static body missing 'Target source: static'"
+grep -q "If target_source == dynamic" "$body_file" \
+  || die "static body missing dynamic-branch close instruction"
+grep -q "agent-bridge agent compact $STATIC_AGENT" "$body_file" \
+  || die "static body missing 'agent-bridge agent compact <agent>' invocation"
+grep -q "agent-bridge agent handoff $STATIC_AGENT" "$body_file" \
+  || die "static body missing 'agent-bridge agent handoff <agent>' invocation"
+
+log "step 4 — Track C daemon body for dynamic target uses the close path"
+dyn_body_file="$TMP_ROOT/dynamic-body.md"
+(
+  set +u
+  # shellcheck source=../../bridge-lib.sh
+  source "$REPO_ROOT/bridge-lib.sh"
+  bridge_load_roster
+  helper_src="$TMP_ROOT/body-builder.sh"
+  # shellcheck disable=SC1090
+  source "$helper_src"
+  bridge_write_context_pressure_report_body \
+    "$DYNAMIC_AGENT" "$DYNAMIC_AGENT" warning 0 0 hud:context_pct=85 "demo excerpt" "$dyn_body_file"
+)
+[[ -s "$dyn_body_file" ]] || die "dynamic body file empty: $dyn_body_file"
+grep -q "Operator-managed" "$dyn_body_file" \
+  || die "dynamic body missing 'Operator-managed' close instruction"
+# Defense-in-depth: the dynamic-branch body must NOT recommend invoking
+# the new primitives (those reject dynamic anyway, but the body should
+# not even suggest them and make admin try).
+if grep -q "agent-bridge agent compact $DYNAMIC_AGENT" "$dyn_body_file"; then
+  die "dynamic body must not recommend 'agent compact'; admin should close as operator-managed"
+fi
+
+log "all steps passed"
