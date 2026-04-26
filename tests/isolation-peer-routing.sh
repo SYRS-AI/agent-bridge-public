@@ -6,16 +6,21 @@
 # Verifies (portable, runs on macOS with bash 4+):
 #   1. bridge_write_linux_agent_env_file emits BRIDGE_AGENT_IDS for every
 #      static peer, plus non-secret metadata (description, engine, session,
-#      workdir, isolation_mode, source, prompt_guard policy).
+#      workdir, isolation_mode, source).
 #   2. The scoped env NEVER contains a peer's BRIDGE_AGENT_LAUNCH_CMD value.
 #      The peer's LAUNCH_CMD entry is present-but-empty so the array shape
 #      stays consistent.
-#   3. The scoped env emits the explicit BRIDGE_GATEWAY_PROXY=1 flag when the
+#   3. The scoped env NEVER contains a peer's BRIDGE_AGENT_PROMPT_GUARD
+#      policy value (canary tokens leak otherwise — #294 r1 finding 3). The
+#      peer's PROMPT_GUARD entry is present-but-empty.
+#   4. The scoped env hides the live BRIDGE_TASK_DB path; queue access must
+#      route through the gateway proxy (#294 r1 finding 4 / #287 ACL).
+#   5. The scoped env emits the explicit BRIDGE_GATEWAY_PROXY=1 flag when the
 #      calling agent is in linux-user isolation, and omits it otherwise.
-#   4. bridge_queue_gateway_proxy_agent() returns the calling agent when
+#   6. bridge_queue_gateway_proxy_agent() returns the calling agent when
 #      BRIDGE_GATEWAY_PROXY=1, even with multiple BRIDGE_AGENT_IDS — i.e.,
 #      decoupled from roster cardinality.
-#   5. Shared-mode regression guard: bridge_queue_gateway_proxy_agent returns
+#   7. Shared-mode regression guard: bridge_queue_gateway_proxy_agent returns
 #      empty when BRIDGE_GATEWAY_PROXY is unset.
 #
 # The Linux-only ACL/sudo path lives in tests/isolation-queue-gateway-acl.sh.
@@ -79,7 +84,7 @@ BRIDGE_AGENT_SOURCE[$ADMIN_AGENT]=static
 BRIDGE_AGENT_ISOLATION_MODE[$ISOLATED_AGENT]=linux-user
 BRIDGE_AGENT_ISOLATION_MODE[$ADMIN_AGENT]=shared
 BRIDGE_AGENT_OS_USER[$ISOLATED_AGENT]=agent-bridge-peer-a
-BRIDGE_AGENT_PROMPT_GUARD[$ADMIN_AGENT]="enabled:1;task_body_min_block:high"
+BRIDGE_AGENT_PROMPT_GUARD[$ADMIN_AGENT]="enabled:1;task_body_min_block:high;canary:ADMIN-CANARY-DO-NOT-LEAK"
 ROSTER
 
 # shellcheck source=../bridge-lib.sh
@@ -112,9 +117,18 @@ grep -Eq "BRIDGE_AGENT_ISOLATION_MODE\[$ADMIN_AGENT\]=" "$ENV_FILE" \
 grep -Eq "BRIDGE_AGENT_SOURCE\[$ADMIN_AGENT\]=" "$ENV_FILE" \
   || die "peer source missing"
 
-log "asserting peer guard policy is emitted (non-secret)"
-grep -Eq "BRIDGE_AGENT_PROMPT_GUARD\[$ADMIN_AGENT\]=" "$ENV_FILE" \
-  || die "peer prompt_guard missing"
+log "asserting peer guard policy entry exists but is empty (canary-leak guard, #294 r1 finding 3)"
+peer_guard_line="$(grep -E "^BRIDGE_AGENT_PROMPT_GUARD\[$ADMIN_AGENT\]=" "$ENV_FILE" || true)"
+[[ -n "$peer_guard_line" ]] || die "peer prompt_guard entry missing (must be present-but-empty)"
+case "$peer_guard_line" in
+  "BRIDGE_AGENT_PROMPT_GUARD[$ADMIN_AGENT]=''") ;;
+  *) die "peer prompt_guard must be empty string, got: $peer_guard_line" ;;
+esac
+
+log "asserting peer prompt_guard canary token is NEVER leaked"
+if grep -Fq "ADMIN-CANARY-DO-NOT-LEAK" "$ENV_FILE"; then
+  die "peer prompt_guard canary leaked into scoped env"
+fi
 
 log "asserting peer LAUNCH_CMD entry exists but is empty"
 peer_launch_line="$(grep -E "^BRIDGE_AGENT_LAUNCH_CMD\[$ADMIN_AGENT\]=" "$ENV_FILE" || true)"
@@ -131,6 +145,38 @@ fi
 # Self launch_cmd should still be present (calling agent's own command).
 if ! grep -Fq "PEER-TOKEN-DO-NOT-LEAK" "$ENV_FILE"; then
   die "self launch_cmd missing from scoped env"
+fi
+
+log "asserting BRIDGE_TASK_DB live path is hidden from scoped env (#294 r1 finding 4 / #287 ACL)"
+# The scoped env must not disclose the operator's queue DB layout. Either
+# absent OR explicitly empty OR /dev/null sentinel is acceptable; the live
+# path under \$BRIDGE_STATE_DIR/tasks.db is NOT.
+if grep -Fq "$BRIDGE_TASK_DB" "$ENV_FILE"; then
+  die "BRIDGE_TASK_DB live path leaked into scoped env: $BRIDGE_TASK_DB"
+fi
+task_db_line="$(grep -E '^BRIDGE_TASK_DB=' "$ENV_FILE" || true)"
+if [[ -n "$task_db_line" ]]; then
+  case "$task_db_line" in
+    'BRIDGE_TASK_DB='|'BRIDGE_TASK_DB=""'|"BRIDGE_TASK_DB=''"|'BRIDGE_TASK_DB=/dev/null'|"BRIDGE_TASK_DB='/dev/null'"|'BRIDGE_TASK_DB="/dev/null"')
+      log "  [ok] BRIDGE_TASK_DB sentineled: $task_db_line"
+      ;;
+    *)
+      die "BRIDGE_TASK_DB sentinel violation in scoped env: $task_db_line"
+      ;;
+  esac
+fi
+
+log "asserting no peer BRIDGE_AGENT_PROMPT_GUARD entry carries non-empty value (#294 r1 finding 3)"
+# Walk every BRIDGE_AGENT_PROMPT_GUARD["<id>"] line; only the calling agent
+# (ISOLATED_AGENT) may carry a non-empty value. Peer entries must be empty.
+nonempty_peer_guard="$(
+  grep -E '^BRIDGE_AGENT_PROMPT_GUARD\[[^]]+\]=' "$ENV_FILE" \
+    | grep -vE "^BRIDGE_AGENT_PROMPT_GUARD\[$ISOLATED_AGENT\]=" \
+    | grep -vE "=(''|\"\")\s*\$" \
+    || true
+)"
+if [[ -n "$nonempty_peer_guard" ]]; then
+  die "peer BRIDGE_AGENT_PROMPT_GUARD entries are non-empty (potential canary leak): $nonempty_peer_guard"
 fi
 
 log "asserting BRIDGE_GATEWAY_PROXY=1 emitted for isolated agent"
