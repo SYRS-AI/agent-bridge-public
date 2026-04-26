@@ -926,6 +926,89 @@ print(resolved or "")
 PY
 }
 
+bridge_known_marketplaces_lookup() {
+  # Inspect `known_marketplaces.json` and return whether a marketplace is
+  # registered. Mirrors the lookup shape used by the manifest writer's
+  # `:1092` block (and the directory-source fallback at `:894` in
+  # bridge_resolve_plugin_install_path) so the symlink path in
+  # bridge_linux_share_plugin_catalog gates on the same source-of-truth.
+  #
+  # Output protocol — exactly one line:
+  #   present:directory   — registered with a directory source
+  #   present:git         — registered with a git source
+  #   present:other       — registered with another source kind (http, etc.)
+  #   missing             — not registered (caller should silently skip)
+  #   unparseable         — JSON missing / unreadable / not an object
+  #                         (caller should skip the whole 5b' block;
+  #                          this helper stays silent because the
+  #                          manifest writer at :1183 already emitted
+  #                          the canonical warning earlier in the same
+  #                          share pass — see #348 r3).
+  #
+  # The `<source-kind>` half of `present:*` is informational — current
+  # callers symlink `<plugins_root>/marketplaces/<mkt>` regardless of
+  # source kind because that mirror tree is what Claude actually reads
+  # at runtime; the source-kind disclosure exists so a future caller
+  # that wants to special-case directory vs git can do so without
+  # re-parsing the JSON. (#348 r2.)
+  local marketplace_id="$1"
+  local plugins_root="$2"
+  local marketplaces_json="$plugins_root/known_marketplaces.json"
+
+  bridge_require_python
+  python3 - "$marketplace_id" "$marketplaces_json" <<'PY'
+import json, os, sys
+
+marketplace_id = sys.argv[1]
+marketplaces_path = sys.argv[2]
+
+
+if not os.path.isfile(marketplaces_path):
+    # Treat missing as unparseable for caller-side simplicity: the
+    # whole 5b' block is a no-op without it. Mirrors the manifest
+    # writer's behaviour (it also short-circuits the directory-
+    # marketplace fallback when the JSON is absent).
+    print("unparseable")
+    sys.exit(0)
+
+try:
+    with open(marketplaces_path) as f:
+        markets = json.load(f)
+    if not isinstance(markets, dict):
+        raise ValueError("expected JSON object at root, got %r" % type(markets).__name__)
+except (OSError, ValueError):
+    # Stay silent on the corrupt-JSON branch: the manifest writer
+    # (`bridge_write_isolated_installed_plugins_manifest`, step 4 of
+    # bridge_linux_share_plugin_catalog) always runs before this
+    # helper (step 5b') and already emitted the canonical
+    # `[bridge-isolate] controller known_marketplaces.json unparseable …`
+    # warning at :1183-1186 for the same file. Re-emitting here would
+    # log the same condition twice (once per share pass, plus once per
+    # `_mkt_id` iteration before the 5b' loop short-circuits on
+    # `unparseable`). Returning `unparseable` is sufficient — the
+    # caller's `case` arm sets `_mkt_block_disabled=1` and skips the
+    # symlink path silently. (#348 r3.)
+    print("unparseable")
+    sys.exit(0)
+
+entry = markets.get(marketplace_id)
+if not isinstance(entry, dict):
+    print("missing")
+    sys.exit(0)
+
+src = entry.get("source")
+if isinstance(src, dict):
+    kind = src.get("source")
+    if kind == "directory":
+        print("present:directory")
+        sys.exit(0)
+    if kind == "git":
+        print("present:git")
+        sys.exit(0)
+print("present:other")
+PY
+}
+
 bridge_isolated_plugin_grants_state_file() {
   # State file recording the channel set last granted plugin-share ACLs to
   # an isolated agent. Lives under $BRIDGE_ACTIVE_AGENT_DIR/<agent>/ — the
@@ -1026,14 +1109,25 @@ bridge_linux_revoke_plugin_channel_grants() {
 
 bridge_write_isolated_installed_plugins_manifest() {
   # Write a per-isolated-UID installed_plugins.json containing only the
-  # plugins this agent declared in BRIDGE_AGENT_CHANNELS, with installPath
-  # rewritten to the actually-existing location resolved by
+  # plugins this agent declared via BRIDGE_AGENT_CHANNELS (transport
+  # plugins) and BRIDGE_AGENT_PLUGINS (#272 per-agent allowlist of
+  # non-channel domain plugins), with installPath rewritten to the
+  # actually-existing location resolved by
   # bridge_resolve_plugin_install_path. The file is owned by root so the
   # isolated UID cannot tamper with which plugins it loads.
+  #
+  # Arguments:
+  #   os_user             — isolated UID
+  #   isolated_plugins    — destination ~/.claude/plugins root for the UID
+  #   controller_plugins  — controller's ~/.claude/plugins (read-only source)
+  #   channels_csv        — CSV of `plugin:<id>` (and other) channel tokens
+  #   plugins_csv         — CSV of bare `<id>` (or `<id>@<mkt>`) tokens from
+  #                         BRIDGE_AGENT_PLUGINS["<agent>"]; may be empty.
   local os_user="$1"
   local isolated_plugins="$2"
   local controller_plugins="$3"
   local channels_csv="$4"
+  local plugins_csv="${5-}"
   local manifest="$isolated_plugins/installed_plugins.json"
   local manifest_tmp=""
 
@@ -1045,10 +1139,10 @@ bridge_write_isolated_installed_plugins_manifest() {
   # copy+unlink and a concurrent reader can see a half-written or
   # transiently missing manifest. (Blocking 2 in PR #302 r1.)
   manifest_tmp="$(bridge_linux_sudo_root mktemp "${manifest}.tmp.XXXXXX")"
-  if ! bridge_linux_sudo_root python3 - "$controller_plugins" "$channels_csv" "$manifest_tmp" <<'PY'
+  if ! bridge_linux_sudo_root python3 - "$controller_plugins" "$channels_csv" "$manifest_tmp" "$plugins_csv" <<'PY'
 import json, os, sys
 
-controller_plugins, channels_csv, out_path = sys.argv[1:]
+controller_plugins, channels_csv, out_path, plugins_csv = sys.argv[1:]
 controller_manifest = os.path.join(controller_plugins, "installed_plugins.json")
 markets_path = os.path.join(controller_plugins, "known_marketplaces.json")
 
@@ -1135,6 +1229,18 @@ for chan in channels_csv.split(","):
     chan = chan.strip()
     if chan.startswith("plugin:"):
         declared.add(chan[len("plugin:"):])
+
+# BRIDGE_AGENT_PLUGINS allowlist (#272) — bare plugin ids, optionally
+# `<plugin>@<marketplace>`. Merged here so the isolated manifest covers
+# the union of channel-declared transport plugins AND domain plugins
+# the operator allowlisted per-agent. Dedupe via the shared `declared`
+# set so an entry that lives in both arrays appears once. (#348)
+for token in plugins_csv.split(","):
+    token = token.strip()
+    if token.startswith("plugin:"):
+        token = token[len("plugin:"):]
+    if token:
+        declared.add(token)
 
 out = {"version": source.get("version", 2), "plugins": {}}
 for plugin_id in sorted(declared):
@@ -1251,20 +1357,31 @@ bridge_linux_share_plugin_catalog() {
     bridge_linux_acl_add "u:${os_user}:r--" "$src"
   done
 
-  # 4. Per-UID installed_plugins.json — declared plugins only, real install paths.
+  # 4. Per-UID installed_plugins.json — declared plugins only (union of
+  #    BRIDGE_AGENT_CHANNELS plugin entries and BRIDGE_AGENT_PLUGINS allowlist
+  #    per #348 / #272), real install paths.
   local channels_csv=""
+  local plugins_csv=""
   channels_csv="$(bridge_agent_channels_csv "$agent" 2>/dev/null || true)"
-  bridge_write_isolated_installed_plugins_manifest "$os_user" "$isolated_plugins" "$controller_plugins" "$channels_csv"
+  plugins_csv="$(bridge_agent_plugins_csv "$agent" 2>/dev/null || true)"
+  bridge_write_isolated_installed_plugins_manifest \
+    "$os_user" "$isolated_plugins" "$controller_plugins" \
+    "$channels_csv" "$plugins_csv"
 
   # 5. Compute the channel diff against the persisted grant set so we can
   #    revoke channels that were previously granted but are no longer in
-  #    the roster (Blocking 1 in PR #302 r1). Only entries with a
-  #    `plugin:` prefix participate; non-plugin channels are ignored on
-  #    both sides of the diff.
+  #    the roster (Blocking 1 in PR #302 r1). The "current" set is the
+  #    union of BRIDGE_AGENT_CHANNELS `plugin:<id>` tokens and
+  #    BRIDGE_AGENT_PLUGINS bare ids (#348). Allowlist entries are
+  #    promoted to `plugin:<id>` form here so they share the same
+  #    persisted-state shape and revoke pipeline as channel-declared
+  #    plugins. Non-plugin channel tokens are ignored on both sides.
   local prior_channels_csv=""
   prior_channels_csv="$(bridge_isolated_plugin_grants_read "$agent" 2>/dev/null || true)"
   local -a _current_plugin_channels=()
   local -a _prior_plugin_channels=()
+  local _seen_marker=$'\x1f'
+  local _seen=""
   if [[ -n "$channels_csv" ]]; then
     local _cur_split=()
     local _cur_chan=""
@@ -1272,7 +1389,27 @@ bridge_linux_share_plugin_catalog() {
     for _cur_chan in "${_cur_split[@]}"; do
       _cur_chan="${_cur_chan// /}"
       [[ "$_cur_chan" == plugin:* ]] || continue
+      case "$_seen" in
+        *"${_seen_marker}${_cur_chan}${_seen_marker}"*) continue ;;
+      esac
+      _seen="${_seen}${_seen_marker}${_cur_chan}${_seen_marker}"
       _current_plugin_channels+=("$_cur_chan")
+    done
+  fi
+  if [[ -n "$plugins_csv" ]]; then
+    local _plg_split=()
+    local _plg_token=""
+    local _plg_full=""
+    IFS=',' read -ra _plg_split <<<"$plugins_csv"
+    for _plg_token in "${_plg_split[@]}"; do
+      _plg_token="${_plg_token// /}"
+      [[ -n "$_plg_token" ]] || continue
+      _plg_full="plugin:${_plg_token}"
+      case "$_seen" in
+        *"${_seen_marker}${_plg_full}${_seen_marker}"*) continue ;;
+      esac
+      _seen="${_seen}${_seen_marker}${_plg_full}${_seen_marker}"
+      _current_plugin_channels+=("$_plg_full")
     done
   fi
   if [[ -n "$prior_channels_csv" ]]; then
@@ -1286,7 +1423,9 @@ bridge_linux_share_plugin_catalog() {
     done
   fi
 
-  # 5a. Revoke removed channels (in prior set but not in current set).
+  # 5a. Revoke removed entries (in prior set but not in current set).
+  #     This covers both channel removals and BRIDGE_AGENT_PLUGINS
+  #     removals — both are persisted in the same `plugin:<id>` form.
   local _prior_entry=""
   local _cur_entry=""
   local _found=0
@@ -1301,7 +1440,8 @@ bridge_linux_share_plugin_catalog() {
     fi
   done
 
-  # 5b. Grant current plugin channel install paths + traverse chain.
+  # 5b. Grant current plugin install paths + traverse chain (channel-declared
+  #     plus BRIDGE_AGENT_PLUGINS allowlist entries).
   local channel=""
   local plugin_id=""
   local install_path=""
@@ -1316,13 +1456,105 @@ bridge_linux_share_plugin_catalog() {
     bridge_linux_acl_add_recursive "u:${os_user}:r-X" "$install_path"
   done
 
+  # 5b'. Marketplace symlinks (#348). For every union plugin in
+  #     `<plugin>@<marketplace>` form whose marketplace is registered
+  #     in the controller's `known_marketplaces.json` AND whose mirror
+  #     tree exists at `~/.claude/plugins/marketplaces/<marketplace>`,
+  #     plant a read-only symlink under the isolated UID's plugins root
+  #     so Claude can resolve the marketplace reference recorded in
+  #     installed_plugins.json. The `known_marketplaces.json` lookup is
+  #     the source-of-truth gate (matches the issue spec wording and the
+  #     manifest writer's :1092 / `:894` directory-source fallback);
+  #     the on-disk `marketplaces/<mkt>` dir is the symlink target, so
+  #     git-source marketplaces whose tree has not been cached yet
+  #     silently skip rather than synthesising a broken symlink.
+  #     Symlink + traverse + recursive r-X mirrors the channel install-
+  #     path pattern (5b). (#348 r2.)
+  local _isolated_marketplaces="$isolated_plugins/marketplaces"
+  local _marketplaces_root_created=0
+  local _mkt_seen=""
+  local _channel_full=""
+  local _mkt_id=""
+  local _mkt_src=""
+  local _mkt_dst=""
+  local _mkt_lookup=""
+  local _mkt_block_disabled=0
+  for _channel_full in "${_current_plugin_channels[@]+"${_current_plugin_channels[@]}"}"; do
+    (( _mkt_block_disabled == 0 )) || break
+    plugin_id="${_channel_full#plugin:}"
+    [[ "$plugin_id" == *@* ]] || continue
+    _mkt_id="${plugin_id#*@}"
+    [[ -n "$_mkt_id" ]] || continue
+    case "$_mkt_seen" in
+      *"${_seen_marker}${_mkt_id}${_seen_marker}"*) continue ;;
+    esac
+    _mkt_seen="${_mkt_seen}${_seen_marker}${_mkt_id}${_seen_marker}"
+    # Source-of-truth gate: marketplace must be registered in
+    # known_marketplaces.json. On `unparseable` we abandon the whole
+    # 5b' block; the manifest writer at :1183-1186 already logged the
+    # canonical warning earlier in the same share pass, so the helper
+    # itself stays silent (no duplicate stderr line per share pass —
+    # #348 r3).
+    _mkt_lookup="$(bridge_known_marketplaces_lookup "$_mkt_id" "$controller_plugins")"
+    case "$_mkt_lookup" in
+      unparseable)
+        _mkt_block_disabled=1
+        break
+        ;;
+      missing|"")
+        # marketplace not registered → silent skip, no broken symlink.
+        continue
+        ;;
+      present:*) ;;  # fall through to the symlink path
+      *) continue ;;
+    esac
+    _mkt_src="$controller_plugins/marketplaces/$_mkt_id"
+    # Even when known_marketplaces.json carries an entry, the on-disk
+    # mirror tree may not yet exist (common for git-source marketplaces
+    # on a fresh checkout, or directory-source marketplaces whose cache
+    # has been pruned). Skip silently rather than creating a dangling
+    # symlink — the issue spec calls this out as the expected shape.
+    [[ -d "$_mkt_src" ]] || continue
+    if (( _marketplaces_root_created == 0 )); then
+      bridge_linux_sudo_root mkdir -p "$_isolated_marketplaces"
+      bridge_linux_sudo_root chown root:root "$_isolated_marketplaces"
+      bridge_linux_sudo_root chmod 0750 "$_isolated_marketplaces"
+      bridge_linux_acl_add "u:${os_user}:r-x" "$_isolated_marketplaces"
+      _marketplaces_root_created=1
+    fi
+    _mkt_dst="$_isolated_marketplaces/$_mkt_id"
+    bridge_linux_sudo_root rm -f "$_mkt_dst" >/dev/null 2>&1 || true
+    bridge_linux_sudo_root ln -s "$_mkt_src" "$_mkt_dst"
+    bridge_linux_sudo_root chown -h root:root "$_mkt_dst" >/dev/null 2>&1 || true
+    # Same r-X chain as the install-path grant: traverse first so the
+    # mask doesn't end up `--x` on entries we then bump to r--/r-x.
+    bridge_linux_grant_traverse_chain "$os_user" "$_mkt_src" "$controller_home"
+    bridge_linux_acl_add_recursive "u:${os_user}:r-X" "$_mkt_src"
+  done
+
   # 5c. Persist the new grant set so the next reapply / unisolate sees
-  #     exactly what we touched here.
+  #     exactly what we touched here. Persisted entries cover both the
+  #     channel-derived and BRIDGE_AGENT_PLUGINS-derived plugins (both
+  #     stored in `plugin:<id>` form), so the unisolate revoke loop in
+  #     bridge_migration_unisolate strips the union without further
+  #     wiring.
   local _persist_csv=""
   if [[ "${#_current_plugin_channels[@]}" -gt 0 ]]; then
     _persist_csv="$(IFS=','; printf '%s' "${_current_plugin_channels[*]}")"
   fi
   bridge_isolated_plugin_grants_write "$agent" "$_persist_csv"
+
+  # 5d. Audit row so operators can confirm exactly which plugins landed
+  #     on the isolated UID after each reapply (#348). The detail rows
+  #     carry the union list (channel + allowlist) and its size so a
+  #     follow-up `bridge-audit` query can surface domain-plugin
+  #     propagation gaps without a manual sudo into the UID's home.
+  local _audit_csv="$_persist_csv"
+  local _audit_count="${#_current_plugin_channels[@]}"
+  bridge_audit_log daemon isolated_plugin_manifest_written "$agent" \
+    --detail os_user="$os_user" \
+    --detail plugin_count="$_audit_count" \
+    --detail plugins="$_audit_csv" >/dev/null 2>&1 || true
 }
 
 bridge_linux_unshare_plugin_catalog() {
@@ -1360,6 +1592,20 @@ bridge_linux_unshare_plugin_catalog() {
     bridge_migration_print_step "$dry_run" "rm $manifest (per-UID installed_plugins.json)"
     if [[ "$dry_run" != "1" ]]; then
       bridge_linux_sudo_root rm -f "$manifest" >/dev/null 2>&1 || true
+    fi
+  fi
+
+  # Marketplaces/ symlinks (#348) — created by share for plugins in
+  # `<plugin>@<marketplace>` form whose marketplace tree exists at the
+  # controller. Strip the symlinks the share path planted, then rmdir the
+  # marketplaces/ dir if it ends up empty so the outer rmdir below can
+  # also tear down plugins/. plugins/data/ remains untouched.
+  local isolated_marketplaces="$isolated_plugins/marketplaces"
+  if [[ -d "$isolated_marketplaces" || -L "$isolated_marketplaces" ]]; then
+    bridge_migration_print_step "$dry_run" "rm $isolated_marketplaces/* symlinks (isolated marketplace symlinks)"
+    if [[ "$dry_run" != "1" ]]; then
+      bridge_linux_sudo_root bash -c "shopt -s nullglob dotglob; for entry in \"$isolated_marketplaces\"/*; do [[ -L \"\$entry\" ]] && rm -f \"\$entry\"; done" >/dev/null 2>&1 || true
+      bridge_linux_sudo_root rmdir "$isolated_marketplaces" >/dev/null 2>&1 || true
     fi
   fi
 
@@ -2295,6 +2541,47 @@ bridge_agent_channels_csv() {
 bridge_agent_dev_channels_csv() {
   local agent="$1"
   bridge_filter_development_channels_csv "$(bridge_agent_channels_csv "$agent")"
+}
+
+bridge_agent_plugins_csv() {
+  # Emit the per-agent BRIDGE_AGENT_PLUGINS allowlist (#272) as a normalized
+  # CSV of plugin ids (no `plugin:` prefix). Tokens in the roster value may be
+  # space- or comma-separated and may carry an optional `plugin:` prefix; both
+  # forms are accepted and normalised here so isolation helpers can treat the
+  # output as a flat plugin-id list (`<plugin>` or `<plugin>@<marketplace>`).
+  # Returns the empty string when the entry is unset or contains no tokens.
+  local agent="$1"
+  local raw="${BRIDGE_AGENT_PLUGINS[$agent]-}"
+  [[ -n "$raw" ]] || { printf ''; return 0; }
+
+  local -a tokens=()
+  local seen_marker=$'\x1f'
+  local seen=""
+  local token=""
+  # shellcheck disable=SC2206 # split on whitespace+comma is intentional here.
+  local IFS_orig="$IFS"
+  IFS=$' \t\n,'
+  read -ra _split <<<"$raw"
+  IFS="$IFS_orig"
+  for token in "${_split[@]}"; do
+    token="${token## }"
+    token="${token%% }"
+    [[ -n "$token" ]] || continue
+    # Accept `plugin:<id>` and `<id>` interchangeably; normalise to `<id>`.
+    [[ "$token" == plugin:* ]] && token="${token#plugin:}"
+    [[ -n "$token" ]] || continue
+    case "$seen" in
+      *"${seen_marker}${token}${seen_marker}"*) continue ;;
+    esac
+    seen="${seen}${seen_marker}${token}${seen_marker}"
+    tokens+=("$token")
+  done
+
+  if (( ${#tokens[@]} == 0 )); then
+    printf ''
+    return 0
+  fi
+  (IFS=','; printf '%s' "${tokens[*]}")
 }
 
 bridge_agent_auto_accept_dev_channels_csv() {
