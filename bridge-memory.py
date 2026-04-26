@@ -3400,7 +3400,16 @@ def cmd_harvest_daily(args: argparse.Namespace) -> int:
     # with the range path). When the manifest already exists, skip the harvest
     # run and exit 0 with a stderr breadcrumb. This lets operators run
     # `harvest-daily --date YYYY-MM-DD --missing-only` opportunistically.
-    single_date = args.date or _harvest_default_date(tz_name)
+    if args.date:
+        try:
+            single_date = _parse_harvest_date_arg(
+                args.date, arg_name="--date"
+            ).date().isoformat()
+        except ValueError as exc:
+            sys.stderr.write(f"harvest-daily: {exc}\n")
+            return 2
+    else:
+        single_date = _harvest_default_date(tz_name)
     if missing_only and _manifest_path(state_dir, agent, single_date).exists():
         sys.stderr.write(
             f"[bridge-memory] harvest-daily date={single_date} already harvested "
