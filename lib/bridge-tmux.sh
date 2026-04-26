@@ -528,6 +528,107 @@ bridge_tmux_paste_landed() {
   (( post_hits > pre_hits ))
 }
 
+bridge_tmux_codex_post_paste_is_clean() {
+  # Issue #331 Track B: pure-text helper. After paste, the codex composer's
+  # last `›` line should now hold the pasted nudge text — NOT the dim
+  # placeholder ghost ("› Find and fix a bug in @filename" etc.). When the
+  # paste lands visually but composer focus resets the line back to the
+  # placeholder, downstream C-m hits an empty input. The classic symptom is
+  # `paste_landed` returns true (the signature DOES appear in the post
+  # capture, just not on the actual composer line) and yet submit never
+  # fires. Reject that state explicitly so the caller can fall back to
+  # per-key input.
+  #
+  # Returns 0 iff the last prompt-glyph line in $1 (ANSI-preserving capture)
+  # contains $2 (the paste signature) AND that line is not rendered with the
+  # SGR 2 (dim) attribute. Returns 1 otherwise — caller treats as not-clean.
+  local ansi_text="$1"
+  local signature="$2"
+  [[ -n "$ansi_text" ]] || return 1
+  [[ -n "$signature" ]] || return 1
+  local last_line=""
+  local line=""
+  while IFS= read -r line; do
+    if [[ "$line" == *›* ]]; then
+      last_line="$line"
+    fi
+  done <<<"$ansi_text"
+  [[ -n "$last_line" ]] || return 1
+  case "$last_line" in
+    *$'\x1b[2m'*|*$'\x1b[0;2m'*|*$'\x1b[22;2m'*|*$'\x1b[2;'*)
+      # Last `›` line is dim — placeholder restored, paste did not stick.
+      return 1
+      ;;
+  esac
+  case "$last_line" in
+    *"$signature"*)
+      return 0
+      ;;
+  esac
+  return 1
+}
+
+bridge_tmux_codex_submit_landed() {
+  # Issue #331 Track B: pure-text helper. After C-m, decide whether the
+  # codex TUI actually consumed the submission or whether the keystroke was
+  # absorbed (focus race, placeholder lifecycle reset) and dropped on the
+  # floor.
+  #
+  # Inputs: $1 ANSI-preserving post-C-m capture, $2 the paste signature.
+  #
+  # Returns 0 (submit landed) iff one of:
+  #   (a) the last `›` line in the capture is the dim placeholder AND the
+  #       paste signature is no longer present on that line — meaning the
+  #       composer cleared and codex is back to its idle ghost-text state
+  #       AFTER having something to submit; OR
+  #   (b) a "Working" banner / esc-to-interrupt status line is visible —
+  #       codex started processing the submission.
+  #
+  # Returns 1 (submit lost) iff:
+  #   - the last `›` line still contains the paste signature (composer kept
+  #     the text, never submitted); or
+  #   - no `›` line is present at all, no Working banner, capture is empty.
+  #
+  # Note: the issue #331 failure mode is specifically the case where the
+  # last `›` line goes BACK to dim placeholder *without* a Working banner
+  # firing. In live captures we cannot reliably tell that apart from "codex
+  # submitted then immediately returned to placeholder" except by waiting
+  # for the Working banner; treat absence of both signature and Working as
+  # ambiguous-fail so the caller falls back. This is the conservative
+  # choice — a false-fall-back resends per-key input, which is idempotent
+  # at the queue level (the receiving agent claims once even if nudged
+  # twice). A false-success wedges the task; we prefer to fall back.
+  local ansi_text="$1"
+  local signature="$2"
+  [[ -n "$ansi_text" ]] || return 1
+  [[ -n "$signature" ]] || return 1
+
+  if [[ "$ansi_text" == *"Working"* || "$ansi_text" == *"esc to interrupt"* ]]; then
+    return 0
+  fi
+
+  local last_prompt_line=""
+  local line=""
+  while IFS= read -r line; do
+    if [[ "$line" == *›* ]]; then
+      last_prompt_line="$line"
+    fi
+  done <<<"$ansi_text"
+
+  if [[ -n "$last_prompt_line" && "$last_prompt_line" == *"$signature"* ]]; then
+    # Signature still on the composer line — submit did not fire.
+    return 1
+  fi
+  # No Working banner, no signature on the last `›` line. This is the
+  # ambiguous case (#331): codex may have submitted and immediately
+  # restored the placeholder, or the C-m was absorbed and the placeholder
+  # never went anywhere. Treat as fail so the caller retries via the
+  # per-key path. The downside is a duplicate nudge if the original
+  # actually landed; the receiving agent's claim semantics dedupe at the
+  # queue layer.
+  return 1
+}
+
 bridge_tmux_paste_and_submit() {
   local session="$1"
   local text="$2"
@@ -578,6 +679,30 @@ bridge_tmux_paste_and_submit() {
   fi
   tmux delete-buffer -b "$buffer_name" 2>/dev/null || true
 
+  # Issue #331 Track B: codex-specific pre-submit composer state check.
+  # The plain `paste_landed` test above asks "does the signature appear
+  # somewhere in the recent capture" — it does not distinguish between
+  # "signature is on the composer line" and "signature is in scrollback
+  # while the composer line snapped back to the dim placeholder." The
+  # latter is exactly the #331 failure: paste lands visually for one
+  # frame, focus lifecycle restores the placeholder, the impending C-m
+  # hits an empty input and is dropped. Reject placeholder-restored state
+  # before the C-m and fall back to per-key input.
+  if [[ "$engine" == "codex" ]]; then
+    local pre_submit_ansi
+    pre_submit_ansi="$(bridge_capture_recent_ansi "$session" 15 2>/dev/null || true)"
+    if [[ -n "$pre_submit_ansi" ]] \
+        && ! bridge_tmux_codex_post_paste_is_clean "$pre_submit_ansi" "$signature"; then
+      bridge_warn "codex composer placeholder restored after paste in '${session}'; falling back to type_and_submit"
+      bridge_audit_log daemon tmux_codex_composer_placeholder_restored "$session" \
+        --detail engine="$engine" \
+        --detail signature="$signature" \
+        --detail stage=pre_submit
+      bridge_tmux_type_and_submit "$session" "$text" "$engine"
+      return $?
+    fi
+  fi
+
   # Issue #175: symmetric verify/retry mirrors bridge_tmux_type_and_submit
   # (issue #146). Fresh codex sessions can miss the first C-m when the TUI
   # hasn't absorbed the paste within the 50ms grace — the submit lands on
@@ -591,6 +716,29 @@ bridge_tmux_paste_and_submit() {
     sleep 0.15
     bridge_tmux_send_keys_with_timeout tmux_send_paste_submit_retry \
       -t "$pane_target" C-m
+  fi
+
+  # Issue #331 Track B: codex post-submit state-machine verification. The
+  # `pending_input` retry above catches the case where the composer still
+  # holds the signature (a clean "C-m absorbed, text intact" race). It
+  # does NOT catch the worse #331 case where C-m fired, composer cleared
+  # to placeholder, but no Working banner appeared — submit was lost
+  # without leaving a trace on the composer line. Capture an ANSI post-
+  # state and require either a Working banner or a positive transition
+  # away from the signature; otherwise fall back to per-key input.
+  if [[ "$engine" == "codex" ]]; then
+    sleep 0.1
+    local post_submit_ansi
+    post_submit_ansi="$(bridge_capture_recent_ansi "$session" 20 2>/dev/null || true)"
+    if [[ -n "$post_submit_ansi" ]] \
+        && ! bridge_tmux_codex_submit_landed "$post_submit_ansi" "$signature"; then
+      bridge_warn "codex submit not observed in '${session}' (no Working banner, signature gone); falling back to type_and_submit"
+      bridge_audit_log daemon tmux_codex_submit_lost "$session" \
+        --detail engine="$engine" \
+        --detail signature="$signature"
+      bridge_tmux_type_and_submit "$session" "$text" "$engine"
+      return $?
+    fi
   fi
 }
 
