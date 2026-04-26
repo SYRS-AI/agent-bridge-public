@@ -399,6 +399,58 @@ run_stall_classify_case "CJK prose discussing access -> silent" \
   "" \
   $'승인 안 된 액세스를 묘님이 검토 중\n'
 
+log "stall-detector matched_line_hash dedup (#329 Track D)"
+# Track D fallback: even if a future false-positive slips past the narrowed
+# regex, dedup on the matched line itself (not the shifting excerpt window)
+# so nudge_count cannot re-fire past max_nudges. Verify (a) the same
+# offending line hashes identically across two scans even when surrounding
+# scrollback changes, (b) two genuinely different stall causes hash
+# differently so a fresh stall still gets a fresh nudge, and (c) the
+# normalized form survives whitespace/case shifts on the matched line.
+extract_matched_line_hash() {
+  printf '%s\n' "$1" | sed -n 's/^STALL_MATCHED_LINE_HASH="\(.*\)"$/\1/p'
+}
+
+stall_d_loop1_out="$(printf 'foo\nbar\nerror: HTTP 429 Too Many Requests\nbaz\n' | python3 "$REPO_ROOT/bridge-stall.py" analyze --format shell)"
+stall_d_loop2_out="$(printf 'qux\nzot\nerror: HTTP 429 Too Many Requests\nplugh\nxyzzy\n' | python3 "$REPO_ROOT/bridge-stall.py" analyze --format shell)"
+stall_d_loop1_hash="$(extract_matched_line_hash "$stall_d_loop1_out")"
+stall_d_loop2_hash="$(extract_matched_line_hash "$stall_d_loop2_out")"
+[[ -n "$stall_d_loop1_hash" ]] || die "stall #329 Track D: loop1 produced empty matched_line_hash for a 429 line"
+if [[ "$stall_d_loop1_hash" != "$stall_d_loop2_hash" ]]; then
+  die "stall #329 Track D: same matched line should hash identically across scrollback shifts (loop1=$stall_d_loop1_hash loop2=$stall_d_loop2_hash)"
+fi
+log "  [ok] same matched line stable across shifting scrollback"
+
+# Different stall cause → different matched_line → different hash → fresh nudge.
+stall_d_diff_out="$(printf 'error: 503 service unavailable\n' | python3 "$REPO_ROOT/bridge-stall.py" analyze --format shell)"
+stall_d_diff_hash="$(extract_matched_line_hash "$stall_d_diff_out")"
+[[ -n "$stall_d_diff_hash" ]] || die "stall #329 Track D: 503 line produced empty matched_line_hash"
+if [[ "$stall_d_diff_hash" == "$stall_d_loop1_hash" ]]; then
+  die "stall #329 Track D: distinct stall causes (429 vs 503) must produce distinct matched_line_hash"
+fi
+log "  [ok] distinct stall causes hash differently"
+
+# Whitespace + case shifts on the matched line should collapse via the
+# normalized form (lowercase + collapsed whitespace + trim).
+stall_d_norm_out="$(printf '   ERROR:\tHTTP   429    Too Many Requests   \n' | python3 "$REPO_ROOT/bridge-stall.py" analyze --format shell)"
+stall_d_norm_hash="$(extract_matched_line_hash "$stall_d_norm_out")"
+if [[ "$stall_d_norm_hash" != "$stall_d_loop1_hash" ]]; then
+  die "stall #329 Track D: whitespace/case-shifted variant of the same line should normalize to the same hash (norm=$stall_d_norm_hash loop1=$stall_d_loop1_hash)"
+fi
+log "  [ok] whitespace/case shifts collapse to the same hash"
+
+# Daemon-level dedup: simulate the comparison process_stall_reports() runs
+# against the prior stall.env. With matched_line_hash as the dedup key the
+# second loop's key matches the persisted prior key, so first_detected_ts
+# stays put and nudge_count is NOT reset → the max_nudges cap holds even
+# if the same false-positive line keeps appearing in scrollback.
+prior_dedup_key="line:$stall_d_loop1_hash"
+current_dedup_key="line:$stall_d_loop2_hash"
+if [[ "$prior_dedup_key" != "$current_dedup_key" ]]; then
+  die "stall #329 Track D: daemon dedup key mismatch despite identical matched line (prior=$prior_dedup_key current=$current_dedup_key)"
+fi
+log "  [ok] daemon dedup key stable → nudge_count not reset across loops"
+
 log "CLI subcommand suggestion helper (issue #163)"
 run_suggest_case() {
   local label="$1"
