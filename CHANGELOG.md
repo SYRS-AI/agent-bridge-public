@@ -4,6 +4,100 @@ All notable changes to Agent Bridge are documented here. This project adheres
 loosely to [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and tracks
 version bumps via the `VERSION` file.
 
+## [0.6.19] — 2026-04-27
+
+### Highlights — isolate-v2 PR-C: per-agent private root + secret-env split
+
+The substantive isolation contract change. Replaces named-ACL grants
+with POSIX group + setgid + per-agent private root. **Default off**
+(`BRIDGE_LAYOUT` unset → all helpers fall back to legacy). Opt-in
+via `BRIDGE_LAYOUT=v2` + `BRIDGE_DATA_ROOT=<path>`.
+
+- **Per-agent private root layout** (#381). Operator-decided contract:
+  - `$BRIDGE_AGENT_ROOT_V2/<agent>/` mode 2750 owner=root group=ab-agent-<agent>
+  - `home/`, `workdir/`, `runtime/`, `logs/`, `requests/`, `responses/` mode 2770 owner=isolated group=ab-agent-<agent>
+  - `credentials/` mode 2750 owner=controller group=ab-agent-<agent>
+  - `credentials/launch-secrets.env` mode 0640 owner=controller group=ab-agent-<agent>
+
+  Member of `ab-agent-<agent>` group gets traverse + read; non-member
+  UID has no group → cannot traverse → cross-agent secret leak blocked.
+  Isolated UID can `cat` `launch-secrets.env` but cannot rm/mv/replace
+  (parent + dir mode 2750 deny group write).
+
+- **Secret-env split** (#381). `bridge_isolation_v2_load_secret_env` reads
+  `launch-secrets.env` and exports its `KEY=value` pairs strictly (no
+  `eval`). New file-mode check (codex r1 B-3) rejects modes broader than
+  0640 (group-write or world-read). New
+  `bridge_isolation_v2_exec_with_secret_env` helper wraps the child
+  exec in a subshell so the parent restart-loop cannot retain secrets
+  across rotations. Out-of-band `mktemp` marker pattern signals loader
+  failure separately from the child's own exit code.
+
+- **`bridge_agent_workdir` v2 precedence** (#381). When v2 active,
+  per-agent root takes precedence over `BRIDGE_AGENT_WORKDIR` roster
+  override. Rationale: per-agent private contract requires the workdir
+  to live inside the per-agent root; an explicit override outside that
+  root would break the isolation guarantee. Operators wanting a
+  different anchor location should set `BRIDGE_DATA_ROOT` (moves the
+  v2 anchor for the entire install), not `BRIDGE_AGENT_WORKDIR`
+  per agent.
+
+- **Memory-daily v2 wiring** (#381). `bridge-memory.py` adds
+  `--per-agent-state-dir` + `--shared-aggregate-dir` args; 5 helpers
+  signature-unified to consume them. `scripts/memory-daily-harvest.sh`
+  3 exec branches all pass these args under v2. Shared aggregate path
+  canonicalized to `$BRIDGE_SHARED_ROOT/memory-daily/aggregate`.
+  Aggregate moved from `recursive_write_paths` to `recursive_read_paths`
+  — enforces the contract "ab-shared = read-only public, only
+  controller writes".
+
+- **Queue gateway v2 anchoring** (#381). `requests/` and `responses/`
+  paths anchor under `$BRIDGE_AGENT_ROOT_V2/<agent>/` in v2 mode;
+  legacy path retained for `BRIDGE_LAYOUT` unset.
+
+### Test coverage
+
+- `tests/isolation-v2-pr-c/smoke.sh` ships rootless R1-R7 / S1-S5 /
+  E1 / M1 acceptance cases, plus the new S3b (file-mode rejection) and
+  the rewritten S4 integration test that drives the actual
+  `bridge_isolation_v2_exec_with_secret_env` production helper (not a
+  test-side re-implementation). X1-X3 root-required operator probes
+  documented in the smoke header.
+
+### v0.6.19 upgrade / migration notes
+
+#### Auto
+
+- v0.6.18 → v0.6.19 binary upgrade is straightforward — `BRIDGE_LAYOUT`
+  unset means every new resolver falls back to its legacy path. Legacy
+  installs see no behavior change after this upgrade. The new
+  per-agent-private path activates only on `BRIDGE_LAYOUT=v2` +
+  `BRIDGE_DATA_ROOT=<path>`.
+
+#### Operator-required (v2 opt-in only — skip if staying on legacy)
+
+If you want to evaluate v2 isolation on a non-production install:
+
+1. Set `BRIDGE_LAYOUT=v2` + `BRIDGE_DATA_ROOT=/srv/agent-bridge`
+   (or any preferred path) in your shell environment or
+   `agent-roster.local.sh`.
+2. Run `agent-bridge agent prepare <agent>` for each agent. The
+   prepare path will:
+   - Create the per-agent group `ab-agent-<agent>` (idempotent).
+   - Add the isolated UID + controller as supplementary members.
+   - Create the `$BRIDGE_AGENT_ROOT_V2/<agent>/` tree with the layout
+     above.
+   - Plant `credentials/launch-secrets.env` (mode 0640, controller-write
+     only) carrying any per-agent secrets that previously lived in the
+     env-file.
+3. Restart the agent so its supplementary group memberships and new
+   anchor paths take effect.
+
+The legacy ACL-based path keeps working in parallel until PR-D (migration
+tool) and PR-E (legacy ACL removal) ship in upcoming releases. Operators
+should NOT enable on production yet — the migration tool + ACL removal
+are still in flight.
+
 ## [0.6.18] — 2026-04-27
 
 ### Highlights — production isolation runtime stability
