@@ -34,6 +34,7 @@ Usage:
   $CLI_NAME config <set|get|list-protected> ...
   $CLI_NAME bundle <create|show> ...
   $CLI_NAME intake <triage|show> ...
+  $CLI_NAME wave <dispatch|list|show|templates|close-issue> ...
   $CLI_NAME agent <create|list|show|start|safe-mode|stop|restart|attach|compact|handoff> ...
   $CLI_NAME kill <number|all>
   $CLI_NAME attach [number|name]
@@ -536,6 +537,10 @@ PY
     intake)
       shift
       exec "$BRIDGE_BASH_BIN" "$SCRIPT_DIR/bridge-intake.sh" "$@"
+      ;;
+    wave)
+      shift
+      exec "$BRIDGE_BASH_BIN" "$SCRIPT_DIR/bridge-wave.sh" "$@"
       ;;
     list)
       if [[ $# -ne 1 ]]; then
