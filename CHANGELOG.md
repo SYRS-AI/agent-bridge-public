@@ -4,6 +4,57 @@ All notable changes to Agent Bridge are documented here. This project adheres
 loosely to [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and tracks
 version bumps via the `VERSION` file.
 
+## [0.6.23] — 2026-04-27
+
+### Hotfix — macOS cron memory_pressure false positive root cause
+
+Pairs with v0.6.22 (#393 / PR #396): v0.6.22 stopped the cron-followup
+spam loop, this release stops the false positive at source.
+
+- **`cron: probe macOS kernel pressure level instead of swap_pct`**
+  (#397, PR #400). `bridge-cron-runner.py`'s memory probe was treating
+  `swap_pct >= 80` as `memory_pressure` on darwin, but macOS uses swap
+  as a normal tier of the memory hierarchy — a laptop sitting at 90%+
+  swap can be perfectly healthy because the kernel pages out idle
+  memory while keeping RAM available for active workloads. Activity
+  Monitor's pressure level stays "Normal" (yellow at most) under these
+  conditions. Result on the reporter's host: 15+ memory_pressure
+  deferrals in 30 minutes across 5+ cron families while the OS itself
+  reported only "Normal" pressure.
+
+  The darwin probe now uses `sysctl kern.memorystatus_vm_pressure_level`
+  (Apple's calibrated tier — `1`=Normal, `2`=Warn, `4`=Critical), the
+  same metric Apple uses for jetsam decisions and Activity Monitor's
+  "Memory Pressure" graph. Defaults to deferring only when level >=
+  Warn (>= 2). Env-overridable via
+  `BRIDGE_CRON_DARWIN_PRESSURE_LEVEL` (accepts 2 or 4).
+
+  Legacy `swap_pct` probe stays available as an explicit fallback via
+  `BRIDGE_CRON_DARWIN_PRESSURE_FALLBACK=swap_pct`, AND fires
+  automatically when the sysctl is unreadable (older macOS / sandboxed
+  test envs) so the host always has *some* pressure signal rather
+  than zero. The legacy `BRIDGE_CRON_SWAP_PCT_LIMIT` env override
+  continues to apply when the fallback fires.
+
+  Linux probe (`/proc/meminfo` MemAvailable) is unchanged — the fix
+  is gated on darwin only.
+
+### v0.6.23 upgrade / migration notes
+
+#### Auto
+
+- v0.6.22 → v0.6.23 binary upgrade is straightforward — no schema or
+  state-file shape changes. The new darwin probe activates on the next
+  cron tick.
+
+#### Operator-required
+
+None. Hotfix activates automatically. macOS operators should observe
+cron families resume normal flow as long as the OS is reporting
+"Normal" or "Warn"-but-below-threshold pressure level. To verify:
+`sysctl -n kern.memorystatus_vm_pressure_level` should print `1` or
+`2` on a healthy system.
+
 ## [0.6.22] — 2026-04-27
 
 ### Hotfix — cron-followup self-feeding loop on memory-pressured hosts
