@@ -4,6 +4,65 @@ All notable changes to Agent Bridge are documented here. This project adheres
 loosely to [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and tracks
 version bumps via the `VERSION` file.
 
+## [0.6.28] — 2026-04-28
+
+### Runtime enforcement — input-source ↔ output-reply matching
+
+- **`hooks(stop): enforce input-source → mcp reply matching at runtime`**
+  (#415, PR #416). Issue #342 closed in v0.6.18 with a textual rule
+  only — plugin tool descriptions + `_template/CLAUDE.md` instructed
+  agents to send replies through the matching MCP tool. Within 24h the
+  same defect resurfaced twice on the reporter's host, including on the
+  agent that originally filed #342. Same-day re-occurrence on the
+  originating agent is the strongest signal that text-only enforcement
+  is insufficient.
+
+  This release adds a Stop-hook runtime layer:
+
+  - **`hooks/surface-reply-enforce.py`** (new). Reads the transcript at
+    end-of-turn, finds the latest user turn with
+    `<channel source="<surface>" chat_id="..." message_id="..." />`
+    tags (where `<surface>` is `discord`, `telegram`, or `teams`),
+    and blocks Stop with a structured `{decision: "block", reason: ...}`
+    response if the assistant turn did NOT invoke
+    `mcp__plugin_<surface>__reply` with a matching `chat_id` AND did
+    NOT emit a `<no-reply-needed source="..." chat_id="..." />`
+    marker. Reply scanning is anchored at the index of the latest
+    pending user turn, so an older reply to the same chat cannot
+    silently mask a newer unanswered turn (codex r1 fix).
+  - **`agents/_template/.claude/settings.json`** registers the hook in
+    a new `Stop` array alongside the existing `PreCompact` array.
+    `agent-bridge upgrade --apply` propagates to all channel-paired
+    agents automatically.
+  - **`tests/surface-reply-enforce/smoke.sh`** (new). 7 acceptance
+    cases including the codex-r1 regression: matching reply / missing
+    reply→block / no-reply marker / TUI-source / `BRIDGE_AGENT_ID`
+    empty / `stop_hook_active` re-entry / older same-chat reply does
+    NOT satisfy newer unanswered turn.
+
+  Surfaces NOT enforced: ms365 (different reply shape — email-send,
+  not chat reply). The `<no-reply-needed>` marker is the operator-
+  visible escape hatch for legitimately silent turns.
+
+### v0.6.28 upgrade / migration notes
+
+#### Auto
+
+- v0.6.27 → v0.6.28 binary upgrade is straightforward — no schema
+  changes. The new Stop hook is added to `_template/.claude/settings.json`;
+  `agent-bridge upgrade --apply` propagates to all agents on next
+  upgrade run.
+
+#### Operator-required
+
+None. After upgrade, channel-paired agents will receive a Stop-hook
+block-and-resume cycle the first time they skip an mcp reply for a
+channel-source input. The hook's `reason` text guides the agent toward
+the correct call. Operators don't need to take action unless they
+want to ALLOW a silent turn — in which case the agent emits
+`<no-reply-needed source="..." chat_id="..." reason="..." />` in its
+text content.
+
 ## [0.6.27] — 2026-04-28
 
 ### Fixes
