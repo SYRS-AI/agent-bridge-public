@@ -422,6 +422,83 @@ the install-root copy is left in place so existing admin tooling and a
 clean rollback remain possible. A future PR (PR-G) is expected to either
 unify the two locations or mark the install-root copy read-only.
 
+### v2 ACL contract (PR-E)
+
+PR-E removes named-user POSIX ACLs from v2 mode in favor of POSIX group
+ownership + setgid. Scope and exceptions:
+
+- **Scope.** When `bridge_isolation_v2_active`, every named-user ACL
+  primitive (`bridge_linux_acl_add`, `bridge_linux_acl_add_recursive`,
+  `bridge_linux_acl_add_default_dirs_recursive`,
+  `bridge_linux_acl_remove_recursive`) and the v2-noopable wrappers
+  (`bridge_linux_grant_traverse_chain`,
+  `bridge_linux_revoke_traverse_chain`,
+  `bridge_linux_revoke_plugin_channel_grants`,
+  `bridge_linux_acl_repair_channel_env_files`) short-circuit to a
+  no-op. Their replacements in v2 are group ownership + setgid:
+  - **agent-env.sh**: chgrp `ab-agent-<name>`, chmod 0640
+    (controller owner; isolated UID reads via group bit).
+  - **per-UID `installed_plugins.json`**: chgrp `ab-agent-<name>`,
+    chmod 0640 (root owner; isolated UID reads via group bit).
+  - **`$user_home/.claude/plugins`** + `marketplaces`: chown
+    `root:ab-agent-<name>`, chmod 2750 (setgid; new children inherit
+    `ab-agent-<name>`).
+  - **channel symlink target dir**: chown `<isolated_user>`, chgrp
+    `ab-agent-<name>`, chmod 2770 (setgid; new files inside inherit
+    group + group rw).
+  - **bridge-run.sh launches**: `umask 007` is applied via
+    `bridge_run_apply_v2_umask_if_needed` after `bridge_require_agent`,
+    so files created by the agent process tree land at 0660 with
+    correct group ownership.
+
+- **Transitional exception (Claude credentials).** The v2 layout does
+  not include the operator's `~/.claude/.credentials.json`, so
+  `bridge_linux_grant_claude_credentials_access` retains named-user
+  ACL access in v2 mode for that single file plus the traversal chain
+  up to the operator's home. This is the **only** v2 surface that uses
+  ACLs. PR-F or a future PR is expected to replace this with per-agent
+  `claude login` (operator workflow change). The helper itself fails
+  loud (`bridge_die`) when `setfacl` is unavailable, so silent breakage
+  is impossible.
+
+- **Engine CLI prerequisite (v2).** v2 mode requires the engine CLI to
+  resolve to a base-readable path (`other::r-x` along the entire
+  ancestor chain). `bridge_linux_grant_engine_cli_access` validates
+  both `cli_path` and its `readlink -f` target; controller-home paths
+  are rejected with `bridge_die`. Install Claude/Codex in
+  `/usr/local/bin` (or another path with no controller-home ancestor)
+  before activating v2.
+
+- **`acl` package.** v2 + non-Claude engines do not require the `acl`
+  package. v2 + Claude does, because the credential exception above
+  uses `setfacl`. `bridge_linux_prepare_agent_isolation` gates
+  `bridge_linux_require_setfacl` accordingly.
+
+- **`BRIDGE_SHARED_GROUP` membership.** v2 prep ensures the isolated
+  UID is a member of `ab-shared` (default) so it can read the shared
+  plugin cache. Controller failure to update its own membership is a
+  warn unless the controller can no longer read
+  `bridge_isolation_v2_shared_plugins_root`, in which case it
+  escalates to die (the operator must re-login after the manual
+  `usermod` for new group membership to take effect).
+
+### PR-E smoke (operator-runnable)
+
+```bash
+# Always-on rootless cases (17, run on every PR review).
+tests/isolation-v2-pr-e/smoke.sh
+
+# Opt-in root-required cases (4, run against a live install with at
+# least two ab-agent groups). Requires sudo -n -u <isolated-user>.
+BRIDGE_TEST_V2_PRE_ROOT=1 tests/isolation-v2-pr-e/smoke.sh
+```
+
+The opt-in cases verify kernel-level cross-agent EACCES, self-agent
+read access, engine CLI exec via the isolated UID, and the
+`setgid + umask 007` composition for files created inside a v2
+channel target dir. These cannot be substituted by rootless
+fake-group assertions.
+
 ## Release Checklist
 
 Before pushing bridge changes:
