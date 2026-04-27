@@ -544,6 +544,25 @@ bridge_linux_install_agent_bridge_symlink() {
   local target="$user_home/.agent-bridge"
   local current=""
 
+  # Issue #403 — defense-in-depth fix #1: refuse to operate on the
+  # controller's own install. The `rm -rf "$target"` step below has no
+  # path-safety check; if a caller passes the controller's login as
+  # $os_user (or BRIDGE_LINUX_ISOLATED_USER_HOME_ROOT happens to resolve
+  # to the controller's home root), `target` becomes the controller's
+  # live install root and the rm/ln pair wipes the install. The smoke
+  # regression that revealed this (PR-E CT4 + sudo-stub passthrough +
+  # hardcoded `ec2-user`) is fixed at the smoke layer too, but the
+  # helper itself MUST fail-loud on a controller-self attempt — any
+  # caller that reaches this branch is a bug.
+  if [[ -z "$os_user" || -z "$user_home" || -z "$bridge_home" ]]; then
+    bridge_die "install_agent_bridge_symlink: missing arg (os_user='$os_user' user_home='$user_home' bridge_home='$bridge_home')"
+  fi
+  if [[ "$target" == "$bridge_home" ]] \
+      || [[ "$target" == "${HOME:-/dev/null}/.agent-bridge" ]] \
+      || [[ "$os_user" == "$(id -un 2>/dev/null)" ]]; then
+    bridge_die "install_agent_bridge_symlink: refusing to overwrite controller install at '$target' (os_user='$os_user', controller='$(id -un 2>/dev/null)'). This is a caller bug — never pass the controller login as the isolated agent's os_user."
+  fi
+
   current="$(bridge_linux_sudo_root python3 - "$target" <<'PY'
 from pathlib import Path
 import os
@@ -766,7 +785,15 @@ bridge_linux_grant_claude_credentials_access() {
     # `agent-bridge isolate <agent>` after each Claude re-auth, which
     # is the documented C1 contract until PR-F's per-agent claude login.
     _bridge_linux_grant_traverse_chain_unguarded "$os_user" "$controller_claude_dir" "$controller_home"
-    bridge_linux_sudo_root setfacl -m "u:${os_user}:r--" "$controller_cred_file" >/dev/null 2>&1 || true
+    # PR-E r2 P1#3 fix: load-bearing setfacl call must fail-loud. The
+    # `|| true` of the prior version masked filesystem-ACL-disabled
+    # mounts, sudo failures, and missing-kernel-feature errors and let
+    # the symlink-plant step below succeed against an unreadable target —
+    # producing the exact runtime login-picker / EACCES failure this
+    # surface is meant to make fail-fast. This is the only v2 surface
+    # that retains a named-user ACL (KNOWN_ISSUES.md §16).
+    bridge_linux_sudo_root setfacl -m "u:${os_user}:r--" "$controller_cred_file" \
+      || bridge_die "claude cred ACL: setfacl r-- on $controller_cred_file failed (v2+claude requires functional ACLs on this surface; see KNOWN_ISSUES.md §16)"
   else
     bridge_linux_grant_traverse_chain "$os_user" "$controller_claude_dir" "$controller_home"
     bridge_linux_acl_add "u:${os_user}:r-x" "$controller_claude_dir" >/dev/null 2>&1 || true
@@ -1653,6 +1680,14 @@ bridge_linux_share_plugin_catalog() {
   local controller_plugins=""
   if controller_plugins="$(bridge_isolation_v2_shared_plugins_root 2>/dev/null)"; then
     :
+  elif bridge_isolation_v2_active; then
+    # PR-E r2 P2#4 fix: in v2 mode, the legacy controller_home fallback is
+    # unsafe — the traverse-chain and acl_add helpers no-op in v2 (group-
+    # mediated access only), so symlinks under controller_home would be
+    # planted with no readable path for the isolated UID. Fail-loud so
+    # the operator either populates $BRIDGE_SHARED_ROOT/plugins-cache or
+    # resolves the v2 migration before agent start.
+    bridge_die "isolation v2 plugin catalog: \$BRIDGE_SHARED_ROOT/plugins-cache is not populated (no installed_plugins.json). The legacy controller_home/.claude/plugins fallback is unsafe in v2 mode because the traverse/ACL helpers no-op and would plant unreadable symlinks. Populate the shared plugins cache (\`agb bundle install\` or seed installed_plugins.json into \$BRIDGE_SHARED_ROOT/plugins-cache) before starting v2-isolated agents."
   elif [[ -n "$controller_home" && -d "$controller_home/.claude/plugins" ]]; then
     controller_plugins="$controller_home/.claude/plugins"
   else
@@ -2298,6 +2333,26 @@ bridge_linux_prepare_agent_isolation() {
 
   [[ "$(bridge_host_platform)" == "Linux" ]] || return 0
   [[ -n "$os_user" ]] || bridge_die "linux-user isolation requires os_user"
+
+  # PR-E r2 P1#2 fix: in v2 mode, the channel symlink + workdir mutations
+  # downstream perform check-then-mutate sequences on paths whose parent
+  # is owned by the isolated UID. A running agent could win a swap race
+  # between guard and mutation. Require the agent's tmux session to be
+  # quiesced before prepare/reapply so the isolated UID cannot race.
+  # Install path (fresh agent) has no session yet → loop no-ops.
+  # Reapply / migration path (running agent) → operator must stop first.
+  # BRIDGE_PREPARE_ISOLATION_ALLOW_RUNNING is an opt-out for sandboxed
+  # smoke fixtures that simulate isolation prepare without a real tmux
+  # binary on the host.
+  if bridge_isolation_v2_active && [[ "${BRIDGE_PREPARE_ISOLATION_ALLOW_RUNNING:-0}" != "1" ]]; then
+    local _quiesce_session=""
+    _quiesce_session="$(bridge_agent_session "$agent" 2>/dev/null || printf '')"
+    if [[ -n "$_quiesce_session" ]] \
+        && command -v tmux >/dev/null 2>&1 \
+        && bridge_tmux_session_exists "$_quiesce_session"; then
+      bridge_die "isolation v2 prepare requires the agent session to be stopped: tmux session '$_quiesce_session' is alive (channel/workdir mutations are not race-safe on a live isolated UID). Run \`agb agent stop $agent\` first, then retry."
+    fi
+  fi
 
   # PR-E: setfacl is the legacy-mode prerequisite. v2 mode replaces named-
   # user ACLs with group setgid except for the Claude credential exception

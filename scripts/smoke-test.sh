@@ -939,6 +939,17 @@ SPOOL_UT
 
 TMP_ROOT="$(cd "$(mktemp -d)" && pwd -P)"
 export BRIDGE_HOME="$TMP_ROOT/bridge-home"
+# Issue #403 fix #4: pin the isolated-user home root under TMP_ROOT so any
+# inner test path that builds `<root>/<os_user>/.agent-bridge` cannot
+# escape into the operator's $HOME — even if a future test forgets to use
+# a synthetic os_user. The default (`/home`, set by bridge-lib.sh) was the
+# vector that combined with PR-E CT4's hardcoded `ec2-user` to wipe a
+# live install during a routine pre-PR validation. Outer guard sits at
+# the env layer; per-test guards (sudo stub TMP_ROOT prefix check,
+# install_agent_bridge_symlink controller-self refusal) are independent
+# and complementary.
+export BRIDGE_LINUX_ISOLATED_USER_HOME_ROOT="$TMP_ROOT/iso-users"
+mkdir -p "$BRIDGE_LINUX_ISOLATED_USER_HOME_ROOT"
 export BRIDGE_STATE_DIR="$BRIDGE_HOME/state"
 export BRIDGE_ACTIVE_AGENT_DIR="$BRIDGE_STATE_DIR/agents"
 export BRIDGE_HISTORY_DIR="$BRIDGE_STATE_DIR/history"
