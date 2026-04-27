@@ -974,6 +974,19 @@ export BRIDGE_HOME="$TMP_ROOT/bridge-home"
 # the env layer; per-test guards (sudo stub TMP_ROOT prefix check,
 # install_agent_bridge_symlink controller-self refusal) are independent
 # and complementary.
+#
+# r2 follow-up (codex r1 FAIL #3): this export is DEFENSIVE-ONLY. It
+# protects scripts/smoke-test.sh's own subprocesses if they ever
+# happen to call into a Linux-user isolation helper; it does NOT
+# invoke the PR-E acceptance suite at tests/isolation-v2-pr-e/smoke.sh.
+# The PR-E suite is Linux-only, drives bridge-lib helpers under a
+# sudo-stub fixture, and is intended to be run by the operator (or a
+# Linux CI lane) directly: `bash tests/isolation-v2-pr-e/smoke.sh`.
+# Wiring it into this script would require Linux gating, a separate
+# subshell to keep its env-clear pass from clobbering the daemon-side
+# state this script depends on, and would silently no-op on macOS dev
+# machines. Keep them as two separate entry points; this comment is
+# the contract.
 export BRIDGE_LINUX_ISOLATED_USER_HOME_ROOT="$TMP_ROOT/iso-users"
 mkdir -p "$BRIDGE_LINUX_ISOLATED_USER_HOME_ROOT"
 export BRIDGE_STATE_DIR="$BRIDGE_HOME/state"

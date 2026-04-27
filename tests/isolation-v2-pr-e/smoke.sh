@@ -751,13 +751,27 @@ case_ct4_dead() {
 log "case: CT4 v2 prepare quiesce check (P1#2 fix)"
 CT4_DIR="$TMP_ROOT/ct4"
 CT4_LOG="$CT4_DIR/sudo.log"
+CT4_ALIVE_ERR="$CT4_DIR/alive.err"
 mkdir -p "$CT4_DIR"
 : >"$CT4_LOG"
+: >"$CT4_ALIVE_ERR"
 ct4_alive_rc=0
+# r2 follow-up (codex r1 FAIL #1): just `rc != 0` is non-deterministic
+# because case_ct4_alive's bridge_linux_require_setfacl marker exits 42.
+# If quiesce fails to fire, the body would still reach the marker and exit
+# with rc=42 — masking a missing gate. Capture stderr and assert:
+#   (a) rc != 0   — some failure happened
+#   (b) rc != 42  — the marker (post-quiesce path) was NOT reached
+#   (c) stderr contains the quiesce die's "tmux session" phrase
+# Together these pin the failure to bridge_die from the quiesce gate.
 run_in_v2 "$CT4_DIR" "$CT4_LOG" case_ct4_alive "smoke-ct4" "$CT4_DIR/wd" \
-  2>/dev/null || ct4_alive_rc=$?
+  2>"$CT4_ALIVE_ERR" || ct4_alive_rc=$?
 [[ $ct4_alive_rc -ne 0 ]] || die "CT4 expected die when tmux session is alive, got rc=0"
-ok "CT4-alive v2 prepare with live session → fails loud (rc=$ct4_alive_rc)"
+[[ $ct4_alive_rc -ne 42 ]] \
+  || die "CT4-alive: expected quiesce-die rc=1, got marker rc=42 — quiesce gate did not fire (stderr: $(cat "$CT4_ALIVE_ERR" 2>/dev/null))"
+grep -q 'tmux session' "$CT4_ALIVE_ERR" \
+  || die "CT4-alive: stderr did not contain quiesce-die 'tmux session' message — gate may not have fired (stderr: $(cat "$CT4_ALIVE_ERR" 2>/dev/null))"
+ok "CT4-alive v2 prepare with live session → fails loud (rc=$ct4_alive_rc, quiesce gate fired)"
 : >"$CT4_LOG"
 ct4_dead_rc=0
 run_in_v2 "$CT4_DIR" "$CT4_LOG" case_ct4_dead "smoke-ct4-dead" "$CT4_DIR/wd2" \
@@ -824,7 +838,7 @@ case_pc2() {
   bridge_load_roster
   BRIDGE_AGENT_IDS=("smoke-pc2")
   BRIDGE_AGENT_ENGINE["smoke-pc2"]="claude"
-  BRIDGE_AGENT_WORKDIR["smoke-pc2"]="/tmp/wd-pc2"
+  BRIDGE_AGENT_WORKDIR["smoke-pc2"]="$TMP_ROOT/wd-pc2"
   # PR-E r3 P2: PC2 agent NEEDS plugins (declares a plugin: channel),
   # so the v2 + empty cache path must die. PC3 below pairs this — same
   # setup, but no-plugin agent — and asserts the narrow fix returns 0.
@@ -862,7 +876,7 @@ case_pc3() {
   bridge_load_roster
   BRIDGE_AGENT_IDS=("smoke-pc3")
   BRIDGE_AGENT_ENGINE["smoke-pc3"]="codex"
-  BRIDGE_AGENT_WORKDIR["smoke-pc3"]="/tmp/wd-pc3"
+  BRIDGE_AGENT_WORKDIR["smoke-pc3"]="$TMP_ROOT/wd-pc3"
   BRIDGE_AGENT_CHANNELS["smoke-pc3"]="discord,telegram"   # non-plugin only
   BRIDGE_AGENT_PLUGINS["smoke-pc3"]=""
   export BRIDGE_CONTROLLER_HOME_OVERRIDE="$ctrl_home"
@@ -885,26 +899,49 @@ ok "PC3 v2 + empty shared cache + no-plugin agent → silent no-op"
 # the upstream merge of #399; this case pins the contract.
 # ---------------------------------------------------------------------------
 log "case: EP1 bridge-run.sh entrypoint dry-run no 'command not found' (P1#1)"
+# r2 follow-up (codex r1 FAIL #2): EP1 used to depend on `bridge-run.sh
+# --list` returning at least one host roster agent and skipped silently
+# otherwise — non-deterministic across hosts (CI runners, fresh clones).
+# Build a synthetic fixture roster under TMP_ROOT (same shape as UM3
+# above) so EP1 always has a deterministic target. The fixture is
+# pointed at via BRIDGE_ROSTER_FILE / BRIDGE_ROSTER_LOCAL_FILE so the
+# host's roster is never read.
 EP1_DIR="$TMP_ROOT/ep1"
-mkdir -p "$EP1_DIR"
+EP1_HOME="$EP1_DIR/bridge-home"
+EP1_DATA="$EP1_DIR/data"
+EP1_STATE="$EP1_HOME/state"
+EP1_ROSTER_FILE="$EP1_HOME/agent-roster.sh"
+EP1_ROSTER_LOCAL="$EP1_HOME/agent-roster.local.sh"
+EP1_WORKDIR="$EP1_DIR/agent-workdir"
 EP1_OUT="$EP1_DIR/out"
 EP1_ERR="$EP1_DIR/err"
-ep1_target_agent=""
-if list_out="$(bash "$REPO_ROOT/bridge-run.sh" --list 2>/dev/null)"; then
-  ep1_target_agent="$(printf '%s\n' "$list_out" | awk '/^  [a-zA-Z0-9_-]+ —/ {print $1; exit}')"
-fi
-if [[ -z "$ep1_target_agent" ]]; then
-  log "skip: EP1 (no host roster agents resolvable; entrypoint smoke needs a registered agent name)"
-else
+mkdir -p "$EP1_HOME" "$EP1_DATA/agents" "$EP1_DATA/shared" "$EP1_DATA/state" \
+         "$EP1_STATE/agents" "$EP1_WORKDIR"
+: >"$EP1_ROSTER_FILE"
+cat >"$EP1_ROSTER_LOCAL" <<EOF
+#!/usr/bin/env bash
+bridge_add_agent_id_if_missing "agent-bridge-smoke-ep1"
+BRIDGE_AGENT_ENGINE["agent-bridge-smoke-ep1"]="codex"
+BRIDGE_AGENT_SESSION["agent-bridge-smoke-ep1"]="agent-bridge-smoke-ep1"
+BRIDGE_AGENT_WORKDIR["agent-bridge-smoke-ep1"]="$EP1_WORKDIR"
+BRIDGE_AGENT_ISOLATION_MODE["agent-bridge-smoke-ep1"]="shared"
+BRIDGE_AGENT_LAUNCH_CMD["agent-bridge-smoke-ep1"]="codex"
+EOF
+ep1_target_agent="agent-bridge-smoke-ep1"
+BRIDGE_HOME="$EP1_HOME" \
+BRIDGE_DATA_ROOT="$EP1_DATA" \
+BRIDGE_STATE_DIR="$EP1_STATE" \
+BRIDGE_ACTIVE_AGENT_DIR="$EP1_STATE/agents" \
+BRIDGE_ROSTER_FILE="$EP1_ROSTER_FILE" \
+BRIDGE_ROSTER_LOCAL_FILE="$EP1_ROSTER_LOCAL" \
   bash "$REPO_ROOT/bridge-run.sh" "$ep1_target_agent" --dry-run \
-    >"$EP1_OUT" 2>"$EP1_ERR" || true
-  if grep -q "command not found" "$EP1_ERR" "$EP1_OUT" 2>/dev/null; then
-    printf '[v2-pr-e][error] EP1 bridge-run.sh "%s" --dry-run emitted "command not found":\n' "$ep1_target_agent" >&2
-    grep -n "command not found" "$EP1_ERR" "$EP1_OUT" >&2 || true
-    die "EP1 P1#1 regression — umask helper ordering broken"
-  fi
-  ok "EP1 bridge-run.sh dry-run on '$ep1_target_agent' → no 'command not found' (P1#1 verified)"
+  >"$EP1_OUT" 2>"$EP1_ERR" || true
+if grep -q "command not found" "$EP1_ERR" "$EP1_OUT" 2>/dev/null; then
+  printf '[v2-pr-e][error] EP1 bridge-run.sh "%s" --dry-run emitted "command not found":\n' "$ep1_target_agent" >&2
+  grep -n "command not found" "$EP1_ERR" "$EP1_OUT" >&2 || true
+  die "EP1 P1#1 regression — umask helper ordering broken"
 fi
+ok "EP1 bridge-run.sh dry-run on synthetic '$ep1_target_agent' → no 'command not found' (P1#1 verified)"
 
 # ---------------------------------------------------------------------------
 # X1-X4: root-required (opt-in via BRIDGE_TEST_V2_PRE_ROOT=1)
