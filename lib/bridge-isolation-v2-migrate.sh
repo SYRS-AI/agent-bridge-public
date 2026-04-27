@@ -440,21 +440,38 @@ bridge_isolation_v2_migrate_normalize_layout() {
       || { bridge_warn "normalize_layout: state/ chgrp_setgid_recursive failed"; return 1; }
   fi
 
-  local agent agent_grp
+  # Per-agent root must be 2750 (isolated UID enters via group r-x but
+  # MUST NOT have group write at the root, otherwise it could rename or
+  # delete credentials/ even though credentials/ itself is 2750). r3
+  # review caught the broad recursive 2770 pass making the root
+  # writable. Spec: lib/bridge-isolation-v2.sh:45-59 +
+  # lib/bridge-agents.sh:2116-2152 (`# 2750 — isolated UID r-x at root`).
+  local agent agent_grp agent_root sub
+  local writable_subs=(home workdir runtime logs requests responses)
   while IFS= read -r agent; do
     [[ -n "$agent" ]] || continue
     agent_grp="$(bridge_isolation_v2_agent_group_name "$agent")"
-    if [[ -d "$data_root/agents/$agent" ]]; then
-      # Whole agent root: dir 2770 (group rwx + setgid), file 0660.
+    agent_root="$data_root/agents/$agent"
+    [[ -d "$agent_root" ]] || continue
+
+    # Per-agent root: SINGLE-DIR normalize at 2750. No recursion.
+    bridge_isolation_v2_chgrp_setgid_dir "$agent_grp" 2750 "$agent_root" \
+      || { bridge_warn "normalize_layout: agents/$agent root chgrp_setgid_dir failed"; return 1; }
+
+    # Writable children: 2770/0660 recursive (group rwx + setgid +
+    # files group-rw so the isolated UID can write its runtime state).
+    for sub in "${writable_subs[@]}"; do
+      [[ -d "$agent_root/$sub" ]] || continue
       bridge_isolation_v2_chgrp_setgid_recursive \
-        "$agent_grp" 2770 0660 "$data_root/agents/$agent" \
-        || { bridge_warn "normalize_layout: agents/$agent chgrp_setgid_recursive failed"; return 1; }
-    fi
-    # credentials/ holds controller-private secrets — tighter modes
-    # (dir 2750, file 0640). Re-run after the broad pass so it overrides.
-    if [[ -d "$data_root/agents/$agent/credentials" ]]; then
+        "$agent_grp" 2770 0660 "$agent_root/$sub" \
+        || { bridge_warn "normalize_layout: agents/$agent/$sub chgrp_setgid_recursive failed"; return 1; }
+    done
+
+    # credentials/: tighter modes — controller writes, isolated UID
+    # gets group r-x dir + group r files only.
+    if [[ -d "$agent_root/credentials" ]]; then
       bridge_isolation_v2_chgrp_setgid_recursive \
-        "$agent_grp" 2750 0640 "$data_root/agents/$agent/credentials" \
+        "$agent_grp" 2750 0640 "$agent_root/credentials" \
         || { bridge_warn "normalize_layout: agents/$agent/credentials chgrp_setgid_recursive failed"; return 1; }
     fi
   done < "$snapshot_path"

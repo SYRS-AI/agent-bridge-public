@@ -168,6 +168,10 @@ bridge_isolation_v2_ensure_group() { return 0; }
 bridge_isolation_v2_agent_group_name() { printf 'ab-agent-%s' "$1"; }
 bridge_agent_os_user() { printf 'agent-bridge-%s' "$1"; }
 
+# Source the real isolation-v2 helpers (chgrp_setgid_{dir,recursive},
+# ensure_group, ensure_user_in_group, etc.) so the migrate module's
+# helper calls resolve to actual implementations rather than 127.
+source "$REPO_ROOT/lib/bridge-isolation-v2.sh"
 source "$REPO_ROOT/lib/bridge-isolation-v2-migrate.sh"
 
 # Case 5: emit_plan output contains profile rows with delete_eligible=0.
@@ -403,6 +407,107 @@ if grep -q '"ab-shared"' <<<"$postflight_body"; then
   fail "postflight still hardcodes 'ab-shared' as a literal"
 else
   ok "postflight no longer hardcodes 'ab-shared'"
+fi
+
+# ---------------------------------------------------------------------------
+# Case 13: normalize_layout sets per-agent root to 2750, NOT 2770
+#          (r3 finding: 2770 root would let isolated UID rename credentials)
+# ---------------------------------------------------------------------------
+
+norm_body="$(declare -f bridge_isolation_v2_migrate_normalize_layout)"
+
+# Per-agent root call uses chgrp_setgid_dir (single, not recursive) at 2750.
+if grep -E 'chgrp_setgid_dir[[:space:]]+\\?\s*"\$agent_grp"\s+2750\s+"\$agent_root"' <<<"$norm_body" >/dev/null \
+   || grep -E 'chgrp_setgid_dir[[:space:]]' <<<"$norm_body" \
+        | grep -qE '"\$agent_grp"[[:space:]]+2750[[:space:]]+"\$agent_root"'; then
+  ok "normalize_layout sets per-agent root to 2750 via single-dir helper"
+else
+  fail "normalize_layout per-agent root call missing or wrong (expected chgrp_setgid_dir agent_grp 2750 root)"
+fi
+
+# Writable children iterated as a list, all 2770/0660.
+if grep -q 'writable_subs=(home workdir runtime logs requests responses)' <<<"$norm_body"; then
+  ok "normalize_layout enumerates writable subs explicitly"
+else
+  fail "normalize_layout writable_subs list missing or wrong"
+fi
+
+if grep -E 'chgrp_setgid_recursive[[:space:]]' <<<"$norm_body" \
+     | grep -qE '"\$agent_grp"[[:space:]]+2770[[:space:]]+0660'; then
+  ok "normalize_layout writable children use 2770/0660"
+else
+  fail "normalize_layout writable child call missing 2770/0660"
+fi
+
+# credentials/ override 2750/0640 still present.
+if grep -E 'chgrp_setgid_recursive[[:space:]]' <<<"$norm_body" \
+     | grep -qE '"\$agent_grp"[[:space:]]+2750[[:space:]]+0640'; then
+  ok "normalize_layout credentials/ uses 2750/0640"
+else
+  fail "normalize_layout credentials/ mode wrong"
+fi
+
+# Functional check: rootless run with a primary-group agent dir tree.
+PRIMARY_GRP="$(id -gn 2>/dev/null)"
+if [[ -n "$PRIMARY_GRP" ]]; then
+  norm_root="$SMOKE_ROOT/norm-test"
+  mkdir -p "$norm_root/agents/probe-agent/home" \
+           "$norm_root/agents/probe-agent/workdir" \
+           "$norm_root/agents/probe-agent/credentials"
+  echo 'irrelevant' > "$norm_root/agents/probe-agent/credentials/launch.env"
+
+  # Stub group-name resolver to use caller's primary group so
+  # chgrp/chmod succeed without sudo (helper falls through to direct
+  # path because mode/chgrp succeed for the owning user).
+  bridge_isolation_v2_agent_group_name() { printf '%s' "$PRIMARY_GRP"; }
+
+  # Build a one-line snapshot for the probe agent.
+  SNAP_NORM="$norm_root/snap"
+  printf 'probe-agent\n' > "$SNAP_NORM"
+
+  # Run the normalize step (BRIDGE_SHARED_GROUP/ctrl_grp left default —
+  # shared/ and state/ dirs do not exist in this fixture so those
+  # branches no-op).
+  set +e
+  ( bridge_isolation_v2_migrate_normalize_layout "$SNAP_NORM" "$norm_root" 2>/dev/null )
+  rc=$?
+  set -e
+
+  if (( rc == 0 )); then
+    root_mode="$(stat -c '%a' "$norm_root/agents/probe-agent" 2>/dev/null)"
+    workdir_mode="$(stat -c '%a' "$norm_root/agents/probe-agent/workdir" 2>/dev/null)"
+    home_mode="$(stat -c '%a' "$norm_root/agents/probe-agent/home" 2>/dev/null)"
+    cred_mode="$(stat -c '%a' "$norm_root/agents/probe-agent/credentials" 2>/dev/null)"
+    cred_file_mode="$(stat -c '%a' "$norm_root/agents/probe-agent/credentials/launch.env" 2>/dev/null)"
+
+    if [[ "$root_mode" == "2750" ]]; then
+      ok "post-normalize: per-agent root mode = 2750"
+    else
+      fail "post-normalize: per-agent root mode = $root_mode (expected 2750)"
+    fi
+    if [[ "$workdir_mode" == "2770" ]]; then
+      ok "post-normalize: workdir mode = 2770"
+    else
+      fail "post-normalize: workdir mode = $workdir_mode (expected 2770)"
+    fi
+    if [[ "$home_mode" == "2770" ]]; then
+      ok "post-normalize: home mode = 2770"
+    else
+      fail "post-normalize: home mode = $home_mode (expected 2770)"
+    fi
+    if [[ "$cred_mode" == "2750" ]]; then
+      ok "post-normalize: credentials/ mode = 2750"
+    else
+      fail "post-normalize: credentials/ mode = $cred_mode (expected 2750)"
+    fi
+    if [[ "$cred_file_mode" == "640" ]]; then
+      ok "post-normalize: credentials file mode = 0640"
+    else
+      fail "post-normalize: credentials file mode = $cred_file_mode (expected 640)"
+    fi
+  else
+    fail "normalize_layout returned rc=$rc on rootless fixture"
+  fi
 fi
 
 printf '\n[summary] pass=%d fail=%d\n' "$PASS" "$FAIL"
