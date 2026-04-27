@@ -1681,13 +1681,24 @@ bridge_linux_share_plugin_catalog() {
   if controller_plugins="$(bridge_isolation_v2_shared_plugins_root 2>/dev/null)"; then
     :
   elif bridge_isolation_v2_active; then
-    # PR-E r2 P2#4 fix: in v2 mode, the legacy controller_home fallback is
-    # unsafe — the traverse-chain and acl_add helpers no-op in v2 (group-
-    # mediated access only), so symlinks under controller_home would be
-    # planted with no readable path for the isolated UID. Fail-loud so
-    # the operator either populates $BRIDGE_SHARED_ROOT/plugins-cache or
-    # resolves the v2 migration before agent start.
-    bridge_die "isolation v2 plugin catalog: \$BRIDGE_SHARED_ROOT/plugins-cache is not populated (no installed_plugins.json). The legacy controller_home/.claude/plugins fallback is unsafe in v2 mode because the traverse/ACL helpers no-op and would plant unreadable symlinks. Populate the shared plugins cache (\`agb bundle install\` or seed installed_plugins.json into \$BRIDGE_SHARED_ROOT/plugins-cache) before starting v2-isolated agents."
+    # PR-E r3 P2#4 (narrow): in v2 mode the legacy controller_home
+    # fallback is unsafe — traverse_chain and acl_add no-op, so
+    # symlinks under controller_home would be unreadable for the
+    # isolated UID. BUT: if the agent has nothing to share (empty
+    # channel-plugin union and empty plugin allowlist), there is no
+    # symlink to plant and no manifest to write. Codex / no-plugin
+    # Claude agents must not be blocked by an empty cache. Compute the
+    # union here and short-circuit before failing loud.
+    local _v2_pcg_channels="" _v2_pcg_plugins=""
+    _v2_pcg_channels="$(bridge_agent_channels_csv "$agent" 2>/dev/null || true)"
+    _v2_pcg_plugins="$(bridge_agent_plugins_csv "$agent" 2>/dev/null || true)"
+    # plugin-shaped channels are `plugin:<id>`; non-plugin channels
+    # (discord, telegram, ms365) do not need this catalog at all.
+    if [[ "$_v2_pcg_channels" != *plugin:* ]] \
+        && [[ -z "$_v2_pcg_plugins" ]]; then
+      return 0
+    fi
+    bridge_die "isolation v2 plugin catalog: \$BRIDGE_SHARED_ROOT/plugins-cache is not populated (no installed_plugins.json) but agent '$agent' declares plugin: channels or BRIDGE_AGENT_PLUGINS allowlist entries. The legacy controller_home/.claude/plugins fallback is unsafe in v2 mode because the traverse/ACL helpers no-op and would plant unreadable symlinks. Populate the shared plugins cache (\`agb bundle install\` or seed installed_plugins.json into \$BRIDGE_SHARED_ROOT/plugins-cache) before starting v2-isolated agents that require plugins."
   elif [[ -n "$controller_home" && -d "$controller_home/.claude/plugins" ]]; then
     controller_plugins="$controller_home/.claude/plugins"
   else
