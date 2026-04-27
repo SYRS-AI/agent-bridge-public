@@ -26,7 +26,8 @@ No LLM is invoked. The harvester is pure detection.
 
 ## 2. Cron registration
 
-`bootstrap-memory-system.sh` registers one cron per active Claude agent:
+`bootstrap-memory-system.sh` registers one cron per active **static** Claude
+agent (see [§12 — Static-only contract](#12-static-only-contract)):
 
 - Title: `memory-daily-<agent>`
 - Schedule: `0 3 * * *` (Asia/Seoul)
@@ -402,3 +403,67 @@ invocation.
   not write notes — only queues backfill tasks.
 - Cron rebalancing via `agb cron rebalance-memory-daily` is a separate
   operational surface and not invoked by bootstrap.
+
+## 12. Static-only contract
+
+Per [issue #376](https://github.com/SYRS-AI/agent-bridge-public/issues/376),
+the `memory-daily-<agent>` cron + `memory-daily-harvest.sh` harvester pipeline
+is intentionally scoped to **static** agents only.
+
+### Why
+
+Static agents are managed-from-outside: operators interact via
+Discord/Telegram/Teams, agents run unattended, and the daily note at
+`<agent-home>/memory/<date>.md` is the operational record.
+
+Dynamic agents are managed-from-inside: the operator is at the agent's TUI,
+the conversation IS the operational record, and the transcript is already on
+disk at `~/.claude/projects/<slug>/<sessionId>.jsonl`. There is no separate
+daily note the bridge needs to harvest — the operator already saw everything.
+
+### Enforcement points (defense in depth)
+
+The contract is enforced at three layers so a single forgotten filter at any
+one layer cannot reintroduce the daily exit-2 / `[cron-followup]` storm that
+issue #376 documents:
+
+| Layer | Source | Behavior |
+|---|---|---|
+| Registration filter (Track A, v0.6.18) | `scripts/_common.sh::list_active_static_claude_agents` | Filters `agent list --json` on `engine=="claude" && active && source=="static"`. `bootstrap-memory-system.sh` builds `STATIC_AGENT_SET` from this helper. |
+| Apply-time migration (Track B) | `bootstrap-memory-system.sh::step_memory_daily_cron_one` | When `agent ∉ STATIC_AGENT_SET`, the function detects an existing dynamic-agent cron and removes it via the existing 3-mode pattern (`check` records `drift-migration-pending`; `dry-run` records `would-remove`; `apply` calls `agb cron delete <id>` and records `migrated-removed`). When no cron exists for the dynamic agent, it records `skip-dynamic-agent`. |
+| Harvester refusal (Track C, v0.6.18) | `scripts/memory-daily-harvest.sh` | Re-checks `agent show --json | .source` and exits `0` (success / no-op) — *not* `2` — when source is dynamic. Exit 0 keeps the cron's run-state at success so the daemon does not generate a `[cron-followup]` task. |
+
+Track A prevents new dynamic-agent crons from being registered. Track B
+removes any pre-v0.6.18 dynamic-agent crons on the next
+`bootstrap-memory-system.sh apply` and reports them under `check` / `dry-run`.
+Track C is the last-resort guard that catches manually-created crons or
+future helpers that forget to filter.
+
+### Future helpers
+
+If you add a new per-agent pipeline that depends on `<agent-home>/` existing
+on disk, filter on `source == "static"`. The dynamic-agent case is easy to
+forget because the broader `list_active_claude_agents` helper still emits
+both classes — that helper is preserved for status reporting and watchdog
+scans that genuinely apply to both. For static-only registration, use
+`list_active_static_claude_agents`.
+
+The strict source-class block lives in `bootstrap-memory-system.sh` and
+`scripts/wiki-daily-ingest.sh` per `KNOWN_ISSUES` entry 15 — do not lift
+it into a new `_common.sh` helper without re-reviewing that contract.
+
+### Operator-side cleanup of pre-fix installs
+
+Operators with installs bootstrapped before v0.6.18 already have
+`memory-daily-<agent>` crons registered for dynamic agents. After v0.6.18,
+the harvester silently no-ops via Track C, so the dead crons are harmless —
+but they remain dead weight on the cron board until removed. To clean them
+up automatically:
+
+```bash
+bash bootstrap-memory-system.sh --apply
+```
+
+The Track B branch in `step_memory_daily_cron_one` detects the existing
+dynamic-agent crons and removes them with a `migrated-removed` audit row.
+Re-runs are no-ops (the lookup returns nothing on the second pass).
