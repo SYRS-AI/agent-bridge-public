@@ -32,13 +32,26 @@ TMP_ROOT="$(mktemp -d -t isolation-v2-pr-e.XXXXXX)"
 trap 'rm -rf "$TMP_ROOT" >/dev/null 2>&1 || true' EXIT
 export TMPDIR="${TMPDIR:-/tmp}"
 
-# Issue #403: redirect the isolated-user home root into the TMP_ROOT
-# so even if a test passes an os_user that collides with a real
-# account, the destructive paths land in our tempdir, not /home/<user>.
-# Consumed by bridge_agent_linux_user_home() in lib/bridge-agents.sh.
+# Issue #403 (#406): redirect the isolated-user home root into the
+# TMP_ROOT so even if a test passes an os_user that collides with a
+# real account, the destructive paths land in our tempdir, not
+# /home/<user>. Consumed by bridge_agent_linux_user_home() in
+# lib/bridge-agents.sh. Per-case run_in_v2/run_in_legacy fixtures
+# below set this again with case-scoped values, but the top-level
+# default keeps any direct (non-fixture) helper call safe.
 mkdir -p "$TMP_ROOT/fake-home"
 export BRIDGE_LINUX_ISOLATED_USER_HOME_ROOT="$TMP_ROOT/fake-home"
 mkdir -p "$BRIDGE_LINUX_ISOLATED_USER_HOME_ROOT/agb-smoke-fake-user"
+
+# PR-E r3 P1 (this PR): a global refuse-log captures every
+# [sudo-stub][refuse] line emitted by any case body. Cases that do NOT
+# opt in (the default) fail at end-of-run if the log is non-empty — a
+# refused live-install write must never be silently masked by a positive
+# log assertion. Cases that explicitly want to assert refusal must check
+# + truncate this log themselves.
+SUDO_REFUSE_LOG="$TMP_ROOT/sudo-stub-refuse.log"
+: >"$SUDO_REFUSE_LOG"
+export SUDO_REFUSE_LOG
 
 # ---------------------------------------------------------------------------
 # Subshell helpers — caller passes a function NAME (defined in this
@@ -50,17 +63,26 @@ mkdir -p "$BRIDGE_LINUX_ISOLATED_USER_HOME_ROOT/agb-smoke-fake-user"
 # stored in a non-local variable because bash binds variable references
 # at call time, not at function-definition time, so a `local log` would
 # be out of scope when the stub is invoked later.
+#
+# Issue #403 fix #2 — sudo stub TMP_ROOT path guard: rm/ln/mkdir/etc
+# pass-through paths must be inside $TMP_ROOT. The previous stub passed
+# any path through, which combined with a controller-shaped os_user in
+# CT4 (fix #3) wiped the operator's live install. Anything that escapes
+# TMP_ROOT now logs a [refuse] line and returns 99.
 make_sudo_stub() {
   _BRIDGE_LINUX_SUDO_LOG_FILE="$1"
+  _BRIDGE_LINUX_SUDO_ALLOWED_PREFIX="${TMP_ROOT:?make_sudo_stub: TMP_ROOT must be set}"
+  _BRIDGE_LINUX_SUDO_REFUSE_LOG="${SUDO_REFUSE_LOG:?make_sudo_stub: SUDO_REFUSE_LOG must be set}"
   bridge_linux_sudo_root() {
     printf '%s\n' "$*" >>"$_BRIDGE_LINUX_SUDO_LOG_FILE"
-    # Issue #403: refuse to exec a destructive op when ANY positional
-    # arg looks like an absolute path outside $TMP_ROOT. This is a
-    # belt-and-suspenders defense against test cases or helper code
-    # paths that compute paths from os_user (etc.) which collide with
-    # the operator's home. `mktemp` and `python3` may receive non-path
-    # args; the loop only kicks on absolute paths. `test` is left in
-    # its own arm because its args may be non-path predicates.
+    # Issue #403 (#406): refuse to exec a destructive op when ANY
+    # positional arg looks like an absolute path outside $TMP_ROOT.
+    # Belt-and-suspenders against helper code paths that compute paths
+    # from os_user. `test` is left in its own arm because its args may
+    # be non-path predicates; mktemp/python3 may receive non-path args
+    # (caught by the leading-`/` filter). Refusals are also persisted
+    # to $SUDO_REFUSE_LOG so end-of-run assertion can fail the smoke
+    # if any case body silently relied on the guard (PR-E r3 P1).
     local _arg _tmp_canon _tmp_raw _arg_canon
     _tmp_raw="${TMP_ROOT:-}"
     _tmp_canon="$(readlink -f "$_tmp_raw" 2>/dev/null)"
@@ -81,8 +103,11 @@ make_sudo_stub() {
           case "$_arg" in
             "$_tmp_canon"|"$_tmp_canon"/*|"$_tmp_raw"|"$_tmp_raw"/*) continue ;;
           esac
-          printf '[smoke][error] sudo-stub refusing %s with arg %s outside TMP_ROOT %s (issue #403)\n' \
-            "$1" "$_arg" "$_tmp_canon" >&2
+          local _refuse_msg
+          _refuse_msg="$(printf '[smoke][sudo-stub][refuse] %s with arg %s outside TMP_ROOT %s (issue #403)' \
+            "$1" "$_arg" "$_tmp_canon")"
+          printf '%s\n' "$_refuse_msg" >&2
+          printf '%s\n' "$_refuse_msg" >>"$_BRIDGE_LINUX_SUDO_REFUSE_LOG"
           return 99
           ;;
       esac
@@ -104,18 +129,50 @@ make_sudo_stub() {
   }
 }
 
+# PR-E r3 P1: clear EVERY inherited BRIDGE_* env var before sourcing
+# bridge-lib.sh, then re-export only the ones the fixture needs. The
+# previous fixture only reset BRIDGE_HOME/BRIDGE_LAYOUT/BRIDGE_DATA_ROOT
+# and a handful of v2 roots; vars like BRIDGE_ACTIVE_AGENT_DIR,
+# BRIDGE_STATE_DIR, BRIDGE_LOG_DIR, BRIDGE_AGENT_HOME_ROOT, etc. carried
+# over from the operator shell (or a parent test runner) and silently
+# steered helpers at the live install. Two preserved exceptions:
+#   - SUDO_REFUSE_LOG: the global refuse-log path the sudo stub writes
+#     to; needs to outlive the subshell so end-of-run assertion sees it.
+#   - TMPDIR: posix-standard, not bridge-owned; preserved.
+_smoke_clear_bridge_env() {
+  local _var
+  while read -r _var; do
+    [[ -n "$_var" ]] || continue
+    case "$_var" in
+      # Caller-prefixed test hooks must survive the mass unset — they're
+      # the fixture's own knobs, not host state. Add new ones here as
+      # cases evolve; never expand the list to host-driven vars.
+      BRIDGE_RUN_UMASK_PROBE_FILE) continue ;;
+      BRIDGE_PREPARE_ISOLATION_ALLOW_RUNNING) continue ;;
+    esac
+    unset "$_var" 2>/dev/null || true
+  done < <(compgen -v BRIDGE_ 2>/dev/null || true)
+}
+
 run_in_v2() {
   local case_dir="$1"; shift
   local sudo_log="$1"; shift
   local fn="$1"; shift
   (
     set -e
+    _smoke_clear_bridge_env
     export BRIDGE_HOME="$case_dir/bridge-home"
     export BRIDGE_LAYOUT="v2"
     export BRIDGE_DATA_ROOT="$case_dir/data"
+    # Issue #403 fix #3: pin BRIDGE_LINUX_ISOLATED_USER_HOME_ROOT under
+    # TMP_ROOT so any helper that builds `<root>/<os_user>/.agent-bridge`
+    # cannot resolve to the controller's $HOME, even if a future case
+    # forgets and uses a controller-shaped os_user. The default `/home`
+    # is what got us into the live-install wipe.
+    export BRIDGE_LINUX_ISOLATED_USER_HOME_ROOT="$case_dir/iso-users"
     mkdir -p "$BRIDGE_HOME" "$BRIDGE_DATA_ROOT/agents" \
-             "$BRIDGE_DATA_ROOT/shared" "$BRIDGE_DATA_ROOT/state"
-    unset BRIDGE_SHARED_ROOT BRIDGE_AGENT_ROOT_V2 BRIDGE_CONTROLLER_STATE_ROOT
+             "$BRIDGE_DATA_ROOT/shared" "$BRIDGE_DATA_ROOT/state" \
+             "$BRIDGE_LINUX_ISOLATED_USER_HOME_ROOT"
     # shellcheck source=/dev/null
     source "$REPO_ROOT/bridge-lib.sh"
     make_sudo_stub "$sudo_log"
@@ -129,10 +186,10 @@ run_in_legacy() {
   local fn="$1"; shift
   (
     set -e
+    _smoke_clear_bridge_env
     export BRIDGE_HOME="$case_dir/bridge-home"
-    unset BRIDGE_LAYOUT BRIDGE_DATA_ROOT BRIDGE_SHARED_ROOT \
-          BRIDGE_AGENT_ROOT_V2 BRIDGE_CONTROLLER_STATE_ROOT
-    mkdir -p "$BRIDGE_HOME"
+    export BRIDGE_LINUX_ISOLATED_USER_HOME_ROOT="$case_dir/iso-users"
+    mkdir -p "$BRIDGE_HOME" "$BRIDGE_LINUX_ISOLATED_USER_HOME_ROOT"
     # shellcheck source=/dev/null
     source "$REPO_ROOT/bridge-lib.sh"
     make_sudo_stub "$sudo_log"
@@ -190,7 +247,7 @@ P1_DIR="$TMP_ROOT/p1"
 P1_LOG="$P1_DIR/sudo.log"
 mkdir -p "$P1_DIR"
 : >"$P1_LOG"
-run_in_v2 "$P1_DIR" "$P1_LOG" case_p1
+run_in_v2 "$P1_DIR" "$P1_LOG" case_p1 || die "P1 case_p1 returned non-zero"
 assert_no_setfacl "$P1_LOG" "P1 v2 primitives" || die "P1 leaked setfacl"
 ok "P1 v2 ACL primitives all no-op"
 
@@ -207,7 +264,7 @@ P2_DIR="$TMP_ROOT/p2"
 P2_LOG="$P2_DIR/sudo.log"
 mkdir -p "$P2_DIR"
 : >"$P2_LOG"
-run_in_v2 "$P2_DIR" "$P2_LOG" case_p2
+run_in_v2 "$P2_DIR" "$P2_LOG" case_p2 || die "P2 case_p2 returned non-zero"
 assert_no_setfacl "$P2_LOG" "P2 v2 direct setfacl helpers" || die "P2 leaked setfacl"
 ok "P2 v2 direct-setfacl helpers all no-op"
 
@@ -223,7 +280,7 @@ P3_DIR="$TMP_ROOT/p3"
 P3_LOG="$P3_DIR/sudo.log"
 mkdir -p "$P3_DIR/a/b/c"
 : >"$P3_LOG"
-run_in_v2 "$P3_DIR" "$P3_LOG" case_p3 "$P3_DIR"
+run_in_v2 "$P3_DIR" "$P3_LOG" case_p3 "$P3_DIR" || die "P3 case_p3 returned non-zero"
 assert_no_setfacl "$P3_LOG" "P3 v2 grant_traverse_chain" || die "P3 leaked setfacl"
 ok "P3 v2 grant_traverse_chain no-op"
 
@@ -294,7 +351,8 @@ M1_LOG="$M1_DIR/sudo.log"
 mkdir -p "$M1_DIR/iso-plugins" "$M1_DIR/ctrl-plugins"
 echo '{"plugins":{}}' > "$M1_DIR/ctrl-plugins/installed_plugins.json"
 : >"$M1_LOG"
-run_in_v2 "$M1_DIR" "$M1_LOG" case_m1 "$M1_DIR/iso-plugins" "$M1_DIR/ctrl-plugins"
+run_in_v2 "$M1_DIR" "$M1_LOG" case_m1 "$M1_DIR/iso-plugins" "$M1_DIR/ctrl-plugins" \
+  || die "M1 case_m1 returned non-zero"
 assert_no_setfacl "$M1_LOG" "M1 v2 manifest" || die "M1 leaked setfacl"
 grep -q "^chmod 0640 .*\.tmp\." "$M1_LOG" || die "M1 missing chmod 0640 on tmp"
 grep -q "^chgrp ab-agent-smoke-m1" "$M1_LOG" || die "M1 missing chgrp ab-agent-smoke-m1"
@@ -328,6 +386,7 @@ case_pc1() {
   local iso_root="$1"
   local ctrl_home="$2"
   local user_home="$3"
+  local shared_root="$4"
   bridge_load_roster
   BRIDGE_AGENT_IDS=("smoke-pc1")
   BRIDGE_AGENT_ENGINE["smoke-pc1"]="claude"
@@ -340,6 +399,10 @@ case_pc1() {
   # fixture already places. The helper expects controller HOME (not the
   # plugins dir); it appends `/.claude/plugins` itself.
   export BRIDGE_CONTROLLER_HOME_OVERRIDE="$ctrl_home"
+  # PR-E r2 P2#4 fix: v2 mode requires a populated shared plugins cache;
+  # the legacy controller_home fallback is now rejected. Point at a
+  # populated cache so PC1 exercises the v2-canonical path.
+  export BRIDGE_SHARED_ROOT="$shared_root"
   bridge_linux_share_plugin_catalog "ec2-user" "$user_home" "ec2-user" "smoke-pc1"
   [[ -d "$iso_root" ]] || { echo "iso plugins root missing" >&2; return 32; }
 }
@@ -347,12 +410,15 @@ log "case: PC1 plugin catalog root v2 group-mode"
 PC1_DIR="$TMP_ROOT/pc1"
 PC1_LOG="$PC1_DIR/sudo.log"
 mkdir -p "$PC1_DIR/iso-home/.claude" \
-         "$PC1_DIR/ctrl-home/.claude/plugins"
+         "$PC1_DIR/ctrl-home/.claude/plugins" \
+         "$PC1_DIR/shared/plugins-cache"
 echo '{"plugins":{}}' > "$PC1_DIR/ctrl-home/.claude/plugins/installed_plugins.json"
+echo '{"plugins":{}}' > "$PC1_DIR/shared/plugins-cache/installed_plugins.json"
 : >"$PC1_LOG"
 ISO_PLUGIN_ROOT="$PC1_DIR/iso-home/.claude/plugins"
 run_in_v2 "$PC1_DIR" "$PC1_LOG" case_pc1 \
-  "$ISO_PLUGIN_ROOT" "$PC1_DIR/ctrl-home" "$PC1_DIR/iso-home"
+  "$ISO_PLUGIN_ROOT" "$PC1_DIR/ctrl-home" "$PC1_DIR/iso-home" "$PC1_DIR/shared" \
+  || die "PC1 case_pc1 returned non-zero"
 assert_no_setfacl "$PC1_LOG" "PC1 v2 plugin catalog" || die "PC1 leaked setfacl"
 grep -q "^chmod 2750 .*\.claude/plugins" "$PC1_LOG" \
   || die "PC1 missing chmod 2750 on plugins root"
@@ -378,7 +444,8 @@ UM1_LOG="$UM1_DIR/sudo.log"
 UM1_PROBE="$UM1_DIR/umask.probe"
 mkdir -p "$UM1_DIR"
 : >"$UM1_PROBE"
-BRIDGE_RUN_UMASK_PROBE_FILE="$UM1_PROBE" run_in_v2 "$UM1_DIR" "$UM1_LOG" case_um1
+BRIDGE_RUN_UMASK_PROBE_FILE="$UM1_PROBE" run_in_v2 "$UM1_DIR" "$UM1_LOG" case_um1 \
+  || die "UM1 case_um1 returned non-zero"
 um1_recorded="$(cat "$UM1_PROBE" 2>/dev/null || true)"
 [[ "$um1_recorded" == "0007" ]] || die "UM1 expected probe=0007, got: '$um1_recorded'"
 ok "UM1 v2 + linux-user → bridge-run.sh helper sets umask 0007"
@@ -399,7 +466,8 @@ UM2_LOG="$UM2_DIR/sudo.log"
 UM2_PROBE="$UM2_DIR/umask.probe"
 mkdir -p "$UM2_DIR"
 : >"$UM2_PROBE"
-BRIDGE_RUN_UMASK_PROBE_FILE="$UM2_PROBE" run_in_legacy "$UM2_DIR" "$UM2_LOG" case_um2
+BRIDGE_RUN_UMASK_PROBE_FILE="$UM2_PROBE" run_in_legacy "$UM2_DIR" "$UM2_LOG" case_um2 \
+  || die "UM2 case_um2 returned non-zero"
 um2_recorded="$(cat "$UM2_PROBE" 2>/dev/null || true)"
 [[ "$um2_recorded" == "0077" ]] || die "UM2 expected probe=0077 (bridge-lib default), got: '$um2_recorded'"
 ok "UM2 legacy mode → helper inert (umask stays 0077)"
@@ -509,7 +577,8 @@ run_in_v2 "$EC_DIR" "$EC_LOG" case_ec2 "$EC_DIR" 2>/dev/null || ec2_rc=$?
 ok "EC2 v2 engine CLI controller-home cli_real reject (rc=$ec2_rc)"
 
 : >"$EC_LOG"
-run_in_v2 "$EC_DIR" "$EC_LOG" case_ec3 "$EC_DIR"
+run_in_v2 "$EC_DIR" "$EC_LOG" case_ec3 "$EC_DIR" \
+  || die "EC3 case_ec3 returned non-zero"
 assert_no_setfacl "$EC_LOG" "EC3 v2 engine CLI system path" || die "EC3 leaked setfacl on system path"
 ok "EC3 v2 engine CLI system path pass-through (no setfacl)"
 
@@ -534,7 +603,8 @@ mkdir -p "$CR_DIR/ctrl-home/.claude" "$CR_DIR/iso-home"
 echo '{"token":"redacted"}' > "$CR_DIR/ctrl-home/.claude/.credentials.json"
 chmod 0600 "$CR_DIR/ctrl-home/.claude/.credentials.json"
 : >"$CR_LOG"
-run_in_v2 "$CR_DIR" "$CR_LOG" case_cr1 "$CR_DIR"
+run_in_v2 "$CR_DIR" "$CR_LOG" case_cr1 "$CR_DIR" \
+  || die "CR1 case_cr1 returned non-zero"
 assert_some_setfacl "$CR_LOG" "CR1 v2 credentials helper" \
   || die "CR1 expected setfacl ≥ 1 for v2 cred exception"
 ok "CR1 v2 credentials helper transitional exception (setfacl ≥ 1)"
@@ -580,7 +650,8 @@ LP_DIR="$TMP_ROOT/lp"
 LP_LOG="$LP_DIR/sudo.log"
 mkdir -p "$LP_DIR/a/b"
 : >"$LP_LOG"
-run_in_legacy "$LP_DIR" "$LP_LOG" case_lp1 "$LP_DIR"
+run_in_legacy "$LP_DIR" "$LP_LOG" case_lp1 "$LP_DIR" \
+  || die "LP1 case_lp1 returned non-zero"
 assert_some_setfacl "$LP_LOG" "LP1 legacy primitives" \
   || die "LP1 legacy mode produced no setfacl (regression)"
 ok "LP1 legacy parity preserved (setfacl ≥ 1)"
@@ -607,7 +678,8 @@ ln -s "$TARGET_EXISTING" "$TARGET_SYMLINK"
 
 # CT1: new target.
 : >"$CT_LOG"
-run_in_v2 "$CT_DIR" "$CT_LOG" case_ct "$CT_DIR/iso-home" "$TARGET_NEW" "smoke-ct1"
+run_in_v2 "$CT_DIR" "$CT_LOG" case_ct "$CT_DIR/iso-home" "$TARGET_NEW" "smoke-ct1" \
+  || die "CT1 case_ct returned non-zero"
 assert_no_setfacl "$CT_LOG" "CT1 v2 channel symlink (new)" || die "CT1 leaked setfacl"
 grep -q "^chmod 2770 .*discord-new" "$CT_LOG" || die "CT1 missing chmod 2770"
 grep -q "^chgrp ab-agent-smoke-ct1 .*discord-new" "$CT_LOG" || die "CT1 missing chgrp ab-agent-smoke-ct1"
@@ -615,7 +687,8 @@ ok "CT1 v2 channel symlink target (new) → 2770/group-correct, no setfacl"
 
 # CT2: existing target.
 : >"$CT_LOG"
-run_in_v2 "$CT_DIR" "$CT_LOG" case_ct "$CT_DIR/iso-home" "$TARGET_EXISTING" "smoke-ct2"
+run_in_v2 "$CT_DIR" "$CT_LOG" case_ct "$CT_DIR/iso-home" "$TARGET_EXISTING" "smoke-ct2" \
+  || die "CT2 case_ct returned non-zero"
 assert_no_setfacl "$CT_LOG" "CT2 v2 channel symlink (existing)" || die "CT2 leaked setfacl"
 grep -q "^chmod 2770 .*discord-existing" "$CT_LOG" || die "CT2 missing chmod 2770 on existing"
 grep -q "^chgrp ab-agent-smoke-ct2 .*discord-existing" "$CT_LOG" || die "CT2 missing chgrp on existing"
@@ -631,6 +704,244 @@ if grep -qE "^(chgrp|chmod 2770) .*discord-symlink" "$CT_LOG"; then
   die "CT3 unexpectedly mutated symlink target: $(grep -E 'discord-symlink' "$CT_LOG")"
 fi
 ok "CT3 v2 channel symlink target (symlink) → reject without mutation (rc=$ct3_rc)"
+
+# ---------------------------------------------------------------------------
+# CT4 (PR-E r2 P1#2): v2 prepare quiesce check — alive tmux session → die.
+# Issue #403 fix #3: every CT4 case body uses a synthetic os_user that
+# CANNOT collide with a controller login. Combined with run_in_v2's
+# pinned BRIDGE_LINUX_ISOLATED_USER_HOME_ROOT under TMP_ROOT, no helper
+# downstream can resolve `<root>/<os_user>/.agent-bridge` to the
+# operator's live install.
+# ---------------------------------------------------------------------------
+case_ct4_alive() {
+  local agent="$1"
+  local workdir="$2"
+  local synthetic_os_user="agent-bridge-smoke-${agent}"
+  bridge_load_roster
+  BRIDGE_AGENT_IDS=("$agent")
+  BRIDGE_AGENT_ENGINE["$agent"]="claude"
+  BRIDGE_AGENT_SESSION["$agent"]="ab.${agent}"
+  BRIDGE_AGENT_WORKDIR["$agent"]="$workdir"
+  BRIDGE_AGENT_ISOLATION_MODE["$agent"]="linux-user"
+  BRIDGE_AGENT_OS_USER["$agent"]="$synthetic_os_user"
+  bridge_tmux_session_exists() { return 0; }
+  # Marker so the BRIDGE_PREPARE_ISOLATION_ALLOW_RUNNING=1 bypass case can
+  # confirm that quiesce was skipped (rc=42 means setfacl marker reached).
+  # Inert in the locked-alive case because quiesce dies first.
+  bridge_linux_require_setfacl() { exit 42; }
+  bridge_linux_prepare_agent_isolation \
+    "$agent" "$synthetic_os_user" "$workdir" "$(id -un)"
+}
+case_ct4_dead() {
+  local agent="$1"
+  local workdir="$2"
+  local synthetic_os_user="agent-bridge-smoke-${agent}"
+  bridge_load_roster
+  BRIDGE_AGENT_IDS=("$agent")
+  BRIDGE_AGENT_ENGINE["$agent"]="claude"
+  BRIDGE_AGENT_SESSION["$agent"]="ab.${agent}"
+  BRIDGE_AGENT_WORKDIR["$agent"]="$workdir"
+  BRIDGE_AGENT_ISOLATION_MODE["$agent"]="linux-user"
+  BRIDGE_AGENT_OS_USER["$agent"]="$synthetic_os_user"
+  bridge_tmux_session_exists() { return 1; }
+  bridge_linux_require_setfacl() { exit 42; }
+  bridge_linux_prepare_agent_isolation \
+    "$agent" "$synthetic_os_user" "$workdir" "$(id -un)"
+}
+log "case: CT4 v2 prepare quiesce check (P1#2 fix)"
+CT4_DIR="$TMP_ROOT/ct4"
+CT4_LOG="$CT4_DIR/sudo.log"
+CT4_ALIVE_ERR="$CT4_DIR/alive.err"
+mkdir -p "$CT4_DIR"
+: >"$CT4_LOG"
+: >"$CT4_ALIVE_ERR"
+ct4_alive_rc=0
+# r2 follow-up (codex r1 FAIL #1): just `rc != 0` is non-deterministic
+# because case_ct4_alive's bridge_linux_require_setfacl marker exits 42.
+# If quiesce fails to fire, the body would still reach the marker and exit
+# with rc=42 — masking a missing gate. Capture stderr and assert:
+#   (a) rc != 0   — some failure happened
+#   (b) rc != 42  — the marker (post-quiesce path) was NOT reached
+#   (c) stderr contains the quiesce die's "tmux session" phrase
+# Together these pin the failure to bridge_die from the quiesce gate.
+run_in_v2 "$CT4_DIR" "$CT4_LOG" case_ct4_alive "smoke-ct4" "$CT4_DIR/wd" \
+  2>"$CT4_ALIVE_ERR" || ct4_alive_rc=$?
+[[ $ct4_alive_rc -ne 0 ]] || die "CT4 expected die when tmux session is alive, got rc=0"
+[[ $ct4_alive_rc -ne 42 ]] \
+  || die "CT4-alive: expected quiesce-die rc=1, got marker rc=42 — quiesce gate did not fire (stderr: $(cat "$CT4_ALIVE_ERR" 2>/dev/null))"
+grep -q 'tmux session' "$CT4_ALIVE_ERR" \
+  || die "CT4-alive: stderr did not contain quiesce-die 'tmux session' message — gate may not have fired (stderr: $(cat "$CT4_ALIVE_ERR" 2>/dev/null))"
+ok "CT4-alive v2 prepare with live session → fails loud (rc=$ct4_alive_rc, quiesce gate fired)"
+: >"$CT4_LOG"
+ct4_dead_rc=0
+run_in_v2 "$CT4_DIR" "$CT4_LOG" case_ct4_dead "smoke-ct4-dead" "$CT4_DIR/wd2" \
+  2>/dev/null || ct4_dead_rc=$?
+[[ $ct4_dead_rc -eq 42 ]] \
+  || die "CT4-dead expected rc=42 (quiesce passed → setfacl marker), got rc=$ct4_dead_rc"
+ok "CT4-dead v2 prepare with no session → quiesce passes (rc=$ct4_dead_rc, marker)"
+: >"$CT4_LOG"
+ct4_bypass_rc=0
+BRIDGE_PREPARE_ISOLATION_ALLOW_RUNNING=1 \
+  run_in_v2 "$CT4_DIR" "$CT4_LOG" case_ct4_alive "smoke-ct4-bypass" "$CT4_DIR/wd3" \
+  2>/dev/null || ct4_bypass_rc=$?
+[[ $ct4_bypass_rc -eq 42 ]] \
+  || die "CT4-bypass expected rc=42 (quiesce skipped → setfacl marker), got rc=$ct4_bypass_rc"
+ok "CT4-bypass BRIDGE_PREPARE_ISOLATION_ALLOW_RUNNING=1 skips quiesce gate (rc=$ct4_bypass_rc, marker)"
+
+# ---------------------------------------------------------------------------
+# CR3 (PR-E r2 P1#3): v2 cred ACL setfacl failure → die before symlink plant
+# ---------------------------------------------------------------------------
+case_cr3() {
+  local cr_dir="$1"
+  bridge_linux_require_setfacl() { return 0; }
+  # Override the sudo stub: setfacl returns 1 (filesystem ACL disabled etc.).
+  bridge_linux_sudo_root() {
+    printf '%s\n' "$*" >>"$_BRIDGE_LINUX_SUDO_LOG_FILE"
+    case "${1:-}" in
+      setfacl) return 1 ;;
+      test) shift; test "$@" ;;
+      mkdir|chmod|touch|ln|rm|mv|find|mktemp|python3) "$@" ;;
+      chown|chgrp) return 0 ;;
+      bash) shift; bash "$@" ;;
+      *) return 0 ;;
+    esac
+  }
+  getent() {
+    if [[ "$1" == "passwd" && "$2" == "ec2-user" ]]; then
+      printf "ec2-user:x:1000:1000::%s:/bin/bash\n" "$cr_dir/ctrl-home"
+    fi
+  }
+  bridge_linux_grant_claude_credentials_access \
+    "ec2-user" "$cr_dir/iso-home" "ec2-user" "claude"
+}
+log "case: CR3 v2 cred setfacl failure → die before symlink plant (P1#3 fix)"
+CR3_DIR="$TMP_ROOT/cr3"
+CR3_LOG="$CR3_DIR/sudo.log"
+mkdir -p "$CR3_DIR/ctrl-home/.claude" "$CR3_DIR/iso-home"
+echo '{"token":"redacted"}' > "$CR3_DIR/ctrl-home/.claude/.credentials.json"
+chmod 0600 "$CR3_DIR/ctrl-home/.claude/.credentials.json"
+: >"$CR3_LOG"
+cr3_rc=0
+run_in_v2 "$CR3_DIR" "$CR3_LOG" case_cr3 "$CR3_DIR" 2>/dev/null || cr3_rc=$?
+[[ $cr3_rc -ne 0 ]] \
+  || die "CR3 expected die when v2 cred setfacl fails, got rc=0 (P1#3 regression)"
+[[ ! -e "$CR3_DIR/iso-home/.claude/.credentials.json" ]] \
+  || die "CR3 expected NO symlink plant on setfacl failure, but found one (P1#3 regression)"
+ok "CR3 v2 cred setfacl failure → fails loud, no symlink planted (rc=$cr3_rc)"
+
+# ---------------------------------------------------------------------------
+# PC2 (PR-E r2 P2#4): v2 plugin catalog with empty shared cache → die
+# ---------------------------------------------------------------------------
+case_pc2() {
+  local user_home="$1"
+  local ctrl_home="$2"
+  bridge_load_roster
+  BRIDGE_AGENT_IDS=("smoke-pc2")
+  BRIDGE_AGENT_ENGINE["smoke-pc2"]="claude"
+  BRIDGE_AGENT_WORKDIR["smoke-pc2"]="$TMP_ROOT/wd-pc2"
+  # PR-E r3 P2: PC2 agent NEEDS plugins (declares a plugin: channel),
+  # so the v2 + empty cache path must die. PC3 below pairs this — same
+  # setup, but no-plugin agent — and asserts the narrow fix returns 0.
+  BRIDGE_AGENT_CHANNELS["smoke-pc2"]="plugin:fake-plugin"
+  BRIDGE_AGENT_PLUGINS["smoke-pc2"]=""
+  export BRIDGE_CONTROLLER_HOME_OVERRIDE="$ctrl_home"
+  # NOTE: BRIDGE_SHARED_ROOT is intentionally unset by run_in_v2 so the
+  # v2_shared_plugins_root gate fails. The legacy fallback (controller_home/
+  # .claude/plugins) IS present on disk — the fix is that v2 mode must not
+  # walk into it.
+  bridge_linux_share_plugin_catalog "ec2-user" "$user_home" "ec2-user" "smoke-pc2"
+}
+log "case: PC2 v2 plugin catalog with empty shared cache + plugin agent → die (P2#4 fix)"
+PC2_DIR="$TMP_ROOT/pc2"
+PC2_LOG="$PC2_DIR/sudo.log"
+mkdir -p "$PC2_DIR/iso-home/.claude" "$PC2_DIR/ctrl-home/.claude/plugins"
+echo '{"plugins":{}}' > "$PC2_DIR/ctrl-home/.claude/plugins/installed_plugins.json"
+: >"$PC2_LOG"
+pc2_rc=0
+run_in_v2 "$PC2_DIR" "$PC2_LOG" case_pc2 "$PC2_DIR/iso-home" "$PC2_DIR/ctrl-home" \
+  2>/dev/null || pc2_rc=$?
+[[ $pc2_rc -ne 0 ]] \
+  || die "PC2 expected die in v2 + empty shared cache + plugin agent, got rc=0 (P2#4 regression)"
+ok "PC2 v2 + empty shared cache + plugin agent → fails loud (rc=$pc2_rc)"
+
+# ---------------------------------------------------------------------------
+# PC3 (PR-E r3 P2 narrow): v2 + empty shared cache + no-plugin agent → no-op.
+# This pins the dev-codex r2 P2 finding: codex / no-plugin claude agents
+# must not be blocked by a missing shared plugins-cache because they
+# have nothing to share.
+# ---------------------------------------------------------------------------
+case_pc3() {
+  local user_home="$1"
+  local ctrl_home="$2"
+  bridge_load_roster
+  BRIDGE_AGENT_IDS=("smoke-pc3")
+  BRIDGE_AGENT_ENGINE["smoke-pc3"]="codex"
+  BRIDGE_AGENT_WORKDIR["smoke-pc3"]="$TMP_ROOT/wd-pc3"
+  BRIDGE_AGENT_CHANNELS["smoke-pc3"]="discord,telegram"   # non-plugin only
+  BRIDGE_AGENT_PLUGINS["smoke-pc3"]=""
+  export BRIDGE_CONTROLLER_HOME_OVERRIDE="$ctrl_home"
+  bridge_linux_share_plugin_catalog "ec2-user" "$user_home" "ec2-user" "smoke-pc3"
+}
+log "case: PC3 v2 plugin catalog with empty shared cache + no-plugin agent → no-op (P2 narrow)"
+PC3_DIR="$TMP_ROOT/pc3"
+PC3_LOG="$PC3_DIR/sudo.log"
+mkdir -p "$PC3_DIR/iso-home/.claude" "$PC3_DIR/ctrl-home/.claude/plugins"
+echo '{"plugins":{}}' > "$PC3_DIR/ctrl-home/.claude/plugins/installed_plugins.json"
+: >"$PC3_LOG"
+run_in_v2 "$PC3_DIR" "$PC3_LOG" case_pc3 "$PC3_DIR/iso-home" "$PC3_DIR/ctrl-home" \
+  || die "PC3 case_pc3 returned non-zero — codex/no-plugin agents must not be blocked by empty shared cache"
+ok "PC3 v2 + empty shared cache + no-plugin agent → silent no-op"
+
+# ---------------------------------------------------------------------------
+# EP1 (PR-E r2 P1#1 verification): bridge-run.sh entrypoint dry-run
+# produces no "command not found" — guards against future regressions of
+# the umask helper definition order. P1#1 itself was already fixed in
+# the upstream merge of #399; this case pins the contract.
+# ---------------------------------------------------------------------------
+log "case: EP1 bridge-run.sh entrypoint dry-run no 'command not found' (P1#1)"
+# r2 follow-up (codex r1 FAIL #2): EP1 used to depend on `bridge-run.sh
+# --list` returning at least one host roster agent and skipped silently
+# otherwise — non-deterministic across hosts (CI runners, fresh clones).
+# Build a synthetic fixture roster under TMP_ROOT (same shape as UM3
+# above) so EP1 always has a deterministic target. The fixture is
+# pointed at via BRIDGE_ROSTER_FILE / BRIDGE_ROSTER_LOCAL_FILE so the
+# host's roster is never read.
+EP1_DIR="$TMP_ROOT/ep1"
+EP1_HOME="$EP1_DIR/bridge-home"
+EP1_DATA="$EP1_DIR/data"
+EP1_STATE="$EP1_HOME/state"
+EP1_ROSTER_FILE="$EP1_HOME/agent-roster.sh"
+EP1_ROSTER_LOCAL="$EP1_HOME/agent-roster.local.sh"
+EP1_WORKDIR="$EP1_DIR/agent-workdir"
+EP1_OUT="$EP1_DIR/out"
+EP1_ERR="$EP1_DIR/err"
+mkdir -p "$EP1_HOME" "$EP1_DATA/agents" "$EP1_DATA/shared" "$EP1_DATA/state" \
+         "$EP1_STATE/agents" "$EP1_WORKDIR"
+: >"$EP1_ROSTER_FILE"
+cat >"$EP1_ROSTER_LOCAL" <<EOF
+#!/usr/bin/env bash
+bridge_add_agent_id_if_missing "agent-bridge-smoke-ep1"
+BRIDGE_AGENT_ENGINE["agent-bridge-smoke-ep1"]="codex"
+BRIDGE_AGENT_SESSION["agent-bridge-smoke-ep1"]="agent-bridge-smoke-ep1"
+BRIDGE_AGENT_WORKDIR["agent-bridge-smoke-ep1"]="$EP1_WORKDIR"
+BRIDGE_AGENT_ISOLATION_MODE["agent-bridge-smoke-ep1"]="shared"
+BRIDGE_AGENT_LAUNCH_CMD["agent-bridge-smoke-ep1"]="codex"
+EOF
+ep1_target_agent="agent-bridge-smoke-ep1"
+BRIDGE_HOME="$EP1_HOME" \
+BRIDGE_DATA_ROOT="$EP1_DATA" \
+BRIDGE_STATE_DIR="$EP1_STATE" \
+BRIDGE_ACTIVE_AGENT_DIR="$EP1_STATE/agents" \
+BRIDGE_ROSTER_FILE="$EP1_ROSTER_FILE" \
+BRIDGE_ROSTER_LOCAL_FILE="$EP1_ROSTER_LOCAL" \
+  bash "$REPO_ROOT/bridge-run.sh" "$ep1_target_agent" --dry-run \
+  >"$EP1_OUT" 2>"$EP1_ERR" || true
+if grep -q "command not found" "$EP1_ERR" "$EP1_OUT" 2>/dev/null; then
+  printf '[v2-pr-e][error] EP1 bridge-run.sh "%s" --dry-run emitted "command not found":\n' "$ep1_target_agent" >&2
+  grep -n "command not found" "$EP1_ERR" "$EP1_OUT" >&2 || true
+  die "EP1 P1#1 regression — umask helper ordering broken"
+fi
+ok "EP1 bridge-run.sh dry-run on synthetic '$ep1_target_agent' → no 'command not found' (P1#1 verified)"
 
 # ---------------------------------------------------------------------------
 # X1-X4: root-required (opt-in via BRIDGE_TEST_V2_PRE_ROOT=1)
@@ -668,5 +979,18 @@ OPERATOR_NOTE
     ok "X1-X4 operator probes documented (manual run against live install)"
   fi
 fi
+
+# PR-E r3 P1: end-of-run refuse-log assertion. Any case body that caused
+# bridge_linux_sudo_root to refuse a path-escape attempt has appended a
+# line to $SUDO_REFUSE_LOG. A non-empty log is a smoke FAIL — a
+# refused live-install write must never be silently masked by a positive
+# log assertion in the same case.
+if [[ -s "$SUDO_REFUSE_LOG" ]]; then
+  printf '[v2-pr-e][error] sudo-stub refused %d host-escape attempt(s):\n' \
+    "$(wc -l <"$SUDO_REFUSE_LOG")" >&2
+  cat "$SUDO_REFUSE_LOG" >&2
+  die "smoke caught at least one helper trying to mutate outside TMP_ROOT — fix the helper or the case body before merging (positive cases must not depend on the sudo-stub guard for safety)"
+fi
+ok "no sudo-stub refusals across all cases (no helper attempted to escape TMP_ROOT)"
 
 log "PR-E smoke complete"
