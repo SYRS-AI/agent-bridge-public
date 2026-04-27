@@ -314,6 +314,10 @@ fields = {
     "CRON_RESULT_STATUS": result.get("status", ""),
     "CRON_RESULT_SUMMARY": result.get("summary", ""),
     "CRON_RUN_STATE": status.get("state", ""),
+    # Issue #393: surface deferred_reason so the daemon can suppress
+    # cron-followup tasks for memory_pressure deferrals. Empty string
+    # for non-deferred runs (legacy callers see the same value).
+    "CRON_DEFERRED_REASON": str(status.get("deferred_reason") or "").strip(),
     "CRON_RESULT_FILE": str(result_file),
     "CRON_STATUS_FILE": str(status_file),
     "CRON_STDOUT_LOG": request.get("stdout_log", ""),
