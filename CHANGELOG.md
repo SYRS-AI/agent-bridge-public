@@ -4,6 +4,97 @@ All notable changes to Agent Bridge are documented here. This project adheres
 loosely to [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and tracks
 version bumps via the `VERSION` file.
 
+## [0.6.21] — 2026-04-27
+
+### Highlights — isolate-v2 PR-D + cron-followup signal correctness
+
+#### isolate-v2 PR-D: migration tool + docs
+
+Operator-driven migration from the legacy ACL-based isolation layout to
+v2's per-agent private root + group/setgid + secret-env split (PR-A/B/C
+shipped in v0.6.18 + v0.6.19). Default off — every migrate subcommand
+fails-fast on `BRIDGE_LAYOUT` unset/legacy.
+
+- **`agent-bridge migrate isolation-v2`** (#388) ships 5 subcommands:
+  - `dry-run` — read-only, works on legacy with a `currently legacy —
+    would migrate X agents` hint.
+  - `apply` — fails-fast on `BRIDGE_LAYOUT != v2`. Self-stop guard
+    refuses if `BRIDGE_AGENT_ID` is in the active snapshot (must run
+    from out-of-band controller shell). Empty active snapshot → rc=0
+    with `[migrate] no active claude agents to migrate; nothing to do.`
+  - `rollback` — same fail-fast + self-stop semantics as apply.
+  - `commit` — only deletes manifest rows with `verify_status=ok &&
+    delete_eligible=1`. Profile / skills / memory files
+    (`delete_eligible=0`) are kept in the install root as a frozen
+    snapshot through PR-G.
+  - `status` — lock-free, read-only summary; rejects extra positional
+    args.
+
+- **`bridge_agent_default_profile_home` v2-aware** (#388). Closes a
+  contract gap PR-A/B/C left open: returns the v2 workdir under
+  `BRIDGE_LAYOUT=v2`, matching every read site (`profile deploy`, etc.).
+  Legacy fallback to `bridge_agent_default_home` preserved for
+  `BRIDGE_LAYOUT` unset.
+
+- **`scripts/wiki-daily-ingest.sh` Lane B v2-gating** (#388). Lane B's
+  strict `agent list --json` enumeration is now gated on `BRIDGE_LAYOUT=v2`;
+  legacy installs fall through to the original `find $AGENTS_ROOT/*/memory/...`
+  enumeration. Default-off invariant preserved. Inline strict block is
+  scoped to `wiki-daily-ingest.sh`; `_common.sh::list_active_claude_agents`
+  silent-success-on-malformed-JSON behavior is preserved for non-PR-D
+  callers (KNOWN_ISSUES entry 15).
+
+- **Tests**: `tests/isolation-v2-pr-d/smoke.sh` 14/14 (rootless
+  acceptance for dry-run / apply / rollback / commit / status round-
+  trips); `tests/wiki-daily-ingest/smoke.sh` 7/7 (was 5/5; new Lane B
+  legacy fallback + v2 strict cases).
+
+#### cron-followup signal correctness
+
+- **`stall: success-followup bypasses cron burst-gate`** (#385, PR #391).
+  `bridge-daemon.sh::process_stall_reports`'s burst-gate (introduced by
+  #230-B to suppress transient API failure noise) was also suppressing
+  legitimate `success+needs_human_followup=true` signals on the first
+  run of every slot — cron families like `morning-briefing` have a
+  daily channel-relay handoff task that the subagent legitimately marks
+  `needs_human_followup=true` on success, but the gate fired
+  `below_threshold` and the followup task was never created. The fix
+  introduces an `is_failure_followup` flag set only when the cron's run
+  state is non-success (transient API failure path); the burst counter
+  + threshold gate apply only to `is_failure_followup=1`. Success-
+  followups always create the task. The transient failure protection
+  from #230-B is preserved.
+
+### v0.6.21 upgrade / migration notes
+
+#### Auto
+
+- v0.6.20 → v0.6.21 binary upgrade is straightforward — no schema or
+  state-file shape changes. The cron-followup gate fix activates on
+  the next daemon cycle.
+- The migration tool itself (`agent-bridge migrate isolation-v2`) is
+  default-off — operators must explicitly opt in to v2 via
+  `BRIDGE_LAYOUT=v2` + `BRIDGE_DATA_ROOT=<path>` before any of the
+  mutating subcommands will run.
+
+#### Operator-required (v2 opt-in only — skip if staying on legacy)
+
+If you want to migrate a non-production install from legacy to v2:
+
+1. Set `BRIDGE_LAYOUT=v2` + `BRIDGE_DATA_ROOT=/srv/agent-bridge` (or any
+   preferred path) in your shell environment.
+2. Out-of-band shell (NOT inside an agent's tmux session — the
+   self-stop guard refuses): `agent-bridge migrate isolation-v2 dry-run`
+   to preview the migration.
+3. `agent-bridge migrate isolation-v2 apply` to perform the migration.
+4. After verification: `agent-bridge migrate isolation-v2 status` to
+   confirm. `commit` to delete eligible legacy paths once you're happy.
+
+The legacy ACL-based path keeps working in parallel until PR-E (legacy
+ACL helper removal) and PR-F (default flip) ship in upcoming releases.
+Operators should NOT enable v2 on production yet — full series review
+recommended before flipping the default.
+
 ## [0.6.20] — 2026-04-27
 
 Operator-experience hotfix release. Two issues filed against v0.6.19 that
