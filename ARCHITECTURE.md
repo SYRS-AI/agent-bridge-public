@@ -165,3 +165,15 @@ Use them for isolated testing and for machine-specific installs.
 - Multi-tenant per-UID isolation is Linux-only; macOS runs shared mode
   plus hook-layer hardening only (see
   [`docs/platform-support.md`](./docs/platform-support.md))
+- Linux-user isolation has two access-control modes governed by
+  `bridge_isolation_v2_active`:
+  - **legacy**: per-isolated-UID named-user POSIX ACLs (`u:agent-bridge-<name>:r-x`
+    + traversal chains). Requires the `acl` package on every agent host.
+  - **v2 (PR-A → PR-E)**: per-agent group + setgid (`ab-agent-<name>`,
+    chmod 2750/2770) plus `umask 007` on agent launches. v2 retains a
+    single named-user ACL surface for Claude credentials
+    (`bridge_linux_grant_claude_credentials_access`) because the
+    operator's `~/.claude/.credentials.json` lives outside the v2
+    layout — see `OPERATIONS.md` "v2 ACL contract (PR-E)" for scope and
+    `KNOWN_ISSUES.md` §16/§17 for the transitional exception and the
+    base-readable engine CLI prerequisite.

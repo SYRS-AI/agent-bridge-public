@@ -85,6 +85,11 @@ fi
 
 bridge_require_agent "$AGENT"
 
+# PR-E: apply v2 umask before any runtime mkdir/plugin sync/launch work.
+# bridge-lib.sh:17 unconditionally set 0077; this helper only changes it
+# when BRIDGE_LAYOUT=v2 and the agent is linux-user-isolated.
+bridge_run_apply_v2_umask_if_needed "$AGENT"
+
 if [[ $CONTINUE_EXPLICIT -eq 1 ]]; then
   BRIDGE_AGENT_CONTINUE["$AGENT"]="$CONTINUE_MODE"
 fi
@@ -161,6 +166,35 @@ log_loop_help() {
   log_line "에이전트를 완전히 종료하기: 바깥 터미널에서 'agb kill ${AGENT}' 를 실행하세요."
 }
 
+# PR-E: in v2 mode + linux-user isolation, switch the runtime umask from
+# bridge-lib.sh's default 0077 (private) to 0007 (group-writable). The v2
+# group-setgid layout (PR-A/B/C) gives new files the right group, but the
+# mode bits depend on umask. Without 0007, a setgid 2770 channel/runtime
+# dir would still hold 0600 files that the controller (group member) can
+# only read because of the inherited group ownership combined with chmod
+# at directory creation; agent-created channel state .env files would
+# lack group rw and the daemon's controller-side health probes would
+# silently see EACCES.
+#
+# Called twice from this script: once after the first bridge_require_agent
+# at startup, and once from bridge_run_refresh_roster_if_changed after the
+# subsequent bridge_require_agent on roster reload.
+#
+# BRIDGE_RUN_UMASK_PROBE_FILE is a hidden smoke-only hook: when set, the
+# helper writes the resulting umask (post-set) to that path so a smoke
+# fixture can assert the bridge-run.sh effective umask without parsing
+# /proc/<pid>/status. Inert when unset.
+bridge_run_apply_v2_umask_if_needed() {
+  local agent="$1"
+  if bridge_isolation_v2_active 2>/dev/null \
+      && bridge_agent_linux_user_isolation_effective "$agent" 2>/dev/null; then
+    umask 007
+  fi
+  if [[ -n "${BRIDGE_RUN_UMASK_PROBE_FILE:-}" ]]; then
+    umask >"$BRIDGE_RUN_UMASK_PROBE_FILE" 2>/dev/null || true
+  fi
+}
+
 bridge_run_session_attached() {
   local attached
 
@@ -221,6 +255,10 @@ bridge_run_refresh_roster_if_changed() {
 
   bridge_load_roster
   bridge_require_agent "$AGENT"
+  # PR-E: re-apply v2 umask after roster reload — bridge-lib.sh's umask 077
+  # is sticky across the process but a defensive re-set guards against any
+  # subshell that may have reset it during the refresh.
+  bridge_run_apply_v2_umask_if_needed "$AGENT"
   if [[ $CONTINUE_EXPLICIT -eq 1 ]]; then
     BRIDGE_AGENT_CONTINUE["$AGENT"]="$CONTINUE_MODE"
   fi
