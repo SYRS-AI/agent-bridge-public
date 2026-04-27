@@ -4,6 +4,79 @@ All notable changes to Agent Bridge are documented here. This project adheres
 loosely to [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and tracks
 version bumps via the `VERSION` file.
 
+## [0.6.25] — 2026-04-27
+
+### P0 fix — smoke-test live-install wipe defense
+
+- **`P0: smoke-test live-install wipe — 4-layer defense`** (#403, PR #406).
+  PR-E's smoke (CT4) wiped a reporter's live install at
+  `~/.agent-bridge/` because four independent defense layers all failed
+  together. The destructive sequence: `bridge_linux_install_agent_bridge_symlink`
+  did `rm -rf "$user_home/.agent-bridge"` with `user_home` flowing
+  unvalidated from `os_user`; the smoke passed `"ec2-user"` (controller
+  login) as `os_user`; the sudo-stub case-passed `rm` straight through
+  to the host shell; and the outer smoke-test safety gate only checked
+  `BRIDGE_HOME`, not the inner test's `BRIDGE_LINUX_ISOLATED_USER_HOME_ROOT`.
+
+  Fix lands defense-in-depth at all four layers — any one being correct
+  prevents the wipe:
+
+  - **Layer A** (`lib/bridge-agents.sh::bridge_linux_install_agent_bridge_symlink`):
+    new guard `bridge_die`s if `realpath(target) == realpath(bridge_home)`
+    OR if `os_user` is empty OR equals `id -un` (controller login).
+  - **Layer B** (`tests/isolation-v2-pr-e/smoke.sh`): unconditional env
+    redirect of `BRIDGE_LINUX_ISOLATED_USER_HOME_ROOT` to
+    `$TMP_ROOT/fake-home` so destructive paths land in tempdir even if
+    a test passes a literal os_user.
+  - **Layer C** (`tests/isolation-v2-pr-e/smoke.sh` sudo-stub): every
+    absolute-path arg passed to `rm`/`mv`/`mkdir`/`ln`/`find` must
+    resolve under `$TMP_ROOT`. Otherwise return 99 + log-to-stderr.
+  - **Layer D** (`scripts/smoke-test.sh`): refuses to run when
+    `BRIDGE_LINUX_ISOLATED_USER_HOME_ROOT` is set but not rooted under
+    a recognised tempdir.
+
+  Operators upgrading from any prior version are protected immediately:
+  the next time anyone runs the smoke, the layers fail loud rather than
+  destroy data.
+
+### memory-daily Tracks B+D follow-up
+
+- **`memory-daily: apply-time migration cleanup + static-only docs`**
+  (#376 B+D, PR #404). Closes the loop on #376 (Tracks A+C shipped in
+  v0.6.18). All 4 tracks of #376 are now complete.
+
+  - **Track B** (`bootstrap-memory-system.sh::step_memory_daily_cron_one`):
+    detects existing `memory-daily-<agent>` crons whose agent's `source ==
+    "dynamic"` and removes them via the existing 3-mode pattern (`check`
+    → `drift-migration-pending` + note_drift; `dry-run` → `would-remove`;
+    `apply` → `agb cron delete <id>` + `migrated-removed` audit). Operators
+    with installs bootstrapped before v0.6.18 had dynamic-agent crons
+    silently no-op'd by Track C; the cron entries themselves are now
+    cleaned up on the next `bootstrap-memory-system.sh apply`.
+  - **Track D** (`docs/agent-runtime/memory-daily-harvest.md` §12):
+    documents the static-only memory-daily contract with a three-layer
+    defense table (Track A registration filter → Track B apply-time
+    migration → Track C harvester refusal) so future per-agent pipelines
+    don't repeat the omission.
+
+### v0.6.25 upgrade / migration notes
+
+#### Auto
+
+- v0.6.24 → v0.6.25 binary upgrade is straightforward — no schema or
+  state-file shape changes.
+- The smoke-test defense layers (Layer A, C, D) activate immediately
+  on the next smoke invocation; existing operator workflows are
+  unaffected.
+
+#### Operator-required
+
+- **(Optional, recommended)** Run `bootstrap-memory-system.sh apply`
+  once on each install to clean up any pre-v0.6.18 dynamic-agent
+  memory-daily crons that are still on the cron board (#376 Track B
+  apply-time migration). `bootstrap-memory-system.sh dry-run` previews
+  what would be removed.
+
 ## [0.6.24] — 2026-04-27
 
 ### Highlights — isolate-v2 PR-E: legacy ACL helpers no-op + v2 group-mode replacements
