@@ -76,6 +76,20 @@ write_transcript_tui_only() {
 JSONL
 }
 
+write_transcript_old_reply_new_unanswered() {
+  # codex r1 fix: an OLD reply to chat_id=C123 must NOT satisfy a NEW
+  # unanswered user turn from the SAME chat_id. The reply scanner used
+  # to walk forward from the start of the transcript and matched the
+  # first reply for that chat_id, leaking past a newer unanswered
+  # message in the same chat.
+  cat >"$1" <<'JSONL'
+{"type":"user","message":{"content":[{"type":"text","text":"<channel source=\"discord\" chat_id=\"C123\" message_id=\"M111\" />\nfirst question"}]}}
+{"type":"assistant","message":{"content":[{"type":"text","text":"answering"},{"type":"tool_use","name":"mcp__plugin_discord__reply","input":{"chat_id":"C123","content":"old reply"}}]}}
+{"type":"user","message":{"content":[{"type":"text","text":"<channel source=\"discord\" chat_id=\"C123\" message_id=\"M222\" />\nsecond question — needs a fresh reply"}]}}
+{"type":"assistant","message":{"content":[{"type":"text","text":"thinking out loud, no reply tool"}]}}
+JSONL
+}
+
 run_hook() {
   # $1: transcript path
   # $2: BRIDGE_AGENT_ID value (use empty string to unset)
@@ -140,5 +154,22 @@ write_transcript_missing_reply "$T"
 out="$(run_hook "$T" "agent-foo" ',"stop_hook_active":true')"
 [[ -z "$out" ]] || die "case (f) expected no output (stop_hook_active=true), got: $out"
 pass "(f) stop_hook_active re-entry -> silent"
+
+# ---- Case (g) old reply for same chat_id must NOT satisfy newer unanswered ----
+# codex r1 regression: reply scanner anchored at index of the LATEST
+# channel-source user turn, not the first same-chat user turn from the
+# start of the transcript.
+T="$TMP/g.jsonl"
+write_transcript_old_reply_new_unanswered "$T"
+out="$(run_hook "$T" "agent-foo")"
+[[ -n "$out" ]] || die "case (g) expected block JSON for new unanswered turn, got empty (old reply leaked through)"
+echo "$out" | python3 -c '
+import json, sys
+data = json.loads(sys.stdin.read())
+assert data.get("decision") == "block"
+reason = data.get("reason", "")
+assert "M222" in reason, "reason should reference NEW message_id, got: " + reason
+' || die "case (g) JSON shape mismatch (old reply may be satisfying new unanswered)"
+pass "(g) old reply for same chat_id does not satisfy newer unanswered turn"
 
 log "all cases passed"

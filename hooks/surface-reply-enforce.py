@@ -83,9 +83,11 @@ def _extract_text(message_content) -> str:
 
 def _latest_pending_channel_input(entries: list[dict]):
     """Walk entries in reverse and return the most recent user turn's
-    (source, chat_id, message_id) tuple. Returns None if no channel-source
-    user turn is found in the trailing block."""
-    for entry in reversed(entries):
+    (source, chat_id, message_id, index) tuple where `index` is the
+    position of that user turn inside `entries`. Returns None if no
+    channel-source user turn is found in the trailing block."""
+    for idx in range(len(entries) - 1, -1, -1):
+        entry = entries[idx]
         if entry.get("type") != "user":
             continue
         text = _extract_text((entry.get("message") or {}).get("content"))
@@ -93,7 +95,7 @@ def _latest_pending_channel_input(entries: list[dict]):
         if match:
             source = match.group(1).lower()
             if source in SUPPORTED_SURFACES:
-                return (source, match.group(2), match.group(3))
+                return (source, match.group(2), match.group(3), idx)
         # No supported channel tag on this user turn -> stop walking; we only
         # enforce when the latest user turn was channel-sourced.
         return None
@@ -104,23 +106,17 @@ def _assistant_replies_for_surface(
     entries: list[dict],
     source: str,
     chat_id: str,
+    user_idx: int,
 ) -> bool:
-    """Walk forward from the latest channel-source user turn; return True
-    when an assistant tool_use of mcp__plugin_<source>__reply with matching
-    chat_id is found, OR when an explicit <no-reply-needed source=..
-    chat_id=..> marker appears in the assistant text."""
+    """Walk forward from the latest channel-source user turn (anchored at
+    `user_idx`); return True when an assistant tool_use of
+    mcp__plugin_<source>__reply with matching chat_id is found, OR when an
+    explicit <no-reply-needed source=.. chat_id=..> marker appears in the
+    assistant text. Codex r1 fix #415: anchoring on user_idx (not the first
+    same-chat user turn from the start of transcript) prevents an older
+    reply from satisfying a newer unanswered message in the same chat."""
     expected_tool = f"mcp__plugin_{source}__reply"
-    found_user = False
-    for entry in entries:
-        if not found_user:
-            if entry.get("type") == "user":
-                text = _extract_text((entry.get("message") or {}).get("content"))
-                m = CHANNEL_TAG_RE.search(text)
-                if m and m.group(1).lower() == source and m.group(2) == chat_id:
-                    found_user = True
-            continue
-
-        # Past the latest channel-source user turn; check assistant replies.
+    for entry in entries[user_idx + 1:]:
         if entry.get("type") != "assistant":
             continue
         content = (entry.get("message") or {}).get("content")
@@ -169,8 +165,8 @@ def main() -> int:
     if pending is None:
         return 0
 
-    source, chat_id, message_id = pending
-    if _assistant_replies_for_surface(entries, source, chat_id):
+    source, chat_id, message_id, user_idx = pending
+    if _assistant_replies_for_surface(entries, source, chat_id, user_idx):
         return 0
 
     reason = (
