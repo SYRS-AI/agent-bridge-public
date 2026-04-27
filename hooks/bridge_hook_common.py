@@ -324,14 +324,18 @@ def _enqueue_handoff_pending(agent: str, next_session: Path, digest: str) -> Non
         f"\n"
         f"Auto-enqueued by bridge_hook_common._enqueue_handoff_pending.\n"
     )
-    # find-open guard: skip if a same-titled task is already open for the agent.
-    # bridge-queue.py find-open --title-prefix uses SQL LIKE; with --format json
-    # and no --all, returns a single dict (or returncode 1 with empty stdout).
+    # find-open guard: skip if a same-digest handoff task is already open.
+    # bridge-queue.py find-open --title-prefix uses SQL LIKE; passing the FULL
+    # digest-bearing title as the prefix is the exact-match form (no other
+    # title starts with this exact string since digest8 + ")" is terminal).
+    # Codex r1 flagged the LIMIT 1 trap: a generic prefix like
+    # "[bridge:handoff-pending]" matches an older different-digest row first
+    # and suppresses the new enqueue, missing the current handoff.
     try:
         existing = queue_cli([
             "find-open",
             "--agent", agent,
-            "--title-prefix", "[bridge:handoff-pending]",
+            "--title-prefix", title,
             "--format", "json",
         ])
         if existing.returncode == 0 and existing.stdout.strip():
