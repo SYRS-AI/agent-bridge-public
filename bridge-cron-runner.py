@@ -190,6 +190,20 @@ DEFAULT_SWAP_PCT_LIMIT = 80
 DEFAULT_MIN_AVAIL_MB = 512
 PRESSURE_DEFER_SECONDS = 900  # +15 min
 
+# Issue #397: macOS uses a pressure tier as its real signal. The kernel
+# exposes `kern.memorystatus_vm_pressure_level` with the following values
+# (per <sys/kern_memorystatus.h>):
+#   1 = Normal (no pressure)
+#   2 = Warn   (Activity Monitor "yellow")
+#   4 = Critical (Activity Monitor "red"; jetsam imminent)
+# We default to deferring only when level >= Warn (>= 2). swap_pct on
+# darwin is NOT a pressure signal — macOS uses swap as a normal tier of
+# the memory hierarchy, so a laptop sitting at 90%+ swap can be
+# perfectly healthy. Operators on hosts where the kernel sysctl isn't
+# available can fall back to the legacy swap_pct probe via
+# BRIDGE_CRON_DARWIN_PRESSURE_FALLBACK=swap_pct.
+DEFAULT_DARWIN_PRESSURE_LEVEL = 2  # Warn
+
 
 def _swap_pct_limit() -> int:
     raw = os.environ.get("BRIDGE_CRON_SWAP_PCT_LIMIT", "").strip()
@@ -200,6 +214,17 @@ def _swap_pct_limit() -> int:
     except ValueError:
         return DEFAULT_SWAP_PCT_LIMIT
     return value if value > 0 else DEFAULT_SWAP_PCT_LIMIT
+
+
+def _darwin_pressure_level_limit() -> int:
+    raw = os.environ.get("BRIDGE_CRON_DARWIN_PRESSURE_LEVEL", "").strip()
+    if not raw:
+        return DEFAULT_DARWIN_PRESSURE_LEVEL
+    try:
+        value = int(raw)
+    except ValueError:
+        return DEFAULT_DARWIN_PRESSURE_LEVEL
+    return value if value in (2, 4) else DEFAULT_DARWIN_PRESSURE_LEVEL
 
 
 def _min_avail_mb() -> int:
@@ -227,6 +252,50 @@ def check_memory_pressure() -> dict[str, Any] | None:
         return None
 
     if kind == "darwin":
+        # Issue #397: probe the kernel pressure tier rather than swap_pct.
+        # macOS swaps as part of normal operation; a host at 90%+ swap can
+        # still report Normal pressure level when the OS is healthy. The
+        # legacy swap_pct probe stays available as a deliberate fallback
+        # via BRIDGE_CRON_DARWIN_PRESSURE_FALLBACK=swap_pct (and is the
+        # ONLY way to fire on hosts where the sysctl is unreadable, e.g.
+        # sandboxed test environments).
+        fallback = (
+            os.environ.get("BRIDGE_CRON_DARWIN_PRESSURE_FALLBACK", "").strip().lower()
+        )
+        if fallback != "swap_pct":
+            try:
+                level_raw = subprocess.check_output(
+                    ["sysctl", "-n", "kern.memorystatus_vm_pressure_level"],
+                    text=True,
+                    timeout=5,
+                ).strip()
+            except (OSError, subprocess.SubprocessError):
+                # Sysctl not available (older macOS / sandboxed env) — fall
+                # through to the legacy swap-based probe so the host still
+                # has *some* pressure signal rather than zero.
+                level_raw = ""
+            if level_raw:
+                try:
+                    level = int(level_raw)
+                except ValueError:
+                    level = 0
+                limit = _darwin_pressure_level_limit()
+                if level >= limit:
+                    return {
+                        "reason": "memory_pressure",
+                        "kind": "darwin",
+                        "metric": "pressure_level",
+                        "value": level,
+                        "limit": limit,
+                    }
+                # Healthy path on darwin — sysctl read OK, level below
+                # threshold. Skip the swap probe entirely; swap usage on
+                # macOS is not a pressure signal.
+                return None
+        # Either operator opted into the legacy swap probe, or the
+        # sysctl was unreadable. Fall through to the original swap_pct
+        # path so we still defer on hosts where pressure_level isn't
+        # available.
         try:
             usage_line = subprocess.check_output(
                 ["sysctl", "-n", "vm.swapusage"], text=True, timeout=5
