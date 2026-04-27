@@ -51,8 +51,8 @@ bridge_isolation_v2_marker_validate() {
     return 1
   fi
 
-  local allowed_re='^(BRIDGE_LAYOUT|BRIDGE_DATA_ROOT|BRIDGE_SHARED_GROUP|BRIDGE_CONTROLLER_GROUP|BRIDGE_AGENT_GROUP_PREFIX)=.+$'
-  local line saw_layout=0 layout_value="" data_root_value=""
+  local allowed_re='^(BRIDGE_LAYOUT|BRIDGE_DATA_ROOT|BRIDGE_SHARED_GROUP|BRIDGE_CONTROLLER_GROUP|BRIDGE_AGENT_GROUP_PREFIX)=.*$'
+  local line key raw value saw_layout=0 layout_value="" data_root_value=""
   while IFS= read -r line; do
     [[ -z "${line//[[:space:]]/}" ]] && continue
     [[ "$line" =~ ^[[:space:]]*# ]] && continue
@@ -60,43 +60,89 @@ bridge_isolation_v2_marker_validate() {
       bridge_warn "layout-marker.sh ignored: disallowed line '$line'"
       return 1
     fi
-    case "$line" in
-      BRIDGE_LAYOUT=*)
-        saw_layout=1
-        layout_value="${line#BRIDGE_LAYOUT=}"
-        ;;
-      BRIDGE_DATA_ROOT=*)
-        data_root_value="${line#BRIDGE_DATA_ROOT=}"
-        ;;
+    key="${line%%=*}"
+    raw="${line#*=}"
+    if ! bridge_isolation_v2_marker_value_safe "$raw"; then
+      bridge_warn "layout-marker.sh ignored: unsafe value for $key"
+      return 1
+    fi
+    value="$(bridge_isolation_v2_marker_value_unquote "$raw")"
+    case "$key" in
+      BRIDGE_LAYOUT) saw_layout=1; layout_value="$value" ;;
+      BRIDGE_DATA_ROOT) data_root_value="$value" ;;
     esac
   done < "$path"
 
-  if (( saw_layout == 1 )); then
-    local _lv="$layout_value"
-    _lv="${_lv#\'}"; _lv="${_lv%\'}"
-    _lv="${_lv#\"}"; _lv="${_lv%\"}"
-    if [[ "$_lv" == "v2" ]]; then
-      local _dr="$data_root_value"
-      _dr="${_dr#\'}"; _dr="${_dr%\'}"
-      _dr="${_dr#\"}"; _dr="${_dr%\"}"
-      if [[ -z "$_dr" || "${_dr:0:1}" != "/" ]]; then
-        bridge_warn "layout-marker.sh ignored: BRIDGE_DATA_ROOT must be absolute, got '$data_root_value'"
-        return 1
-      fi
+  if (( saw_layout == 1 )) && [[ "$layout_value" == "v2" ]]; then
+    if [[ -z "$data_root_value" || "${data_root_value:0:1}" != "/" ]]; then
+      bridge_warn "layout-marker.sh ignored: BRIDGE_DATA_ROOT must be absolute, got '$data_root_value'"
+      return 1
     fi
   fi
 
   return 0
 }
 
+bridge_isolation_v2_marker_value_safe() {
+  # Strict value grammar. Reject any value that could trigger shell
+  # expansion (command/process/arithmetic substitution, backticks,
+  # redirect/pipe metacharacters, escapes, newlines, or globs) so the
+  # marker can never run code via the eventual export. Allowed forms:
+  #   - bare token: [A-Za-z0-9_./@:+-]+
+  #   - single-quoted token: '<bare token>' or empty ''
+  #   - double-quoted token: same content set
+  # Anything else is rejected.
+  local v="$1"
+  case "$v" in
+    *'$('*|*'$<'*|*'$>'*|*'$['*|*'$\\'*|*'`'*|*';'*|*'&'*|*'|'* \
+      |*'>'*|*'<'*|*'\\'*|*$'\n'*|*$'\r'*|*'*'*|*'?'*|*'~'* )
+      return 1
+      ;;
+  esac
+  if [[ "$v" =~ ^\'[A-Za-z0-9_./@:+-]*\'$ ]]; then
+    return 0
+  fi
+  if [[ "$v" =~ ^\"[A-Za-z0-9_./@:+-]*\"$ ]]; then
+    return 0
+  fi
+  if [[ "$v" =~ ^[A-Za-z0-9_./@:+-]+$ ]]; then
+    return 0
+  fi
+  return 1
+}
+
+bridge_isolation_v2_marker_value_unquote() {
+  local v="$1"
+  v="${v#\'}"; v="${v%\'}"
+  v="${v#\"}"; v="${v%\"}"
+  printf '%s' "$v"
+}
+
 bridge_isolation_v2_marker_load() {
+  # Parse-and-export, do NOT source the marker. Sourcing would let any
+  # validated KEY=value line execute its value (e.g. command substitution),
+  # which the validator above explicitly cannot detect on shell-quoted
+  # bytes alone.
   local path
   path="$(bridge_isolation_v2_marker_path)"
   [[ -f "$path" ]] || return 0
-  if bridge_isolation_v2_marker_validate "$path"; then
-    # shellcheck source=/dev/null
-    . "$path"
-  fi
+  bridge_isolation_v2_marker_validate "$path" || return 0
+
+  local line key raw value
+  while IFS= read -r line; do
+    [[ -z "${line//[[:space:]]/}" ]] && continue
+    [[ "$line" =~ ^[[:space:]]*# ]] && continue
+    key="${line%%=*}"
+    raw="${line#*=}"
+    value="$(bridge_isolation_v2_marker_value_unquote "$raw")"
+    case "$key" in
+      BRIDGE_LAYOUT) export BRIDGE_LAYOUT="$value" ;;
+      BRIDGE_DATA_ROOT) export BRIDGE_DATA_ROOT="$value" ;;
+      BRIDGE_SHARED_GROUP) export BRIDGE_SHARED_GROUP="$value" ;;
+      BRIDGE_CONTROLLER_GROUP) export BRIDGE_CONTROLLER_GROUP="$value" ;;
+      BRIDGE_AGENT_GROUP_PREFIX) export BRIDGE_AGENT_GROUP_PREFIX="$value" ;;
+    esac
+  done < "$path"
 }
 
 # Auto-load: bridge-lib.sh sources this module after bridge-core.sh and

@@ -251,20 +251,35 @@ bridge_isolation_v2_migrate_emit_row() {
 # ---------------------------------------------------------------------------
 
 bridge_isolation_v2_migrate_sha256_of() {
-  # Print sha256 of a path. For files, hash the bytes. For dirs, hash
-  # the sorted concatenation of (relpath, sha256) lines so two trees
-  # with identical content compare equal regardless of inode/atime.
+  # Print sha256 of a path. For regular files, hash the bytes. For
+  # symlinks, hash the link kind + readlink target. For directories,
+  # walk every regular file AND symlink so a tree containing symlinks
+  # is verified — the previous `-type f` filter let symlink drops
+  # under `rsync -a` slip through as verify_status=ok.
   local target="$1"
-  if [[ -f "$target" && ! -L "$target" ]]; then
+  if [[ -L "$target" ]]; then
+    printf 'symlink:%s' "$(readlink "$target" 2>/dev/null || printf 'unreadable')" \
+      | sha256sum | awk '{print $1}'
+    return
+  fi
+  if [[ -f "$target" ]]; then
     sha256sum "$target" 2>/dev/null | awk '{print $1}'
     return
   fi
   if [[ -d "$target" ]]; then
     (
       cd "$target" 2>/dev/null || exit 0
-      find . -type f -print0 2>/dev/null \
+      find . \( -type f -o -type l \) -print0 2>/dev/null \
         | sort -z \
-        | xargs -0 sha256sum 2>/dev/null
+        | while IFS= read -r -d '' p; do
+            if [[ -L "$p" ]]; then
+              printf 'symlink:%s\t%s\n' "$p" \
+                "$(readlink "$p" 2>/dev/null || printf 'unreadable')"
+            elif [[ -f "$p" ]]; then
+              printf 'file:%s\t%s\n' "$p" \
+                "$(sha256sum "$p" 2>/dev/null | awk '{print $1}')"
+            fi
+          done
     ) | sha256sum | awk '{print $1}'
     return
   fi
@@ -302,16 +317,18 @@ bridge_isolation_v2_migrate_mirror_one() {
     mkdir -p "$dst_parent" 2>/dev/null
   fi
 
-  # Real copy. -a preserves perm/owner/time. -X xattrs. --numeric-ids
-  # avoids name lookups on the destination side. --no-links so symlinks
-  # are followed (rare in the layouts we mirror; if a symlink is later
-  # discovered we treat it as runtime).
+  # Real copy. -a preserves perm/owner/time AND symlinks (-l is part of
+  # -a). -H preserves hardlinks. -X preserves xattrs. --numeric-ids
+  # skips name lookups on the destination side. NOTE: do not use
+  # --no-links — it disables symlink copying entirely, which previously
+  # let symlink-bearing trees pass verify_status=ok with the symlinks
+  # silently dropped (caught by the dev-codex r1 review).
   local rc=0
   if [[ -d "$legacy_src" ]]; then
-    rsync -aHX --numeric-ids --no-links --delete-excluded \
+    rsync -aHX --numeric-ids --delete-excluded \
       "$legacy_src/" "$v2_dst/" >/dev/null 2>&1 || rc=$?
   else
-    rsync -aHX --numeric-ids --no-links \
+    rsync -aHX --numeric-ids \
       "$legacy_src" "$v2_dst" >/dev/null 2>&1 || rc=$?
   fi
   if (( rc != 0 )); then
@@ -360,17 +377,56 @@ bridge_isolation_v2_migrate_mirror_all() {
 # 6. group ensure + post-flight probe
 # ---------------------------------------------------------------------------
 
-bridge_isolation_v2_migrate_ensure_groups() {
+bridge_isolation_v2_migrate_ensure_groups_and_memberships() {
+  # Group creation + user membership additions + path ownership
+  # normalization, all in one operation. Uses BRIDGE_SHARED_GROUP /
+  # BRIDGE_CONTROLLER_GROUP / BRIDGE_AGENT_GROUP_PREFIX overrides if
+  # the marker provided them; defaults match lib/bridge-isolation-v2.sh.
   local snapshot_path="$1"
-  local _g
-  for _g in "ab-shared" "ab-controller"; do
-    bridge_isolation_v2_ensure_group "$_g" || return 1
-  done
-  local agent
+  local data_root="$2"
+  local controller_user="${SUDO_USER:-${USER:-}}"
+  local shared_grp="${BRIDGE_SHARED_GROUP:-ab-shared}"
+  local ctrl_grp="${BRIDGE_CONTROLLER_GROUP:-ab-controller}"
+
+  bridge_isolation_v2_ensure_group "$shared_grp" || return 1
+  bridge_isolation_v2_ensure_group "$ctrl_grp" || return 1
+
+  if [[ -n "$controller_user" ]]; then
+    bridge_isolation_v2_ensure_user_in_group "$controller_user" "$shared_grp" || return 1
+    bridge_isolation_v2_ensure_user_in_group "$controller_user" "$ctrl_grp" || return 1
+  fi
+
+  local agent agent_grp os_user
   while IFS= read -r agent; do
     [[ -n "$agent" ]] || continue
-    bridge_isolation_v2_ensure_group "$(bridge_isolation_v2_agent_group_name "$agent")" \
-      || return 1
+    agent_grp="$(bridge_isolation_v2_agent_group_name "$agent")"
+    bridge_isolation_v2_ensure_group "$agent_grp" || return 1
+    os_user="$(bridge_agent_os_user "$agent" 2>/dev/null || true)"
+    if [[ -n "$os_user" ]]; then
+      bridge_isolation_v2_ensure_user_in_group "$os_user" "$shared_grp" || return 1
+      bridge_isolation_v2_ensure_user_in_group "$os_user" "$agent_grp" || return 1
+    fi
+    if [[ -n "$controller_user" ]]; then
+      bridge_isolation_v2_ensure_user_in_group "$controller_user" "$agent_grp" || return 1
+    fi
+  done < "$snapshot_path"
+
+  # Normalize ownership/mode on the migrated trees per the v2 layout
+  # spec (lib/bridge-isolation-v2.sh:36-65). Without this step the
+  # share-plugin-catalog / per-agent traverse paths cannot reach the
+  # files even with correct group memberships.
+  if [[ -d "$data_root/shared" ]]; then
+    bridge_isolation_v2_chgrp_setgid_recursive "$data_root/shared" "$shared_grp" 2>/dev/null || true
+  fi
+  if [[ -d "$data_root/state" ]]; then
+    bridge_isolation_v2_chgrp_setgid_recursive "$data_root/state" "$ctrl_grp" 2>/dev/null || true
+  fi
+  while IFS= read -r agent; do
+    [[ -n "$agent" ]] || continue
+    agent_grp="$(bridge_isolation_v2_agent_group_name "$agent")"
+    if [[ -d "$data_root/agents/$agent" ]]; then
+      bridge_isolation_v2_chgrp_setgid_recursive "$data_root/agents/$agent" "$agent_grp" 2>/dev/null || true
+    fi
   done < "$snapshot_path"
   return 0
 }
@@ -586,8 +642,8 @@ bridge_isolation_v2_migrate_apply() {
 
   bridge_isolation_v2_migrate_orchestrate_stop "$snapshot"
 
-  bridge_isolation_v2_migrate_ensure_groups "$snapshot" \
-    || bridge_die "group ensure failed"
+  bridge_isolation_v2_migrate_ensure_groups_and_memberships "$snapshot" "$data_root" \
+    || bridge_die "group ensure / membership / normalize failed"
 
   local manifest
   manifest="$(bridge_isolation_v2_migrate_manifest_path)"
@@ -602,7 +658,7 @@ bridge_isolation_v2_migrate_apply() {
   bridge_isolation_v2_migrate_orchestrate_restart "$snapshot"
 
   if ! bridge_isolation_v2_migrate_postflight_groups "$snapshot"; then
-    bridge_warn "post-flight group probe reported issues — investigate before --commit"
+    bridge_die "post-flight group probe reported missing memberships — v2 plugin/share path will be broken; rollback before retrying"
   fi
 
   printf 'apply ok: marker=%s manifest=%s\n' \

@@ -92,6 +92,33 @@ else
   ok "marker_validate rejects relative BRIDGE_DATA_ROOT"
 fi
 
+# 2d. command substitution in allowed-key value
+printf 'BRIDGE_LAYOUT=v2\nBRIDGE_DATA_ROOT=/tmp/v2\nBRIDGE_SHARED_GROUP=$(touch /tmp/agb-pwn-canary.%d)\n' "$$" > "$marker_path"
+chmod 0640 "$marker_path"
+rm -f "/tmp/agb-pwn-canary.$$"
+if bridge_isolation_v2_marker_validate "$marker_path" 2>/dev/null; then
+  fail "marker_validate accepted command substitution in value"
+else
+  ok "marker_validate rejects command substitution in value"
+fi
+# Also confirm load does NOT execute it.
+( bridge_isolation_v2_marker_load 2>/dev/null )
+if [[ -e "/tmp/agb-pwn-canary.$$" ]]; then
+  fail "marker_load executed command substitution (canary file created)"
+  rm -f "/tmp/agb-pwn-canary.$$"
+else
+  ok "marker_load did not execute command substitution"
+fi
+
+# 2e. backtick injection
+printf 'BRIDGE_LAYOUT=v2\nBRIDGE_DATA_ROOT=`/bin/echo /tmp`\n' > "$marker_path"
+chmod 0640 "$marker_path"
+if bridge_isolation_v2_marker_validate "$marker_path" 2>/dev/null; then
+  fail "marker_validate accepted backtick value"
+else
+  ok "marker_validate rejects backtick value"
+fi
+
 # ---------------------------------------------------------------------------
 # Case 3: marker validation accepts valid v2 marker
 # ---------------------------------------------------------------------------
@@ -263,6 +290,64 @@ rm -f /tmp/dr.out.$$
 # ---------------------------------------------------------------------------
 # Summary
 # ---------------------------------------------------------------------------
+
+# ---------------------------------------------------------------------------
+# Case 9: symlink-aware sha256_of (regression for r1 finding 3)
+# ---------------------------------------------------------------------------
+
+sym_root="$SMOKE_ROOT/symtest"
+mkdir -p "$sym_root/sub"
+echo 'real' > "$sym_root/sub/real.txt"
+ln -s "$sym_root/sub/real.txt" "$sym_root/link.txt"
+
+sha_with_link="$(bridge_isolation_v2_migrate_sha256_of "$sym_root")"
+
+# Drop just the symlink and recompute — hashes must differ. With the
+# old `-type f` filter the two hashes were identical because the
+# symlink was ignored.
+rm "$sym_root/link.txt"
+sha_without_link="$(bridge_isolation_v2_migrate_sha256_of "$sym_root")"
+
+if [[ "$sha_with_link" != "$sha_without_link" ]]; then
+  ok "sha256_of distinguishes presence of symlink"
+else
+  fail "sha256_of same hash with/without symlink — symlinks ignored"
+fi
+
+# Symlink standalone hash differs from absent.
+ln -s /nonexistent "$sym_root/danglink"
+sha_dangling="$(bridge_isolation_v2_migrate_sha256_of "$sym_root/danglink")"
+if [[ "$sha_dangling" != "absent" && "$sha_dangling" != "" ]]; then
+  ok "sha256_of dangling symlink hashes link target string"
+else
+  fail "sha256_of dangling symlink returned absent"
+fi
+
+# ---------------------------------------------------------------------------
+# Case 10: ensure_groups_and_memberships exists and references env-overridable group names
+# ---------------------------------------------------------------------------
+
+# Cannot exercise group creation rootlessly, but verify the function
+# was renamed/updated and reads BRIDGE_SHARED_GROUP / BRIDGE_CONTROLLER_GROUP.
+if declare -f bridge_isolation_v2_migrate_ensure_groups_and_memberships >/dev/null; then
+  ok "ensure_groups_and_memberships function defined"
+else
+  fail "ensure_groups_and_memberships function missing"
+fi
+
+if declare -f bridge_isolation_v2_migrate_ensure_groups_and_memberships \
+   | grep -q 'BRIDGE_SHARED_GROUP'; then
+  ok "ensure_groups_and_memberships honors BRIDGE_SHARED_GROUP override"
+else
+  fail "ensure_groups_and_memberships does not reference BRIDGE_SHARED_GROUP override"
+fi
+
+if declare -f bridge_isolation_v2_migrate_ensure_groups_and_memberships \
+   | grep -q 'bridge_isolation_v2_ensure_user_in_group'; then
+  ok "ensure_groups_and_memberships adds user memberships"
+else
+  fail "ensure_groups_and_memberships does NOT add user memberships"
+fi
 
 printf '\n[summary] pass=%d fail=%d\n' "$PASS" "$FAIL"
 if (( FAIL > 0 )); then
