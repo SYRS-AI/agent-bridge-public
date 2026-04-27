@@ -350,28 +350,23 @@ bridge_run_schedule_idle_marker_and_inbox_bootstrap() {
 
 bridge_run_should_auto_accept_dev_channels() {
   local launch_cmd="$1"
-  local allowed=""
   local effective=""
-  local item=""
-  local -a items=()
 
   [[ "$ENGINE" == "claude" ]] || return 1
   [[ $SAFE_MODE -eq 0 ]] || return 1
+  # Presence of --dangerously-load-development-channels in the launch cmd
+  # is itself the operator's explicit opt-in; the warning picker is a
+  # confirmation of that same decision. Auto-accept whenever any dev
+  # channel is extracted from the cmd, regardless of the per-agent
+  # allowlist or isolation mode. PR #364 r2 originally gated this on the
+  # bridge_agent_auto_accept_dev_channels_csv allowlist, which silently
+  # excluded non-isolated agents whose roster had a non-default override
+  # (issue #410: sales_sean stalled indefinitely on the picker on cold
+  # start because the per-agent allowlist did not intersect the loaded
+  # dev channels).
   effective="$(bridge_extract_development_channels_from_command "$launch_cmd")"
   [[ -n "$effective" ]] || return 1
-  allowed="$(bridge_agent_auto_accept_dev_channels_csv "$AGENT")"
-  [[ -n "$allowed" ]] || return 1
-
-  IFS=',' read -r -a items <<<"$allowed"
-  for item in "${items[@]}"; do
-    item="$(bridge_trim_whitespace "$item")"
-    [[ -n "$item" ]] || continue
-    if bridge_channel_csv_contains "$effective" "$item"; then
-      return 0
-    fi
-  done
-
-  return 1
+  return 0
 }
 
 bridge_run_schedule_dev_channels_accept() {
