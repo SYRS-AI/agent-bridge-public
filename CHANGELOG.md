@@ -4,6 +4,68 @@ All notable changes to Agent Bridge are documented here. This project adheres
 loosely to [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and tracks
 version bumps via the `VERSION` file.
 
+## [0.6.27] — 2026-04-28
+
+### Fixes
+
+- **`hooks(session-start): self-enqueue handoff-pending task`** (#409
+  Track A, PR #411). `NEXT-SESSION.md` handoff was advisory only —
+  the SessionStart hook injected a stdout context line, which
+  empirically got out-prioritized by whatever the operator typed as the
+  first user message and was silently skipped. The fix self-enqueues
+  an urgent task on the agent's own inbox when a handoff is detected.
+  The existing queue contract ("claim highest-priority queued task
+  first") then turns the handoff into a hard precondition for any
+  other work.
+
+  - Idempotent enqueue keyed on a SHA-1 digest of the handoff content
+    (matches the bash side's `bridge_agent_next_session_digest`).
+  - Same digest → no-op (find-open + title equality check).
+  - Content change → fresh urgent task with new digest; operator can
+    `done` the previous one once the new handoff is processed.
+  - `queue_cli` unavailable → exits 0 without traceback; the existing
+    "Handoff present:" stdout context still emits as a fallback.
+
+  Tracks B (settings.json schema cleanup), C (role contract
+  strengthening), D (audit row for unacted handoff) of #409 stay open
+  for follow-up.
+
+- **`bridge-run: auto-accept dev-channels picker independent of
+  allowlist`** (#410, PR #413). The dev-channels warning picker was
+  silently failing to auto-accept on agents whose loaded dev channels
+  did not intersect the per-agent
+  `BRIDGE_AGENT_AUTO_ACCEPT_DEV_CHANNELS` allowlist. Default allowlist
+  is `plugin:teams@agent-bridge`, so any agent declaring an MS365-only
+  (or other non-teams) dev channel stalled indefinitely on the picker.
+  Affected both isolated and non-isolated agents — the issue surfaced
+  on a non-isolated static agent because earlier debugging assumed
+  the bug was isolation-specific.
+
+  The fix removes the allowlist intersection from
+  `bridge_run_should_auto_accept_dev_channels` entirely. Rationale:
+  the presence of `--dangerously-load-development-channels` in the
+  launch cmd is itself the operator's explicit opt-in; the warning
+  picker is a confirmation of the same decision. Engine=claude +
+  !safe-mode + dev-channels-extracted guards preserved.
+
+### v0.6.27 upgrade / migration notes
+
+#### Auto
+
+- v0.6.26 → v0.6.27 binary upgrade is straightforward — no schema
+  changes. Both fixes activate immediately on the next agent cold
+  start (#410) / next session (#409).
+
+#### Operator-required
+
+None.
+
+For operators who relied on the per-agent allowlist as a soft denial
+of auto-accept, note that v0.6.27 removes that gate — if you want to
+prevent auto-accept of a specific dev channel, drop it from the launch
+cmd's `--dangerously-load-development-channels` flags. (No reports of
+operators using the allowlist this way.)
+
 ## [0.6.26] — 2026-04-27
 
 ### isolate-v2 PR-E follow-up — dev-codex r1 review remediation
