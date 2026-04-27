@@ -666,6 +666,46 @@ step_memory_daily_cron_one() {
     existing_tz="$(printf '%s' "$found" | awk -F'\t' '{print $3}')"
   fi
 
+  # Issue #376 Track B: apply-time migration. Track A (v0.6.18) gates the
+  # registration loop on STATIC_AGENT_SET so a fresh bootstrap no longer
+  # creates memory-daily-<agent> crons for dynamic agents. But pre-v0.6.18
+  # installs already have those crons sitting on the cron board — Track C
+  # makes the harvester silently no-op for them, but the entries remain
+  # dead weight until removed. Detect and clean them up here, mirroring
+  # the 3-mode pattern used for the #320 Track A migration in step_cron_one.
+  #
+  # Dynamic = "active claude agent NOT in STATIC_AGENT_SET". This avoids an
+  # extra `agb agent show --json` subprocess per agent — the static set is
+  # already loaded at script start from list_active_static_claude_agents.
+  if [[ -z "${STATIC_AGENT_SET[$agent]:-}" ]]; then
+    if [[ -n "$found" ]]; then
+      case "$MODE" in
+        apply)
+          if "$BRIDGE_AGB" cron delete "$existing_id" >/dev/null 2>&1; then
+            record "$agent" "cron:$title" "migrated-removed" \
+              "id=$existing_id reason=dynamic-agent-not-memory-daily-target"
+          else
+            record "$agent" "cron:$title" "migrate-failed" \
+              "id=$existing_id reason=dynamic-agent-not-memory-daily-target"
+            note_drift
+          fi
+          ;;
+        dry-run)
+          record "$agent" "cron:$title" "would-remove" \
+            "id=$existing_id reason=dynamic-agent-not-memory-daily-target"
+          ;;
+        check|*)
+          record "$agent" "cron:$title" "drift-migration-pending" \
+            "id=$existing_id reason=dynamic-agent-not-memory-daily-target"
+          note_drift
+          ;;
+      esac
+    else
+      record "$agent" "cron:$title" "skip-dynamic-agent" ""
+    fi
+    return 0
+  fi
+
   if ! memory_daily_gate_on "$agent"; then
     # Gate off. If a cron exists, schedule a cleanup in apply mode; else skip.
     if [[ -n "$found" ]]; then
@@ -990,12 +1030,13 @@ while IFS=$'\t' read -r agent home; do
   [[ -z "$agent" || -z "$home" ]] && continue
   step_hook_one "$agent" "$home"
   step_rebuild_one "$agent" "$home"
-  # Issue #376: only register memory-daily-<agent> crons for static agents.
-  # Dynamic agents have no stable per-agent home; the harvester would fail
-  # every morning with exit 2 and spam admin's queue with cron-followup tasks.
-  if [[ -n "${STATIC_AGENT_SET[$agent]:-}" ]]; then
-    step_memory_daily_cron_one "$agent"
-  fi
+  # Issue #376: memory-daily-<agent> registration is gated on static-class
+  # membership *inside* step_memory_daily_cron_one. The function returns
+  # early for dynamic agents — either deleting a stale pre-v0.6.18 cron
+  # (Track B apply-time migration) or recording skip-dynamic-agent when no
+  # cron exists. Always invoke; the static/dynamic split is the function's
+  # responsibility, not the loop's.
+  step_memory_daily_cron_one "$agent"
 done < "$AGENT_LIST_TMP"
 
 for spec in "${CRON_SPECS[@]}"; do
