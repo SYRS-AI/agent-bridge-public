@@ -143,13 +143,16 @@ PYEOF
 
 # -------------------------------------------------------------------------
 # Lane B — non-daily captures for librarian ingest.
-# Workdir-aware strict enumeration (PR-D / isolation v2 compatibility).
-# Does NOT source _common.sh — runs an inline strict probe so other callers
-# of list_active_claude_agents are unaffected by PR-D's stricter contract.
-# v2 활성 후 install-root memory 는 frozen snapshot 이라 새 file 안 들어옴;
-# `agb agent list --json` 의 workdir field 가 single source of truth.
 #
-# fail-closed semantics:
+# v2-gated dual-mode enumeration. Default-off invariant: legacy installs
+# (BRIDGE_LAYOUT unset or "legacy") use the original find-based enumeration
+# over $AGENTS_ROOT/*/memory/... so unrelated installs are unaffected by
+# PR-D's stricter contract. Only when BRIDGE_LAYOUT=v2 do we switch to the
+# workdir-aware strict probe via `agb agent list --json` — install-root
+# memory is a frozen snapshot under v2, so the workdir field becomes the
+# single source of truth.
+#
+# Strict (v2) fail-closed semantics:
 #   - BRIDGE_AGB 미실행/비실행파일      → exit 2
 #   - `agent list --json` 호출 실패      → exit 2 + stderr
 #   - JSON parse 실패 또는 list 아님     → exit 2 + stderr
@@ -161,23 +164,27 @@ PYEOF
 : "${BRIDGE_AGB:=$BRIDGE_HOME/agent-bridge}"
 : "${BRIDGE_PYTHON:=python3}"
 
-if [[ ! -x "$BRIDGE_AGB" ]]; then
-  printf '[wiki-daily-ingest] BRIDGE_AGB not executable: %s\n' "$BRIDGE_AGB" >&2
-  exit 2
-fi
+declare -a AGENT_MEMORY_ROOTS=()
 
-_lane_b_stderr="$(mktemp -t wiki-daily-ingest.agb-stderr.XXXXXX)"
+if [[ "${BRIDGE_LAYOUT:-legacy}" == "v2" ]]; then
+  # v2: strict workdir-aware enumeration via `agb agent list --json`.
+  if [[ ! -x "$BRIDGE_AGB" ]]; then
+    printf '[wiki-daily-ingest] BRIDGE_AGB not executable: %s\n' "$BRIDGE_AGB" >&2
+    exit 2
+  fi
 
-agent_list_json="$("$BRIDGE_AGB" agent list --json 2>"$_lane_b_stderr")"
-agb_exit=$?
-if (( agb_exit != 0 )); then
-  printf '[wiki-daily-ingest] agb agent list --json failed (exit=%d): %s\n' \
-    "$agb_exit" "$(cat "$_lane_b_stderr")" >&2
-  rm -f "$_lane_b_stderr"
-  exit 2
-fi
+  _lane_b_stderr="$(mktemp -t wiki-daily-ingest.agb-stderr.XXXXXX)"
 
-agents_tsv="$("$BRIDGE_PYTHON" - "$agent_list_json" <<'PY' 2>"$_lane_b_stderr"
+  agent_list_json="$("$BRIDGE_AGB" agent list --json 2>"$_lane_b_stderr")"
+  agb_exit=$?
+  if (( agb_exit != 0 )); then
+    printf '[wiki-daily-ingest] agb agent list --json failed (exit=%d): %s\n' \
+      "$agb_exit" "$(cat "$_lane_b_stderr")" >&2
+    rm -f "$_lane_b_stderr"
+    exit 2
+  fi
+
+  agents_tsv="$("$BRIDGE_PYTHON" - "$agent_list_json" <<'PY' 2>"$_lane_b_stderr"
 import json, sys
 try:
     data = json.loads(sys.argv[1])
@@ -199,25 +206,34 @@ for a in data:
     print(f"{name}\t{wd}")
 PY
 )"
-parse_exit=$?
-if (( parse_exit != 0 )); then
-  printf '[wiki-daily-ingest] agent list JSON parse failed (exit=%d): %s\n' \
-    "$parse_exit" "$(cat "$_lane_b_stderr")" >&2
+  parse_exit=$?
+  if (( parse_exit != 0 )); then
+    printf '[wiki-daily-ingest] agent list JSON parse failed (exit=%d): %s\n' \
+      "$parse_exit" "$(cat "$_lane_b_stderr")" >&2
+    rm -f "$_lane_b_stderr"
+    exit 2
+  fi
   rm -f "$_lane_b_stderr"
-  exit 2
-fi
-rm -f "$_lane_b_stderr"
 
-declare -a AGENT_MEMORY_ROOTS=()
-if [[ -n "$agents_tsv" ]]; then
-  while IFS=$'\t' read -r _agent _workdir; do
-    [[ -n "$_agent" && -n "$_workdir" ]] || continue
-    [[ -d "$_workdir/memory" ]] || continue
-    AGENT_MEMORY_ROOTS+=("$_workdir/memory")
-  done <<< "$agents_tsv"
+  if [[ -n "$agents_tsv" ]]; then
+    while IFS=$'\t' read -r _agent _workdir; do
+      [[ -n "$_agent" && -n "$_workdir" ]] || continue
+      [[ -d "$_workdir/memory" ]] || continue
+      AGENT_MEMORY_ROOTS+=("$_workdir/memory")
+    done <<< "$agents_tsv"
+  fi
+else
+  # Legacy: original find-based enumeration over $AGENTS_ROOT/*/memory.
+  # Each install-root agent dir with a memory/ subtree contributes a root.
+  if [[ -d "$AGENTS_ROOT" ]]; then
+    for _legacy_dir in "$AGENTS_ROOT"/*/memory; do
+      [[ -d "$_legacy_dir" ]] || continue
+      AGENT_MEMORY_ROOTS+=("$_legacy_dir")
+    done
+  fi
 fi
 
-# Research files touched in last 24h (across all active agent workdirs).
+# Research files touched in last 24h (across all active agent memory roots).
 touched_research=""
 for _root in "${AGENT_MEMORY_ROOTS[@]}"; do
   [[ -d "$_root/research" ]] || continue

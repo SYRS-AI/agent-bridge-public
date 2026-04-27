@@ -664,9 +664,17 @@ bridge_isolation_v2_migrate_dry_run() {
   local snapshot
   snapshot="$(bridge_isolation_v2_migrate_active_snapshot_path)"
 
+  local active_count
+  active_count="$(wc -l < "$snapshot" | tr -d ' ')"
+
   printf '== isolation-v2 migrate dry-run ==\n'
   printf 'data_root: %s\n' "$data_root"
-  printf 'active agents: %s\n' "$(wc -l < "$snapshot" | tr -d ' ')"
+  printf 'BRIDGE_LAYOUT: %s\n' "${BRIDGE_LAYOUT:-legacy}"
+  printf 'active agents: %s\n' "$active_count"
+  if [[ "${BRIDGE_LAYOUT:-legacy}" != "v2" ]]; then
+    printf '(BRIDGE_LAYOUT currently %s — would migrate %s agents; set BRIDGE_LAYOUT=v2 + BRIDGE_DATA_ROOT=<path> before --apply)\n' \
+      "${BRIDGE_LAYOUT:-legacy}" "$active_count"
+  fi
   printf '\n-- mirror plan (mapping_id  src  dst  delete_eligible) --\n'
   bridge_isolation_v2_migrate_emit_plan "$data_root" "$snapshot"
 
@@ -682,6 +690,14 @@ bridge_isolation_v2_migrate_apply() {
   local data_root="$1"
   [[ -n "$data_root" && "${data_root:0:1}" == "/" ]] \
     || bridge_die "--apply requires --data-root <absolute-path>"
+
+  # Fail-fast on legacy installs. Operators must opt in to v2 before
+  # running the mutation paths; otherwise the marker flip lands on an
+  # install whose runtime is still wired to legacy paths.
+  if [[ "${BRIDGE_LAYOUT:-legacy}" != "v2" ]]; then
+    bridge_die "migrate apply requires BRIDGE_LAYOUT=v2 (currently: ${BRIDGE_LAYOUT:-legacy}). Set BRIDGE_LAYOUT=v2 + BRIDGE_DATA_ROOT=<path> in the controller environment before running the migration tool."
+  fi
+
   if bridge_isolation_v2_active; then
     bridge_warn "v2 already active — apply is idempotent only when --data-root matches; proceeding will re-mirror."
   fi
@@ -690,6 +706,14 @@ bridge_isolation_v2_migrate_apply() {
   bridge_isolation_v2_migrate_capture_active_snapshot
   local snapshot
   snapshot="$(bridge_isolation_v2_migrate_active_snapshot_path)"
+
+  # Empty active snapshot — no-op cleanly rather than silently mirroring
+  # zero rows. Operators expect a clear signal when there are no active
+  # claude agents to migrate.
+  if [[ ! -s "$snapshot" ]]; then
+    printf '[migrate] no active claude agents to migrate; nothing to do.\n'
+    return 0
+  fi
 
   bridge_isolation_v2_migrate_self_stop_guard "$snapshot"
 
@@ -731,6 +755,14 @@ bridge_isolation_v2_migrate_apply() {
 }
 
 bridge_isolation_v2_migrate_rollback() {
+  # Fail-fast on legacy installs. Rollback removes the v2 marker; if the
+  # install was never v2 there is nothing to roll back, and silent
+  # daemon stop/restart cycles on a legacy install would surprise the
+  # operator.
+  if [[ "${BRIDGE_LAYOUT:-legacy}" != "v2" ]]; then
+    bridge_die "migrate rollback requires BRIDGE_LAYOUT=v2 (currently: ${BRIDGE_LAYOUT:-legacy}). Rollback only makes sense on a v2-active install."
+  fi
+
   bridge_isolation_v2_migrate_acquire_lock
   bridge_isolation_v2_migrate_capture_active_snapshot
   local snapshot
@@ -746,6 +778,14 @@ bridge_isolation_v2_migrate_rollback() {
 }
 
 bridge_isolation_v2_migrate_commit() {
+  # Fail-fast on legacy installs. Commit deletes legacy paths recorded in
+  # the manifest; running on a legacy install would either no-op
+  # confusingly or — worse, if a stale manifest is around — delete data
+  # the runtime is still reading.
+  if [[ "${BRIDGE_LAYOUT:-legacy}" != "v2" ]]; then
+    bridge_die "migrate commit requires BRIDGE_LAYOUT=v2 (currently: ${BRIDGE_LAYOUT:-legacy}). Commit deletes legacy data and is only safe after apply has succeeded and the marker is active."
+  fi
+
   bridge_isolation_v2_migrate_acquire_lock
 
   if ! bridge_isolation_v2_active; then
@@ -887,6 +927,12 @@ bridge_isolation_v2_migrate_cli() {
       BRIDGE_ISOLATION_V2_MIGRATE_YES=1 bridge_isolation_v2_migrate_commit
       ;;
     status)
+      # status is read-only and works on any layout; reject extra
+      # positional args so typos like `status --json` (unsupported) don't
+      # silently succeed.
+      if (( $# > 0 )); then
+        bridge_die "migrate isolation-v2 status: unexpected extra args: $*"
+      fi
       bridge_isolation_v2_migrate_status
       ;;
     ""|-h|--help|help)

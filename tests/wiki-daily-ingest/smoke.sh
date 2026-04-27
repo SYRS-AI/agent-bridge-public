@@ -26,11 +26,19 @@
 #      a non-zero error count the previous watermark stays, so the next
 #      run retries the same window.
 #
-# Lane B (librarian-ingest task creation) is intentionally not exercised
-# here — it requires a real $BRIDGE_AGB binary. We populate only daily
-# notes under memory/, so the find(1) over research/projects/shared/
-# decisions returns zero and Lane B is a no-op. That matches the issue
-# scope (Lane A is the watermark consumer).
+# Lane B (librarian-ingest task creation) full task-create is intentionally
+# not exercised — that requires a real $BRIDGE_AGB binary. Scenarios 1-5
+# populate only daily notes under memory/, so the find(1) over
+# research/projects/shared/decisions returns zero and Lane B is a no-op.
+# That matches the watermark scope (Lane A is the watermark consumer).
+#
+# Scenarios 6 and 7 exercise the Lane B v2-gate added in PR-D r2:
+#   6. BRIDGE_LAYOUT unset/legacy → falls through to find-based
+#      enumeration over $AGENTS_ROOT/*/memory/research, picks up the
+#      research file under the legacy install-root memory path.
+#   7. BRIDGE_LAYOUT=v2 + populated `agb agent list --json` (via
+#      AGB_MOCK_AGENT_LIST_JSON) → strict enumeration picks up the
+#      research file under the v2 workdir's memory tree.
 #
 # Usage:   ./tests/wiki-daily-ingest/smoke.sh
 # Exit 0 if every scenario PASSes; exit 1 otherwise.
@@ -301,6 +309,86 @@ fi
 
 # Cleanup the deliberate collision so EXIT trap removes things cleanly.
 rm -f "$dest_parent" 2>/dev/null || true
+
+# =============================================================================
+# Scenario 6 — Lane B legacy fallback enumeration.
+# When BRIDGE_LAYOUT is unset/legacy, Lane B must fall through to the
+# original $AGENTS_ROOT/*/memory/<sub> find-based enumeration. We populate
+# a research/*.md file under the install-root agent path and assert the
+# audit log records it. The v2 strict path would never look at install-root
+# memory (frozen snapshot under v2), so this case proves the gate.
+# =============================================================================
+banner "6 — Lane B legacy fallback enumeration via install-root memory"
+reset_runtime
+unset BRIDGE_LAYOUT 2>/dev/null || true
+write_note "$TODAY" "# $TODAY note"
+
+# Drop a fresh research file under the install-root memory path.
+mkdir -p "$AGENT_HOME/memory/research"
+echo "# probe research note" >"$AGENT_HOME/memory/research/probe.md"
+# Ensure the file's mtime is within last-24h (BSD vs GNU touch differ; the
+# default mtime is "now" so this is just a belt-and-suspenders).
+touch "$AGENT_HOME/memory/research/probe.md"
+
+out_file="$(run_ingest s6 || true)"
+audit_file="$BRIDGE_WIKI_ROOT/_audit/ingest-$TODAY.md"
+if [[ ! -f "$audit_file" ]]; then
+  fail "6" "audit log missing: $audit_file"
+elif ! grep -q "research/probe.md" "$audit_file"; then
+  fail "6" "legacy fallback did NOT enumerate $AGENT_HOME/memory/research/probe.md; audit body: $(head -c 400 "$audit_file")"
+elif ! grep -q "Research files (1)" "$audit_file"; then
+  fail "6" "expected 'Research files (1)' in audit; got: $(head -c 400 "$audit_file")"
+else
+  pass "6"
+fi
+
+# =============================================================================
+# Scenario 7 — Lane B v2 strict enumeration via populated agent list.
+# BRIDGE_LAYOUT=v2 + AGB_MOCK_AGENT_LIST_JSON pointing at a fixture v2
+# workdir: the audit log must reference the v2 workdir's memory tree, not
+# the install-root path.
+# =============================================================================
+banner "7 — Lane B v2 strict enumeration uses agb agent list workdir"
+reset_runtime
+write_note "$TODAY" "# $TODAY note"
+
+# Build a v2-style workdir for the smoke agent and put a research file
+# under its memory subtree. The legacy install-root memory must NOT
+# contain a matching file in this case so we can prove the v2 path is
+# what populated the audit log.
+V2_WORKDIR="$SMOKE_ROOT/data-v2/agents/$AGENT/workdir"
+mkdir -p "$V2_WORKDIR/memory/research"
+echo "# v2 probe research" >"$V2_WORKDIR/memory/research/v2probe.md"
+touch "$V2_WORKDIR/memory/research/v2probe.md"
+
+# Mock returns a single active claude agent with workdir pointing at the
+# fixture v2 workdir. Use python to emit valid JSON without escaping pain.
+AGB_MOCK_AGENT_LIST_JSON="$("$PYTHON" -c "
+import json, sys
+print(json.dumps([{
+    'agent': '$AGENT',
+    'engine': 'claude',
+    'active': True,
+    'workdir': '$V2_WORKDIR',
+}]))
+")"
+export AGB_MOCK_AGENT_LIST_JSON
+export BRIDGE_LAYOUT=v2
+
+out_file="$(run_ingest s7 || true)"
+audit_file="$BRIDGE_WIKI_ROOT/_audit/ingest-$TODAY.md"
+if [[ ! -f "$audit_file" ]]; then
+  fail "7" "audit log missing: $audit_file"
+elif ! grep -q "v2probe.md" "$audit_file"; then
+  fail "7" "v2 strict enumeration did NOT pick up $V2_WORKDIR/memory/research/v2probe.md; audit body: $(head -c 400 "$audit_file")"
+elif ! grep -q "$V2_WORKDIR" "$audit_file"; then
+  fail "7" "audit log path is not the v2 workdir: $(head -c 400 "$audit_file")"
+else
+  pass "7"
+fi
+
+# Restore env for any later scenarios.
+unset AGB_MOCK_AGENT_LIST_JSON BRIDGE_LAYOUT 2>/dev/null || true
 
 # -----------------------------------------------------------------------------
 # Summary
