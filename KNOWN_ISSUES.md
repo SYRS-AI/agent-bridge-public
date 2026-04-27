@@ -219,3 +219,43 @@ Operator guidance:
 - Declare an allowlist for each long-lived agent role. Start by listing the plugins the agent actually uses (channel transports, role-specific MCP servers like `syrs-gmail`, etc.) and re-run `bash scripts/apply-channel-policy.sh`.
 - Restart the agent to pick up the overlay (`agb agent restart <agent>`).
 - The allowlist is enforced at MCP-spawn time via `enabledPlugins=false`, not via `--strict-mcp-config`. A `--strict-mcp-config` track is feasible as a follow-up if `enabledPlugins` is found insufficient on a given Claude Code release; today the overlay is the lowest-risk path because the same machinery already enforces the singleton channel policy.
+## 14. Layout v2 retains legacy install-root profile / memory after migration
+
+PR-D's `agent-bridge migrate isolation-v2 commit` does NOT delete profile,
+skill, or memory files from `$BRIDGE_HOME/agents/<agent>/` — those are
+copied to the v2 workdir with `delete_eligible=0` and the install-root
+copies are kept as a frozen snapshot.
+
+Practical effect:
+
+- Edits to `CLAUDE.md`, `MEMORY.md`, `SKILLS.md`, `SOUL.md`, `HEARTBEAT.md`,
+  `MEMORY-SCHEMA.md`, `COMMON-INSTRUCTIONS.md`, `CHANGE-POLICY.md`,
+  `TOOLS.md`, `SESSION-TYPE.md`, `NEXT-SESSION.md`, `.agents/`, `memory/`,
+  `users/`, `references/`, `skills/` after activation must go into the v2
+  workdir (`$BRIDGE_DATA_ROOT/agents/<agent>/workdir/`). The install-root
+  copy is left in place but goes stale.
+- `agent-bridge profile deploy <agent>` writes to the v2 workdir under
+  v2 because PR-D ships the matching `bridge_agent_default_profile_home`
+  v2 branch (lib/bridge-agents.sh). The two locations therefore can drift
+  if an admin hand-edits the install-root copy.
+
+Plan: PR-G will either unify the two locations (single source-of-truth in
+the v2 workdir) or mark the install-root copy read-only and point all
+admin tooling at the v2 path explicitly.
+
+## 15. `_common.sh` `list_active_claude_agents` retains silent success on malformed JSON
+
+`scripts/_common.sh:71-96` parses `agb agent list --json` with a broad
+`try/except: sys.exit(0)` clause, so a malformed JSON payload or a failed
+`agb` invocation produces an empty agent list rather than a non-zero exit.
+
+PR-D switched `scripts/wiki-daily-ingest.sh` to a strict inline enumerator
+because Lane B silent-zero would have masked v2 memory updates, but it
+deliberately did NOT change `_common.sh` to avoid touching every other
+caller (`bootstrap-memory-system.sh`, `scripts/wiki-v2-rebuild.sh`,
+`scripts/wiki-weekly-summarize.sh`, `scripts/wiki-monthly-summarize.sh`).
+Those callers retain the original silent-OK behaviour for now.
+
+A follow-up PR (PR-G review) is expected to flip `_common.sh` to fail-closed
+and adjust each caller, replacing the local strict block in
+`wiki-daily-ingest.sh` with the shared helper at that point.

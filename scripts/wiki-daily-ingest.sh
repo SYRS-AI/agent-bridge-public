@@ -142,16 +142,120 @@ PYEOF
 )
 
 # -------------------------------------------------------------------------
-# Lane B — non-daily captures for librarian ingest
+# Lane B — non-daily captures for librarian ingest.
+#
+# v2-gated dual-mode enumeration. Default-off invariant: legacy installs
+# (BRIDGE_LAYOUT unset or "legacy") use the original find-based enumeration
+# over $AGENTS_ROOT/*/memory/... so unrelated installs are unaffected by
+# PR-D's stricter contract. Only when BRIDGE_LAYOUT=v2 do we switch to the
+# workdir-aware strict probe via `agb agent list --json` — install-root
+# memory is a frozen snapshot under v2, so the workdir field becomes the
+# single source of truth.
+#
+# Strict (v2) fail-closed semantics:
+#   - BRIDGE_AGB 미실행/비실행파일      → exit 2
+#   - `agent list --json` 호출 실패      → exit 2 + stderr
+#   - JSON parse 실패 또는 list 아님     → exit 2 + stderr
+#   - 정상 + 진짜 0 active claude agent  → silent OK, Lane B 0 카운트
+# 모든 fail 경로는 `_lane_b_stderr` 임시파일을 명시적으로 rm 한 뒤 exit
+# (기존 line ~101 의 COPY_JSON EXIT trap 을 손상하지 않기 위해 별도 trap 미사용).
 # -------------------------------------------------------------------------
 
-# Research files touched in last 24h.
-touched_research=$(find "$AGENTS_ROOT"/*/memory/research -type f -name '*.md' -mtime -1 2>/dev/null | sort)
+: "${BRIDGE_AGB:=$BRIDGE_HOME/agent-bridge}"
+: "${BRIDGE_PYTHON:=python3}"
+
+declare -a AGENT_MEMORY_ROOTS=()
+
+if [[ "${BRIDGE_LAYOUT:-legacy}" == "v2" ]]; then
+  # v2: strict workdir-aware enumeration via `agb agent list --json`.
+  if [[ ! -x "$BRIDGE_AGB" ]]; then
+    printf '[wiki-daily-ingest] BRIDGE_AGB not executable: %s\n' "$BRIDGE_AGB" >&2
+    exit 2
+  fi
+
+  _lane_b_stderr="$(mktemp -t wiki-daily-ingest.agb-stderr.XXXXXX)"
+
+  agent_list_json="$("$BRIDGE_AGB" agent list --json 2>"$_lane_b_stderr")"
+  agb_exit=$?
+  if (( agb_exit != 0 )); then
+    printf '[wiki-daily-ingest] agb agent list --json failed (exit=%d): %s\n' \
+      "$agb_exit" "$(cat "$_lane_b_stderr")" >&2
+    rm -f "$_lane_b_stderr"
+    exit 2
+  fi
+
+  agents_tsv="$("$BRIDGE_PYTHON" - "$agent_list_json" <<'PY' 2>"$_lane_b_stderr"
+import json, sys
+try:
+    data = json.loads(sys.argv[1])
+except Exception as e:
+    print(f"malformed JSON: {e}", file=sys.stderr)
+    sys.exit(2)
+if not isinstance(data, list):
+    print(f"expected JSON list, got {type(data).__name__}", file=sys.stderr)
+    sys.exit(2)
+for a in data:
+    if not isinstance(a, dict):
+        continue
+    if a.get("engine") != "claude" or not a.get("active"):
+        continue
+    name = a.get("agent") or ""
+    wd = a.get("workdir") or ""
+    if not name or not wd:
+        continue
+    print(f"{name}\t{wd}")
+PY
+)"
+  parse_exit=$?
+  if (( parse_exit != 0 )); then
+    printf '[wiki-daily-ingest] agent list JSON parse failed (exit=%d): %s\n' \
+      "$parse_exit" "$(cat "$_lane_b_stderr")" >&2
+    rm -f "$_lane_b_stderr"
+    exit 2
+  fi
+  rm -f "$_lane_b_stderr"
+
+  if [[ -n "$agents_tsv" ]]; then
+    while IFS=$'\t' read -r _agent _workdir; do
+      [[ -n "$_agent" && -n "$_workdir" ]] || continue
+      [[ -d "$_workdir/memory" ]] || continue
+      AGENT_MEMORY_ROOTS+=("$_workdir/memory")
+    done <<< "$agents_tsv"
+  fi
+else
+  # Legacy: original find-based enumeration over $AGENTS_ROOT/*/memory.
+  # Each install-root agent dir with a memory/ subtree contributes a root.
+  if [[ -d "$AGENTS_ROOT" ]]; then
+    for _legacy_dir in "$AGENTS_ROOT"/*/memory; do
+      [[ -d "$_legacy_dir" ]] || continue
+      AGENT_MEMORY_ROOTS+=("$_legacy_dir")
+    done
+  fi
+fi
+
+# Research files touched in last 24h (across all active agent memory roots).
+touched_research=""
+for _root in "${AGENT_MEMORY_ROOTS[@]}"; do
+  [[ -d "$_root/research" ]] || continue
+  while IFS= read -r _f; do
+    [[ -n "$_f" ]] && touched_research+="$_f"$'\n'
+  done < <(find "$_root/research" -type f -name '*.md' -mtime -1 2>/dev/null)
+done
+touched_research=$(printf '%s' "$touched_research" | sed '/^$/d' | sort -u)
 research_count=$(printf '%s\n' "$touched_research" | grep -c '[^[:space:]]' || true)
 research_count=${research_count:-0}
 
 # projects/shared/decisions files touched in last 24h.
-touched_other=$(find "$AGENTS_ROOT"/*/memory/projects "$AGENTS_ROOT"/*/memory/shared "$AGENTS_ROOT"/*/memory/decisions -type f -name '*.md' -mtime -1 2>/dev/null | sort)
+touched_other=""
+for _root in "${AGENT_MEMORY_ROOTS[@]}"; do
+  for _sub in projects shared decisions; do
+    [[ -d "$_root/$_sub" ]] || continue
+    while IFS= read -r _f; do
+      [[ -n "$_f" ]] && touched_other+="$_f"$'\n'
+    done < <(find "$_root/$_sub" -type f -name '*.md' -mtime -1 2>/dev/null)
+  done
+done
+touched_other=$(printf '%s' "$touched_other" | sed '/^$/d' | sort -u)
 other_count=$(printf '%s\n' "$touched_other" | grep -c '[^[:space:]]' || true)
 other_count=${other_count:-0}
 

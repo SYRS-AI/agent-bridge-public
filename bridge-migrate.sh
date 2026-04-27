@@ -6,6 +6,8 @@ set -euo pipefail
 SCRIPT_DIR="$(cd -P "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 # shellcheck source=/dev/null
 source "$SCRIPT_DIR/bridge-lib.sh"
+# shellcheck source=lib/bridge-isolation-v2-migrate.sh
+source "$SCRIPT_DIR/lib/bridge-isolation-v2-migrate.sh"
 bridge_load_roster
 
 usage() {
@@ -23,6 +25,11 @@ Usage:
   bash $SCRIPT_DIR/bridge-migrate.sh workspace cutover <agent> --dry-run
   bash $SCRIPT_DIR/bridge-migrate.sh overhead pre-migrate [--output <file>] [--json]
   bash $SCRIPT_DIR/bridge-migrate.sh overhead dry-run [--agent <name>|--all] [--json]
+  bash $SCRIPT_DIR/bridge-migrate.sh isolation-v2 dry-run --data-root <path>
+  bash $SCRIPT_DIR/bridge-migrate.sh isolation-v2 apply   --data-root <path> --yes
+  bash $SCRIPT_DIR/bridge-migrate.sh isolation-v2 rollback --yes
+  bash $SCRIPT_DIR/bridge-migrate.sh isolation-v2 commit  --yes
+  bash $SCRIPT_DIR/bridge-migrate.sh isolation-v2 status
   bash $SCRIPT_DIR/bridge-migrate.sh overhead apply [--agent <name>|--all] --yes [--dry-run] [--json]
   bash $SCRIPT_DIR/bridge-migrate.sh overhead rollback --stamp <YYYYMMDD-HHMMSS-<pid>> [--json]
 EOF
@@ -821,6 +828,9 @@ case "$subcommand" in
         bridge_die "지원하지 않는 migrate workspace 명령입니다: $1"
         ;;
     esac
+    ;;
+  isolation-v2)
+    bridge_isolation_v2_migrate_cli "$@"
     ;;
   ""|-h|--help|help)
     usage

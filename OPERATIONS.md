@@ -341,6 +341,87 @@ emits when `BRIDGE_AGENT_ISOLATION_MODE=linux-user`. See issue
 > A2A queue tasks from those sessions stop routing through the gateway
 > until they pick up the new env.
 
+## Migrating to layout v2
+
+The v2 layout (PR-A/B/C, shipped in v0.6.19) replaces named-ACL access on
+per-agent runtime data with group-based ownership under a single
+`$BRIDGE_DATA_ROOT`. PR-D adds the operator tool to migrate an existing
+legacy install onto v2.
+
+Activation criteria: marker file at `$BRIDGE_HOME/state/layout-marker.sh`
+present, owner root or controller, mode 0640, content limited to an
+allowlist of `BRIDGE_LAYOUT=v2` / `BRIDGE_DATA_ROOT=<absolute path>` / a
+small set of group overrides. Anything else is rejected at load time and
+the install falls back to legacy.
+
+**Phases** (run from an out-of-band controller shell, NOT from inside an
+Agent Bridge agent session — the migration tool's self-stop guard refuses
+otherwise):
+
+1. **dry-run** — print the legacy → v2 mirror plan and the
+   profile_home preflight. No mutation. Use `--data-root` to choose the
+   target (e.g. `/srv/agent-bridge`).
+
+   ```bash
+   agent-bridge migrate isolation-v2 dry-run --data-root /srv/agent-bridge
+   ```
+
+2. **apply** — stop active agents one by one, stop the daemon
+   (active=0 path, no `--force`), ensure the v2 groups exist (sudo),
+   real-copy mirror legacy → v2 (rsync, no hardlinks), write the marker
+   atomically, restart daemon and the agents from the snapshot, post-flight
+   probe each agent UID's groups via fresh `sudo -u <user> id -nG`.
+
+   ```bash
+   agent-bridge migrate isolation-v2 apply --data-root /srv/agent-bridge --yes
+   ```
+
+   Apply refuses if any agent's roster has an explicit
+   `BRIDGE_AGENT_PROFILE_HOME` that is not `<data_root>/agents/<agent>/workdir`.
+   Edit `agent-roster.local.sh` (via `agent-bridge config set`) to align
+   the override and re-run, or unset it and re-run.
+
+3. **soak** — operate on v2 for as long as you want to be sure things
+   work. Rollback is cheap (legacy tree is intact until commit).
+
+   ```bash
+   agent-bridge migrate isolation-v2 status
+   agent-bridge migrate isolation-v2 rollback --yes   # if needed
+   ```
+
+4. **commit** — tar-zst backup + delete the legacy paths recorded in the
+   manifest as `verify_status=ok && delete_eligible=1`. Profile/skill/memory
+   files (delete_eligible=0, see below) are NOT deleted.
+
+   ```bash
+   agent-bridge migrate isolation-v2 commit --yes
+   ```
+
+### Editing profile / skills / memory after activation
+
+After v2 activation, runtime resolvers (`bridge-skills.sh`,
+`bridge-setup.sh`, `bridge-agent.sh`, `bridge-upgrade.sh`,
+`bootstrap-memory-system.sh`, the wiki cron suite) read from the v2
+workdir (`$BRIDGE_DATA_ROOT/agents/<agent>/workdir/`). PR-D additionally
+fixes `bridge_agent_default_profile_home` so that `agent-bridge profile
+deploy` writes to the v2 workdir as well — closing a gap left by PR-A/B/C
+where the profile alias still pointed at v2 `home/`.
+
+These files are mirrored to the v2 workdir with `delete_eligible=0`,
+meaning the install-root copy is **retained as a frozen snapshot** through
+`--commit`:
+
+- `agents/<agent>/CLAUDE.md`, `MEMORY.md`, `SKILLS.md`, `SOUL.md`,
+  `HEARTBEAT.md`, `MEMORY-SCHEMA.md`, `COMMON-INSTRUCTIONS.md`,
+  `CHANGE-POLICY.md`, `TOOLS.md`
+- `agents/<agent>/SESSION-TYPE.md`, `NEXT-SESSION.md` (dual-read)
+- `agents/<agent>/.agents/`, `memory/`, `users/`, `references/`, `skills/`
+
+**Edit at the v2 workdir.** The runtime resolver reads the v2 path first;
+the install-root copy is left in place so existing admin tooling and a
+clean rollback remain possible. A future PR (PR-G) is expected to either
+unify the two locations or mark the install-root copy read-only.
+
 ## Release Checklist
 
 Before pushing bridge changes:

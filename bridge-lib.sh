@@ -155,6 +155,11 @@ bridge_source_module() {
 
 bridge_source_module "bridge-session-patterns.sh"
 bridge_source_module "bridge-core.sh"
+# Read the v2 layout marker (state/layout-marker.sh) before any module
+# snapshots BRIDGE_LAYOUT/BRIDGE_DATA_ROOT. Sourced after bridge-core.sh
+# so bridge_warn is available, before bridge-agents.sh / bridge-isolation-v2.sh
+# so v2 helpers see the marker values. Safe no-op when the marker is absent.
+bridge_source_module "bridge-marker-bootstrap.sh"
 bridge_source_module "bridge-agents.sh"
 bridge_source_module "bridge-guard.sh"
 bridge_source_module "bridge-tmux.sh"
