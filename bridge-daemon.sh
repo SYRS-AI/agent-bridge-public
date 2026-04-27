@@ -3127,9 +3127,17 @@ cmd_run_cron_worker() {
     source <(bridge_cron_load_run_shell "$run_id")
   fi
 
+  # Issue #385: distinguish failure-followups (transient API noise) from
+  # success-followups (subagent legitimately set needs_human_followup=true).
+  # The burst gate below only applies to the failure path; success-with-
+  # followup-flag must always create a task, otherwise routine signals like
+  # morning-briefing's daily channel-relay handoff are silently suppressed
+  # on the first run of every slot.
+  local is_failure_followup=0
   if [[ "$CRON_RUN_STATE" != "success" || "$CRON_RESULT_STATUS" == "error" || $subagent_status -ne 0 ]]; then
     CRON_NEEDS_HUMAN_FOLLOWUP="1"
     followup_priority="high"
+    is_failure_followup=1
   fi
 
   # Trust the subagent's needs_human_followup decision.
@@ -3174,9 +3182,15 @@ cmd_run_cron_worker() {
   # variable mutations evaporate on exit, leaving the downstream
   # `(( fail_burst_count >= fail_burst_threshold ))` gate forever
   # reading 0 → burst threshold never reached → task never created.
+  # Issue #385: only failure-followups bump the consecutive-failure
+  # counter. A success-with-needs_human_followup is a legitimate signal
+  # (morning-briefing channel relay, routine daily digest handoff, etc.)
+  # and must not inflate the counter or otherwise affect the gate.
+  # Any non-failure outcome resets the counter so a follow-up failure
+  # has to re-accumulate from zero.
   if (( _has_flock == 1 )); then
     { flock -x 9
-      if [[ "$CRON_NEEDS_HUMAN_FOLLOWUP" == "1" ]]; then
+      if (( is_failure_followup == 1 )); then
         fail_burst_count=0
         if [[ -f "$fail_burst_file" ]]; then
           fail_burst_count=$(cat "$fail_burst_file" 2>/dev/null || echo 0)
@@ -3189,7 +3203,7 @@ cmd_run_cron_worker() {
       fi
     } 9>"$fail_burst_lock"
   else
-    if [[ "$CRON_NEEDS_HUMAN_FOLLOWUP" == "1" ]]; then
+    if (( is_failure_followup == 1 )); then
       fail_burst_count=0
       if [[ -f "$fail_burst_file" ]]; then
         fail_burst_count=$(cat "$fail_burst_file" 2>/dev/null || echo 0)
@@ -3239,11 +3253,18 @@ cmd_run_cron_worker() {
       bridge_queue_cli update "$existing_followup_id" --actor "$followup_actor" --title "$followup_title" --priority "$followup_priority" --body-file "$followup_body_file" >/dev/null 2>&1 || true
       followup_task_id="$existing_followup_id"
       daemon_info "refreshed cron followup task #${followup_task_id} for ${CRON_JOB_NAME:-$run_id}"
-    elif (( fail_burst_count >= fail_burst_threshold )); then
+    # Issue #385: success-followups (is_failure_followup=0) bypass the
+    # burst threshold. Only transient-failure noise (#230-B's original
+    # target) is gated behind fail_burst_threshold.
+    elif (( is_failure_followup == 0 )) || (( fail_burst_count >= fail_burst_threshold )); then
       create_output="$(bridge_queue_cli create --to "$TASK_ASSIGNED_TO" --title "$followup_title" --from "$followup_actor" --priority "$followup_priority" --body-file "$followup_body_file" 2>/dev/null || true)"
       if [[ "$create_output" =~ created\ task\ \#([0-9]+) ]]; then
         followup_task_id="${BASH_REMATCH[1]}"
-        daemon_info "created cron followup task #${followup_task_id} after ${fail_burst_count} consecutive failures of ${cron_family_key}"
+        if (( is_failure_followup == 1 )); then
+          daemon_info "created cron followup task #${followup_task_id} after ${fail_burst_count} consecutive failures of ${cron_family_key}"
+        else
+          daemon_info "created cron followup task #${followup_task_id} for success+needs_human_followup signal of ${cron_family_key}"
+        fi
         # Reset the burst counter so subsequent failures don't rapid-
         # fire a fresh followup task after the admin closes this one.
         # The cycle restarts only after another BRIDGE_CRON_FOLLOWUP_FAIL_BURST_THRESHOLD
