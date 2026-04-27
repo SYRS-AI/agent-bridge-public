@@ -2601,6 +2601,17 @@ bridge_agent_should_stop_on_attached_clean_exit() {
 
 bridge_agent_default_profile_home() {
   local agent="$1"
+  # v2: profile lives under workdir, not home. Every runtime resolver
+  # (bridge-skills.sh:230, bridge-setup.sh:90/823, bridge-agent.sh:1275)
+  # reads CLAUDE.md from workdir, so the deploy target (this function)
+  # must point at workdir too, otherwise `agent-bridge profile deploy`
+  # would land in v2 home/ where nothing reads it. PR-A/B/C made
+  # bridge_agent_default_home v2-aware but left this profile alias
+  # passing through to it. PR-D closes that gap.
+  if bridge_isolation_v2_active && [[ -n "$BRIDGE_AGENT_ROOT_V2" && -n "$agent" ]]; then
+    printf '%s/%s/workdir' "$BRIDGE_AGENT_ROOT_V2" "$agent"
+    return 0
+  fi
   bridge_agent_default_home "$agent"
 }
 

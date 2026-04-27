@@ -71,11 +71,13 @@ BRIDGE_AGENTS_ROOT="$BRIDGE_HOME/agents"
 BRIDGE_SHARED_ROOT="$BRIDGE_HOME/shared"
 BRIDGE_WIKI_ROOT="$BRIDGE_SHARED_ROOT/wiki"
 BRIDGE_SCRIPTS_ROOT="$REPO_ROOT/scripts"
-# Stub $BRIDGE_AGB to /bin/true so Lane B's "agent show librarian" probe
-# returns non-zero (no librarian) and the task-create call short-circuits
-# under `|| true`. With zero non-daily files we never reach that branch
-# anyway, but defense-in-depth keeps the test hermetic.
-BRIDGE_AGB="/bin/true"
+# PR-D made wiki-daily-ingest.sh Lane B strict: it now calls
+# `BRIDGE_AGB agent list --json` and refuses malformed JSON. /bin/true
+# returns empty stdout which the strict parser rejects, so the smoke
+# uses a tiny hermetic mock that returns a valid empty list and
+# fails non-zero for unrelated subcommands.
+BRIDGE_AGB="$REPO_ROOT/tests/wiki-daily-ingest/agb-mock.sh"
+chmod +x "$BRIDGE_AGB" 2>/dev/null || true
 WIKI_WATERMARK_FILE="$BRIDGE_STATE_DIR/wiki/last-ingest.txt"
 mkdir -p "$BRIDGE_STATE_DIR" "$BRIDGE_AGENTS_ROOT" "$BRIDGE_WIKI_ROOT/_audit"
 
