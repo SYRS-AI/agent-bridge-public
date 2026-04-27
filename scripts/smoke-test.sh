@@ -33,6 +33,32 @@ if [[ -n "${BRIDGE_HOME:-}" ]]; then
   unset _smoke_allowed_tmp_prefix _smoke_tmp_candidate
 fi
 
+# Issue #403: the BRIDGE_HOME guard above isn't enough — isolation tests
+# compute destructive paths from BRIDGE_LINUX_ISOLATED_USER_HOME_ROOT
+# (default /home) + os_user, NOT from BRIDGE_HOME. Refuse to run when
+# the override is set but doesn't point under a recognised tempdir.
+# (Default /home is rejected outright when set; if unset, downstream
+# isolation suites are responsible for setting their own tmp-rooted
+# value — see tests/isolation-v2-pr-e/smoke.sh.)
+if [[ -n "${BRIDGE_LINUX_ISOLATED_USER_HOME_ROOT:-}" ]]; then
+  _smoke_iso_allowed=""
+  for _smoke_iso_candidate in "${TMPDIR%/}" "/tmp" "/private/tmp" "/var/folders" "/private/var/folders"; do
+    [[ -n "$_smoke_iso_candidate" ]] || continue
+    case "$BRIDGE_LINUX_ISOLATED_USER_HOME_ROOT" in
+      "$_smoke_iso_candidate"|"$_smoke_iso_candidate"/*)
+        _smoke_iso_allowed="$_smoke_iso_candidate"
+        break
+        ;;
+    esac
+  done
+  if [[ -z "$_smoke_iso_allowed" ]]; then
+    printf '[smoke][error] refusing to run with BRIDGE_LINUX_ISOLATED_USER_HOME_ROOT=%s (must be under /tmp or $TMPDIR — issue #403)\n' \
+      "$BRIDGE_LINUX_ISOLATED_USER_HOME_ROOT" >&2
+    exit 1
+  fi
+  unset _smoke_iso_allowed _smoke_iso_candidate
+fi
+
 log() {
   printf '[smoke] %s\n' "$*"
 }

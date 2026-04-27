@@ -32,12 +32,23 @@ TMP_ROOT="$(mktemp -d -t isolation-v2-pr-e.XXXXXX)"
 trap 'rm -rf "$TMP_ROOT" >/dev/null 2>&1 || true' EXIT
 export TMPDIR="${TMPDIR:-/tmp}"
 
-# PR-E r3 P1: a global refuse-log captures every [sudo-stub][refuse]
-# line emitted by any case body. Cases that do NOT opt in (the default)
-# fail at end-of-run if the log is non-empty — a refused live-install
-# write must never be silently masked by a positive log assertion. Cases
-# that explicitly want to assert refusal must check + truncate this log
-# themselves.
+# Issue #403 (#406): redirect the isolated-user home root into the
+# TMP_ROOT so even if a test passes an os_user that collides with a
+# real account, the destructive paths land in our tempdir, not
+# /home/<user>. Consumed by bridge_agent_linux_user_home() in
+# lib/bridge-agents.sh. Per-case run_in_v2/run_in_legacy fixtures
+# below set this again with case-scoped values, but the top-level
+# default keeps any direct (non-fixture) helper call safe.
+mkdir -p "$TMP_ROOT/fake-home"
+export BRIDGE_LINUX_ISOLATED_USER_HOME_ROOT="$TMP_ROOT/fake-home"
+mkdir -p "$BRIDGE_LINUX_ISOLATED_USER_HOME_ROOT/agb-smoke-fake-user"
+
+# PR-E r3 P1 (this PR): a global refuse-log captures every
+# [sudo-stub][refuse] line emitted by any case body. Cases that do NOT
+# opt in (the default) fail at end-of-run if the log is non-empty — a
+# refused live-install write must never be silently masked by a positive
+# log assertion. Cases that explicitly want to assert refusal must check
+# + truncate this log themselves.
 SUDO_REFUSE_LOG="$TMP_ROOT/sudo-stub-refuse.log"
 : >"$SUDO_REFUSE_LOG"
 export SUDO_REFUSE_LOG
@@ -64,32 +75,48 @@ make_sudo_stub() {
   _BRIDGE_LINUX_SUDO_REFUSE_LOG="${SUDO_REFUSE_LOG:?make_sudo_stub: SUDO_REFUSE_LOG must be set}"
   bridge_linux_sudo_root() {
     printf '%s\n' "$*" >>"$_BRIDGE_LINUX_SUDO_LOG_FILE"
+    # Issue #403 (#406): refuse to exec a destructive op when ANY
+    # positional arg looks like an absolute path outside $TMP_ROOT.
+    # Belt-and-suspenders against helper code paths that compute paths
+    # from os_user. `test` is left in its own arm because its args may
+    # be non-path predicates; mktemp/python3 may receive non-path args
+    # (caught by the leading-`/` filter). Refusals are also persisted
+    # to $SUDO_REFUSE_LOG so end-of-run assertion can fail the smoke
+    # if any case body silently relied on the guard (PR-E r3 P1).
+    local _arg _tmp_canon _tmp_raw _arg_canon
+    _tmp_raw="${TMP_ROOT:-}"
+    _tmp_canon="$(readlink -f "$_tmp_raw" 2>/dev/null)"
+    [[ -z "$_tmp_canon" ]] && _tmp_canon="$_tmp_raw"
+    for _arg in "$@"; do
+      case "$_arg" in
+        /*)
+          # Accept the arg if either its raw or its resolved form is rooted
+          # under TMP_ROOT (raw or canonical). On macOS, readlink -f returns
+          # empty for nonexistent paths, so the raw match is required to
+          # avoid spurious rejection of valid TMP_ROOT-relative ops on files
+          # that don't yet exist when the stub runs.
+          _arg_canon="$(readlink -f "$_arg" 2>/dev/null)"
+          [[ -z "$_arg_canon" ]] && _arg_canon="$_arg"
+          case "$_arg_canon" in
+            "$_tmp_canon"|"$_tmp_canon"/*|"$_tmp_raw"|"$_tmp_raw"/*) continue ;;
+          esac
+          case "$_arg" in
+            "$_tmp_canon"|"$_tmp_canon"/*|"$_tmp_raw"|"$_tmp_raw"/*) continue ;;
+          esac
+          local _refuse_msg
+          _refuse_msg="$(printf '[smoke][sudo-stub][refuse] %s with arg %s outside TMP_ROOT %s (issue #403)' \
+            "$1" "$_arg" "$_tmp_canon")"
+          printf '%s\n' "$_refuse_msg" >&2
+          printf '%s\n' "$_refuse_msg" >>"$_BRIDGE_LINUX_SUDO_REFUSE_LOG"
+          return 99
+          ;;
+      esac
+    done
     case "${1:-}" in
       # Filesystem state ops we want to exercise — the case body asserts
       # post-conditions like mode/existence after these run.
       test) shift; test "$@" ;;
-      mkdir|chmod|touch|ln|rm|mv|find|mktemp|python3)
-        local _cmd="$1"
-        local _arg
-        for _arg in "${@:2}"; do
-          [[ "$_arg" == -* ]] && continue
-          [[ "$_arg" == --* ]] && continue
-          [[ "$_arg" == "-" ]] && continue
-          [[ "$_arg" =~ ^[0-9]+$ ]] && continue
-          [[ "$_arg" != /* ]] && continue
-          if [[ "$_arg" != "$_BRIDGE_LINUX_SUDO_ALLOWED_PREFIX"* ]]; then
-            local _refuse_msg
-            _refuse_msg="$(printf '[v2-pr-e][sudo-stub][refuse] %s would escape TMP_ROOT (arg=%q, prefix=%s)' \
-              "$_cmd" "$_arg" "$_BRIDGE_LINUX_SUDO_ALLOWED_PREFIX")"
-            printf '%s\n' "$_refuse_msg" >&2
-            # PR-E r3 P1: persist the refusal into the global refuse-log
-            # so end-of-run assertion can fail the smoke. No case must be
-            # allowed to silently mask a refused live-install write.
-            printf '%s\n' "$_refuse_msg" >>"$_BRIDGE_LINUX_SUDO_REFUSE_LOG"
-            return 99
-          fi
-        done
-        "$@" ;;
+      mkdir|chmod|touch|ln|rm|mv|find|mktemp|python3) "$@" ;;
       # chown/chgrp need root in real life. The smoke is rootless, so
       # we only want them in the sudo log (for grep-on-log assertions).
       # Skip the actual call. Failure of a real chgrp to a non-existent

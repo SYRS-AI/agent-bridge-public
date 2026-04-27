@@ -544,23 +544,23 @@ bridge_linux_install_agent_bridge_symlink() {
   local target="$user_home/.agent-bridge"
   local current=""
 
-  # Issue #403 — defense-in-depth fix #1: refuse to operate on the
-  # controller's own install. The `rm -rf "$target"` step below has no
-  # path-safety check; if a caller passes the controller's login as
-  # $os_user (or BRIDGE_LINUX_ISOLATED_USER_HOME_ROOT happens to resolve
-  # to the controller's home root), `target` becomes the controller's
-  # live install root and the rm/ln pair wipes the install. The smoke
-  # regression that revealed this (PR-E CT4 + sudo-stub passthrough +
-  # hardcoded `ec2-user`) is fixed at the smoke layer too, but the
-  # helper itself MUST fail-loud on a controller-self attempt — any
-  # caller that reaches this branch is a bug.
-  if [[ -z "$os_user" || -z "$user_home" || -z "$bridge_home" ]]; then
-    bridge_die "install_agent_bridge_symlink: missing arg (os_user='$os_user' user_home='$user_home' bridge_home='$bridge_home')"
+  # Issue #403 P0: NEVER rm -rf a path that resolves to the controller's
+  # own BRIDGE_HOME. The realpath check catches both literal-equality
+  # and symlink-to-controller-home cases. Any caller passing
+  # os_user==<controller-login> hits this gate, which is the right
+  # behavior — the controller's login is not an isolated agent and
+  # should never have its ~/.agent-bridge wiped.
+  local _resolved_target _resolved_bridge_home _controller_user
+  _resolved_target="$(readlink -f "$target" 2>/dev/null || printf '%s' "$target")"
+  _resolved_bridge_home="$(readlink -f "$bridge_home" 2>/dev/null || printf '%s' "${bridge_home:-}")"
+  if [[ -n "$_resolved_bridge_home" && "$_resolved_target" == "$_resolved_bridge_home" ]]; then
+    bridge_die "install_agent_bridge_symlink: refusing to rm -rf controller BRIDGE_HOME at $target (would wipe live install — issue #403). Caller must pass an isolated UID's os_user, not the controller login."
   fi
-  if [[ "$target" == "$bridge_home" ]] \
-      || [[ "$target" == "${HOME:-/dev/null}/.agent-bridge" ]] \
-      || [[ "$os_user" == "$(id -un 2>/dev/null)" ]]; then
-    bridge_die "install_agent_bridge_symlink: refusing to overwrite controller install at '$target' (os_user='$os_user', controller='$(id -un 2>/dev/null)'). This is a caller bug — never pass the controller login as the isolated agent's os_user."
+  # Also reject when os_user is empty or matches the controller's login
+  # directly, even if BRIDGE_HOME isn't yet set in this scope.
+  _controller_user="$(id -un 2>/dev/null || printf '%s' "${USER:-}")"
+  if [[ -z "$os_user" || "$os_user" == "$_controller_user" ]]; then
+    bridge_die "install_agent_bridge_symlink: os_user '$os_user' equals controller login or is empty — refusing to operate on controller-side path $target (issue #403)."
   fi
 
   current="$(bridge_linux_sudo_root python3 - "$target" <<'PY'
