@@ -3074,6 +3074,7 @@ cmd_run_cron_worker() {
   local CRON_SLOT=""
   local CRON_TARGET_AGENT=""
   local CRON_TARGET_ENGINE=""
+  local CRON_DEFERRED_REASON=""
   local CRON_RESULT_STATUS=""
   local CRON_RESULT_SUMMARY=""
   local CRON_RUN_STATE=""
@@ -3138,6 +3139,27 @@ cmd_run_cron_worker() {
     CRON_NEEDS_HUMAN_FOLLOWUP="1"
     followup_priority="high"
     is_failure_followup=1
+  fi
+
+  # Issue #393: memory_pressure deferrals auto-retry on the next cron
+  # slot — emitting a high-priority cron-followup task per deferred slot
+  # only wakes the parent agent (e.g. patch), consumes tokens that
+  # materialize as more memory, and deepens the pressure that triggered
+  # the deferral in the first place. Reset the followup flags after
+  # the failure-path set above so the existing burst-counter + creation
+  # block silently skips. Real failed/timeout/crash runs still emit a
+  # high-priority followup as today; only the memory_pressure deferral
+  # path is suppressed.
+  if [[ "$CRON_RUN_STATE" == "deferred" && "$CRON_DEFERRED_REASON" == "memory_pressure" ]]; then
+    CRON_NEEDS_HUMAN_FOLLOWUP=""
+    is_failure_followup=0
+    bridge_audit_log daemon cron_followup_suppressed "$TASK_ASSIGNED_TO" \
+      --detail run_id="$run_id" \
+      --detail job_name="${CRON_JOB_NAME:-$run_id}" \
+      --detail family="${CRON_FAMILY:-}" \
+      --detail slot="${CRON_SLOT:-}" \
+      --detail reason=memory_pressure_deferral
+    daemon_info "skipped cron-followup for memory_pressure deferral of ${CRON_FAMILY:-${CRON_JOB_NAME:-$run_id}}"
   fi
 
   # Trust the subagent's needs_human_followup decision.
