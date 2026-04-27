@@ -4,6 +4,96 @@ All notable changes to Agent Bridge are documented here. This project adheres
 loosely to [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and tracks
 version bumps via the `VERSION` file.
 
+## [0.6.24] — 2026-04-27
+
+### Highlights — isolate-v2 PR-E: legacy ACL helpers no-op + v2 group-mode replacements
+
+Fifth (and second-to-last) PR in the v2 isolation 6-PR initiative. v2
+mode (`BRIDGE_LAYOUT=v2`) now stops using named-user POSIX ACLs
+end-to-end and runs entirely on the per-agent group + setgid contract,
+with one documented transitional exception (Claude credentials access).
+
+**Default off** — every ACL helper falls through to the legacy path
+when `BRIDGE_LAYOUT` is unset or `legacy`. PR-F (default flip) is the
+only remaining piece in the series.
+
+#### What's in scope (#399, PR #399)
+
+- **ACL primitive helpers** + **direct setfacl call sites**
+  short-circuit under v2: `bridge_linux_acl_add` /
+  `_recursive` / `_default_dirs_recursive` / `_remove_recursive`,
+  `bridge_linux_grant_traverse_chain` / `_revoke_traverse_chain` /
+  `_revoke_plugin_channel_grants`, `bridge_linux_acl_repair_channel_env_files`.
+- **Traverse refactor**: new private emitter `_bridge_linux_grant_traverse_paths`
+  owns `/`-reject + missing-stop reject + Python resolver + ancestor
+  check. Public v2-noop wrapper and `_bridge_linux_grant_traverse_chain_unguarded`
+  (used only by the credential exception) consume the same emitter.
+- **Group-mode replacements** for ACL-load-bearing v2 artifacts:
+  - `agent-env.sh` → `chgrp ab-agent-<name>` + `chmod 0640`
+  - per-UID `installed_plugins.json` (manifest writer signature now
+    takes an explicit `agent` arg) → `chgrp + chmod 0640`
+  - `$user_home/.claude/plugins` + `marketplaces` → `chown
+    root:ab-agent-<name>`, `chmod 2750`
+  - `$user_home/.claude` itself → `chgrp ab-agent-<name>` + `chmod 2750`
+    so `~/.claude/projects` (Claude transcripts, used by the memory
+    pipeline) is reachable via the v2 group/setgid path
+  - channel symlink target → `chgrp + chmod 2770` idempotent for both
+    new + pre-existing targets, with explicit `test -L` TOCTOU guards
+- **Engine CLI fail-fast** under v2: controller-home paths rejected
+  for both `cli_path` and `readlink -f` target. Optional execute probe
+  via `bridge_linux_can_sudo_to`-gated `sudo -n -u <os_user> test -x`
+  — no nested-sudo pitfalls.
+- **`BRIDGE_SHARED_GROUP` membership** is now ensured in
+  `bridge_linux_prepare_agent_isolation` for both the isolated UID
+  (die on failure) and the controller (warn unless shared plugin
+  cache becomes unreadable, in which case escalate to die).
+- **`bridge_linux_require_setfacl`** is now gated to legacy mode and
+  to v2-with-Claude (covers the credential exception). v2 + non-Claude
+  drops the `acl` package prerequisite entirely.
+- **`bridge-run.sh` umask wiring**: `bridge_run_apply_v2_umask_if_needed`
+  helper sets `umask 007` after `bridge_require_agent` (both startup
+  + roster-reload paths) so the agent process tree creates files at
+  0660/group inheritance under setgid dirs. The umask is the missing
+  piece that lets the controller (group member) read agent-created
+  channel state files without ACLs. Helper is defined inline in
+  `bridge-run.sh` above the first call site; UM3 smoke drives the
+  real entrypoint with `BRIDGE_RUN_UMASK_PROBE_FILE` to assert the
+  post-launch umask is `007`.
+
+#### C1 transitional exception — Claude credentials
+
+The single documented ACL retention is `bridge_linux_grant_claude_credentials_access`,
+which preserves `r--` access on `~/.claude/.credentials.json` plus the
+unguarded traverse chain on its parent ancestors. Other paths under
+`~/.claude` are NOT granted; the controller-side `~/.claude` directory
+itself is no longer touched by C1. KNOWN_ISSUES.md entry #16
+documents the re-auth ACL refresh requirement.
+
+### v0.6.24 upgrade / migration notes
+
+#### Auto
+
+- v0.6.23 → v0.6.24 binary upgrade is straightforward — no schema or
+  state-file shape changes. Legacy installs see no behavior change.
+
+#### Operator-required (v2 opt-in only — skip if staying on legacy)
+
+If you want to evaluate v2 isolation:
+
+1. Set `BRIDGE_LAYOUT=v2` + `BRIDGE_DATA_ROOT=/srv/agent-bridge` (or
+   any preferred path).
+2. Out-of-band shell, run `agent-bridge migrate isolation-v2 dry-run`
+   to preview, then `apply` (PR-D, shipped in v0.6.21).
+3. Ensure operator account is a member of `BRIDGE_SHARED_GROUP`
+   (`ab-shared` by default) — KNOWN_ISSUES.md entries #16 + #18
+   document the controller re-login prerequisite.
+4. Restart agents so the new v2 group memberships take effect.
+
+The legacy ACL-based path keeps working in parallel until PR-F (default
+flip) ships in the next release. Operators should NOT enable v2 on
+production yet — wait for PR-F + the migration tool from PR-D to be
+exercised on a non-production install first.
+
 ## [0.6.23] — 2026-04-27
 
 ### Hotfix — macOS cron memory_pressure false positive root cause
