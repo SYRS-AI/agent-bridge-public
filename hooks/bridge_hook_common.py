@@ -250,7 +250,7 @@ def onboarding_state_from_file(path: Path | None) -> str:
     return match.group(1)
 
 
-def _stamp_next_session_delivered(agent: str, next_session: Path) -> None:
+def _stamp_next_session_delivered(agent: str, next_session: Path) -> str | None:
     """Persist the SHA-1 digest of NEXT-SESSION.md into the per-agent marker.
 
     The bash-side `bridge_agent_maybe_expire_next_session` gates on
@@ -261,13 +261,17 @@ def _stamp_next_session_delivered(agent: str, next_session: Path) -> None:
     marker here so `bridge-run.sh`'s reconcile step can age out a stale
     handoff file the next time a Claude agent restarts.
 
+    Returns the digest string on success so callers (e.g. the queue-route
+    handoff path in #409 Track A) can use it as an idempotency key. Returns
+    None when the file cannot be read or the marker cannot be written.
+
     Best-effort: any IO failure is swallowed so the hook never blocks agent
     startup over marker bookkeeping.
     """
     try:
         content = next_session.read_bytes()
     except OSError:
-        return
+        return None
     # bridge_agent_next_session_digest (bash) pipes the file through
     # `bridge_sha1 "$(cat $file)"`. Command substitution strips trailing
     # newlines before the argument reaches Python's hashlib, so hashing
@@ -286,6 +290,70 @@ def _stamp_next_session_delivered(agent: str, next_session: Path) -> None:
         marker_file.parent.mkdir(parents=True, exist_ok=True)
         marker_file.write_text(digest, encoding="utf-8")
     except OSError:
+        return None
+    return digest
+
+
+def _enqueue_handoff_pending(agent: str, next_session: Path, digest: str) -> None:
+    """Self-enqueue an urgent task so the queue contract enforces handoff priority.
+
+    The hook's stdout-as-context surface (current behaviour) puts the handoff
+    instruction on equal footing with whatever the operator types as the first
+    user message. Empirically the operator's intent wins and the handoff is
+    silently skipped. By creating a queued task on the agent's own inbox at
+    the same time, the existing "claim highest-priority queued task first"
+    contract turns the handoff into a hard precondition for any other work.
+
+    Idempotency: title carries the digest so re-running for the same handoff
+    file produces a duplicate-title task that bridge-task.sh's find-open path
+    refuses to re-create. A new digest (handoff content changed) yields a new
+    task; an unchanged digest is a no-op.
+
+    Best-effort: any IO/subprocess failure is swallowed so the hook never
+    blocks agent startup over enqueue bookkeeping. The stdout-as-context path
+    still runs as a fallback regardless.
+    """
+    title = f"[bridge:handoff-pending] {next_session.name} ({digest[:8]})"
+    body = (
+        f"NEXT-SESSION.md handoff detected at {next_session}.\n"
+        f"\n"
+        f"Read this file in full and execute its checklist before any other work. "
+        f"Reply briefly to the operator (\"handoff 처리부터 하겠습니다\") if a user "
+        f"message is also pending; resume normal flow only after the file is "
+        f"deleted by the agent.\n"
+        f"\n"
+        f"Auto-enqueued by bridge_hook_common._enqueue_handoff_pending.\n"
+    )
+    # find-open guard: skip if a same-titled task is already open for the agent.
+    # bridge-queue.py find-open --title-prefix uses SQL LIKE; with --format json
+    # and no --all, returns a single dict (or returncode 1 with empty stdout).
+    try:
+        existing = queue_cli([
+            "find-open",
+            "--agent", agent,
+            "--title-prefix", "[bridge:handoff-pending]",
+            "--format", "json",
+        ])
+        if existing.returncode == 0 and existing.stdout.strip():
+            try:
+                row = json.loads(existing.stdout)
+            except (json.JSONDecodeError, ValueError):
+                row = None
+            if isinstance(row, dict) and row.get("title", "") == title:
+                return  # already enqueued for this exact digest
+    except Exception:
+        pass
+    try:
+        queue_cli([
+            "create",
+            "--to", agent,
+            "--from", agent,
+            "--priority", "urgent",
+            "--title", title,
+            "--body", body,
+        ])
+    except Exception:
+        # Hook must not block agent startup on enqueue failure.
         return
 
 
@@ -309,7 +377,9 @@ def bootstrap_artifact_context(agent: str) -> str:
         if excerpt:
             lines.append("Handoff excerpt:")
             lines.append(excerpt)
-        _stamp_next_session_delivered(agent, next_session)
+        digest = _stamp_next_session_delivered(agent, next_session)
+        if digest is not None:
+            _enqueue_handoff_pending(agent, next_session, digest)
 
     session_type = first_existing_path(
         [
