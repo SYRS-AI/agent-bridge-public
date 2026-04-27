@@ -4,6 +4,51 @@ All notable changes to Agent Bridge are documented here. This project adheres
 loosely to [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and tracks
 version bumps via the `VERSION` file.
 
+## [0.6.22] — 2026-04-27
+
+### Hotfix — cron-followup self-feeding loop on memory-pressured hosts
+
+- **`stall: skip cron-followup for memory_pressure deferrals`** (#393, PR #396).
+  The pre-flight memory guard from #263 Track B (shipped in v0.6.x) defers
+  cron dispatch when host swap > 80%, but the daemon was still emitting
+  high-priority `[cron-followup]` tasks per deferred slot — creating a
+  self-feeding loop on memory-pressured hosts: each followup wakes the
+  parent agent, consumes tokens that materialize as more memory in the
+  claude process, and increases swap → more deferrals → more followups.
+  Observed pattern on a memory-pressured macOS host: 6 `memory_pressure`
+  deferrals in 1 hour, each fanning a high-priority task to `patch`.
+
+  Two-part fix:
+  - `lib/bridge-cron.sh::bridge_cron_load_run_shell` now exports
+    `CRON_DEFERRED_REASON` from `status.json` so the daemon can branch
+    on the deferral reason. Empty string for non-deferred runs.
+  - `bridge-daemon.sh::process_stall_reports` resets
+    `CRON_NEEDS_HUMAN_FOLLOWUP` and `is_failure_followup` after the
+    failure-path set when `CRON_RUN_STATE == deferred && CRON_DEFERRED_REASON
+    == memory_pressure`. The existing burst-counter + creation block
+    silently skips. An audit row records `reason=memory_pressure_deferral`
+    and a `daemon_info` line surfaces the skip with the cron family for
+    triage.
+
+  Real `failed`/`timeout`/`crash` runs still emit a high-priority
+  cron-followup as today. The transient-failure burst gate from
+  #230-B and the success+needs_human_followup path from #385 are both
+  preserved unchanged.
+
+### v0.6.22 upgrade / migration notes
+
+#### Auto
+
+- v0.6.21 → v0.6.22 binary upgrade is straightforward — no schema or
+  state-file shape changes. The cron-followup memory_pressure skip
+  activates on the next daemon cycle.
+
+#### Operator-required
+
+None. Hotfix activates automatically. Operators on memory-pressured
+hosts should observe the next deferred slot no longer fanning out a
+followup task to the parent agent.
+
 ## [0.6.21] — 2026-04-27
 
 ### Highlights — isolate-v2 PR-D + cron-followup signal correctness
