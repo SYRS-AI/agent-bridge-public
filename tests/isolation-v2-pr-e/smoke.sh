@@ -364,6 +364,62 @@ um2_recorded="$(cat "$UM2_PROBE" 2>/dev/null || true)"
 ok "UM2 legacy mode → helper inert (umask stays 0077)"
 
 # ---------------------------------------------------------------------------
+# UM3: real bridge-run.sh entrypoint applies umask 0007 in v2 (PR #399 r2 FAIL #14)
+#
+# UM1 only asserts the helper *body* sets umask correctly. r1 FAIL #14
+# noted that the bug was *call ordering* — bridge-run.sh called the helper
+# before its definition was parsed, so initial v2 launches inherited the
+# bridge-lib.sh default 0077 even though the helper body was correct.
+# UM3 drives the actual bridge-run.sh entrypoint with --dry-run + the
+# umask probe to assert the call site (line ~91 of bridge-run.sh) is
+# observably effective. Uses BRIDGE_HOST_PLATFORM_OVERRIDE=Linux so the
+# linux_user_isolation_effective check passes on macOS as well.
+# ---------------------------------------------------------------------------
+log "case: UM3 real bridge-run.sh entrypoint applies umask 0007 in v2"
+UM3_DIR="$TMP_ROOT/um3"
+UM3_PROBE="$UM3_DIR/umask.probe"
+UM3_HOME="$UM3_DIR/bridge-home"
+UM3_DATA="$UM3_DIR/data"
+UM3_STATE="$UM3_HOME/state"
+UM3_ROSTER_FILE="$UM3_HOME/agent-roster.sh"
+UM3_ROSTER_LOCAL="$UM3_HOME/agent-roster.local.sh"
+UM3_WORKDIR="$UM3_DIR/agent-workdir"
+mkdir -p "$UM3_HOME" "$UM3_DATA/agents" "$UM3_DATA/shared" "$UM3_DATA/state" \
+         "$UM3_STATE/agents" "$UM3_WORKDIR"
+: >"$UM3_PROBE"
+: >"$UM3_ROSTER_FILE"
+# BRIDGE_AGENT_SESSION must be set so bridge_agent_exists returns true,
+# which gates bridge_require_agent inside bridge-run.sh.
+cat >"$UM3_ROSTER_LOCAL" <<EOF
+#!/usr/bin/env bash
+bridge_add_agent_id_if_missing "smoke-um3"
+BRIDGE_AGENT_ENGINE["smoke-um3"]="codex"
+BRIDGE_AGENT_SESSION["smoke-um3"]="smoke-um3"
+BRIDGE_AGENT_WORKDIR["smoke-um3"]="$UM3_WORKDIR"
+BRIDGE_AGENT_ISOLATION_MODE["smoke-um3"]="linux-user"
+BRIDGE_AGENT_OS_USER["smoke-um3"]="ec2-user"
+BRIDGE_AGENT_LAUNCH_CMD["smoke-um3"]="codex"
+EOF
+um3_rc=0
+BRIDGE_HOME="$UM3_HOME" \
+BRIDGE_LAYOUT="v2" \
+BRIDGE_DATA_ROOT="$UM3_DATA" \
+BRIDGE_STATE_DIR="$UM3_STATE" \
+BRIDGE_ACTIVE_AGENT_DIR="$UM3_STATE/agents" \
+BRIDGE_ROSTER_FILE="$UM3_ROSTER_FILE" \
+BRIDGE_ROSTER_LOCAL_FILE="$UM3_ROSTER_LOCAL" \
+BRIDGE_HOST_PLATFORM_OVERRIDE="Linux" \
+BRIDGE_RUN_UMASK_PROBE_FILE="$UM3_PROBE" \
+  bash "$REPO_ROOT/bridge-run.sh" smoke-um3 --dry-run >/dev/null 2>"$UM3_DIR/run.err" \
+  || um3_rc=$?
+[[ $um3_rc -eq 0 ]] \
+  || die "UM3 bridge-run.sh --dry-run failed rc=$um3_rc; stderr=$(cat "$UM3_DIR/run.err" 2>/dev/null)"
+um3_recorded="$(cat "$UM3_PROBE" 2>/dev/null || true)"
+[[ "$um3_recorded" == "0007" ]] \
+  || die "UM3 expected probe=0007 (real bridge-run.sh entrypoint, v2 + linux-user), got: '$um3_recorded'; stderr=$(cat "$UM3_DIR/run.err" 2>/dev/null)"
+ok "UM3 real bridge-run.sh entrypoint sets umask 0007 (call ordering fixed)"
+
+# ---------------------------------------------------------------------------
 # EC1/EC2/EC3: engine CLI v2 fail-fast vs system-path pass-through
 # ---------------------------------------------------------------------------
 case_ec1() {

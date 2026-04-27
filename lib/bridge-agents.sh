@@ -750,10 +750,23 @@ bridge_linux_grant_claude_credentials_access() {
   if bridge_isolation_v2_active; then
     # C1 exception: bypass the v2-noop public traverse chain and apply
     # the grant directly. Same safety body via _bridge_linux_grant_traverse_paths.
+    #
+    # Scope is intentionally narrow per PR #399 r1 FAIL #13 — only what
+    # the kernel needs to resolve the symlink at
+    # `$user_home/.claude/.credentials.json` to
+    # `$controller_home/.claude/.credentials.json`:
+    #   1. traverse `--x` along every ancestor up to controller_home
+    #      (the unguarded helper above grants this on each ancestor,
+    #      including controller_claude_dir itself).
+    #   2. read `r--` on the credential file inode.
+    # No directory `r-x` (would let the isolated UID list ~/.claude/),
+    # no default ACL on ~/.claude/ (would extend grants to every new
+    # inode under there). Re-auth's atomic-rename produces a new inode
+    # without an inherited ACL — operator must re-run
+    # `agent-bridge isolate <agent>` after each Claude re-auth, which
+    # is the documented C1 contract until PR-F's per-agent claude login.
     _bridge_linux_grant_traverse_chain_unguarded "$os_user" "$controller_claude_dir" "$controller_home"
-    bridge_linux_sudo_root setfacl -m "u:${os_user}:r-x" "$controller_claude_dir" >/dev/null 2>&1 || true
     bridge_linux_sudo_root setfacl -m "u:${os_user}:r--" "$controller_cred_file" >/dev/null 2>&1 || true
-    bridge_linux_sudo_root setfacl -d -m "u:${os_user}:r--" "$controller_claude_dir" >/dev/null 2>&1 || true
   else
     bridge_linux_grant_traverse_chain "$os_user" "$controller_claude_dir" "$controller_home"
     bridge_linux_acl_add "u:${os_user}:r-x" "$controller_claude_dir" >/dev/null 2>&1 || true
@@ -2578,7 +2591,27 @@ bridge_linux_prepare_agent_isolation() {
   local isolated_projects_dir="$isolated_claude_dir/projects"
   bridge_linux_sudo_root mkdir -p "$isolated_claude_dir"
   bridge_linux_sudo_root chown "$os_user" "$isolated_claude_dir" >/dev/null 2>&1 || true
-  bridge_linux_sudo_root chmod 0700 "$isolated_claude_dir" >/dev/null 2>&1 || true
+  # PR-E r2 (FAIL #15): under v2 the legacy ACL grant on this dir is
+  # no-op'd (`bridge_linux_acl_add` short-circuits in v2), but the dir
+  # itself was still chmod 0700 — group has no traverse, so the
+  # controller (group member of ab-agent-<name>) cannot reach
+  # ~/.claude/projects/ for the memory-daily harvester. Mirror the
+  # group-mode replacements applied to ~/.claude/plugins (lines around
+  # 1666-1670) and ~/.claude/plugins/marketplaces: chgrp the v2 agent
+  # group + chmod 2750 (setgid so new subdirs like projects/ inherit
+  # the group). Legacy keeps 0700 + named-user ACL.
+  if bridge_isolation_v2_active; then
+    local _claude_v2_grp=""
+    _claude_v2_grp="$(bridge_isolation_v2_agent_group_name "$agent" 2>/dev/null || printf '')"
+    [[ -n "$_claude_v2_grp" ]] \
+      || bridge_die "isolation v2: cannot resolve agent group for ~/.claude of '$agent'"
+    bridge_linux_sudo_root chgrp "$_claude_v2_grp" "$isolated_claude_dir" \
+      || bridge_die "isolation v2: chgrp $_claude_v2_grp on '$isolated_claude_dir' failed"
+    bridge_linux_sudo_root chmod 2750 "$isolated_claude_dir" \
+      || bridge_die "isolation v2: chmod 2750 on '$isolated_claude_dir' failed"
+  else
+    bridge_linux_sudo_root chmod 0700 "$isolated_claude_dir" >/dev/null 2>&1 || true
+  fi
   # Channel-ownership-aware plugin sharing. Without this the isolated UID's
   # ~/.claude/plugins/ is empty and Claude starts with no MCP servers loaded
   # (Teams/ms365/cosmax-* all silently missing). The helper writes a per-UID

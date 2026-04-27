@@ -276,9 +276,13 @@ This is an intentional, named, fail-loud transitional exception:
   is missing, so the symlink is never planted in a half-broken state.
 - `bridge_linux_prepare_agent_isolation` keeps the `acl` package
   prerequisite for v2 + Claude (and skips it for v2 + non-Claude).
-- The v2 ACL grants are the symlink path
-  (`controller_home/.claude/.credentials.json`) plus a traverse chain
-  up to `controller_home`. No other v2 artifact uses ACLs.
+- The v2 ACL grants are exactly: `r--` on the credential file
+  (`controller_home/.claude/.credentials.json`) plus `--x` traverse on
+  every ancestor up to `controller_home` (inclusive of
+  `controller_home/.claude/`). No directory-list `r-x` and no default
+  ACL on `controller_home/.claude/` — re-auth (atomic rename → new
+  inode) requires re-running `agent-bridge isolate <agent>` to refresh
+  the file ACL on the new inode. No other v2 artifact uses ACLs.
 
 Plan: PR-F or a future PR is expected to switch v2 to per-agent
 `claude login` (each isolated UID gets its own credential file inside
@@ -315,3 +319,38 @@ symlink, which passes the v2 check.
 
 Legacy mode is unaffected — the controller-home traverse-chain ACL
 grants still cover that path.
+
+## 18. Layout v2 swaps the isolated UID's `~/.claude` from 0700 to 2750 group-mode
+
+Before PR-E, the isolated UID's `$user_home/.claude` was created mode
+`0700` and the controller (and the memory-daily harvester running as
+the controller UID) reached `~/.claude/projects/` via a named-user
+default ACL `u:<controller>:r-X` set on that directory. PR-E v2 mode
+no-ops `bridge_linux_acl_add` and the default-ACL setfacl, so on v2
+the dir would have been left at `0700` with no group access — the
+controller could no longer traverse into `projects/`.
+
+Under v2 the isolated `~/.claude` is now `chgrp ab-agent-<agent>` +
+`chmod 2750`:
+
+- Owner (the isolated UID): `rwx` — Claude still owns its config tree
+  and can write `projects/`, `sessions/`, `settings.json`, etc.
+- Group (`ab-agent-<agent>`, which the controller joins via PR-A/B/C
+  group plumbing): `r-x` — the harvester can list and read.
+- Other: `---`.
+- The setgid bit means subdirectories created by Claude later (e.g.
+  `projects/<workspace>`) inherit `ab-agent-<agent>` as their group,
+  so the harvester walks them without further setup. Combined with
+  the v2 umask 007 from `bridge_run_apply_v2_umask_if_needed`, new
+  files land at `0660` group-readable.
+
+Legacy mode keeps the prior `0700` + named-user default-ACL contract.
+
+This pairs with the per-agent v2 group prerequisite (every isolated
+UID's controller must be in `ab-agent-<agent>` AND `ab-shared`,
+ensured by `bridge_linux_prepare_agent_isolation`). On a fresh v2
+install the operator needs a re-login (or `newgrp` shell) after the
+first `agent-bridge isolate <agent>` so the controller process picks
+up the new group memberships; otherwise the harvester scan still
+fails until the operator's session refreshes. The same prerequisite
+is documented in `OPERATIONS.md`'s v2 install section.

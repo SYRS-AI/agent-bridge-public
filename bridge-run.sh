@@ -7,6 +7,39 @@ SCRIPT_DIR="$(cd -P "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 # shellcheck source=/dev/null
 source "$SCRIPT_DIR/bridge-lib.sh"
 
+# PR-E: in v2 mode + linux-user isolation, switch the runtime umask from
+# bridge-lib.sh's default 0077 (private) to 0007 (group-writable). The v2
+# group-setgid layout (PR-A/B/C) gives new files the right group, but the
+# mode bits depend on umask. Without 0007, a setgid 2770 channel/runtime
+# dir would still hold 0600 files that the controller (group member) can
+# only read because of the inherited group ownership combined with chmod
+# at directory creation; agent-created channel state .env files would
+# lack group rw and the daemon's controller-side health probes would
+# silently see EACCES.
+#
+# Called twice from this script: once after the first bridge_require_agent
+# at startup, and once from bridge_run_refresh_roster_if_changed after the
+# subsequent bridge_require_agent on roster reload. Defined here (above
+# any caller) so the first call site below is not running against an
+# undefined function (PR #399 r1 FAIL #14): bash with `set -uo pipefail`
+# silently emits "command not found" + rc=127 and the script keeps going,
+# leaving initial v2 launches inheriting bridge-lib.sh's 0077.
+#
+# BRIDGE_RUN_UMASK_PROBE_FILE is a hidden smoke-only hook: when set, the
+# helper writes the resulting umask (post-set) to that path so a smoke
+# fixture can assert the bridge-run.sh effective umask without parsing
+# /proc/<pid>/status. Inert when unset.
+bridge_run_apply_v2_umask_if_needed() {
+  local agent="$1"
+  if bridge_isolation_v2_active 2>/dev/null \
+      && bridge_agent_linux_user_isolation_effective "$agent" 2>/dev/null; then
+    umask 007
+  fi
+  if [[ -n "${BRIDGE_RUN_UMASK_PROBE_FILE:-}" ]]; then
+    umask >"$BRIDGE_RUN_UMASK_PROBE_FILE" 2>/dev/null || true
+  fi
+}
+
 usage() {
   echo "Usage: bash $SCRIPT_DIR/bridge-run.sh <agent> [--once] [--continue|--no-continue] [--safe-mode] [--dry-run]"
   echo "       bash $SCRIPT_DIR/bridge-run.sh --list"
@@ -164,35 +197,6 @@ log_loop_help() {
   bridge_run_session_attached || return 0
   log_line "tmux에서 쉘로 돌아가기: Ctrl-b 를 누른 뒤 d 를 누르세요."
   log_line "에이전트를 완전히 종료하기: 바깥 터미널에서 'agb kill ${AGENT}' 를 실행하세요."
-}
-
-# PR-E: in v2 mode + linux-user isolation, switch the runtime umask from
-# bridge-lib.sh's default 0077 (private) to 0007 (group-writable). The v2
-# group-setgid layout (PR-A/B/C) gives new files the right group, but the
-# mode bits depend on umask. Without 0007, a setgid 2770 channel/runtime
-# dir would still hold 0600 files that the controller (group member) can
-# only read because of the inherited group ownership combined with chmod
-# at directory creation; agent-created channel state .env files would
-# lack group rw and the daemon's controller-side health probes would
-# silently see EACCES.
-#
-# Called twice from this script: once after the first bridge_require_agent
-# at startup, and once from bridge_run_refresh_roster_if_changed after the
-# subsequent bridge_require_agent on roster reload.
-#
-# BRIDGE_RUN_UMASK_PROBE_FILE is a hidden smoke-only hook: when set, the
-# helper writes the resulting umask (post-set) to that path so a smoke
-# fixture can assert the bridge-run.sh effective umask without parsing
-# /proc/<pid>/status. Inert when unset.
-bridge_run_apply_v2_umask_if_needed() {
-  local agent="$1"
-  if bridge_isolation_v2_active 2>/dev/null \
-      && bridge_agent_linux_user_isolation_effective "$agent" 2>/dev/null; then
-    umask 007
-  fi
-  if [[ -n "${BRIDGE_RUN_UMASK_PROBE_FILE:-}" ]]; then
-    umask >"$BRIDGE_RUN_UMASK_PROBE_FILE" 2>/dev/null || true
-  fi
 }
 
 bridge_run_session_attached() {
