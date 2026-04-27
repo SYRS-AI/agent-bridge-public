@@ -349,6 +349,62 @@ else
   fail "ensure_groups_and_memberships does NOT add user memberships"
 fi
 
+# ---------------------------------------------------------------------------
+# Case 11: normalize_layout exists, called with correct helper signature,
+#          and runs AFTER mirror (separate from membership setup)
+# ---------------------------------------------------------------------------
+
+if declare -f bridge_isolation_v2_migrate_normalize_layout >/dev/null; then
+  ok "normalize_layout function defined"
+else
+  fail "normalize_layout function missing"
+fi
+
+# Helper signature is (group, dir_mode, file_mode, root). Verify all
+# calls in normalize_layout use 4 positional args, with the second/third
+# being octal mode tokens (2750/2770/0640/0660), and the FIRST arg is
+# the group var (not a path — that was the r2 P1 #1 bug).
+norm_body="$(declare -f bridge_isolation_v2_migrate_normalize_layout)"
+if grep -qE 'chgrp_setgid_recursive[[:space:]]+\\?\s*"\$(shared_grp|ctrl_grp|agent_grp)"\s+27[57]0\s+0[64]60\s+"\$data_root' <<<"$norm_body"; then
+  ok "normalize_layout calls helper with (group, dir_mode, file_mode, root)"
+else
+  # Fallback regex without strict line breaks.
+  if grep -E 'chgrp_setgid_recursive' <<<"$norm_body" \
+     | grep -qE '"\$(shared_grp|ctrl_grp|agent_grp)"[[:space:]]+27[57]0[[:space:]]+0[64]60'; then
+    ok "normalize_layout calls helper with (group, dir_mode, file_mode, root)"
+  else
+    fail "normalize_layout call signature looks wrong (expected group dir_mode file_mode root)"
+  fi
+fi
+
+# Apply path must call normalize_layout AFTER mirror_all.
+apply_body="$(declare -f bridge_isolation_v2_migrate_apply)"
+mirror_pos=$(grep -n 'mirror_all' <<<"$apply_body" | head -1 | cut -d: -f1)
+norm_pos=$(grep -n 'normalize_layout' <<<"$apply_body" | head -1 | cut -d: -f1)
+if [[ -n "$mirror_pos" && -n "$norm_pos" ]] && (( norm_pos > mirror_pos )); then
+  ok "apply runs normalize_layout AFTER mirror_all"
+else
+  fail "apply order wrong: normalize must come after mirror (mirror_pos=$mirror_pos norm_pos=$norm_pos)"
+fi
+
+# ---------------------------------------------------------------------------
+# Case 12: postflight honors BRIDGE_SHARED_GROUP / BRIDGE_CONTROLLER_GROUP
+# ---------------------------------------------------------------------------
+
+postflight_body="$(declare -f bridge_isolation_v2_migrate_postflight_groups)"
+if grep -q 'BRIDGE_SHARED_GROUP' <<<"$postflight_body" \
+   && grep -q 'BRIDGE_CONTROLLER_GROUP' <<<"$postflight_body"; then
+  ok "postflight honors BRIDGE_SHARED_GROUP + BRIDGE_CONTROLLER_GROUP overrides"
+else
+  fail "postflight does NOT reference both env overrides"
+fi
+
+if grep -q '"ab-shared"' <<<"$postflight_body"; then
+  fail "postflight still hardcodes 'ab-shared' as a literal"
+else
+  ok "postflight no longer hardcodes 'ab-shared'"
+fi
+
 printf '\n[summary] pass=%d fail=%d\n' "$PASS" "$FAIL"
 if (( FAIL > 0 )); then
   exit 1

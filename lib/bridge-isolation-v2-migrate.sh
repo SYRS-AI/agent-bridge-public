@@ -378,12 +378,14 @@ bridge_isolation_v2_migrate_mirror_all() {
 # ---------------------------------------------------------------------------
 
 bridge_isolation_v2_migrate_ensure_groups_and_memberships() {
-  # Group creation + user membership additions + path ownership
-  # normalization, all in one operation. Uses BRIDGE_SHARED_GROUP /
-  # BRIDGE_CONTROLLER_GROUP / BRIDGE_AGENT_GROUP_PREFIX overrides if
-  # the marker provided them; defaults match lib/bridge-isolation-v2.sh.
+  # Group creation + user membership additions only. Honors
+  # BRIDGE_SHARED_GROUP / BRIDGE_CONTROLLER_GROUP / BRIDGE_AGENT_GROUP_PREFIX
+  # overrides; defaults match lib/bridge-isolation-v2.sh.
+  # Path ownership/mode normalization is a SEPARATE step
+  # (`bridge_isolation_v2_migrate_normalize_layout`) run AFTER mirror_all
+  # creates the destination tree — calling it here would no-op because
+  # the dirs do not exist yet. r2 review (P1 #1).
   local snapshot_path="$1"
-  local data_root="$2"
   local controller_user="${SUDO_USER:-${USER:-}}"
   local shared_grp="${BRIDGE_SHARED_GROUP:-ab-shared}"
   local ctrl_grp="${BRIDGE_CONTROLLER_GROUP:-ab-controller}"
@@ -411,38 +413,78 @@ bridge_isolation_v2_migrate_ensure_groups_and_memberships() {
     fi
   done < "$snapshot_path"
 
-  # Normalize ownership/mode on the migrated trees per the v2 layout
-  # spec (lib/bridge-isolation-v2.sh:36-65). Without this step the
-  # share-plugin-catalog / per-agent traverse paths cannot reach the
-  # files even with correct group memberships.
+  return 0
+}
+
+bridge_isolation_v2_migrate_normalize_layout() {
+  # chgrp + setgid + mode normalization on migrated trees. Called AFTER
+  # mirror_all so the destination paths actually exist. Each
+  # bridge_isolation_v2_chgrp_setgid_recursive call uses the helper's
+  # actual signature: (group, dir_mode, file_mode, root).
+  # Failures propagate so apply dies with a clear error — silent
+  # `2>/dev/null || true` was the r2 P1 #1 root cause.
+  local snapshot_path="$1"
+  local data_root="$2"
+  local shared_grp="${BRIDGE_SHARED_GROUP:-ab-shared}"
+  local ctrl_grp="${BRIDGE_CONTROLLER_GROUP:-ab-controller}"
+
   if [[ -d "$data_root/shared" ]]; then
-    bridge_isolation_v2_chgrp_setgid_recursive "$data_root/shared" "$shared_grp" 2>/dev/null || true
+    bridge_isolation_v2_chgrp_setgid_recursive \
+      "$shared_grp" 2750 0640 "$data_root/shared" \
+      || { bridge_warn "normalize_layout: shared/ chgrp_setgid_recursive failed"; return 1; }
   fi
+
   if [[ -d "$data_root/state" ]]; then
-    bridge_isolation_v2_chgrp_setgid_recursive "$data_root/state" "$ctrl_grp" 2>/dev/null || true
+    bridge_isolation_v2_chgrp_setgid_recursive \
+      "$ctrl_grp" 2750 0640 "$data_root/state" \
+      || { bridge_warn "normalize_layout: state/ chgrp_setgid_recursive failed"; return 1; }
   fi
+
+  local agent agent_grp
   while IFS= read -r agent; do
     [[ -n "$agent" ]] || continue
     agent_grp="$(bridge_isolation_v2_agent_group_name "$agent")"
     if [[ -d "$data_root/agents/$agent" ]]; then
-      bridge_isolation_v2_chgrp_setgid_recursive "$data_root/agents/$agent" "$agent_grp" 2>/dev/null || true
+      # Whole agent root: dir 2770 (group rwx + setgid), file 0660.
+      bridge_isolation_v2_chgrp_setgid_recursive \
+        "$agent_grp" 2770 0660 "$data_root/agents/$agent" \
+        || { bridge_warn "normalize_layout: agents/$agent chgrp_setgid_recursive failed"; return 1; }
+    fi
+    # credentials/ holds controller-private secrets — tighter modes
+    # (dir 2750, file 0640). Re-run after the broad pass so it overrides.
+    if [[ -d "$data_root/agents/$agent/credentials" ]]; then
+      bridge_isolation_v2_chgrp_setgid_recursive \
+        "$agent_grp" 2750 0640 "$data_root/agents/$agent/credentials" \
+        || { bridge_warn "normalize_layout: agents/$agent/credentials chgrp_setgid_recursive failed"; return 1; }
     fi
   done < "$snapshot_path"
+
   return 0
 }
 
 bridge_isolation_v2_migrate_postflight_groups() {
   local snapshot_path="$1"
   local controller_user="${SUDO_USER:-${USER:-}}"
+  local shared_grp="${BRIDGE_SHARED_GROUP:-ab-shared}"
+  local ctrl_grp="${BRIDGE_CONTROLLER_GROUP:-ab-controller}"
   local agent groups os_user
   local mismatch=0
 
-  # Controller fresh probe.
+  # Controller fresh probe — must be in shared+controller groups.
   if [[ -n "$controller_user" ]]; then
     groups="$(sudo -n -u "$controller_user" id -nG 2>/dev/null || true)"
     if [[ -z "$groups" ]]; then
       bridge_warn "postflight: cannot fresh-probe controller groups for $controller_user"
       mismatch=1
+    else
+      if ! grep -qw "$shared_grp" <<<"$groups"; then
+        bridge_warn "postflight: controller $controller_user missing group $shared_grp; got: $groups"
+        mismatch=1
+      fi
+      if ! grep -qw "$ctrl_grp" <<<"$groups"; then
+        bridge_warn "postflight: controller $controller_user missing group $ctrl_grp; got: $groups"
+        mismatch=1
+      fi
     fi
   fi
 
@@ -462,8 +504,8 @@ bridge_isolation_v2_migrate_postflight_groups() {
       bridge_warn "postflight: $os_user (agent $agent) missing group $agent_group; got: $groups"
       mismatch=1
     fi
-    if ! grep -qw "ab-shared" <<<"$groups"; then
-      bridge_warn "postflight: $os_user (agent $agent) missing group ab-shared; got: $groups"
+    if ! grep -qw "$shared_grp" <<<"$groups"; then
+      bridge_warn "postflight: $os_user (agent $agent) missing group $shared_grp; got: $groups"
       mismatch=1
     fi
   done < "$snapshot_path"
@@ -642,8 +684,8 @@ bridge_isolation_v2_migrate_apply() {
 
   bridge_isolation_v2_migrate_orchestrate_stop "$snapshot"
 
-  bridge_isolation_v2_migrate_ensure_groups_and_memberships "$snapshot" "$data_root" \
-    || bridge_die "group ensure / membership / normalize failed"
+  bridge_isolation_v2_migrate_ensure_groups_and_memberships "$snapshot" \
+    || bridge_die "group ensure / membership failed"
 
   local manifest
   manifest="$(bridge_isolation_v2_migrate_manifest_path)"
@@ -651,6 +693,12 @@ bridge_isolation_v2_migrate_apply() {
     bridge_warn "mirror reported failures — marker NOT written; legacy tree intact; restarting agents on legacy"
     bridge_isolation_v2_migrate_orchestrate_restart "$snapshot"
     bridge_die "apply aborted at mirror step (manifest=$manifest)"
+  fi
+
+  if ! bridge_isolation_v2_migrate_normalize_layout "$snapshot" "$data_root"; then
+    bridge_warn "layout normalize failed — marker NOT written; legacy tree intact; restarting agents on legacy"
+    bridge_isolation_v2_migrate_orchestrate_restart "$snapshot"
+    bridge_die "apply aborted at normalize step (manifest=$manifest)"
   fi
 
   bridge_isolation_v2_migrate_marker_write "$data_root"
