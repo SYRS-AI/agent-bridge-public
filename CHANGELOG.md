@@ -4,6 +4,72 @@ All notable changes to Agent Bridge are documented here. This project adheres
 loosely to [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and tracks
 version bumps via the `VERSION` file.
 
+## [0.6.26] — 2026-04-27
+
+### isolate-v2 PR-E follow-up — dev-codex r1 review remediation
+
+Follow-up to PR #399 (isolate-v2 PR-E shipped in v0.6.24) addressing
+the 3 unresolved findings from dev-codex r1 review (`task #1418`):
+
+- **`bridge_linux_prepare_agent_isolation` v2 quiesce gate** (#405,
+  PR #405). Refuses to run if the agent's tmux session is alive — the
+  channel/workdir mutations downstream do check-then-mutate on
+  isolated-UID-writable parents, and the quiesce closes the swap race
+  where another iteration of the agent could land between check and
+  mutate. Bypassable via `BRIDGE_PREPARE_ISOLATION_ALLOW_RUNNING=1`
+  for sandboxed smoke. v2-only; legacy unchanged. (P1#2)
+- **`bridge_linux_grant_claude_credentials_access` cred setfacl
+  fail-loud** (#405). Previous `|| true` swallowed setfacl failure on
+  ACL-disabled mounts and the symlink-plant step would still succeed
+  against an unreadable target. Now `|| bridge_die`. (P1#3)
+- **`bridge_linux_share_plugin_catalog` v2 + empty cache → die**
+  (#405). When `BRIDGE_LAYOUT=v2` and `$BRIDGE_SHARED_ROOT/plugins-cache`
+  is empty, the function refuses to fall back to legacy
+  `controller_home/.claude/plugins`. Traverse/ACL helpers no-op in v2,
+  so the legacy fallback would plant unreadable symlinks. (P2#4)
+
+### Smoke fixture hardening (PR-E suite)
+
+PR-E smoke gains acceptance cases for each new gate plus determinism
+hardening:
+
+- **CT4 alive / dead / bypass** verify the v2 quiesce gate — alive case
+  now distinguishes the quiesce-die rc=1 from the bypass-marker rc=42
+  via stderr grep, so the bypass path can't masquerade as a quiesce-die
+  pass.
+- **CR3** verifies cred setfacl fail-loud + no symlink plant.
+- **PC2** verifies v2 + empty shared cache → die.
+- **EP1** pins the `bridge-run.sh` entrypoint dry-run contract via a
+  synthetic fixture roster under `$TMP_ROOT` (was previously skipping
+  when no host agent was present).
+- **PC2/PC3** workdirs moved from hardcoded `/tmp/wd-*` to
+  `$TMP_ROOT/wd-*` so cleanup is automatic via the existing trap and
+  parallel-safe.
+- **`scripts/smoke-test.sh`** documents the defensive-only nature of
+  the new `BRIDGE_LINUX_ISOLATED_USER_HOME_ROOT` export — the PR-E
+  suite remains operator-driven (`bash tests/isolation-v2-pr-e/smoke.sh`
+  directly).
+
+### v0.6.26 upgrade / migration notes
+
+#### Auto
+
+- v0.6.25 → v0.6.26 binary upgrade is straightforward — no schema or
+  state-file shape changes. The new gates activate immediately on the
+  next isolation prepare call (which only runs under v2 active).
+
+#### Operator-required
+
+None. All changes are v2-gated; legacy installs are unaffected.
+
+For operators evaluating v2 (per the long-standing instructions in the
+v0.6.18-v0.6.24 release notes), the new quiesce gate means any
+`agent-bridge isolate <agent>` reapply attempt while the agent's tmux
+session is alive will now `bridge_die`. Stop the agent's session first,
+or pass `BRIDGE_PREPARE_ISOLATION_ALLOW_RUNNING=1` if you genuinely
+need to reapply against a running agent (uncommon — usually only for
+sandboxed smoke).
+
 ## [0.6.25] — 2026-04-27
 
 ### P0 fix — smoke-test live-install wipe defense
