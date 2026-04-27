@@ -32,6 +32,14 @@ TMP_ROOT="$(mktemp -d -t isolation-v2-pr-e.XXXXXX)"
 trap 'rm -rf "$TMP_ROOT" >/dev/null 2>&1 || true' EXIT
 export TMPDIR="${TMPDIR:-/tmp}"
 
+# Issue #403: redirect the isolated-user home root into the TMP_ROOT
+# so even if a test passes an os_user that collides with a real
+# account, the destructive paths land in our tempdir, not /home/<user>.
+# Consumed by bridge_agent_linux_user_home() in lib/bridge-agents.sh.
+mkdir -p "$TMP_ROOT/fake-home"
+export BRIDGE_LINUX_ISOLATED_USER_HOME_ROOT="$TMP_ROOT/fake-home"
+mkdir -p "$BRIDGE_LINUX_ISOLATED_USER_HOME_ROOT/agb-smoke-fake-user"
+
 # ---------------------------------------------------------------------------
 # Subshell helpers — caller passes a function NAME (defined in this
 # script) and we invoke it after wiring up the lib + sudo stub.
@@ -46,6 +54,39 @@ make_sudo_stub() {
   _BRIDGE_LINUX_SUDO_LOG_FILE="$1"
   bridge_linux_sudo_root() {
     printf '%s\n' "$*" >>"$_BRIDGE_LINUX_SUDO_LOG_FILE"
+    # Issue #403: refuse to exec a destructive op when ANY positional
+    # arg looks like an absolute path outside $TMP_ROOT. This is a
+    # belt-and-suspenders defense against test cases or helper code
+    # paths that compute paths from os_user (etc.) which collide with
+    # the operator's home. `mktemp` and `python3` may receive non-path
+    # args; the loop only kicks on absolute paths. `test` is left in
+    # its own arm because its args may be non-path predicates.
+    local _arg _tmp_canon _tmp_raw _arg_canon
+    _tmp_raw="${TMP_ROOT:-}"
+    _tmp_canon="$(readlink -f "$_tmp_raw" 2>/dev/null)"
+    [[ -z "$_tmp_canon" ]] && _tmp_canon="$_tmp_raw"
+    for _arg in "$@"; do
+      case "$_arg" in
+        /*)
+          # Accept the arg if either its raw or its resolved form is rooted
+          # under TMP_ROOT (raw or canonical). On macOS, readlink -f returns
+          # empty for nonexistent paths, so the raw match is required to
+          # avoid spurious rejection of valid TMP_ROOT-relative ops on files
+          # that don't yet exist when the stub runs.
+          _arg_canon="$(readlink -f "$_arg" 2>/dev/null)"
+          [[ -z "$_arg_canon" ]] && _arg_canon="$_arg"
+          case "$_arg_canon" in
+            "$_tmp_canon"|"$_tmp_canon"/*|"$_tmp_raw"|"$_tmp_raw"/*) continue ;;
+          esac
+          case "$_arg" in
+            "$_tmp_canon"|"$_tmp_canon"/*|"$_tmp_raw"|"$_tmp_raw"/*) continue ;;
+          esac
+          printf '[smoke][error] sudo-stub refusing %s with arg %s outside TMP_ROOT %s (issue #403)\n' \
+            "$1" "$_arg" "$_tmp_canon" >&2
+          return 99
+          ;;
+      esac
+    done
     case "${1:-}" in
       # Filesystem state ops we want to exercise — the case body asserts
       # post-conditions like mode/existence after these run.

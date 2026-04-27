@@ -544,6 +544,25 @@ bridge_linux_install_agent_bridge_symlink() {
   local target="$user_home/.agent-bridge"
   local current=""
 
+  # Issue #403 P0: NEVER rm -rf a path that resolves to the controller's
+  # own BRIDGE_HOME. The realpath check catches both literal-equality
+  # and symlink-to-controller-home cases. Any caller passing
+  # os_user==<controller-login> hits this gate, which is the right
+  # behavior — the controller's login is not an isolated agent and
+  # should never have its ~/.agent-bridge wiped.
+  local _resolved_target _resolved_bridge_home _controller_user
+  _resolved_target="$(readlink -f "$target" 2>/dev/null || printf '%s' "$target")"
+  _resolved_bridge_home="$(readlink -f "$bridge_home" 2>/dev/null || printf '%s' "${bridge_home:-}")"
+  if [[ -n "$_resolved_bridge_home" && "$_resolved_target" == "$_resolved_bridge_home" ]]; then
+    bridge_die "install_agent_bridge_symlink: refusing to rm -rf controller BRIDGE_HOME at $target (would wipe live install — issue #403). Caller must pass an isolated UID's os_user, not the controller login."
+  fi
+  # Also reject when os_user is empty or matches the controller's login
+  # directly, even if BRIDGE_HOME isn't yet set in this scope.
+  _controller_user="$(id -un 2>/dev/null || printf '%s' "${USER:-}")"
+  if [[ -z "$os_user" || "$os_user" == "$_controller_user" ]]; then
+    bridge_die "install_agent_bridge_symlink: os_user '$os_user' equals controller login or is empty — refusing to operate on controller-side path $target (issue #403)."
+  fi
+
   current="$(bridge_linux_sudo_root python3 - "$target" <<'PY'
 from pathlib import Path
 import os
